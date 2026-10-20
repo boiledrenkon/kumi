@@ -36,6 +36,22 @@ struct State {
     uncertain_restore_once: bool,
     /// The next restore is made in part: its answer says what it left out.
     left_out_once: Option<String>,
+    /// M6: the project's own id (none until it has one), which run of REAPER this is, its tempo, and its FX.
+    project_id: Option<String>,
+    run: u32,
+    tempo: f64,
+    fx: Vec<SimFx>,
+    /// Tracks a digest page holds (all of them unless a test says).
+    digest_tracks: usize,
+}
+
+/// An FX on a track of the sim: its GUID, its track's place (the master is 0), its name and parameters.
+#[derive(Clone)]
+struct SimFx {
+    guid: String,
+    track: usize,
+    name: String,
+    params: Vec<(String, f64)>,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -99,8 +115,73 @@ impl ReaperScript {
                 uncertain_once: false,
                 uncertain_restore_once: false,
                 left_out_once: None,
+                project_id: None,
+                run: 1,
+                tempo: 120.0,
+                fx: vec![],
+                digest_tracks: usize::MAX,
             })),
         }
+    }
+
+    /// M6: the project keeps a Kumi id (it's a saved project with a place of its own).
+    pub fn set_project_id(&self, id: Option<&str>) {
+        self.state.lock().unwrap().project_id = id.map(str::to_owned);
+    }
+
+    /// REAPER quit and started again with the same project: another run, so another identity and epoch.
+    pub fn restart(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.run += 1;
+        state.epoch += 1;
+    }
+
+    pub fn set_tempo(&self, bpm: f64) {
+        let mut state = self.state.lock().unwrap();
+        state.tempo = bpm;
+        state.changed += 1;
+    }
+
+    /// The producer renames a track.
+    pub fn rename(&self, index: usize, name: &str) {
+        self.set_track(index, "name", name.into());
+    }
+
+    /// The producer adds an FX to a track, with its parameters (name, normalized value): its GUID.
+    pub fn add_fx(&self, track: usize, name: &str, params: &[(&str, f64)]) -> String {
+        let mut state = self.state.lock().unwrap();
+        let guid = format!("{{FX{:04}}}", state.fx.len() + 1);
+        state.fx.push(SimFx {
+            guid: guid.clone(),
+            track,
+            name: name.into(),
+            params: params.iter().map(|(n, v)| (n.to_string(), *v)).collect(),
+        });
+        state.changed += 1;
+        guid
+    }
+
+    /// The producer moves an FX's parameter.
+    pub fn set_param(&self, guid: &str, index: usize, value: f64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(fx) = state.fx.iter_mut().find(|fx| fx.guid == guid) {
+            fx.params[index].1 = value;
+        }
+        state.changed += 1;
+    }
+
+    /// The producer adds a track at the end: its place.
+    pub fn add_named_track(&self, name: &str) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let index = state.tracks.len();
+        state.tracks.push(track_row(index, name));
+        state.changed += 1;
+        index
+    }
+
+    /// A digest page holds this many tracks (with their FX).
+    pub fn digest_pages_of(&self, tracks: usize) {
+        self.state.lock().unwrap().digest_tracks = tracks.max(1);
     }
 
     /// The project switched tabs: refs and cursors from before are stale.
@@ -154,6 +235,7 @@ impl ReaperScript {
                 "change_restore",
                 "undo_step_begin",
                 "undo_step_end",
+                "digest",
             ],
             self.respond(),
         )
@@ -401,6 +483,7 @@ impl ReaperScript {
                 json!({"epoch": epoch, "saved": format!("/lab/REAPER/TrackTemplates/{}.RTrackTemplate", params["name"].as_str().unwrap_or("Template"))}),
             ),
             "read" => Self::read(&state, &epoch, params),
+            "digest" => Self::digest(&state, &epoch, params),
             "snapshot" => {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();
                 let mut snapshot = json!({
@@ -489,9 +572,64 @@ impl ReaperScript {
         Ok(body)
     }
 
-    /// The project row: another project in the tab (`switch_tab`) is another identity.
+    /// The project row: another project in the tab (`switch_tab`) is another identity, and so is another run of REAPER.
     fn project(state: &State) -> Value {
-        json!({"id": null, "identity": format!("sim:{}", state.epoch), "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": 120.0})
+        let identity = if state.run == 1 { format!("sim:{}", state.epoch) } else { format!("sim{}:{}", state.run, state.epoch) };
+        json!({"id": state.project_id, "identity": identity, "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": state.tempo})
+    }
+
+    /// M6: a page of the digest, as the extension makes it: each track (its GUID from its ref), then its FX.
+    fn digest(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
+        let values = params.get("values") == Some(&Value::Bool(true));
+        let start = match params.get("cursor").and_then(Value::as_str) {
+            None => 0,
+            Some(cursor) => match cursor.splitn(3, '.').collect::<Vec<_>>().as_slice() {
+                ["g1", from, n] if *from == epoch => n.parse::<usize>().map_err(|_| ("bad-params".to_string(), "cursor".to_string()))?,
+                ["g1", _, _] => return Err(("stale".into(), "the project in the tab changed since the first page: read again".into())),
+                _ => return Err(("bad-params".into(), "cursor: the nextCursor an earlier page gave, unchanged".into())),
+            },
+        };
+        let end = start.saturating_add(state.digest_tracks).min(state.tracks.len());
+        let mut records = vec![];
+        for (index, row) in state.tracks.iter().enumerate().take(end).skip(start) {
+            let reference = row["ref"].as_str().unwrap_or("");
+            let id = if index == 0 { "master".to_string() } else { reference.trim_start_matches("r:track:").to_string() };
+            let fx: Vec<&SimFx> = state.fx.iter().filter(|fx| fx.track == index).collect();
+            records.push(json!({
+                "k": "track",
+                "id": id,
+                "n": row["name"],
+                "o": index,
+                "f": {"mixer": {"volume": row["volumeDb"], "mute": row["mute"]}, "FX": {"count": fx.len()}},
+            }));
+            for (position, fx) in fx.into_iter().enumerate() {
+                let print: Vec<String> = fx.params.iter().map(|(_, v)| format!("{v:.4}")).collect();
+                let mut record = json!({
+                    "k": "FX",
+                    "id": fx.guid,
+                    "n": fx.name,
+                    "o": position,
+                    "p": id,
+                    "f": {"enabled": true, "params": {"count": fx.params.len(), "paramsHash": print.join(",")}},
+                });
+                if values {
+                    record["v"] = fx.params.iter().map(|(_, v)| json!(v)).collect::<Vec<_>>().into();
+                    record["r"] = format!("r:fx:{}", fx.guid).into();
+                }
+                records.push(record);
+            }
+        }
+        let mut page = json!({"epoch": epoch, "records": records, "changed": state.changed});
+        if end < state.tracks.len() {
+            page["nextCursor"] = format!("g1.{epoch}.{end}").into();
+        }
+        if start == 0 {
+            page["project"] = Self::project(state);
+            page["facts"] = json!({"tempo": state.tempo, "timeSignature": [4, 4]});
+            page["summaries"] = json!({"FX": "FX"});
+            page["bounded"] = json!({});
+        }
+        Ok(page)
     }
 
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
@@ -525,6 +663,15 @@ impl ReaperScript {
             ("track", _) => state.tracks.clone(),
             ("item", Some(parent)) => {
                 state.tracks.iter().filter(|row| row["ref"] == parent).map(|row| item_row(row["ref"].as_str().unwrap())).collect()
+            }
+            ("param", Some(parent)) => {
+                let fx = state.fx.iter().find(|fx| format!("r:fx:{}", fx.guid) == parent);
+                let fx = fx.ok_or_else(|| ("failed".to_string(), "that FX isn't in the project (deleted, or another tab)".to_string()))?;
+                fx.params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, value))| json!({"ref": format!("r:param:{}:{index}", fx.guid), "index": index, "name": name, "value": value, "formatted": format!("{:.0} %", value * 100.0)}))
+                    .collect()
             }
             ("item", None) | ("fx", None) | ("param", None) | ("send", None) | ("note", None) | ("envelope", None) | ("take", None) => {
                 return Err(bad(&format!("{kind}: pass the parent")))

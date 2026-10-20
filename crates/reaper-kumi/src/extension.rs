@@ -415,6 +415,7 @@ impl Extension {
             "quit" => self.quit(params),
             "read" => self.reads.read(&self.reaper(), params),
             "snapshot" => self.reads.snapshot(&self.reaper()),
+            "digest" => self.reads.digest(&self.reaper(), params),
             "focus_body" => self.reads.focus_body(&self.reaper(), params),
             "change_preview" => self.changes.preview(&self.reaper(), &self.reads, params),
             "change_apply" => self.changes.apply(&self.reaper(), &self.reads, params),

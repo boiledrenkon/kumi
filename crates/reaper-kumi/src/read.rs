@@ -18,6 +18,8 @@ mod bodies;
 pub(crate) mod item_rows;
 // m4-r-fxenv: points, automation items and take envelopes.
 mod envelopes;
+// M6: the project as records for catch-up and watch_me.
+mod digest;
 
 pub use bodies::BODY_KINDS;
 

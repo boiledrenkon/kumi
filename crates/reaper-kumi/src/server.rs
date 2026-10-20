@@ -54,7 +54,7 @@ const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
-const MAIN_METHODS: [&str; 16] = [
+const MAIN_METHODS: [&str; 17] = [
     "action",
     "quit",
     "read",
@@ -73,6 +73,8 @@ const MAIN_METHODS: [&str; 16] = [
     // (r-tracks)
     "project_save",
     "track_template_save",
+    // M6: catch-up and watch_me
+    "digest",
 ];
 const EVENTS: [&str; 5] =
     [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];

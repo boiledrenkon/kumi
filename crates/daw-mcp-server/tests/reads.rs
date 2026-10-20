@@ -31,7 +31,8 @@ async fn the_read_methods_on_the_wire() {
             "change_apply",
             "change_restore",
             "undo_step_begin",
-            "undo_step_end"
+            "undo_step_end",
+            "digest"
         ]
     );
 

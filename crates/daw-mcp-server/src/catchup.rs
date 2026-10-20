@@ -273,7 +273,7 @@ where
     F: FnMut(Value) -> Fut,
     Fut: Future<Output = Result<Value, CallError>>,
 {
-    'tries: for _ in 0..DIGEST_TRIES {
+    'tries: for try_number in 0..DIGEST_TRIES {
         let mut snapshot = Snapshot { version: SNAPSHOT_VERSION, daw: daw.id().into(), ..Default::default() };
         let mut cursor: Option<String> = None;
         let mut epoch: Option<String> = None;
@@ -305,6 +305,11 @@ where
             } else if page_epoch != epoch {
                 // Another project in the tab (or another song) meanwhile: the pages don't belong together.
                 continue 'tries;
+            } else if try_number + 1 < DIGEST_TRIES
+                && page.get("changed").is_some_and(|c| !c.is_null() && Some(c) != snapshot.changed.as_ref())
+            {
+                // The producer changed the project between two pages: read it whole again (the last try keeps what it read).
+                continue 'tries;
             }
             for record in page.get("records").and_then(Value::as_array).into_iter().flatten() {
                 if snapshot.records.len() >= MAX_RECORDS {
@@ -325,6 +330,17 @@ where
             if page_number + 1 >= MAX_PAGES {
                 snapshot.bounded.insert("pages".into(), json!(format!("more than {MAX_PAGES} pages")));
                 break;
+            }
+        }
+        // A GUID two things share (REAPER keeps a track's GUID in a copy made from its text): each is a thing of its own.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for record in &mut snapshot.records {
+            if let Some(id) = record.id.clone() {
+                let count = seen.entry(id.clone()).or_default();
+                *count += 1;
+                if *count > 1 {
+                    record.id = Some(format!("{id}~{count}"));
+                }
             }
         }
         snapshot.saved_at = now_ms();
@@ -813,5 +829,24 @@ mod tests {
         assert_eq!(snapshot.bounded["item"], "too many");
         assert_eq!(snapshot.summaries["item"], "items");
         assert_eq!(kept(&snapshot).bounded.len(), 1, "the project row isn't kept");
+    }
+
+    #[tokio::test]
+    async fn a_page_after_the_producer_changed_something_reads_the_digest_again_and_shared_keys_stay_apart() {
+        let pages = vec![
+            json!({"epoch": "1", "changed": 5, "project": {"identity": "9:1"}, "records": [{"k": "track", "id": "{A}", "o": 1}], "nextCursor": "c"}),
+            json!({"epoch": "1", "changed": 6, "records": [{"k": "track", "id": "{B}", "o": 2}]}),
+            json!({"epoch": "1", "changed": 6, "project": {"identity": "9:1"}, "records": [{"k": "track", "id": "{A}", "o": 1}, {"k": "track", "id": "{A}", "o": 2}], "nextCursor": "c"}),
+            json!({"epoch": "1", "changed": 6, "records": [{"k": "track", "id": "{B}", "o": 3}]}),
+        ];
+        let at = std::sync::atomic::AtomicUsize::new(0);
+        let snapshot = collect(Daw::Reaper, false, true, |_| {
+            let page = pages[at.fetch_add(1, std::sync::atomic::Ordering::SeqCst)].clone();
+            async move { Ok(page) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(snapshot.records.iter().map(|r| r.id.clone().unwrap()).collect::<Vec<_>>(), ["{A}", "{A}~2", "{B}"]);
+        assert_eq!(snapshot.changed, Some(json!(6)));
     }
 }
