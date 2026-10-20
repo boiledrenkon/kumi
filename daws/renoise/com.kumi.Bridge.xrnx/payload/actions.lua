@@ -327,12 +327,13 @@ function M.project_save(params, env)
   if path == nil or path == own then
     if own == "" then bad("the song has never been saved: give path, a .xrns file to save it as") end
     renoise.app():save_song()
-    return { epoch = env.epoch(), saved = own, display = { title = "Saved the song" } }
+    -- (`dirty`: whether the song has changes no file holds, as REAPER's save answers; none, just saved)
+    return { epoch = env.epoch(), saved = own, dirty = false, display = { title = "Saved the song" } }
   end
   save_as(path)
   local display = { title = "Saved the song as " .. q(path:match("([^/\\]+)$")) }
   if own ~= "" then display.note = "The song is that file from now on (it was " .. own .. ")." end
-  return { epoch = env.epoch(), saved = path, display = display }
+  return { epoch = env.epoch(), saved = path, dirty = false, display = display }
 end
 
 return M
