@@ -660,7 +660,7 @@ impl TuiApp {
     /// A track's sends and receives, with their levels and where they tap the track.
     fn draw_routing(&self, screen: &mut Screen, x: i32, y: i32, width: i32, routing: &RoutingView, most: i32) -> i32 {
         self.track_header(screen, x, y, width);
-        let rows = routing.routes.len().min((most.max(2) - 2) as usize);
+        let rows = routing.routes.len().min((most.max(3) - 2 - routing.midi_out.is_some() as i32).max(1) as usize);
         for (row, route) in routing.routes.iter().take(rows).enumerate() {
             let arrow = match route.kind {
                 RouteKind::Send => "→",
@@ -669,12 +669,19 @@ impl TuiApp {
             };
             let mut line = format!("{arrow} {}", route.other);
             if let Some(db) = route.volume_db {
-                line.push_str(&format!(" · {} dB", number::to_string(number::round(db * 10.) / 10.)));
+                // (dB with a true minus, as the DAW's titles write it)
+                line.push_str(&format!(" · {} dB", number::to_string(number::round(db * 10.) / 10.).replace('-', "−")));
             }
             if let Some(tap) = &route.tap {
                 line.push_str(&format!(" · {tap}"));
             }
             screen.put(x, y + 1 + row as i32, &truncate(&line, width), &if route.muted { st::FAINT } else { st::DIM });
+        }
+        let mut row = y + 1 + rows as i32;
+        // Its MIDI out of the DAW (REAPER's hardware MIDI output), with the routes.
+        if let Some(out) = &routing.midi_out {
+            screen.put(x, row, &truncate(&format!("⇥ MIDI to {out}"), width), &st::DIM);
+            row += 1;
         }
         let parent = match routing.parent_send {
             Some(true) => "feeds its parent",
@@ -682,10 +689,10 @@ impl TuiApp {
             None => "",
         };
         if !parent.is_empty() {
-            screen.put(x, y + 1 + rows as i32, &truncate(parent, width), &st::FAINT);
-            return 2 + rows as i32;
+            screen.put(x, row, &truncate(parent, width), &st::FAINT);
+            row += 1;
         }
-        1 + rows as i32
+        row - y
     }
     pub(super) fn draw_held(&self, screen: &mut Screen, x: i32, mut y: i32, width: i32, rows: i32) {
         let state = self.0.state.borrow();

@@ -571,6 +571,9 @@ pub struct RoutingView {
     pub routes: Vec<Route>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_send: Option<bool>,
+    /// Where it sends its MIDI out of the DAW, in the DAW's words ("Launchpad · channel 2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_out: Option<String>,
 }
 
 /// One route: to or from which track (or hardware output), how loud, and where it taps the track.

@@ -395,7 +395,18 @@ pub fn routing(track_ref: &str, body: &Value) -> RoutingView {
             Route { kind, other: text(route, "otherName"), volume_db: number(route, "volumeDb"), muted: flag(route, "mute"), tap }
         })
         .collect();
-    RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool) }
+    // (REAPER's MIDI to a hardware output: its device, and channel 0 for all of them)
+    let midi_out = body.get("midiOut").filter(|out| out.is_object()).map(|out| {
+        let device = out
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("device {}", number(out, "device").unwrap_or(0.)), str::to_owned);
+        match number(out, "channel").unwrap_or(0.) as i64 {
+            0 => format!("{device} · all channels"),
+            channel => format!("{device} · channel {channel}"),
+        }
+    });
+    RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool), midi_out }
 }
 
 /// The track kind FOCUS's chip shows, from a focus's `track.type`.

@@ -30,7 +30,7 @@ fn route_text(from: &str, to: &str) -> String {
 
 /// A send as HISTORY draws it (for the display only: no undo reads it): its ends, whether Kumi made, removed or changed it,
 /// and each setting it moved (all of them for one made or removed), before and after, in REAPER's words.
-fn drawn_route(from: &str, to: &str, before: Option<&Value>, after: Option<&Value>) -> Value {
+pub(super) fn drawn_route(from: &str, to: &str, before: Option<&Value>, after: Option<&Value>) -> Value {
     let change = match (before, after) {
         (None, _) => "made",
         (_, None) => "removed",

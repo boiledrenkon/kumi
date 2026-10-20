@@ -45,6 +45,13 @@ fn output_text(dst: i64, src: i64) -> String {
     format!("output {}", sends::span_text(first, count))
 }
 
+/// The output's ends as HISTORY's picture names them: the track, and the output ("output 3–4").
+fn ends(ctx: &Ctx, found: &Found) -> (String, String) {
+    let dst = ctx.reaper.send_value(found.track, HW, found.index, "I_DSTCHAN") as i64;
+    let src = ctx.reaper.send_value(found.track, HW, found.index, "I_SRCCHAN") as i64;
+    (name_of(ctx.reaper, found.track), output_text(dst, src))
+}
+
 fn label(ctx: &Ctx, found: &Found) -> String {
     let dst = ctx.reaper.send_value(found.track, HW, found.index, "I_DSTCHAN") as i64;
     let src = ctx.reaper.send_value(found.track, HW, found.index, "I_SRCCHAN") as i64;
@@ -423,13 +430,20 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         }
     }
     let after = (prop.read)(reaper, found.track, found.index);
+    let (from, to) = ends(ctx, &found);
+    let drawn = sends::drawn_route(&from, &to, Some(&touched(&now, &wanted)), Some(&touched(&after, &wanted)));
     let mut applied = touched(&after, &wanted);
     applied["output"] = seal(reaper, &found);
     Ok(Applied {
         applied,
         created: None,
         material: None,
-        display: json!({"title": (prop.title)(&route, &wanted), "before": touched(&now, &wanted), "after": touched(&after, &wanted)}),
+        display: json!({
+            "title": (prop.title)(&route, &wanted),
+            "before": touched(&now, &wanted),
+            "after": touched(&after, &wanted),
+            "route": drawn,
+        }),
         unwritten: unchanged,
     })
 }
@@ -555,8 +569,10 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let found = Found { track: plan.track, id: plan.id.clone(), index };
     let mut applied = state(reaper, plan.track, index);
+    let (from, to) = ends(ctx, &found);
+    let display = json!({"title": add_title(ctx, &plan), "route": sends::drawn_route(&from, &to, None, Some(&applied))});
     applied["output"] = seal(reaper, &found);
-    Ok(Applied { applied, created: Some(created), material: None, display: json!({"title": add_title(ctx, &plan)}), ..Default::default() })
+    Ok(Applied { applied, created: Some(created), material: None, display, ..Default::default() })
 }
 
 pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -611,6 +627,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let now = state(reaper, found.track, found.index);
     let route = label(ctx, &found);
+    let (from, to) = ends(ctx, &found);
     let last = found.index == reaper.send_count(found.track, HW) - 1;
     let stamp = stamp_of(reaper, found.track, found.index);
     let lost = active_envelopes(reaper, found.track, found.index);
@@ -621,7 +638,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"removed": true}),
         created: None,
         material: Some(json!({"state": now, "stamp": stamp, "last": last, "lostEnvelopes": lost, "trackRef": refs::track_ref(&found.id)})),
-        display: json!({"title": format!("Removed hardware output {route}")}),
+        display: json!({"title": format!("Removed hardware output {route}"), "route": sends::drawn_route(&from, &to, Some(&now), None)}),
         ..Default::default()
     })
 }

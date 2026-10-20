@@ -66,13 +66,15 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
             Route { kind: RouteKind::Receive, other: "Kick".into(), volume_db: None, muted: false, tap: Some("pre-fader".into()) },
         ],
         parent_send: Some(true),
+        midi_out: Some("Launchpad · channel 2".into()),
     }));
     let routing = json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"routing","label":"Routing"}});
     h.emit(json!({"type":"focus","focus":routing}));
     shows(&h, "FOCUS · Routing").await;
-    h.has("→ Reverb Bus · -12 dB · post-fader");
+    h.has("→ Reverb Bus · −12 dB · post-fader");
     h.has("← Kick · pre-fader");
     h.has("feeds its parent");
+    h.has("⇥ MIDI to Launchpad · channel 2");
 
     // The arrange view: each track's items as bars on the timeline.
     *c.arrangement.borrow_mut() = Some(
@@ -541,6 +543,18 @@ scene!(reaper_take_fx, DawId::Reaper, BODY_SHOTS, |h| {
     h.emit(focus_of(reaper::DAW.fill_focus, focus));
     shows(&h, "take “kick.wav”").await;
     assert!(h.calls().contains(&"tree:r:take:{K}".to_string()), "the take's chain is read, not the track's: {:?}", h.calls());
+});
+
+scene!(reaper_routing, DawId::Reaper, BODY_SHOTS, |h| {
+    let route = |category: i64, other: &str, db: f64, mode: i64, mute: bool| json!({"category": category, "otherName": other, "volumeDb": db, "mode": mode, "mute": mute});
+    let body = json!({"ref": "r:track:{B}", "name": "Bass", "parentSend": false, "midiOut": {"device": 2, "name": "Launchpad", "channel": 0},
+        "routes": [route(0, "Reverb", -12.0, 0, false), route(0, "Sidechain", 0.0, 3, true), route(-1, "Kick", 0.0, 1, false), route(1, "output 3/4", -6.0, 0, false)]});
+    let request = BodyRequest::Routing { track_ref: "r:track:{B}".into() };
+    *h.control.own.borrow_mut() = (reaper::DAW.to_body)(&request, &body);
+    let focus = json!({"view": "routing", "selection": {"track": {"name": "Bass", "color": "#3c7cf5", "type": "audio"}, "trackRef": "r:track:{B}",
+        "routingTrackRef": "r:track:{B}"}});
+    h.emit(focus_of(reaper::DAW.fill_focus, focus));
+    shows(&h, "FOCUS · Routing").await;
 });
 
 // NOW and HISTORY: one picture per family

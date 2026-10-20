@@ -124,6 +124,10 @@ fn a_hardware_output_is_added_to_an_output_the_device_has_and_undone_by_its_mark
     let (preview, made) =
         lab.make("hw-out-add", json!({"ref": KICK, "output": {"first": 1}, "volumeDb": -6.0}), "Kumi: Added output (kh001)");
     assert_eq!(made["display"]["title"], "Added hardware output “Kick” → output 1/2");
+    // (m4-tui) HISTORY's picture: the track to its output, made, with its volume.
+    let route = &made["display"]["route"];
+    assert_eq!((route["from"].as_str(), route["to"].as_str(), route["change"].as_str()), (Some("Kick"), Some("output 1/2"), Some("made")));
+    assert_eq!(route["values"][0]["toText"], "−6 dB");
     let outputs = kick_outputs();
     assert_eq!((outputs.len(), outputs[0].dst_chan), (1, 0));
     assert!((outputs[0].volume - 10f64.powf(-6.0 / 20.0)).abs() < 1e-12);
