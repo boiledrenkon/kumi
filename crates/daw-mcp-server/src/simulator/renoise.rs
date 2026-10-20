@@ -25,6 +25,8 @@ const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
 const CHANGE_METHODS: [&str; 4] = ["change_preview", "change_apply", "change_restore", "project_save"];
+/// (m6-places) A line in the status bar, which a song made to be changed shows too.
+const STATUS_MESSAGE: &str = "status_message";
 
 struct Case {
     method: String,
@@ -61,6 +63,8 @@ struct State {
     /// the `metronome`, and each track's solo.
     song: Value,
     solo: std::collections::HashMap<u64, bool>,
+    /// The lines shown in the status bar, oldest first.
+    statuses: Vec<String>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -168,6 +172,7 @@ impl RenoiseScript {
                 run_start: VECTORS_EPOCH,
                 song: json!({"bpm": 128, "loop": {"first": 0, "last": 0}, "patternLoop": false, "metronome": false}),
                 solo: Default::default(),
+                statuses: vec![],
             })),
         }
     }
@@ -527,17 +532,31 @@ impl RenoiseScript {
         SimulatorConfig::renoise(secret, resource).with_methods(&METHODS, self.respond())
     }
 
-    /// The same, and Kumi's changes are made in the song (`change`).
+    /// The same, and Kumi's changes are made in the song (`change`), and its lines shown in the status bar.
     pub fn config_with_changes(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        self.config(secret, resource).with_methods(&CHANGE_METHODS, self.respond())
+        self.config(secret, resource).with_methods(&CHANGE_METHODS, self.respond()).with_methods(&[STATUS_MESSAGE], self.respond())
+    }
+
+    /// The lines shown in Renoise's status bar, oldest first.
+    pub fn statuses(&self) -> Vec<String> {
+        self.state.lock().unwrap().statuses.clone()
     }
 
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
-        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) {
+        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) && method != STATUS_MESSAGE {
             return None;
         }
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
+        if method == STATUS_MESSAGE {
+            return Some(match params.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) {
+                Some(text) => {
+                    state.statuses.push(text.to_string());
+                    Ok(json!({"shown": true}))
+                }
+                None => Err(("bad-params".into(), "text must be a line of words".into())),
+            });
+        }
         if state.empty && state.load_during_look && method == "snapshot" {
             state.empty = false;
             state.load_during_look = false;

@@ -1228,6 +1228,19 @@ function handlers.project_save(params)
   return actions.project_save(params, change_env())
 end
 
+-- (m6-places) A line in Renoise's status bar, never a dialog: what Kumi tells a producer who isn't looking at its window
+-- (done, or a question waiting). One line, at most 200 characters; nothing in the song changes.
+M.STATUS_MESSAGE_CHARS = 200
+function handlers.status_message(params)
+  local text = type(params) == "table" and params.text or nil
+  if type(text) ~= "string" or text:match("^%s*$") then
+    error({ code = "bad-params", message = "text must be a line of words" }, 0)
+  end
+  local line = (text:gsub("[%c]+", " "))
+  show_status(status.cap(line, M.STATUS_MESSAGE_CHARS))
+  return { shown = true }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }

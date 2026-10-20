@@ -18,7 +18,9 @@ use kumi_runtime::ai::types::{
 use kumi_runtime::core::context::IntegrationContext;
 use kumi_runtime::core::contracts::*;
 use kumi_runtime::core::conversations::create_conversation_store_in;
+use kumi_runtime::core::jobs::{create_job_store, JobState};
 use kumi_runtime::core::memory::{create_memory_store_in, MemoryStoreOptions};
+use kumi_runtime::core::session::JobsOptions;
 use kumi_runtime::integrations::{
     own_bridge::{Connect, OwnOptions},
     reaper::create_reaper_integration,
@@ -145,6 +147,8 @@ fn recording(into: Rc<Recorded>) -> KernelFactory {
 struct Own {
     session: Session,
     main: Rc<Recorded>,
+    /// The background workers' model.
+    worker: Rc<Recorded>,
     events: Rc<RefCell<Vec<SessionEvent>>>,
     /// HISTORY's records, as the integration told them.
     changes: Rc<RefCell<Vec<ChangeRecord>>>,
@@ -187,7 +191,7 @@ impl Own {
             }));
             create(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect) })
         });
-        let main = Rc::new(Recorded::default());
+        let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
         let events = Rc::new(RefCell::new(vec![]));
         let out = events.clone();
         let mut options = SessionOptions::new(recording(main.clone()), integration, Rc::new(move |event| out.borrow_mut().push(event)));
@@ -200,10 +204,13 @@ impl Own {
             MemoryStoreOptions { projects_dir: projects.clone(), producer_file: dir.join("memory.json") },
             PLACES,
         ));
+        // Jobs kept per place between sessions, beside the goals, as the app keeps them.
+        options.jobs =
+            Some(JobsOptions { worker_factory: recording(worker.clone()), max: 3, store: Some(create_job_store(dir.join("goals"))) });
         let session = create_session(options).unwrap();
         *controller.borrow_mut() = Some(session.clone());
         session.start().await.unwrap();
-        Own { session, main, events, changes, simulator, controller }
+        Own { session, main, worker, events, changes, simulator, controller }
     }
 
     /// A fixed phrase, run at once: what Kumi said, and whether it's an error. None: the model takes it.
@@ -225,6 +232,7 @@ impl Own {
     /// Everything the model was sent and the producer told.
     fn said(&self) -> Vec<String> {
         let mut said = self.main.requests.borrow().clone();
+        said.extend(self.worker.requests.borrow().iter().cloned());
         said.extend(self.events.borrow().iter().map(|event| serde_json::to_string(event).unwrap()));
         said.extend(self.changes.borrow().iter().map(|record| serde_json::to_string(record).unwrap()));
         said
@@ -610,4 +618,69 @@ async fn after_a_rollback_and_back_the_index_finds_reaper_and_renoise_conversati
     for id in ids {
         assert!(index["gone"].get(id).is_none(), "{id} isn't let go: {index}");
     }
+}
+
+/// Walking away from Kumi in Renoise: its line goes in Renoise's status bar (REAPER has no status line, so nothing is
+/// sent there), and each DAW says whether it records, so no notification lands over a take.
+#[tokio::test(flavor = "current_thread")]
+async fn walk_away_tells_renoises_status_bar_and_each_daw_says_whether_it_records() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let own = Own::open(dir.path(), Daw::Renoise, DawProfile::RENOISE, renoise(&script), create_renoise_integration).await;
+            assert!(own.session.has_daw_message());
+            assert!(own.session.daw_message("Kumi · done · the kick is down").await.unwrap(), "shown");
+            assert_eq!(script.statuses(), ["Kumi · done · the kick is down"]);
+            assert_eq!(own.session.daw_recording().await.unwrap(), Some(false), "stopped, not recording");
+            own.close().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(2, 0);
+            let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
+            assert!(!own.session.daw_message("Kumi · done").await.unwrap(), "REAPER has no status line");
+            assert!(!script.asked().iter().any(|(method, _)| method == "status_message"), "nothing sent");
+            assert_eq!(own.session.daw_recording().await.unwrap(), Some(false));
+            own.close().await;
+        })
+        .await;
+}
+
+/// A background job started in a REAPER project: the worker gets the task in REAPER's words, and the report the
+/// conversation hadn't heard when Kumi closed comes back with that project the next time.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_projects_background_job_report_comes_back_with_the_project() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(2, 0);
+            script.set_project(Some(SONG_A), "/lab/A.rpp", "sim:a", "A.rpp");
+            let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
+            own.worker.script.borrow_mut().push_back(step(|| answer("Three references with a punchy kick: Alpha, Beta and Gamma.")));
+            own.main.script.borrow_mut().extend([
+                step(|| call("start_job", json!({"title": "Kick references", "task": "Find three reference tracks with a punchy kick."}))),
+                step(|| answer("A job is looking for references.")),
+            ]);
+            own.session.submit("Find me kick references.", None).await.unwrap();
+            for _ in 0..500 {
+                if own.session.jobs().iter().any(|job| job.state == JobState::Done) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(own.session.jobs().iter().any(|job| job.state == JobState::Done), "{:?}", own.session.jobs());
+            assert!(!own.worker.requests.borrow().is_empty(), "the worker ran");
+            let said = own.close().await;
+            assert_no_live_words(&said);
+
+            // Next time, the same project: the report reaches the conversation at its next turn.
+            let script = ReaperScript::new(2, 0);
+            script.set_project(Some(SONG_A), "/lab/A.rpp", "sim:a-again", "A.rpp");
+            let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
+            own.session.submit("Anything new?", None).await.unwrap();
+            assert!(own.main.requests.borrow().last().unwrap().contains("Alpha, Beta and Gamma"), "the report came back");
+            let said = own.close().await;
+            assert_no_live_words(&said);
+        })
+        .await;
 }

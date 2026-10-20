@@ -293,6 +293,15 @@ pub fn tools(host: &Host) -> Value {
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
             },
             {
+                "name": "status_message",
+                "title": "A line in Renoise's status bar",
+                "description": "Shows one line of text in Renoise's status bar (never a dialog), cut to 200 characters. Not a change: nothing in the song.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                })), "required": ["text"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            },
+            {
                 "name": "instrument_save",
                 "title": "Save a Renoise instrument",
                 "description": "Saves an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless path names that file exactly and overwrite: true. Not a change: no undo.",
@@ -440,6 +449,11 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                 // m4-r-fxenv
                 "fx_chain_save" if host.daw() == Daw::Reaper => {
                     let (answer, is_error) = host.fx_chain_save(&arguments).await;
+                    result(id, tool_result(answer, is_error))
+                }
+                // (m6-places) A line in Renoise's status bar, for a producer who isn't looking at Kumi's window.
+                "status_message" if host.daw() == Daw::Renoise => {
+                    let (answer, is_error) = host.passthrough(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 // (r-tracks) Saving: the project in either DAW, tracks as a template in REAPER.

@@ -858,6 +858,23 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         Ok(self.changes.history.stop_everything(signal).await)
     }
+    /// A line in the DAW's own window, never a dialog (Renoise's status bar; REAPER has none): true once it showed.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        if self.closed.get() || !self.connected.get() || !self.daw.profile.caps.status_line {
+            return Ok(false);
+        }
+        Ok(self.call("status_message", json!({"text": text}), signal).await?.is_ok())
+    }
+    /// Whether the DAW records now, as its transport says: playing and recording (REAPER's record, Renoise's edit mode while
+    /// it plays). None when it can't say.
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        if self.closed.get() || !self.connected.get() {
+            return Ok(None);
+        }
+        let Ok(focus) = self.call("focus", json!({}), signal).await? else { return Ok(None) };
+        let on = |key: &str| focus.pointer(&format!("/transport/{key}")).and_then(Value::as_bool);
+        Ok(on("playing").map(|playing| playing && on("recording") == Some(true)))
+    }
     /// A fixed phrase as the DAW's change, in the project the session's look just read: one plan, so it lands in HISTORY
     /// with Kumi's undo and Kumi says what changed. A phrase the DAW has no such thing for is refused in its words; one
     /// that can't run as asked here goes to the model.
