@@ -550,7 +550,7 @@ async fn own_session(
     // REAPER has items and takes, Renoise samples and patterns: a clip is Live's word there too, in every tool (the
     // listening ones included) and every reply.
     let clips = Regex::new(r"\b[Cc]lips?\b").unwrap();
-    for listening in ["listen", "audition", "judge", "tune", "sound", "form"] {
+    for listening in ["listen", "audition", "judge", "tune", "sound", "form", "groove"] {
         assert!(main.tools.borrow().iter().any(|tool| tool.name() == listening), "{listening} offered in {}", profile.words.app);
     }
     // The audition and the listen ran (their replies reached the model), not only refused.
@@ -573,6 +573,14 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let script = ReaperScript::new(3, 0);
+            // A drum part and a reference with later, softer off-beats, for groove.
+            let eighths = |late: f64, off: i64| -> Vec<(i64, f64, f64, i64)> {
+                (0..16)
+                    .map(|n| (42, n as f64 * 0.5 + if n % 2 == 1 { late } else { 0. }, 0.25, if n % 2 == 1 { off } else { 110 }))
+                    .collect()
+            };
+            let (part, _) = script.add_midi_item("r:track:{T0002}", "Drums", 0., 8., &eighths(0., 110));
+            let (reference, _) = script.add_midi_item("r:track:{T0003}", "Reference", 0., 8., &eighths(0.08, 70));
             let config = {
                 let script = script.clone();
                 move |secret| script.config(secret, "/lab/REAPER")
@@ -593,6 +601,9 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
                 step(|_| call("audition", json!({"candidates": [{"track": "track:2", "label": "warm"}], "from_beat": 0, "beats": 4}))),
                 step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
                 step(|_| call("judge", json!({"goal": {"loudness": -14}, "from_beat": 0, "beats": 4}))),
+                step(move |_| call("groove", json!({"item": part, "reference": reference}))),
+                step(|_| call("groove", json!({"apply": true}))),
+                step(|_| call("groove", json!({"done": true}))),
                 step(|_| answer("Done.")),
             ];
             let create = kumi_runtime::integrations::reaper::create_reaper_integration;
@@ -600,8 +611,12 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
             assert_eq!(script.volume(1), -6.0, "the plan ran");
             let rename = changes.iter().rev().find(|record| record.title == "Renamed track “Pad” → “Pads”").map(|record| record.state);
             assert_eq!(rename, Some(ChangeState::Undone), "the model undid the rename");
-            // The producer's /undo took back the latest change still standing: the track Kumi added.
-            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added track “Pad”"));
+            // The producer's /undo took back the latest change still standing: groove's move of the part's notes.
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Changed 8 notes in take “Drums”"));
+            assert!(
+                changes.iter().any(|record| record.title == "Added track “Pad”" && record.state == ChangeState::Applied),
+                "{changes:?}"
+            );
             assert!(changes.iter().any(|record| record.title == "Track 1 volume -6 dB"), "{changes:?}");
             assert_no_live_words(&said);
         })
@@ -616,6 +631,26 @@ async fn a_renoise_session_changes_and_undoes_in_renoises_words() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let script = RenoiseScript::new();
+            // A pattern track's 8ths and a reference's, its off-beats later and softer, for groove.
+            let eighths = |delay: Option<&str>, volume: Option<&str>| -> Value {
+                let rows: Vec<Value> = (0..16)
+                    .map(|n| {
+                        let mut cell = json!({"col": 1, "note": "C-4", "instrument": "00"});
+                        if n % 2 == 1 {
+                            if let Some(delay) = delay {
+                                cell["delay"] = delay.into();
+                            }
+                            if let Some(volume) = volume {
+                                cell["volume"] = volume.into();
+                            }
+                        }
+                        json!({"line": n * 2 + 1, "notes": [cell]})
+                    })
+                    .collect();
+                Value::Array(rows)
+            };
+            script.set_lines(1, 1, eighths(None, None));
+            script.set_lines(3, 1, eighths(Some("50"), Some("48")));
             let config = {
                 let script = script.clone();
                 move |secret| script.config_with_changes(secret, "/lab/Renoise")
@@ -634,6 +669,8 @@ async fn a_renoise_session_changes_and_undoes_in_renoises_words() {
                 step(|_| call("renoise_read", json!({"kind": "track"}))),
                 step(|_| call("audition", json!({"candidates": [{"track": "track:1", "label": "kick"}], "from_beat": 0, "beats": 4}))),
                 step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
+                step(|_| call("groove", json!({"pattern": "1:pattern:1 1:track:1", "reference": "1:pattern:3 1:track:1"}))),
+                step(|_| call("groove", json!({"apply": true}))),
                 step(|_| answer("Done.")),
             ];
             let create = kumi_runtime::integrations::renoise::create_renoise_integration;
