@@ -349,14 +349,15 @@ struct Draft {
 }
 
 impl Draft {
-    /// The name a step gives a track: a mark when a step made it, else a blank (the producer's selected track is $track).
+    /// The name a step gives a track: a mark when a step made it, else a blank: $track for the one the producer selected
+    /// (or, with none selected, the first they worked on), the others' after their names.
     fn track(&mut self, name: &str, selected: Option<&str>) -> String {
         if let Some((_, by)) = self.tracks.iter().find(|(track, _)| track == name) {
             return by.clone();
         }
         let taken: Vec<String> = self.params.iter().map(|(blank, _)| blank.clone()).collect();
-        let blank =
-            if selected == Some(name) && !taken.iter().any(|t| t == "track") { "track".to_string() } else { blank_name(name, &taken) };
+        let main = selected.is_none_or(|selected| selected == name);
+        let blank = if main && !taken.iter().any(|t| t == "track") { "track".to_string() } else { blank_name(name, &taken) };
         self.params.push((blank.clone(), format!("the track to work on (it was “{name}”)")));
         let by = format!("${blank}");
         self.tracks.push((name.to_owned(), by.clone()));
@@ -387,7 +388,15 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
         .and_then(Value::as_array)
         .and_then(|tracks| tracks.iter().rev().find_map(|track| track.get("name").and_then(Value::as_str)))
         .map(str::to_owned);
-    let selected = selected.as_deref();
+    // (a track selected that the routine didn't touch says nothing of which one is the track)
+    let touched = |name: &str| {
+        answer.get("changes").and_then(Value::as_array).into_iter().flatten().any(|change| {
+            let thing = change.get("item").or_else(|| change.get("after")).unwrap_or(&Value::Null);
+            thing.get("on").and_then(Value::as_str) == Some(name)
+                || (change.get("kind").and_then(Value::as_str) == Some("track") && thing.get("name").and_then(Value::as_str) == Some(name))
+        })
+    };
+    let selected = selected.as_deref().filter(|name| touched(name));
     let mut draft = Draft::default();
     let mixer_step = |draft: &mut Draft, by: &str, what: &str, value: &Value| {
         let Some(mixer) = kinds.mixer.iter().find(|mixer| mixer.what == what) else { return false };
@@ -748,6 +757,21 @@ mod tests {
         let lines: Vec<Vec<String>> = told.borrow().iter().map(|c| c.lines.clone()).collect();
         assert_eq!(lines, [vec![], vec!["Tempo 120 → 121 BPM".to_string()]]);
         assert!(remembered.since("A").is_some() && remembered.since("B").is_none());
+    }
+
+    #[test]
+    fn with_no_track_selected_the_first_one_worked_on_is_the_track() {
+        let answer = json!({
+            "changes": [
+                {"change": "changed", "kind": "track", "after": {"name": "Bass", "order": 2}, "details": [{"facet": "mixer", "what": "mixer.pan", "from": 0.0, "to": 0.5}]},
+                {"change": "changed", "kind": "track", "after": {"name": "Keys", "order": 3}, "details": [{"facet": "mixer", "what": "mixer.pan", "from": 0.0, "to": -0.5}]},
+            ],
+            // (selected, but the routine didn't touch it)
+            "selected": [{"name": "Drums"}],
+        });
+        let draft = draft(&answer, &WORDS).unwrap();
+        assert_eq!(draft["steps"][0]["input"]["ref"], "$track");
+        assert_eq!(draft["steps"][1]["input"]["ref"], "$keys");
     }
 
     #[test]
