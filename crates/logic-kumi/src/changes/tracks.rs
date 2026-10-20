@@ -335,6 +335,7 @@ pub fn prop_apply(ctx: &mut Ctx, prop: &'static Prop, input: &Value, fence: &Val
     Ok(Applied {
         applied: after.clone(),
         created: None,
+        target: None,
         material: None,
         display: json!({"title": title, "before": now, "after": after}),
         step: None,
@@ -443,6 +444,7 @@ pub fn rename_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied
     Ok(Applied {
         applied: after.clone(),
         created: None,
+        target: None,
         material: None,
         display: json!({"title": rename_title(&found.header.name, &shown), "before": now, "after": after}),
         step: Some("Renaming"),

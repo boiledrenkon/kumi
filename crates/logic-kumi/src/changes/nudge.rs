@@ -36,7 +36,8 @@ fn after(reply: &Value) -> Option<i64> {
     reply.get("after").and_then(Value::as_f64).map(|n| n.round() as i64)
 }
 
-/// One step of a control toward `toward`: by ten when `big`, else by one. The value after it, as the helper read it.
+/// One step of a control toward `toward`: by ten when `big`, else by one. The value after it, as the helper read it
+/// around the step; none when it couldn't (the control went away or was rebuilt).
 pub fn step(ax: &mut Ax, control: &Control, now: i64, toward: i64, big: bool) -> Result<Option<i64>, AxError> {
     let reply = if big {
         let action = if toward > now { "AXIncrement" } else { "AXDecrement" };
@@ -45,6 +46,38 @@ pub fn step(ax: &mut Ax, control: &Control, now: i64, toward: i64, big: bool) ->
         ax.set(&control.root, &control.path, "AXValue", json!(toward), STEP_SETTLE_MS)?
     };
     Ok(after(&reply))
+}
+
+/// A control's value as it reads at its path now, if it can be read at all.
+fn value_at(ax: &mut Ax, control: &Control) -> Option<i64> {
+    let attrs = ax.get(&control.root, &control.path, &["AXValue"]).ok()?;
+    attrs.get("AXValue").and_then(Value::as_f64).map(|n| n.round() as i64)
+}
+
+/// [`step_to`] for a control that every step rebuilds (a cell of the Tempo or Signature list): the helper can't
+/// read it back around a step, so it is read again at its path after each one, once more after a moment when it
+/// still shows the old value. The value reached.
+pub fn step_to_rebuilt(ax: &mut Ax, control: &Control, now: i64, target: i64) -> Result<i64, AxError> {
+    let mut now = now;
+    for _ in 0..MOST_STEPS {
+        if now == target {
+            return Ok(now);
+        }
+        let big = (target - now).abs() >= BIG_STEP;
+        let mut moved = match step(ax, control, now, target, big)? {
+            Some(moved) => Some(moved),
+            None => value_at(ax, control),
+        };
+        if moved == Some(now) {
+            std::thread::sleep(std::time::Duration::from_millis(LAG_MS));
+            moved = value_at(ax, control);
+        }
+        match moved {
+            Some(moved) if moved != now => now = moved,
+            _ => return Ok(now),
+        }
+    }
+    Ok(now)
 }
 
 /// Moves a whole-number control from `now` to `target`, by tens then ones: the value reached, which is `target`

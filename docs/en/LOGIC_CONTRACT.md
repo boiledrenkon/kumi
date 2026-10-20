@@ -34,7 +34,7 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | Kind | Fields | Source |
 | --- | --- | --- |
 | `project` | id, identity, path, tempo, timeSignature, keySignature, sampleRate, trackCount | window document and the control bar's LCD; `MetaData.plist` for the sample rate when the package can be read (macOS keeps `~/Music/Logic` from a process without the Files and Folders permission: then `null`) |
-| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected | track headers (name, mute, solo, armed, monitoring, volume, pan, selected); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
+| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected, stack (only on a Track Stack's header: `true`) | track headers (name, mute, solo, armed, monitoring, volume, pan, selected; a stack's disclosure triangle); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
 | `region` | ref, trackRef, name, startBeats, endBeats, kind (audio, midi), selected, looped | the Tracks area's layout items and their help text ("Region starts at 1 bar  and ends at 5 bars , MIDI region…") |
 | `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel, selected? | the Event List of the region, which shows the selected region's events: a region not selected is selected first, through its item |
 | `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top |
@@ -134,7 +134,8 @@ SysEx may come in several); `{"event": "app", "state": "launched" | "terminated"
 
 ## Changes (`change_preview`, `change_apply`, `change_restore`)
 
-M3 lets Kumi change the project and undo. The wire is the REAPER extension's: the host's journal
+M3 lets Kumi change the project and undo, and M4 adds the kinds below it from `key-command` down,
+with `project_save` and `run_action`'s shape. The wire is the REAPER extension's: the host's journal
 (`crates/daw-mcp-server/src/changes.rs`) previews a change, keeps it, applies it in one named step
 (`desc`, `Kumi: … (k<nonce>)`) and undoes it as another; the bridge answers `change_preview`,
 `change_apply` and `change_restore` with the same fields REAPER's does. Each kind writes through
@@ -165,6 +166,21 @@ Logic Pro 12.3.1; the host's simulated Logic (`simulator/logic.rs`) answers the 
 | `notes-change` | `notes_change` | the note's row cells (pitch, velocity, length, channel, position) | the list | "Value Change" |
 | `notes-delete` | `notes_delete` | the row's Delete action | the list | "Delete" |
 | `fx-bypass` | `fx_bypass` | the Mixer strip slot's bypass checkbox | the slot | none |
+| `key-command` | `run_action` | the key command's chord, by name or id from `com.apple.logic10.plist` (else the factory U.S. set), posted with Logic in front | the Edit menu's Undo title, moved or not | the command's own, or none |
+| `region-move` | `region_move` | the Event List at its region level (Leave Folder), the region's Position scrubber | the Tracks area's items | "Value Change" |
+| `region-resize` | `region_resize` | the playhead at the new edge, Set Region Start/End to Playhead (Cmd-[ / Cmd-]) | the Tracks area | "Value Change" |
+| `region-split` | `region_split` | the region clicked, the playhead at the split, Split at Playhead (Cmd-T) | the Tracks area: the right part is `created` | "Split Regions" |
+| `region-loop` | `region_loop` | the Region inspector's Loop checkbox | the checkbox (the Tracks area never shows `looped`) | "Loop Parameter Change" |
+| `region-rename` | `region_rename` | the Region inspector's name field, `AXConfirm` | the Tracks area | "Renaming" |
+| `region-delete` | `region_delete` | the region clicked, the Delete key | the Tracks area | "Delete" |
+| `loop-range` | `loop_range` | the LCD on Custom, its two locator groups' sliders, the Cycle button | the locators and the button | none |
+| `notes-quantize` | `notes_quantize` | the Event List: Edit > Select > All, the header's Quantize pop-up | the rows, on the grid | "Quantize" |
+| `midi-import` | `midi_import` | a format 0 file under `/tmp/kumi-logic`, File > Import > MIDI File…, the panel's go-to | the new region and track | "Import" |
+| `tempo-marker-set` | `tempo_marker_set` | the Tempo List: Create new Tempo Event at the playhead, the Tempo cell's segments | the list | "Insert Tempo" + "Value Change" |
+| `tempo-marker-delete` | `tempo_marker_delete` | the row's Delete action | the list | "Delete" |
+| `signature-set` | `signature_set` | the Signature List: Create new Time/Key Signature Change, the numerator slider, the denominator pop-up | the list | "Value Change" |
+| `track-stack` | `track_stack` | the headers clicked (Shift for the others), Create Summing/Folder Stack (Cmd-Shift-G/H) | the headers: the stack's disclosure triangle | "Create Track Stack" |
+| `track-stack-flatten` | `track_stack_flatten` | the stack's header clicked, Flatten Stack (Cmd-Shift-U) | the headers | "Flatten Stack" |
 
 A header's control (volume, pan, mute, solo, arm) and the Mixer slot's bypass take a write without
 the track selected or Logic in front; the mute, solo and arm checkboxes take no `AXPress` or set,
@@ -180,11 +196,38 @@ constant tempo). `undo_step_begin`/`undo_step_end` are counted (Logic has no und
 `undo_step_begin` answers `{stepId: "sN"}`, `undo_step_end` `{desc, entry: false, changes: n}`, and
 each change in the plan stays its own step of Logic's undo.
 
+`project_save {epoch, path?, version?}` (the tool `save_project`) is REAPER's shape: no `path`
+saves in place with Logic's Save key command (Cmd-S), answered at once with `dirty: false` when the
+window's close button shows nothing to save; a `path` (a whole path to a `.logicx` that isn't
+there yet) is File > Save As… through macOS's panel service (the go-to-folder sheet, the name
+field, Save), and the project is that file from then on. Read back from the window's document and
+its edited flag; never over a file Kumi can see, never the project's own file as a path
+(`bad-params`), never into a folder that isn't there (the panel's "where" pop-up must name it, else
+`bad-params` and the panel is cancelled; Logic itself leaves an empty `<name>.logicx/Alternatives`
+package behind for the name its panel showed). `version` is REAPER's and refused. Saving is no
+step of Logic's undo. `{saved, dirty}` answers.
+
 ### The fences and the outcomes
 
 - A header prop fences the value now; a rename the name; a track delete `{name, index, regions}`; a
   track add `{tracks, names}` (the count and every name); a marker its whole state or the count; the
-  tempo the BPM; notes the region's note count and a hash of their values.
+  tempo the BPM; notes the region's note count and a hash of their values. A region kind fences the
+  region's `{startBeats, endBeats, name, track, looped}` and the region count; `loop-range` the cycle
+  `{on, startBeats, endBeats}`; `notes-quantize` the notes' count and hash; `midi-import` and
+  `track-stack` `{tracks, names, regions}`; a tempo event or a signature its row (`exists`, `bpm` or
+  `timeSignature`) and the list's count; `key-command` the command's id and name.
+- `key-command` answers like REAPER's `run_action`: `applied: {command, name, changed}`, with
+  `display.unchanged` and `undo.entry: false` when the Undo title didn't move (Logic made no step
+  of it); when it did, the step is kept under Logic's own name and its restore is `daw-only`
+  (Cmd-Z in Logic). Save, Save As, Undo, Redo, Quit, the project commands and every command whose
+  name ends in "…" (a dialog) are refused.
+- `region-split` answers `applied: {left, right}` and `created: {ref}` (the right part, in the new
+  epoch); `midi-import` answers `applied: {notes, startBeats, endBeats, track, trackName, file}`
+  and `created: {ref, track, trackAdded}` (Logic imports a MIDI file onto a new track below the
+  one named, never into it), with `rows` and a note when the Event List lists fewer rows than the
+  file's notes (it lists the rows on its screen; the region's length says the rest came in);
+  `track-stack` answers `applied: {index, name, kind, tracks}` (the subtracks' refs) and `created:
+  {ref, stack}`; `tempo-marker-set` and `signature-set` answer `made: true` when they made the row.
 - `applied` carries the value Logic shows after the write. A write Logic doesn't show back is
   `uncertain` ("Logic Pro shows … after Kumi asked for …"), and leaves the step unnamed. The apply's
   `undo` is `{desc, entry}`, with `title` (the Edit menu's Undo title at apply time) and `entry: true`
@@ -199,7 +242,10 @@ each change in the plan stays its own step of Logic's undo.
   false, how: "undo"}` and a note that Logic's own undo did it, else `failed` ("Logic Pro's undo has
   other steps on top of this one …; Cmd-Z in Logic Pro can, step by step"). `marker-delete`'s restore
   takes Logic's own undo first while its step is on top, else makes the marker again by value (Logic
-  numbers it itself).
+  numbers it itself). Of the M4 kinds, a move, resize, loop, rename, cycle, quantize, tempo event
+  and signature go back by value; a split, a region delete, an import, a flattened stack and a
+  deleted tempo event only through Logic's own undo while on top (`undo: {how: "undo"}`); a stack
+  Kumi made is flattened again by value when its step isn't on top.
 - A restore's refs are from the change's own epoch, carried to where the track or region stands now:
   the bridge watches each epoch move (a header added, deleted, renamed or moved; the M2 observers'
   rule) and keeps, per move, where each place went, so undoing a fader or a rename after a track was
@@ -250,10 +296,42 @@ titles.
 - The tempo takes **whole BPM** from the slider; a fractional `bpm` is rounded, with a note.
 - A **marker can't be named** from outside (its name cell isn't a text field): `marker-add` refuses a
   `name`, and Logic numbers markers itself. `marker-rename` is not made.
-- `loop-range`, `fx-add`, `fx-delete`, `fx-param`, `fx-move`, `send-add`, `send-volume` and
-  `track-move` are **not made**: the cycle locators have no settable field, the slot pop-up menus
-  can't be driven from outside, the plug-in window isn't reached, and the headers can't be dragged.
-  Each is refused `bad-params` saying why.
+- `fx-add`, `fx-delete`, `fx-param`, `fx-move`, `send-add`, `send-volume`, `track-move` and
+  `track-color` are **not made**: the slot pop-up menus can't be driven from outside, the plug-in
+  window isn't reached, the headers can't be dragged (no key command reorders tracks and a header
+  offers no action but its menu), and the Color palette's swatches are bare positions to
+  Accessibility while a header shows no colour, so a colour could never be read back. Each is
+  refused `bad-params` saying why.
+- The **cycle** (`loop-range`) is written through the LCD's Custom display mode, whose locator
+  sliders sit on Logic's ticks; it is no step of Logic's undo, and an off cycle keeps its locators,
+  which a restore puts back too.
+- Logic's **quantize is a parameter** of the events, not a move: `notes-quantize` sets the Event
+  List's Quantize pop-up for every event of the region, the rows then read (and Logic plays) the
+  notes on the grid while their recorded positions stay underneath, and the restore sets the
+  pop-up back so they read as recorded again, exactly. The grid is one of the pop-up's note values
+  or triplets; there is no strength (100 only).
+- The Event List applies a **value change to every selected event** when the edited one is among
+  them: a note row selected with others is selected alone before a write (`notes-change`,
+  `notes-delete`; the quantize's selection is put back after).
+- A region's **edges move on whole beats** (`region-resize`: the playhead placed by the LCD's bar
+  and beat, then Logic's Set Region Start/End to Playhead); a split and a delete need the region
+  clicked (a key command acts on the keyboard focus, which a set of `AXSelected` doesn't give).
+- A **MIDI import makes a track**: File > Import > MIDI File… lands the file on a new track below
+  the one named ("Studio Grand"), so `created.trackAdded` is `true` and the import's undo takes the
+  track away with the region.
+- A **tempo event** made from outside is two steps of Logic's undo ("Insert Tempo", "Value
+  Change"); the Tempo and Signature lists rebuild a cell with every step, so the bridge reads a step
+  back at the cell's path. A signature row has no Delete action: a row Kumi made goes out through
+  the list's Edit > Delete, selected. Both lists take whole beats for a position.
+- A **Track Stack** is made by Logic's own key commands (Create Summing/Folder Stack) on the
+  selected headers, never through the dialog; Logic names it (Sum 1, Sub 1) and a `name` renames it
+  after, which puts "Renaming" on top of the creation. A new folder stack shows closed and is opened
+  (Open Track Stack) to be read; flattening a summing stack, and undoing its creation, leaves its
+  subtracks' output on the stack's bus (Logic's own doing). Which tracks are under a stack isn't
+  readable, so a flattened stack comes back only through Logic's undo.
+- A **key command** runs only with Logic in front; `run_action` takes a name or an id, resolved from
+  the producer's key set (`com.apple.logic10.plist`, their chosen preset) with the factory U.S. set
+  behind it, and refuses an unbound command.
 - `track-add` places a track **below the selected one** (Logic's New Tracks behaviour), so `index`
   counts from 1 (0, above every track, is unreachable); a kind (`audio`, `instrument`, `external`)
   may be given.

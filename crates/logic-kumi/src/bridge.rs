@@ -190,10 +190,9 @@ fn on_app_event(event: &Value, attached: Option<&Attached>) -> Option<Signal> {
     }
 }
 
-/// Logic's string tables for the language it runs in, from its bundle (the app's path from the helper, else the
-/// standard place).
-fn strings_for(app: &App, config: &Config) -> Strings {
-    let bundle = config
+/// Logic's app bundle: the one named, else the running app's, else the standard place.
+fn bundle_of(app: &App, config: &Config) -> std::path::PathBuf {
+    config
         .bundle
         .clone()
         .or_else(|| {
@@ -205,7 +204,13 @@ fn strings_for(app: &App, config: &Config) -> Strings {
                 }
             })
         })
-        .unwrap_or_else(|| Path::new("/Applications/Logic Pro.app").to_path_buf());
+        .unwrap_or_else(|| Path::new("/Applications/Logic Pro.app").to_path_buf())
+}
+
+/// Logic's string tables for the language it runs in, from its bundle (the app's path from the helper, else the
+/// standard place).
+fn strings_for(app: &App, config: &Config) -> Strings {
+    let bundle = bundle_of(app, config);
     let language = strings::language_of(&strings::preferred_languages(&app.bundle));
     let strings = Strings::load(&bundle, &language);
     if language != "en" {
@@ -238,6 +243,12 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 app.bundle,
                 server.port()
             ));
+            // The producer's key command set: their preferences over the preset they chose, cached for the run.
+            let mut changes = Changes::default();
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            changes.keys = crate::keys::KeyCommands::load(&bundle_of(app, config), home.as_deref());
+            let (names, bindings) = changes.keys.counts();
+            log::line(&format!("key commands: {names} names, {bindings} bindings from {:?}", changes.keys.source));
             Some(Attached {
                 pid: app.pid,
                 model,
@@ -246,7 +257,7 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 server,
                 hub,
                 project: Project::new(strings_for(app, config)),
-                changes: Changes::default(),
+                changes,
                 mcu: Mcu::default(),
                 mcu_opened: None,
                 mcu_said: false,

@@ -525,6 +525,12 @@ impl Project {
         ax.tree(&self.root, &list_path, 2, 64, Some(BRIEF))
     }
 
+    /// The list's header a level deeper: the segments of its Edit, Functions and View menu buttons.
+    pub fn list_header(&mut self, ax: &mut Ax) -> Result<Node, AxError> {
+        let list_path = self.need(&self.layout.list, "its list")?;
+        ax.tree(&self.root, &list_path, 3, 64, Some(BRIEF))
+    }
+
     /// Puts the List Editors back as they were before [`Project::show_list`].
     pub fn hide_list(&mut self, ax: &mut Ax, open: ListOpen) -> Result<(), AxError> {
         if let Some(was_on) = open.was_on {
@@ -600,6 +606,23 @@ impl Project {
         let (w, h) = (frame["AXSize"]["w"].as_f64().unwrap_or(0.0), frame["AXSize"]["h"].as_f64().unwrap_or(0.0));
         ax.helper.call("click", json!({"pid": ax.pid, "x": x + (w / 2.0).min(60.0), "y": y + h / 2.0}))?;
         Ok(())
+    }
+
+    /// Adds the track at `place` to the selection: a Shift-click on its header's name field.
+    pub fn extend_track_selection(&mut self, ax: &mut Ax, place: usize) -> Result<(), AxError> {
+        if self.layout.headers.is_none() {
+            self.find_layout(ax)?;
+        }
+        let headers = self.headers(ax)?;
+        let item = headers
+            .children
+            .iter()
+            .filter(|c| c.role == "AXLayoutItem")
+            .nth(place.checked_sub(1).ok_or_else(|| AxError::Missing("that track".into()))?)
+            .ok_or_else(|| AxError::Missing("that track".into()))?;
+        let name = item.child_where(|c| c.role == "AXTextField").ok_or_else(|| AxError::Missing("the track's name field".into()))?;
+        let (x, y, w, h) = ax.frame(&self.root, &name.path)?;
+        ax.click_with(x + (w / 2.0).min(60.0), y + h / 2.0, &["shift"])
     }
 
     /// Selects a region (by its place through the project, from 1) through its item's `AXSelected`, which Logic
@@ -868,6 +891,7 @@ mod tests {
             volume_db: None,
             pan: 0,
             selected: false,
+            stack: false,
         };
         let region = |track: usize, name: &str, bar: u32| {
             (

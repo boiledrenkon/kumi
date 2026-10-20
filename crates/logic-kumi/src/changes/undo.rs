@@ -214,6 +214,34 @@ impl Watch {
         undo
     }
 
+    /// Kumi ran a key command: the titles read again and compared with `before`. The Undo title moved, so Logic
+    /// made a step of it, which the watch keeps under the title's action; else no step and nothing kept. The `undo`
+    /// field of the apply's answer, and the step's name when there is one.
+    pub fn applied_if_title_moved(&mut self, ctx: &mut Ctx, desc: &str, key: &str, before: &Titles) -> (Value, Option<String>) {
+        let (titles, verified) = self.fresh_titles(ctx).unwrap_or_default();
+        let moved = verified && titles.undo != before.undo;
+        let step = if moved { titles.undo_action(&ctx.project.strings) } else { None };
+        let mut undo = json!({"desc": desc, "entry": step.is_some()});
+        if let Some(step) = &step {
+            if self.entries.len() >= MOST {
+                self.entries.remove(0);
+            }
+            let epoch = ctx.project.epoch;
+            self.entries.push(Entry {
+                desc: desc.to_string(),
+                key: key.to_string(),
+                step: Some(step.clone()),
+                title: titles.undo.clone(),
+                undone: false,
+                probe: None,
+                epoch,
+            });
+            self.epoch = Some(epoch);
+            undo["title"] = titles.undo.clone().into();
+        }
+        (undo, step)
+    }
+
     /// Kumi put a change back: its step is Kumi's no more (by value it is a new step of Logic's; by Logic's own undo
     /// it is gone), so the latest step the key names leaves the watch; the `undo` field of the restore's answer,
     /// with `how: "undo"` when Logic's own undo did it.
@@ -342,6 +370,7 @@ mod tests {
             volume_db: Some(volume),
             pan: 0,
             selected: false,
+            stack: false,
         }
     }
 

@@ -24,7 +24,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 19] = [
+const SCENES: [&str; 36] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -44,6 +44,23 @@ const SCENES: [&str; 19] = [
     "change-notes-delete",
     "change-fx-bypass",
     "change-plan",
+    "change-key-command",
+    "change-region-rename",
+    "change-region-move",
+    "change-region-resize",
+    "change-region-split",
+    "change-region-delete",
+    "change-region-loop",
+    "change-midi-import",
+    "change-loop-range",
+    "change-notes-quantize",
+    "change-tempo-marker-set",
+    "change-tempo-marker-delete",
+    "change-signature-set",
+    "change-track-stack",
+    "change-track-stack-flatten",
+    "change-project-save",
+    "change-plan-m4",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -421,4 +438,321 @@ fn the_producers_own_undo_of_a_plan_of_four_changes_is_named_back() {
         (items[0]["name"].as_str(), items[0]["volumeDb"].as_f64(), items[0]["mute"].as_bool()),
         (Some("Vocal"), Some(0.0), Some(false))
     );
+}
+
+#[test]
+fn a_key_command_runs_as_an_action_with_a_row_only_when_logic_made_a_step_and_is_logics_own_to_undo() {
+    let replayed = replay("change-key-command");
+    let previews = of(&replayed, "change_preview");
+    // Select All: Logic's history took no step, so no row (REAPER's run_action shape).
+    assert_eq!(previews[0].result()["target"], json!({"kind": "action", "command": 766, "name": "Select All"}));
+    assert_eq!(previews[0].result()["display"]["title"], "Ran key command “Select All” (⌘A)");
+    let applies = of(&replayed, "change_apply");
+    let select_all = applies[0].result().clone();
+    assert_eq!((select_all["applied"]["changed"].as_bool(), select_all["display"]["unchanged"].as_bool()), (Some(false), Some(true)));
+    assert_eq!(select_all["undo"], json!({"desc": "Kumi: Ran key command “Select All” (k0001)", "entry": false}));
+    // Create Marker (Opt-apostrophe, the producer's own binding): a step, named by the Edit menu's validated title.
+    let marker = applies[1].result().clone();
+    assert_eq!(marker["applied"], json!({"command": 513, "name": "Create Marker", "key": "⌥'", "step": "Create Marker"}));
+    assert_eq!(
+        marker["undo"],
+        json!({"desc": "Kumi: Ran key command “Create Marker” (k0002)", "entry": true, "title": "Undo Create Marker"})
+    );
+    assert_eq!(of(&replayed, "read")[0].result()["items"].as_array().unwrap().len(), 2, "a second marker");
+    // A restore is Logic's own to do.
+    let refused = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(refused["error"]["code"], "daw-only");
+    // The producer's Cmd-Z after it is named back to Kumi by the watch.
+    let named: Vec<&Value> = replayed.events.iter().filter(|event| event["how"] == "undo").collect();
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0]["descs"], json!(["Kumi: Ran key command “Create Marker” (k0002)"]));
+    // What Kumi won't run, and what it doesn't know, is refused with the closest names.
+    let refusals: Vec<String> = previews[2..].iter().map(|step| step.replayed["error"]["message"].as_str().unwrap().to_string()).collect();
+    assert!(refusals[0].contains("no key command named “Save”"), "{}", refusals[0]);
+    assert!(refusals[1].contains("1 to 4999"), "{}", refusals[1]);
+    assert!(refusals[2].contains("“Split Regions/Events at Playhead Position”"), "{}", refusals[2]);
+    assert!(previews[2..].iter().all(|step| step.replayed["error"]["code"] == "bad-params"));
+}
+
+#[test]
+fn a_region_is_renamed_through_the_region_inspector_and_answers_its_ref_in_the_new_epoch() {
+    let replayed = replay("change-region-rename");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!((&preview["prior"], &preview["fence"]), (&json!({"name": "Keys"}), &json!({"name": "Keys"})));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"name": "Keys (Kumi)"}));
+    // A renamed region moves the epoch (M2's rule): the apply answers where the region is now, for the restore.
+    assert_eq!((applied["epoch"].as_str(), &applied["target"]), (Some("2"), &json!({"ref": "2:region:1", "kind": "region"})));
+    assert_eq!(applied["undo"]["title"], "Undo Renaming");
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["name"], "Keys (Kumi)");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(
+        (restored["restored"]["name"].as_str(), restored["epoch"].as_str(), restored["undo"]["entry"].as_bool()),
+        (Some("Keys"), Some("3"), Some(false))
+    );
+    assert_eq!(of(&replayed, "read")[1].result()["items"][0]["name"], "Keys");
+}
+
+#[test]
+fn a_region_is_moved_through_the_event_lists_region_level_and_moved_back_by_value() {
+    let replayed = replay("change-region-move");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"startBeats": 0.0, "endBeats": 16.0, "name": "Keys", "track": 2, "looped": false}));
+    assert_eq!(preview["display"]["title"], "Moved region “Keys” to bar 5");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!((applied["applied"]["startBeats"].as_f64(), applied["applied"]["endBeats"].as_f64()), (Some(16.0), Some(32.0)));
+    // A moved region moves the epoch: the apply says where it is now; Logic's step is a Value Change.
+    assert_eq!((applied["epoch"].as_str(), applied["target"]["ref"].as_str()), (Some("2"), Some("2:region:1")));
+    assert_eq!(applied["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["startBeats"], 16.0);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["startBeats"].as_f64(), restored["undo"]["entry"].as_bool()), (Some(0.0), Some(false)));
+    assert_eq!(reads[1].result()["items"][0]["startBeats"], 0.0);
+}
+
+#[test]
+fn a_regions_edges_are_set_to_the_playhead_with_logics_own_commands_and_put_back_by_value() {
+    let replayed = replay("change-region-resize");
+    let applies = of(&replayed, "change_apply");
+    // The end first, then the start: each a step of Logic's, the notes staying where they are.
+    assert_eq!(
+        (applies[0].result()["applied"]["startBeats"].as_f64(), applies[0].result()["applied"]["endBeats"].as_f64()),
+        (Some(0.0), Some(8.0))
+    );
+    assert_eq!(applies[0].result()["target"]["ref"], "2:region:1");
+    assert_eq!(applies[0].result()["undo"]["entry"], true);
+    assert_eq!(
+        (applies[1].result()["applied"]["startBeats"].as_f64(), applies[1].result()["applied"]["endBeats"].as_f64()),
+        (Some(4.0), Some(16.0))
+    );
+    let restores = of(&replayed, "change_restore");
+    assert!(restores.iter().all(|step| step.result()["restored"]["startBeats"] == 0.0 && step.result()["restored"]["endBeats"] == 16.0));
+    let reads = of(&replayed, "read");
+    assert_eq!(
+        (reads[0].result()["items"][0]["endBeats"].as_f64(), reads[2].result()["items"][0]["startBeats"].as_f64()),
+        (Some(8.0), Some(4.0))
+    );
+    assert_eq!(reads[3].result()["items"][0]["startBeats"], 0.0);
+}
+
+#[test]
+fn a_split_region_answers_its_right_part_as_created_and_comes_back_whole_through_logics_own_undo() {
+    let replayed = replay("change-region-split");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"]["left"]["endBeats"], 8.0);
+    assert_eq!(applied["applied"]["right"]["startBeats"], 8.0);
+    assert_eq!(applied["created"], json!({"ref": "2:region:2", "kind": "region"}));
+    assert_eq!(applied["target"]["ref"], "2:region:1");
+    assert_eq!(of(&replayed, "read")[0].result()["items"].as_array().unwrap().len(), 2);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(restored["display"]["note"], "Put back with Logic Pro's own undo.");
+    assert_eq!(of(&replayed, "read")[1].result()["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_deleted_region_comes_back_only_through_logics_own_undo_while_its_step_is_on_top() {
+    let replayed = replay("change-region-delete");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"deleted": true}));
+    for key in ["startBeats", "endBeats", "name", "track", "kind", "step"] {
+        assert!(applied["material"].get(key).is_some(), "material lacks {key}");
+    }
+    assert_eq!(applied["undo"]["title"], "Undo Delete");
+    assert_eq!(of(&replayed, "read")[0].result()["total"], 0);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["undo"]["how"].as_str(), restored["restored"]["was"].as_str()), (Some("undo"), Some("1:region:1")));
+    assert_eq!(of(&replayed, "read")[1].result()["items"][0]["name"], "Keys");
+}
+
+#[test]
+fn a_regions_loop_is_pressed_in_the_region_inspector_and_read_back_from_it() {
+    let replayed = replay("change-region-loop");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"loop": true}));
+    // Logic keeps a step for it, under its own name.
+    assert_eq!(applied["undo"]["title"], "Undo Loop Parameter Change");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["loop"].as_bool(), restored["undo"]["entry"].as_bool()), (Some(false), Some(false)));
+}
+
+#[test]
+fn notes_are_imported_in_bulk_from_a_midi_file_logic_takes_through_its_panel_and_undone_by_logics_own_undo() {
+    let replayed = replay("change-midi-import");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"tracks": 2, "names": ["Vocal", "Keys"], "regions": 1}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    // Logic made a track for the file and put the region at the playhead: the apply says both, in the new epoch.
+    assert_eq!(
+        (applied["applied"]["notes"].as_u64(), applied["applied"]["startBeats"].as_f64(), applied["applied"]["endBeats"].as_f64()),
+        (Some(4), Some(32.0), Some(36.0))
+    );
+    assert_eq!(applied["created"], json!({"ref": "2:region:2", "kind": "region", "track": "2:track:3", "trackAdded": true}));
+    assert_eq!(applied["epoch"], "2");
+    assert!(applied["applied"]["file"].as_str().unwrap().starts_with("/tmp/kumi-logic/kumi-"));
+    assert_eq!(applied["undo"]["title"], "Undo Import");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][1]["name"], "MIDI Region");
+    assert_eq!(reads[1].result()["items"].as_array().unwrap().len(), 3);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["undo"]["how"].as_str(), restored["restored"]["pressed"].as_str()), (Some("undo"), Some("Undo Import")));
+    assert_eq!(reads[2].result()["total"], 1);
+}
+
+#[test]
+fn the_cycle_is_set_through_the_lcds_locators_and_cycle_button_and_put_back_with_its_locators() {
+    let replayed = replay("change-loop-range");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[0].result()["prior"], json!({"on": false, "startBeats": 0.0, "endBeats": 16.0}));
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies[0].result()["applied"], json!({"on": true, "startBeats": 16.0, "endBeats": 32.0}));
+    // Logic keeps no step for the cycle: nothing for its undo.
+    assert_eq!(applies[0].result()["undo"]["entry"], false);
+    let restores = of(&replayed, "change_restore");
+    // An off cycle still has its locators: the restore puts them back too.
+    assert_eq!(restores[0].result()["restored"], json!({"on": false, "startBeats": 0.0, "endBeats": 16.0}));
+    // Off asked of an off cycle: unchanged, and nothing moves.
+    assert_eq!(previews[1].result()["display"]["unchanged"], true);
+    assert_eq!(applies[1].result()["applied"]["on"], false);
+}
+
+#[test]
+fn notes_are_quantized_through_the_event_lists_quantize_parameter_and_read_as_recorded_once_it_is_off_again() {
+    let replayed = replay("change-notes-quantize");
+    let applies = of(&replayed, "change_apply");
+    // A note nudged 96 ticks late first, so the quantize has something to move.
+    assert_eq!(applies[0].result()["applied"]["added"][0]["position"]["tick"], 97);
+    let quantized = applies[1].result();
+    assert_eq!((quantized["applied"]["moved"].as_u64(), quantized["applied"]["grid"].as_str()), (Some(1), Some("1/16 Note")));
+    assert_eq!(quantized["applied"]["notes"][0]["position"]["tick"], 1);
+    assert_eq!(quantized["material"], json!({"was": "Off"}));
+    // Logic made a step of it (its title wasn't validated at the moment of the read).
+    assert_eq!(quantized["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["position"]["tick"], 1);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"notes": 4, "quantize": "Off"}));
+    // The recorded position is back exactly: the quantize was a parameter of the events.
+    assert_eq!(reads[1].result()["items"][0]["position"]["tick"], 97);
+    assert_eq!(reads[2].result()["items"][0]["position"]["tick"], 1);
+}
+
+#[test]
+fn a_tempo_event_is_made_in_the_tempo_list_and_stepped_to_its_bpm_and_an_existing_one_is_put_back_by_value() {
+    let replayed = replay("change-tempo-marker-set");
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies[0].result()["applied"], json!({"exists": true, "bpm": 128.0, "made": true}));
+    assert_eq!(applies[0].result()["undo"]["title"], "Undo Value Change");
+    let restores = of(&replayed, "change_restore");
+    // A row Kumi made is deleted again.
+    assert_eq!(restores[0].result()["restored"], json!({"exists": false}));
+    // The project's first tempo, by value and back.
+    assert_eq!(applies[1].result()["applied"], json!({"exists": true, "bpm": 100.0, "made": false}));
+    assert_eq!(restores[1].result()["restored"], json!({"exists": true, "bpm": 160.0}));
+}
+
+#[test]
+fn a_deleted_tempo_event_comes_back_through_logics_own_undo_with_its_bpm_as_material() {
+    let replayed = replay("change-tempo-marker-delete");
+    let applies = of(&replayed, "change_apply");
+    let deleted = applies[1].result();
+    assert_eq!(deleted["applied"], json!({"deleted": true}));
+    assert_eq!(deleted["material"], json!({"positionBeats": 16.0, "bpm": 128.0}));
+    assert_eq!(deleted["undo"]["title"], "Undo Delete");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"exists": true, "bpm": 128.0}));
+    assert_eq!(restored["undo"]["how"], "undo");
+}
+
+#[test]
+fn a_time_signature_is_made_in_the_signature_list_and_taken_away_again_through_the_lists_edit_menu() {
+    let replayed = replay("change-signature-set");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"exists": true, "timeSignature": [3, 4], "made": true}));
+    assert_eq!(applied["undo"]["title"], "Undo Value Change");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["signatures"][1]["time"], "3/4");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"exists": false}));
+    assert_eq!(reads[1].result()["items"][0]["signatures"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn tracks_are_stacked_by_logics_own_key_commands_and_a_stack_comes_apart_by_undo_or_by_flattening() {
+    let replayed = replay("change-track-stack");
+    let applies = of(&replayed, "change_apply");
+    // A summing stack of two tracks: its header first, the subtracks after it, all in the new epoch.
+    let summing = applies[0].result();
+    assert_eq!(summing["applied"], json!({"index": 1, "name": "Sum 1", "kind": "summing", "tracks": ["2:track:2", "2:track:3"]}));
+    assert_eq!(summing["created"], json!({"ref": "2:track:1", "kind": "track", "stack": "summing"}));
+    assert_eq!(summing["undo"]["title"], "Undo Create Track Stack");
+    let reads = of(&replayed, "read");
+    let rows = reads[0].result()["items"].as_array().unwrap().clone();
+    assert_eq!((rows[0]["stack"].as_bool(), rows[0]["kind"].as_str(), rows[1].get("stack")), (Some(true), Some("aux"), None));
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"], json!({"tracks": 2, "pressed": "Undo Create Track Stack"}));
+    assert_eq!(reads[1].result()["total"], 2);
+    // A folder stack of one track, named: Logic shows it closed, so it is opened to be read; the rename on top of
+    // the creation means Logic's undo can't take it back, and it is flattened by value instead.
+    let folder = applies[1].result();
+    assert_eq!(folder["applied"], json!({"index": 2, "name": "Keys Folder", "kind": "folder", "tracks": ["4:track:3"]}));
+    assert_eq!(folder["created"]["stack"], "folder");
+    assert_eq!(restores[1].result()["restored"], json!({"tracks": 2}));
+    assert_eq!(restores[1].result()["display"]["title"], "Stack “Keys Folder” flattened again");
+}
+
+#[test]
+fn a_flattened_stack_comes_back_only_through_logics_own_undo() {
+    let replayed = replay("change-track-stack-flatten");
+    let applies = of(&replayed, "change_apply");
+    let flattened = applies[1].result();
+    assert_eq!(flattened["applied"], json!({"name": "Sum 1", "tracks": 2}));
+    assert_eq!(flattened["material"], json!({"name": "Sum 1", "index": 1, "tracks": 3}));
+    assert_eq!(flattened["undo"]["title"], "Undo Flatten Stack");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"tracks": 3, "pressed": "Undo Flatten Stack", "ref": "4:track:1"}));
+    assert_eq!(restored["undo"]["how"], "undo");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[2].result()["items"][0]["stack"], true);
+    assert_eq!(reads[3].result()["total"], 2);
+}
+
+#[test]
+fn the_project_is_saved_as_a_copy_through_the_save_panel_and_in_place_with_cmd_s_and_never_over_a_file_or_into_no_folder() {
+    let replayed = replay("change-project-save");
+    let saves = of(&replayed, "project_save");
+    // Save As to a .logicx that isn't there: the window's document is that file from then on, and clean.
+    assert_eq!(
+        saves[0].result(),
+        &json!({"epoch": "1", "saved": "/Users/me/programs/kumi-lanes/m4-files/Scratch copy.logicx", "dirty": false})
+    );
+    // A plain save after a change (Cmd-S), then one with nothing to save: no key posted, answered at once.
+    assert_eq!(saves[1].result()["dirty"], false);
+    assert_eq!(saves[2].result()["dirty"], false);
+    // Refused: the project's own file as a path, REAPER's version, a folder that isn't there (the panel's own
+    // "where" pop-up says where it stands; nothing is saved).
+    let error = |step: &Step| step.replayed["error"].clone();
+    assert!(error(saves[3])["message"].as_str().unwrap().contains("the project's own file"));
+    assert!(error(saves[4])["message"].as_str().unwrap().contains("keeps no versions"));
+    assert!(error(saves[5])["message"].as_str().unwrap().contains("isn't there"));
+    assert_eq!(error(saves[5])["code"], "bad-params");
+}
+
+#[test]
+fn a_plan_of_a_split_a_cycle_a_tempo_event_an_import_and_a_save_as_runs_as_one_step_each_of_logics_own_undo() {
+    let replayed = replay("change-plan-m4");
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies[0].result()["created"], json!({"ref": "2:region:2", "kind": "region"}));
+    assert_eq!(applies[1].result()["applied"], json!({"on": true, "startBeats": 16.0, "endBeats": 32.0}));
+    assert_eq!(applies[2].result()["applied"], json!({"exists": true, "bpm": 128.0, "made": true}));
+    let import = applies[3].result();
+    assert_eq!(
+        (import["applied"]["notes"].as_u64(), import["applied"]["startBeats"].as_f64(), import["applied"]["endBeats"].as_f64()),
+        (Some(64), Some(32.0), Some(48.0))
+    );
+    assert_eq!(import["created"]["trackAdded"], true);
+    let saved = of(&replayed, "project_save")[0].result().clone();
+    assert_eq!(saved["dirty"], false);
+    assert_eq!(of(&replayed, "read")[0].result()["total"], 3);
 }
