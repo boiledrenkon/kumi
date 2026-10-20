@@ -1175,8 +1175,13 @@ fn deleting_a_tempo_marker_keeps_it_to_make_again_exactly() {
 #[test]
 fn the_loop_is_set_cleared_and_put_back_and_end_must_follow_start() {
     let lab = Lab::new();
-    let (preview, applied) = lab.make("loop-range", json!({"startBeats": 8.0, "endBeats": 16.0}), "Kumi: Loop bar 3 to bar 5 (klp01)");
-    assert_eq!(preview["display"]["title"], "Loop bar 3 to bar 5");
+    let (preview, applied) = lab.make("loop-range", json!({"startBeats": 8.0, "endBeats": 16.0}), "Kumi: Loop bars 3–4 (klp01)");
+    // Whole bars as a producer counts them (it ends where bar 5 starts); one bar, or off the bar lines, as positions.
+    assert_eq!(preview["display"]["title"], "Loop bars 3–4");
+    let title =
+        |input: Value| lab.call("change_preview", json!({"kind": "loop-range", "input": input})).unwrap()["display"]["title"].clone();
+    assert_eq!(title(json!({"startBeats": 8.0, "endBeats": 12.0})), "Loop bar 3");
+    assert_eq!(title(json!({"startBeats": 8.0, "endBeats": 14.0})), "Loop bar 3 to bar 4 beat 3");
     assert_eq!(preview["prior"], json!({"start": 0.0, "end": 0.0}));
     assert_eq!(state(|s| s.loop_range), (4.0, 8.0));
     // Moved by the producer: undo is refused, unless discarded.

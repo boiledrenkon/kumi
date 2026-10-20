@@ -343,9 +343,14 @@ fn loop_wanted(ctx: &Ctx, input: &Value) -> Done<Value> {
 fn loop_title(ctx: &Ctx, state: &Value) -> String {
     let (start, end) = (number(state, "start"), number(state, "end"));
     if start == 0.0 && end == 0.0 {
-        "Loop cleared".into()
-    } else {
-        format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end))
+        return "Loop cleared".into();
+    }
+    // (m6-places) Whole bars as a producer counts them: from bar 9's start to bar 17's is bars 9–16.
+    let bar = |time: f64| ctx.reaper.bar_and_beat_at(ctx.proj, time).filter(|(_, beat)| beat.abs() < 0.005).map(|(measure, _)| measure + 1);
+    match (bar(start), bar(end)) {
+        (Some(first), Some(after)) if after == first + 1 => format!("Loop bar {first}"),
+        (Some(first), Some(after)) if after > first + 1 => format!("Loop bars {first}–{}", after - 1),
+        _ => format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end)),
     }
 }
 
