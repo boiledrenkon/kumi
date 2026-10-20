@@ -383,6 +383,8 @@ pub fn fx_row(reaper: &Reaper, fx: Fx, position: usize) -> Value {
     if fx.index & crate::reaper::INPUT_FX != 0 {
         row["input"] = true.into();
     }
+    // M5 listening (m5-reaper): the FX's track (and take), whether it is a plug-in from outside REAPER, its own name.
+    crate::listening::reads::add_fx_place(reaper, fx, &mut row);
     row
 }
 

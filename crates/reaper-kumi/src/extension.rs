@@ -90,6 +90,8 @@ pub struct Snapshot {
     /// loading, a big take). That request's socket waits for its answer as long as the request allows; others are told
     /// REAPER is busy once it has run longer than a stall.
     pub working: Option<Instant>,
+    /// M5 listening (m5-reaper): the jobs and the preview, which the socket threads answer for themselves.
+    pub listening: Arc<crate::listening::Board>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -241,10 +243,13 @@ pub struct Extension {
     last_heartbeat: Cell<Option<Instant>>,
     focus_value: RefCell<Value>,
     focus_at: Cell<Option<Instant>>,
+    /// M5 listening (m5-reaper): renders, captures, previews, scratch copies.
+    listening: crate::listening::Listening,
 }
 
 impl Extension {
     pub fn new(api: Api, jobs: Receiver<Job>, out: Box<dyn Outbox>, snapshot: Arc<Mutex<Snapshot>>) -> Extension {
+        let board = snapshot.lock().unwrap_or_else(|e| e.into_inner()).listening.clone();
         let extension = Extension {
             api,
             reads: Reads::default(),
@@ -266,6 +271,7 @@ impl Extension {
             last_heartbeat: Cell::new(None),
             focus_value: RefCell::new(Value::Null),
             focus_at: Cell::new(None),
+            listening: crate::listening::Listening::new(board),
         };
         extension.refresh_snapshot(None);
         extension
@@ -321,11 +327,21 @@ impl Extension {
     /// The extension is going: a plan's open undo block is closed.
     pub fn stop(&self) {
         self.changes.stop(&self.reaper(), &self.reads);
+        // M5 listening (m5-reaper): the preview stops, the hook comes out, what runs ends.
+        self.listening.stop(&self.reaper());
+    }
+
+    /// M5 listening (m5-reaper): where renders and captures go, once the reference names Kumi's folder.
+    pub fn set_listening_folder(&self, folder: std::path::PathBuf) {
+        self.listening.set_folder(folder);
     }
 
     pub fn tick(&self, driver: Driver) {
         // A request's REAPER call can call back into the surface (Run included): that tick is skipped.
         if self.in_tick.replace(true) {
+            // M5 listening (m5-reaper): REAPER's render loop ticks while Kumi's render holds the main thread: the socket
+            // threads are told it renders, and a cancel presses the render window's Cancel; nothing else runs.
+            self.listening.nested(&self.snapshot, &*self.out);
             return;
         }
         // Cleared on the way out whatever happens, so one panic caught above doesn't skip every later tick.
@@ -348,6 +364,9 @@ impl Extension {
         if busy.is_none() && !blocked {
             self.run_jobs();
         }
+        // M5 listening (m5-reaper): a preview's end and a capture's drain each tick; a track's items, a planned render (held
+        // inside REAPER's render until it ends) and the first scratch sweep only while REAPER is free.
+        self.listening.tick(&self.reaper(), &self.reads, busy.is_none() && !blocked, &self.snapshot, &*self.out);
         if busy.is_none() {
             self.poll_focus();
             // The producer's undo of Kumi's changes; a plan left open.
@@ -424,6 +443,12 @@ impl Extension {
             "cursor_set" => self.changes.cursor_set(&self.reaper(), &self.reads, params),
             "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
+            // M5 listening (m5-reaper).
+            "render_start" => self.listening.render_start(&self.reaper(), &self.reads, params),
+            "capture_start" => self.listening.capture_start(&self.reaper(), &self.reads, params),
+            "audition" => self.listening.audition(&self.reaper(), params),
+            "audio_file" => self.listening.audio_file(&self.reaper(), &self.reads, params),
+            "scratch" => self.listening.scratch(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }
@@ -512,6 +537,8 @@ impl Extension {
             "api": {"resolved": self.api.resolved(), "total": api::FUNCTION_COUNT},
             "ticksPerSecond": {"timer": rates.timer_hz, "surface": rates.surface_hz},
         });
+        // M5 listening (m5-reaper): what listening can do now.
+        status["listening"] = self.listening.flags(&reaper);
         let missing = reaper.missing_features();
         if !missing.is_empty() {
             status["missing"] =
@@ -553,6 +580,8 @@ impl Extension {
             if let Some(info) = info.as_ref().filter(|_| replaced) {
                 self.reads.project_replaced(info.ptr);
             }
+            // M5 listening (m5-reaper): scratch copies an earlier session left in the project now in front are swept.
+            self.listening.project_changed(&reaper, &*self.out);
         }
         // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
         if let Some(info) = info.as_ref().filter(|_| settled) {

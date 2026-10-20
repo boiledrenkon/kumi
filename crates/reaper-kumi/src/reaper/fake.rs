@@ -7,6 +7,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+// M5 listening (m5-reaper): render settings and renders, the audio device, sources, previews, accessors, the hook.
+mod listening;
+pub use listening::{audio_block, press_render_cancel, render_action, FakeListening, FakeMedia, FakeSource, RenderSeen};
+
 #[derive(Clone)]
 pub struct FakeParam {
     pub name: String,
@@ -449,6 +453,8 @@ pub struct State {
     pub ext_state: HashMap<(String, String), String>,
     /// How often a script's registration was committed to REAPER's key map file (`reaper-kb.ini`).
     pub kb_writes: u32,
+    /// M5 listening (m5-reaper).
+    pub listening: FakeListening,
 }
 
 impl Default for State {
@@ -510,6 +516,7 @@ impl Default for State {
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
+            listening: FakeListening::default(),
         }
     }
 }
@@ -2685,6 +2692,10 @@ pub fn api_without(missing: &[&str]) -> Api {
 }
 
 fn lookup(name: &CStr) -> *mut c_void {
+    // M5 listening (m5-reaper): its functions first; each passes on whatever isn't listening's to the rest below.
+    if let Some(f) = listening::lookup(name) {
+        return f;
+    }
     macro_rules! table {
         ($($name:literal => $f:expr),* $(,)?) => {
             match name.to_bytes() {
