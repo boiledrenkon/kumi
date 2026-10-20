@@ -148,6 +148,7 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 }
 
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // (statvfs's field types differ by platform)
 fn free_on(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;

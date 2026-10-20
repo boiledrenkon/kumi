@@ -47,8 +47,8 @@ struct State {
     /// A cancel can't stop a render at once (Renoise's render in flight runs to its end): it says it's stopping, and the
     /// job ends cancelled at its next status.
     slow_stop: bool,
-    /// Scratch copies by set: each copy's ref, name, the source's ref and the values set on it.
-    scratch: HashMap<String, Vec<(String, String, String, Vec<Value>)>>,
+    /// Scratch copies by set.
+    scratch: HashMap<String, Vec<ScratchCopy>>,
     previews: Vec<Value>,
     playing: Option<String>,
     /// What each render asked, in order.
@@ -72,6 +72,9 @@ struct State {
     /// What part of its source an item plays (REAPER): offset and length in the file, its play rate, reversed.
     item_part: Option<(f64, f64, f64, bool)>,
 }
+
+/// A scratch copy: its ref, name, the source's ref and the values set on it.
+type ScratchCopy = (String, String, String, Vec<Value>);
 
 /// The listening side of a simulated bridge. Clones share it.
 #[derive(Clone)]

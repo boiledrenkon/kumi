@@ -86,6 +86,9 @@ pub fn device(path: &str) -> Option<Device> {
     Some(Device { path, params })
 }
 
+/// What a change asks of one parameter: its number (from 1), and a value or the text Renoise shows for it.
+type Ask = (usize, Option<f64>, Option<String>);
+
 /// The chains a test made, by track number (from 1); each starts with the track's TrackVolPan.
 #[derive(Debug, Default)]
 pub struct Chains {
@@ -185,7 +188,7 @@ impl Chains {
         let source = if method == "change_restore" { &params["target"] } else { &params["input"] };
         let reference = source["ref"].as_str().unwrap_or_default();
         // The device and what was asked of it: (parameter number, value) pairs.
-        let (track, place, asks): (u64, u64, Vec<(usize, Option<f64>, Option<String>)>) = {
+        let (track, place, asks): (u64, u64, Vec<Ask>) = {
             let (at, single) = match numbers(reference, "param") {
                 Some(at) if at.len() == 3 => {
                     let single = Some(at[2] as usize);

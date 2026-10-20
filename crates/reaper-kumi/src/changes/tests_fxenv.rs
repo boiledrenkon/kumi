@@ -529,7 +529,7 @@ fn a_preset_is_loaded_by_name_place_or_step_and_undo_puts_back_the_preset_and_ev
         // By place and by step.
         let (preview, applied) = lab.make("fx-preset", json!({"ref": fx_ref(guid), "index": 2}));
         assert_eq!(preset_name(guid), "Wide");
-        assert_eq!(applied["display"]["title"].as_str().unwrap().ends_with("preset “Wide”"), true);
+        assert!(applied["display"]["title"].as_str().unwrap().ends_with("preset “Wide”"));
         lab.undo("fx-preset", &preview, &applied).unwrap();
         assert_eq!((preset_name(guid), values(guid)), before);
         let (preview, applied) = lab.make("fx-preset", json!({"ref": fx_ref(guid), "step": 1}));

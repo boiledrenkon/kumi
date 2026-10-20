@@ -725,7 +725,7 @@ enum Shown {
     MakeTake(Take, &'static str, i32),
 }
 
-fn name_of<'a>(input: &'a Value) -> Done<&'a str> {
+fn name_of(input: &Value) -> Done<&str> {
     input.get("name").and_then(Value::as_str).ok_or_else(|| bad("name: which envelope (volume, pan, …)"))
 }
 

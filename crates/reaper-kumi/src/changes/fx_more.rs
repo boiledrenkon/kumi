@@ -94,8 +94,11 @@ pub fn offline_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 
 // ----- wet and delta -----
 
+/// The wet and delta controls asked for: each with its parameter's index.
+type WetDelta = (Option<(i32, f64)>, Option<(i32, bool)>);
+
 /// The wet and delta controls REAPER gives every FX (`:wet`, `:delta`).
-fn wet_params(ctx: &Ctx, at: &FxAt, input: &Value) -> Done<(Option<(i32, f64)>, Option<(i32, bool)>)> {
+fn wet_params(ctx: &Ctx, at: &FxAt, input: &Value) -> Done<WetDelta> {
     let wet = match input.get("wet") {
         None | Some(Value::Null) => None,
         Some(value) => {
@@ -1010,7 +1013,7 @@ fn link_left_out(ctx: &Ctx, chain: &[Fx], chosen: &[usize]) -> Option<String> {
     for &place in chosen {
         let fx = chain[place];
         for p in 0..reaper.fx_param_count(fx).min(4096) {
-            if !reaper.fx_config(fx, &format!("param.{p}.plink.active")).is_some_and(|v| v.trim() == "1") {
+            if reaper.fx_config(fx, &format!("param.{p}.plink.active")).is_none_or(|v| v.trim() != "1") {
                 continue;
             }
             let source = reaper.fx_config(fx, &format!("param.{p}.plink.effect")).and_then(|v| v.trim().parse::<usize>().ok());

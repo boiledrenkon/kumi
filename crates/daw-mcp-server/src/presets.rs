@@ -1598,7 +1598,7 @@ pub struct Kept<'a> {
 /// What an undo does: write this document, or nothing (it is back already).
 #[derive(Debug)]
 pub enum Undo {
-    Write { document: xml::Document, title: String, note: Option<String> },
+    Write { document: Box<xml::Document>, title: String, note: Option<String> },
     Back(String),
 }
 
@@ -1619,7 +1619,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             let at = list_of(&kept.applied["at"]);
             let locus = resolve(slot(&document)?, &at, false)?;
             take_out(slot_mut(&mut document), &locus);
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         "doofer-device-delete" => {
             let at = list_of(&kept.prior["at"]);
@@ -1670,7 +1670,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
                     if left == 1 { "it is" } else { "they are" }
                 )
             });
-            Ok(Undo::Write { document, title: put_back, note })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note })
         }
         "doofer-device-move" => {
             let (at, to) = (list_of(&kept.applied["at"]), list_of(&kept.applied["to"]));
@@ -1683,7 +1683,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             let (element, _, _) = take_out(slot_mut(&mut probe), &from);
             let target = resolve(slot(&probe)?, &at, true)?;
             move_device(slot_mut(&mut document), &from, &target, element);
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         "doofer-macro" => {
             let m = kept.applied["macro"].as_i64().unwrap_or(1);
@@ -1719,7 +1719,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
                 return Ok(Undo::Back(format!("macro {m} of {} is as it was already", device.named())));
             }
             write_macro(slot_mut(&mut document), &top, &Value::Object(back));
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         "doofer-device-set" => {
             let at = list_of(&kept.applied["at"]);
@@ -1779,7 +1779,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             if let Some(name) = name_back {
                 set_name(element, &name);
             }
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         "splitter-set" => {
             let now = slot(&document)?.child_text("Type").unwrap_or_else(|| "Parallel".into());
@@ -1794,7 +1794,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
                 return changed(format!("{}'s split changed in Renoise since Kumi set it", q(&device.named())));
             }
             slot_mut(&mut document).set_child_text("Type", was);
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         "notepad-write" => {
             let at = kept.applied.get("at").filter(|at| !at.is_null()).map(list_of);
@@ -1819,7 +1819,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             let lines: Vec<String> =
                 kept.prior["paragraphs"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
             write_paragraphs(element, &lines);
-            Ok(Undo::Write { document, title: put_back, note: None })
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
         other => bad(format!("{other} isn't made here")),
     }
