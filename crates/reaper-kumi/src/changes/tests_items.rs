@@ -669,6 +669,14 @@ fn a_copy_shares_no_ids_with_its_item_and_its_undo_takes_it_away() {
     assert_eq!((track, made.position), (2, 20.0));
     assert_ne!(made.takes[0].guid, "{TAKE-K1}");
     assert_ne!(made.takes[0].fx[0].guid, "{FX-TAKE}");
+    // FX in a container get new ids too.
+    state(|s| {
+        s.tracks[1].items[0].takes[0].fx = vec![fake::FakeFx::container("{FX-BOX}", vec![fake::FakeFx::new("{FX-IN-BOX}", "JS: volume")])]
+    });
+    let (_, boxed) = lab.make("item-duplicate", json!({"ref": K1, "position": 40.0}));
+    let copied = item(&guid_in(&boxed["created"]["ref"])).unwrap().1.takes[0].fx[0].clone();
+    let inner = copied.children.as_ref().expect("the copy's container")[0].guid.clone();
+    assert!(copied.guid != "{FX-BOX}" && inner != "{FX-IN-BOX}", "{} {inner}", copied.guid);
     // Right after the item by default.
     let (_, applied2) = lab.make("item-duplicate", json!({"ref": K1}));
     assert_eq!(item(&guid_in(&applied2["created"]["ref"])).unwrap().1.position, 2.0);
