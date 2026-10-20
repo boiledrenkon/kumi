@@ -130,31 +130,65 @@ function M.tally_note(tally)
   return #parts > 0 and table.concat(parts, " ") or nil
 end
 
--- Where a meta device (*LFO and the like) sends its values: Dest. Track (a track's number less one), Dest. Effect (a device's) and
--- Dest. Parameter, -1 for none. Its preset data doesn't hold them (measured in Renoise 3.5.4): a device put back has none.
--- `own` is the place of the track it is on; with `removing` that track goes, and the tracks after it move up. A destination is kept
--- as the track's place (`to`, carried through the shifts since) and the device's place on it (`dev`), never as Renoise's numbers.
-local function read_destination(device, song, own, removing, env)
-  if not device.device_path:find("/Native/*", 1, true) then return nil end
-  local track_p = parameter_named(device, "Dest. Track")
-  if not track_p or track_p.value < 0 then return nil end
-  local effect_p, parameter_p = parameter_named(device, "Dest. Effect"), parameter_named(device, "Dest. Parameter")
-  local target = track_p.value + 1
-  local saved = { effect = effect_p and effect_p.value, parameter = parameter_p and parameter_p.value }
-  if target == own then
-    saved.self = true
-  elseif target >= 1 and target <= rows.track_count(song) then
-    saved.to = (removing and target > own) and target - 1 or target
-    -- (the device it is aimed at, as a place on that track's devices: Dest. Effect counts from 0, the mixer device)
-    local aimed = type(saved.effect) == "number" and saved.effect >= 0 and saved.effect + 1 or nil
-    local target_track = song:track(target)
-    if aimed and aimed <= #target_track.devices then
-      saved.dev = M.device_place(env, target, aimed, target_track:device(aimed))
-    end
-  else
-    return nil
+-- Where a device sends values: each destination it has, as its parameters {prefix, track, effect, parameter?}: a meta
+-- device's (and #Sidechain's) "Dest. Track/Effect/Parameter", *Hydra's and *XY Pad's "OutN Track/Effect/Parameter" (lab,
+-- 3.5.4: #Sidechain has no Parameter). Track is a track's number less one, Effect a device's (the mixer device is 0), -1 none.
+function M.destinations(device)
+  local path = device.device_path
+  if not (path:find("/Native/*", 1, true) or path:find("/Native/#Sidechain", 1, true)) then return {} end
+  local named, numbered = {}, {}
+  for k = 1, #device.parameters do
+    local parameter = device:parameter(k)
+    named[parameter.name], numbered[parameter.name] = parameter, k
   end
-  return saved
+  local out = {}
+  for k = 1, #device.parameters do
+    local name = device:parameter(k).name
+    local prefix = name:match("^(.*)Track$")
+    if prefix and named[prefix .. "Effect"] then
+      -- (and their numbers on the device, from 1)
+      out[#out + 1] = {
+        prefix = prefix, track = named[name], effect = named[prefix .. "Effect"], parameter = named[prefix .. "Parameter"],
+        numbers = { k, numbered[prefix .. "Effect"], numbered[prefix .. "Parameter"] },
+      }
+    end
+  end
+  return out
+end
+
+local function destination_named(device, prefix)
+  for _, destination in ipairs(M.destinations(device)) do
+    if destination.prefix == prefix then return destination end
+  end
+  return nil
+end
+
+-- Where a device that is deleted sends its values, to aim it again when it is made again: its preset data doesn't hold them
+-- (measured in Renoise 3.5.4: a device put back has none). `own` is the place of the track it is on; with `removing` that
+-- track goes, and the tracks after it move up. Each is kept as the track's place (`to`, carried through the shifts since)
+-- and the device's place on it (`dev`), never as Renoise's numbers.
+local function read_destinations(device, song, own, removing, env)
+  local out = {}
+  for _, destination in ipairs(M.destinations(device)) do
+    local target = destination.track.value + 1
+    if destination.track.value >= 0 then
+      local saved = { prefix = destination.prefix, effect = destination.effect.value, parameter = destination.parameter and destination.parameter.value }
+      if target == own then
+        saved.self = true
+        out[#out + 1] = saved
+      elseif target >= 1 and target <= rows.track_count(song) then
+        saved.to = (removing and target > own) and target - 1 or target
+        -- (the device it is aimed at, as a place on that track's devices: Effect counts from 0, the mixer device)
+        local aimed = type(saved.effect) == "number" and saved.effect >= 0 and saved.effect + 1 or nil
+        local target_track = song:track(target)
+        if aimed and aimed <= #target_track.devices then
+          saved.dev = M.device_place(env, target, aimed, target_track:device(aimed))
+        end
+        out[#out + 1] = saved
+      end
+    end
+  end
+  return #out > 0 and out or nil
 end
 
 -- A device as it is: enough to make it again. (`song` and `own`, the track's place, add where a meta device sends its values.)
@@ -162,37 +196,54 @@ function M.read_device(device, song, own, removing, env)
   return {
     path = device.device_path, name = device.name, display = device.display_name, active = device.is_active,
     maximized = device.is_maximized, preset = device.active_preset, presetData = device.active_preset_data,
-    destination = song and read_destination(device, song, own, removing, env) or nil,
+    destinations = song and read_destinations(device, song, own, removing, env) or nil,
   }
 end
 
--- Sets a device's destination again, once the devices around it are there: `own` is the place of the track it is on, now, and
--- `moved(at, own)` where a track numbered as at the delete is now (nil when it is gone). Answers "set", or why it was left alone:
--- "gone" (the track or the device is gone), "changed" (the device at its place is another), "unknown" (what moved can't be told)
--- or "failed".
-function M.restore_destination(song, device, saved, own, moved, env)
-  local d = saved.destination
-  if type(d) ~= "table" then return nil end
-  local track_p = parameter_named(device, "Dest. Track")
-  if not track_p or track_p.value ~= -1 then return nil end
-  local target = d.self and own or (type(d.to) == "number" and moved(d.to, own) or nil)
-  if not target or target < 1 or target > rows.track_count(song) then return "gone" end
-  local effect = d.effect
-  if not d.self then
-    -- (the device it was aimed at, followed through the devices made, deleted and moved on that track since)
-    if not d.dev then return "unknown" end
-    local at, why = M.device_now(song, env, target, d.dev)
-    if not at then return why end
-    effect = at - 1
+-- Sets a device's destinations again, once the devices around it are there: `own` is the place of the track it is on,
+-- now, and `moved(at, own)` where a track numbered as at the delete is now (nil when it is gone). Answers a status for each:
+-- "set", or why it was left alone: "gone" (the track or the device is gone), "changed" (the device at its place is another),
+-- "unknown" (what moved can't be told) or "failed".
+function M.restore_destinations(song, device, saved, own, moved, env)
+  local kept = saved.destinations
+  if type(kept) ~= "table" and type(saved.destination) == "table" then
+    kept = { saved.destination }
+    kept[1].prefix = kept[1].prefix or "Dest. "
   end
-  local ok = pcall(function()
-    track_p.value = target - 1
-    for name, value in pairs({ ["Dest. Effect"] = effect, ["Dest. Parameter"] = d.parameter }) do
-      local parameter = parameter_named(device, name)
-      if parameter and type(value) == "number" and value >= 0 and parameter.value == -1 then parameter.value = value end
+  local statuses = {}
+  for _, d in ipairs(type(kept) == "table" and kept or {}) do
+    local destination = type(d) == "table" and destination_named(device, d.prefix or "Dest. ") or nil
+    local status
+    if destination and destination.track.value == -1 then
+      local target = d.self and own or (type(d.to) == "number" and moved(d.to, own) or nil)
+      if not target or target < 1 or target > rows.track_count(song) then
+        status = "gone"
+      else
+        local effect = d.effect
+        if not d.self then
+          -- (the device it was aimed at, followed through the devices made, deleted and moved on that track since)
+          if not d.dev then
+            status = "unknown"
+          else
+            local at, why = M.device_now(song, env, target, d.dev)
+            if not at then status = why else effect = at - 1 end
+          end
+        end
+        if not status then
+          local ok = pcall(function()
+            destination.track.value = target - 1
+            for _, pair in ipairs({ { destination.effect, effect }, { destination.parameter, d.parameter } }) do
+              local parameter, value = pair[1], pair[2]
+              if parameter and type(value) == "number" and value >= 0 and parameter.value == -1 then parameter.value = value end
+            end
+          end)
+          status = ok and "set" or "failed"
+        end
+      end
     end
-  end)
-  return ok and "set" or "failed"
+    if status then statuses[#statuses + 1] = status end
+  end
+  return statuses
 end
 
 -- A device put in at `at` as it was read (the state is the preset data; a plug-in that refuses it keeps its defaults).
@@ -348,7 +399,6 @@ function M.read_routes(song, victim, device_at, env)
   local routes = {}
   local victim_track = song:track(victim)
   local is_send = victim_track.type == renoise.Track.TRACK_TYPE_SEND
-  local is_sequencer = victim_track.type == renoise.Track.TRACK_TYPE_SEQUENCER
   local number = (is_send and not device_at) and send_number(song, victim) or nil
   for t = 1, rows.track_count(song) do
     if device_at or t ~= victim then
@@ -368,12 +418,15 @@ function M.read_routes(song, victim, device_at, env)
               end
             end
           end
-          local destination = (is_sequencer or device_at) and path:find("/Native/*", 1, true) and parameter_named(device, "Dest. Track") or nil
-          if destination and destination.value == victim - 1 then
-            local effect, parameter = parameter_named(device, "Dest. Effect"), parameter_named(device, "Dest. Parameter")
-            if not device_at or (effect and effect.value == device_at - 1) then
-              route = route or {}
-              route.destination = { effect = effect and effect.value, parameter = parameter and parameter.value }
+          -- (destinations count every track: sequencer, group, send, master)
+          for _, destination in ipairs(M.destinations(device)) do
+            if destination.track.value == victim - 1 then
+              local effect, parameter = destination.effect, destination.parameter
+              if not device_at or effect.value == device_at - 1 then
+                route = route or {}
+                route.destinations = route.destinations or {}
+                route.destinations[#route.destinations + 1] = { prefix = destination.prefix, effect = effect.value, parameter = parameter and parameter.value }
+              end
             end
           end
           if route then
@@ -425,24 +478,30 @@ function M.write_routes(song, routes, now, moved, tally, env)
               end
             end
           end
-          if route.destination then
-            local track_p = parameter_named(device, "Dest. Track")
-            local effect_p, parameter_p = parameter_named(device, "Dest. Effect"), parameter_named(device, "Dest. Parameter")
-            local saved = route.destination
+          local kept = route.destinations
+          if type(kept) ~= "table" and type(route.destination) == "table" then
+            kept = { route.destination }
+            kept[1].prefix = kept[1].prefix or "Dest. "
+          end
+          for _, saved in ipairs(type(kept) == "table" and kept or {}) do
+            local destination = destination_named(device, saved.prefix or "Dest. ")
             local function put(p, value)
               if p and type(value) == "number" and value >= 0 and p.value == -1 then p.value = value end
             end
-            if now.track then
-              if track_p and track_p.value == -1 then
-                track_p.value = now.track - 1
-                put(effect_p, saved.effect)
+            if destination then
+              local track_p, effect_p, parameter_p = destination.track, destination.effect, destination.parameter
+              if now.track then
+                if track_p.value == -1 then
+                  track_p.value = now.track - 1
+                  put(effect_p, saved.effect)
+                  put(parameter_p, saved.parameter)
+                  set = true
+                end
+              elseif track_p.value == now.on - 1 and effect_p.value == -1 then
+                put(effect_p, now.device - 1)
                 put(parameter_p, saved.parameter)
                 set = true
               end
-            elseif track_p and track_p.value == now.on - 1 and effect_p and effect_p.value == -1 then
-              put(effect_p, now.device - 1)
-              put(parameter_p, saved.parameter)
-              set = true
             end
           end
           return set

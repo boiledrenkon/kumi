@@ -5,11 +5,17 @@ pub mod changes;
 pub mod client;
 pub mod flow;
 pub mod host;
+pub mod instruments;
 pub mod listening;
 pub mod mcp;
+pub mod presets;
+pub mod renoise_devices;
+pub mod renoise_texts;
 pub mod simulator;
 pub mod stdio;
 pub mod tools;
+pub mod xml;
+pub mod zip;
 
 use daw_bridge::Daw;
 use std::path::PathBuf;

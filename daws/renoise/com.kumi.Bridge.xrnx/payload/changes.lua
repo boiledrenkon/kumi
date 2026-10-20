@@ -20,6 +20,10 @@ import("changes_plugins")
 -- M4 (n-song)
 import("changes_patterns")
 local sequence_ = import("changes_sequence")
+-- (M4 n-devices: presets, names, and the Doofer, Splitter and Notepad edits Kumi's host composes)
+local presets = import("changes_presets")
+local macros = import("changes_macros")
+import("changes_params")
 -- (M5 m5-renoise)
 import("changes_scratch")
 
@@ -212,6 +216,23 @@ for _, kind in ipairs({ "pattern-name", "pattern-length", "slot-color", "pattern
 
 -- n-instruments: an instrument saved to a file (an action: no change, no undo).
 M.save_instrument = instruments_.save
+
+-- (M4 n-devices) Whether a kind finds what it changed by places alone (its material): a restore of it isn't held back by
+-- refs of an earlier epoch in its target or `created`.
+function M.follows_places(kind)
+  local spec = base.KINDS[kind]
+  return spec ~= nil and spec.places == true
+end
+
+-- (M4 n-devices) A device's preset data, for Kumi's host to edit (`preset_read`).
+function M.preset_read(params, env) return presets.read(params, env) end
+-- (M4 n-devices) An instrument saved to Kumi's work folder (`instrument_export`).
+function M.instrument_export(params, env) return macros.export(params, env) end
+-- (M4 n-devices) An instrument's macros and mappings as the API reads them (`macro_read`).
+function M.macro_read(params, env) return macros.read(params, env) end
+-- (M4 n-devices) Actions: a device's editor window (`device_editor`), its settings saved as a preset (`preset_save`).
+function M.device_editor(params, env) return presets.editor(params, env) end
+function M.preset_save(params, env) return presets.save(params, env) end
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

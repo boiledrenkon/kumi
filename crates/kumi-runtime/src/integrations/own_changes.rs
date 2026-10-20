@@ -992,10 +992,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     }
 
     /// One action through the host's tool: what the producer is told it did, or why it didn't.
-    async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
+    async fn one_action(&self, action: &'static OwnAction, asked: JsonObject, signal: Signal) -> ActionOutcome {
         let words = self.link().words().words;
-        // (an action's refs are this turn's, as a change's are: the tracks a template is saved from, what Renoise auditions or selects)
-        let input = match self.lengthened(&input) {
+        // (an action's refs are this turn's, as a change's are: the tracks a template is saved from, what Renoise auditions or
+        // selects, the device whose editor or preset it is)
+        let input = match self.lengthened(&asked) {
             Ok(input) => input,
             Err(why) => return ActionOutcome::error(why),
         };
@@ -1009,8 +1010,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 // What the DAW says it did, in its words, when it says (Renoise's actions: the notes, what was selected, the file).
                 let title = answer.pointer("/display/title").and_then(Value::as_str).unwrap_or(action.title).to_owned();
                 let mut text = json!({"done": title});
-                // (r-tracks) `saved`: the file a save wrote; (m4-r-fxenv) `file`, `count`: an FX chain saved.
-                for field in ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved", "file", "count"] {
+                // (r-tracks) `saved`: the file a save wrote; (m4-r-fxenv) `file`, `count`: an FX chain saved; (n-devices)
+                // `visible`, `listed`: a device's editor, a preset saved.
+                for field in
+                    ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved", "file", "count", "visible", "listed"]
+                {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }
@@ -1029,7 +1033,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Ok(Err(refused)) if refused.busy => {
                 ActionOutcome::error(format!("{} is busy ({}): try again in a moment", words.app, refused.why))
             }
-            Ok(Err(refused)) => ActionOutcome::error(self.refusal(&refused, &input)),
+            Ok(Err(refused)) => ActionOutcome::error(self.refusal(&refused, &asked)),
             Err(_) => ActionOutcome {
                 text: format!("{} didn't answer, so it may or may not have done it", words.app),
                 is_error: true,
