@@ -304,8 +304,9 @@ async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
             };
             assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "fx", "ref": BASS}));
             let chains = tree.devices[1].chains.as_ref().unwrap();
-            assert_eq!(chains.len(), 2, "a parallel FX starts its own chain");
-            assert_eq!(chains[1].devices.as_ref().unwrap()[0].name, "ReaDelay");
+            assert_eq!(chains.len(), 1, "a container keeps its one chain");
+            let delay = &chains[0].devices.as_ref().unwrap()[1];
+            assert_eq!((delay.name.as_str(), delay.note.as_deref()), ("ReaDelay", Some("parallel")), "a parallel FX says so beside its name");
 
             host.answers.borrow_mut().push((
                 "focus_body",
