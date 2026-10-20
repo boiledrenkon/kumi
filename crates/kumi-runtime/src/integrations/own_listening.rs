@@ -929,6 +929,17 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 }
 
+/// One knob's change: the device as it is now with the knob's number (a knob's own ref can be from before a search's copies
+/// moved Renoise's refs), or the knob's ref where it has no number.
+fn knob_change(device: &str, knob: &str, field: &str, raw: f64) -> Value {
+    let mut input = match knob.rsplit([':', '.']).next().and_then(|n| n.parse::<u64>().ok()) {
+        Some(index) => json!({"ref": device, "param": index}),
+        None => json!({"ref": knob}),
+    };
+    input[field] = json!(raw);
+    input
+}
+
 /// A level a knob shows, in dB: its text's number in dB, or a bare number where the knob is named in dB (a JSFX's
 /// "Adjustment (dB)" shows "6.0").
 fn shown_db(knob: &str, shown: &str) -> Option<f64> {
@@ -1398,8 +1409,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         // Otherwise one change each, kept in HISTORY as one.
         let mut ids = vec![];
         for (reference, raw) in values {
-            let mut input = json!({"ref": reference});
-            input[self.table.raw_field] = json!(raw);
+            let input = knob_change(&long, reference, self.table.raw_field, *raw);
             match self.change(self.table.param_tool, input, signal.clone()).await {
                 Ok((id, _)) if !id.is_empty() => ids.push(id),
                 Ok(_) => {}
@@ -2229,6 +2239,20 @@ mod tests {
 
     fn knob(name: &str, raw: f64) -> DeviceKnob {
         DeviceKnob { reference: format!("p:{name}"), name: name.into(), raw, min: 0., max: 1., items: vec![], scale: None }
+    }
+
+    #[test]
+    fn a_knob_is_set_on_its_device_as_it_is_now_by_its_number() {
+        // (a Renoise param ref from before a scratch copy moved the epoch; the device ref read just now)
+        assert_eq!(
+            knob_change("70c9ea:device:4.2", "70c9e6:param:4.2.3", "value", 8.),
+            json!({"ref": "70c9ea:device:4.2", "param": 3, "value": 8.0})
+        );
+        assert_eq!(
+            knob_change("r:fx:{G}", "r:param:{G}:12", "normalized", 0.7),
+            json!({"ref": "r:fx:{G}", "param": 12, "normalized": 0.7})
+        );
+        assert_eq!(knob_change("d", "knob", "value", 1.), json!({"ref": "knob", "value": 1.0}));
     }
 
     #[test]
