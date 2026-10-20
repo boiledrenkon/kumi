@@ -46,6 +46,8 @@ mod groups;
 mod hwout;
 mod projectitems;
 mod templates;
+// M6 (m6-library): a sampler kit made from sample files.
+mod kits;
 mod trackprops;
 mod volatile;
 
@@ -155,6 +157,8 @@ enum Kind {
     RunAction,
     /// (r-tracks) A track template inserted as tracks.
     TemplateInsert,
+    /// (m6-library) A sampler kit made from sample files, as tracks.
+    DrumKit,
     /// (r-tracks) The ruler lane a marker or region sits in, held by the lane's id.
     MarkerLane,
     TrackDelete,
@@ -243,6 +247,7 @@ fn kind(name: &str) -> Option<Kind> {
         "track-group-name" => Some(Kind::TrackGroupName),
         "run-action" => Some(Kind::RunAction),
         "track-template-insert" => Some(Kind::TemplateInsert),
+        "drum-kit" => Some(Kind::DrumKit),
         "marker-lane" => Some(Kind::MarkerLane),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
@@ -291,6 +296,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_preview(ctx, input),
             Kind::RunAction => actions::preview(ctx, input),
             Kind::TemplateInsert => templates::preview(ctx, input),
+            Kind::DrumKit => kits::preview(ctx, input),
             Kind::MarkerLane => marks::lane_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
@@ -337,6 +343,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
             Kind::RunAction => actions::apply(ctx, input, fence),
             Kind::TemplateInsert => templates::apply(ctx, input, fence),
+            Kind::DrumKit => kits::apply(ctx, input, fence),
             Kind::MarkerLane => marks::lane_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
@@ -383,6 +390,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_restore(ctx, restore),
             Kind::RunAction => actions::restore(ctx, restore),
             Kind::TemplateInsert => templates::restore(ctx, restore),
+            Kind::DrumKit => kits::restore(ctx, restore),
             Kind::MarkerLane => marks::lane_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
@@ -773,6 +781,8 @@ mod tests_takes;
 mod tests_actions;
 #[cfg(test)]
 mod tests_carried;
+#[cfg(test)]
+mod tests_kits;
 #[cfg(test)]
 mod tests_lab;
 #[cfg(test)]

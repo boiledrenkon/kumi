@@ -276,7 +276,7 @@ fn all_fx(reaper: &Reaper, track: Track) -> Vec<Fx> {
 /// What tells a track made from the template from how the insert left it: its state as the producer can change it (items
 /// and their MIDI, envelopes and their points, mix, routing, plug-ins in and out), its sends and receives, and each FX's
 /// signature (its parameters, less those that move by themselves).
-fn signature(ctx: &Ctx, track: Track) -> Value {
+pub(super) fn signature(ctx: &Ctx, track: Track) -> Value {
     let reaper = ctx.reaper;
     json!({
         "state": reaper.track_chunk(track).map(|chunk| content_hash(&chunk)),
@@ -286,7 +286,7 @@ fn signature(ctx: &Ctx, track: Track) -> Value {
 }
 
 /// Whether the track is as the insert left it, by its recorded signature.
-fn as_left(ctx: &Ctx, track: Track, recorded: &Value) -> bool {
+pub(super) fn as_left(ctx: &Ctx, track: Track, recorded: &Value) -> bool {
     let reaper = ctx.reaper;
     let fx = all_fx(reaper, track);
     let signatures = recorded["fx"].as_array().map(Vec::as_slice).unwrap_or_default();

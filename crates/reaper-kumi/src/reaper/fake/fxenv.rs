@@ -1123,6 +1123,24 @@ fn set_config(owner: u64, index: c_int, key: *const c_char, value: *const c_char
                 s.state_changed = true;
                 true
             }
+            // (m6-library) A sampler's file is named, then taken with DONE (RS5k's way): read back only after.
+            file if file.len() > 4 && file.starts_with("FILE") && file[4..].bytes().all(|b| b.is_ascii_digit()) => {
+                fx.config.insert(format!("pending.{file}"), value);
+                true
+            }
+            "DONE" => {
+                if super::extra(|e| e.sampler_refuses_files) {
+                    return true;
+                }
+                let pending: Vec<(String, String)> =
+                    fx.config.iter().filter(|(k, _)| k.starts_with("pending.FILE")).map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (key, file) in pending {
+                    fx.config.remove(&key);
+                    fx.config.insert(key["pending.".len()..].to_string(), file);
+                }
+                s.state_changed = true;
+                true
+            }
             band if band.starts_with("BANDTYPE") || band.starts_with("BANDENABLED") => {
                 // ReaEQ answers false and takes it.
                 if fx.config.contains_key(band) {

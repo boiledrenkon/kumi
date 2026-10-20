@@ -29,6 +29,12 @@ pub struct Extra {
     /// Files saved through `Main_SaveProjectEx`: (path, options).
     pub saved_as: Vec<(String, i32)>,
     pub made_from_templates: u32,
+    /// (m6-library) A REAPER without JS: MIDI Choke (its Effects folder lacks it).
+    pub no_choke: bool,
+    /// (m6-library) A sampler that takes no file (DONE commits nothing).
+    pub sampler_refuses_files: bool,
+    /// (m6-library) Note names a track was given (`SetTrackMIDINoteNameEx`): (track GUID, pitch, channel, name).
+    pub note_names: Vec<(String, i32, i32, String)>,
 }
 
 impl Default for Extra {
@@ -79,6 +85,9 @@ impl Default for Extra {
             stable_chunks: false,
             saved_as: vec![],
             made_from_templates: 0,
+            no_choke: false,
+            sampler_refuses_files: false,
+            note_names: vec![],
         }
     }
 }
@@ -493,5 +502,22 @@ pub fn lookup(name: &CStr) -> *mut c_void {
         b"Main_SaveProjectEx" => main_save_project_ex as unsafe extern "C" fn(*mut ReaProject, *const c_char, c_int),
         b"SetMediaItemSelected" => set_media_item_selected as unsafe extern "C" fn(*mut MediaItem, bool),
         b"SelectAllMediaItems" => select_all_media_items as unsafe extern "C" fn(*mut ReaProject, bool),
+        b"SetTrackMIDINoteNameEx" => set_track_midi_note_name_ex as unsafe extern "C" fn(*mut ReaProject, *mut MediaTrack, c_int, c_int, *const c_char) -> bool,
     }
+}
+
+unsafe extern "C" fn set_track_midi_note_name_ex(
+    _: *mut ReaProject,
+    track: *mut MediaTrack,
+    pitch: c_int,
+    channel: c_int,
+    name: *const c_char,
+) -> bool {
+    let name = name_of(name);
+    let Some(guid) = with(|s| track_of(s, track as u64).map(|t| t.guid.clone())) else { return false };
+    extra(|e| {
+        e.note_names.retain(|(g, p, c, _)| !(g == &guid && *p == pitch && *c == channel));
+        e.note_names.push((guid, pitch, channel, name));
+    });
+    true
 }

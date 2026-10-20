@@ -1510,9 +1510,92 @@ fn fx_from_entries(text: &str) -> Vec<FakeFx> {
     out
 }
 
+/// (m6-library) ReaSamplOmatic5000's parameters, as 7.82 lists them: a pad's note range is 3 and 4, its note-offs 11.
+const RS5K_PARAMS: [&str; 30] = [
+    "Volume",
+    "Pan",
+    "Gain for minimum velocity",
+    "Note range start",
+    "Note range end",
+    "Pitch for start note",
+    "Pitch for end note",
+    "MIDI channel",
+    "Max voices",
+    "Attack",
+    "Release",
+    "Obey note-offs",
+    "Loop",
+    "Sample start offset",
+    "Sample end offset",
+    "Pitch adjust",
+    "Pitchbend range",
+    "Minimum velocity",
+    "Maximum velocity",
+    "Probability of hitting",
+    "Round-robin mode",
+    "Filter played notes",
+    "Crossfade loop length",
+    "Loop start offset",
+    "Decay",
+    "Sustain",
+    "Release (note-off)",
+    "Use note-off release override",
+    "Legacy voice re-use mode",
+    "Portamento",
+];
+
+/// (m6-library) JS: MIDI Choke's sliders: its name, default and range.
+const CHOKE_SLIDERS: [(&str, f64, f64, f64); 10] = [
+    ("MIDI Channel", 1.0, 1.0, 16.0),
+    ("Choke Note Range Start", 42.0, 0.0, 127.0),
+    ("Number Of Choke Notes", 1.0, 1.0, 16.0),
+    ("Affected Note Range Start", 46.0, 0.0, 127.0),
+    ("Number Of Affected Notes", 1.0, 1.0, 16.0),
+    ("Action During Choke", 0.0, 0.0, 1.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+];
+
 /// A plug-in the fake can instantiate by name: the catalogue is REAPER's own.
 fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
     let lower = name.to_ascii_lowercase();
+    // (m6-library) The sampler a pad is, and the choke a kit's hi-hats go through (when the fake's REAPER has it).
+    if lower.contains("reasamplomatic5000") {
+        s.fx_made += 1;
+        let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), "VSTi: ReaSamplOmatic5000 (Cockos)");
+        fx.instrument = true;
+        fx.params = RS5K_PARAMS
+            .iter()
+            .map(|name| {
+                let value = match *name {
+                    "Volume" => 0.5,
+                    "Note range end" | "Maximum velocity" | "Probability of hitting" | "Sample end offset" => 1.0,
+                    "Pan" | "Pitch for start note" | "Pitch for end note" | "Pitch adjust" => 0.5,
+                    _ => 0.0,
+                };
+                FakeParam::new(name, value, "")
+            })
+            .collect();
+        return Some(fx);
+    }
+    if lower.starts_with("js:") && lower.contains("midi_choke") {
+        if extra(|e| e.no_choke) {
+            return None;
+        }
+        s.fx_made += 1;
+        let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), "JS: MIDI Choke");
+        fx.params = CHOKE_SLIDERS
+            .iter()
+            .map(|(name, value, min, max)| {
+                let mut param = FakeParam::new(name, (value - min) / (max - min), "");
+                (param.min, param.max) = (*min, *max);
+                param
+            })
+            .collect();
+        return Some(fx);
+    }
     let full = if lower.starts_with("js:") {
         name.to_string()
     } else {
