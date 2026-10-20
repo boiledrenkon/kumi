@@ -156,6 +156,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         outside_daw_undo: RefCell::default(),
         undo_unanswered: RefCell::default(),
         in_plan: RefCell::default(),
+        maybe_redone: RefCell::default(),
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());

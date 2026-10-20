@@ -5,6 +5,8 @@ local json = import("json")
 local refs = import("refs")
 local rows = import("rows")
 local wire = import("wire")
+-- (M5 m5-renoise: spans, grid)
+local reads_listening = import("reads_listening")
 
 local fail, the_song, track_count, integer, array = rows.fail, rows.the_song, rows.track_count, rows.integer, rows.array
 local group_parents, song_row, track_row, sequence_row, pattern_row = rows.group_parents, rows.song_row, rows.track_row,
@@ -141,7 +143,7 @@ local function one(params, epoch)
     row = track_row(song, epoch, n[1], group_parents(song))
   elseif kind == "seq" then
     need(n[1] <= #song.sequencer.pattern_sequence)
-    row = sequence_row(song, epoch, n[1], track_count(song))
+    row = reads_listening.slot_beats()(sequence_row(song, epoch, n[1], track_count(song)), n[1])
   elseif kind == "pattern" then
     need(n[1] <= #song.patterns)
     row = pattern_row(song, epoch, n[1], track_count(song))
@@ -161,6 +163,8 @@ local function one(params, epoch)
     need(n[1] <= track_count(song) and n[2] <= #song:track(n[1]).devices
       and n[3] <= #song:track(n[1]):device(n[2]).parameters)
     row = param_row(song, epoch, n[1], n[2], n[3])
+    local with_grid = reads_listening.grid_of(params)
+    if with_grid then row = with_grid(row, song:track(n[1]):device(n[2]):parameter(n[3])) end
   end
   return { items = array({ row }), epoch = epoch }
 end
@@ -170,6 +174,7 @@ function M.read(job, params, epoch)
   if type(params) ~= "table" then fail("bad-params", "read needs a kind") end
   if params.ref ~= nil then return one(params, epoch) end
   local kind = params.kind
+  if params.grid ~= nil then reads_listening.check_kind(kind) end
   local song = the_song()
   if kind == "song" then
     return { items = array({ song_row(song) }), epoch = epoch }
@@ -179,7 +184,8 @@ function M.read(job, params, epoch)
     return page(job, epoch, params, count, function(i) return track_row(the_song(), epoch, i, parents) end)
   elseif kind == "sequence" then
     local tracks = track_count(song)
-    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return sequence_row(the_song(), epoch, s, tracks) end)
+    local beats = reads_listening.slot_beats()
+    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return beats(sequence_row(the_song(), epoch, s, tracks), s) end)
   elseif kind == "pattern" then
     local tracks = track_count(song)
     return page(job, epoch, params, #song.patterns, function(p) return pattern_row(the_song(), epoch, p, tracks) end)
@@ -215,7 +221,14 @@ function M.read(job, params, epoch)
     local at = need_parent(params, "device", 2, epoch)
     local t, d = at[1], at[2]
     if t > track_count(song) or d > #song:track(t).devices then fail("bad-params", "no such device") end
-    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k) return param_row(the_song(), epoch, t, d, k) end)
+    local with_grid = reads_listening.grid_of(params)
+    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k)
+      local live = the_song()
+      local row = param_row(live, epoch, t, d, k)
+      return with_grid and with_grid(row, live:track(t):device(d):parameter(k)) or row
+    end)
+  elseif kind == "spans" then
+    return reads_listening.spans(job, params, epoch, page)
   end
   fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)")
 end

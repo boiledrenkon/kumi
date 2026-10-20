@@ -21,6 +21,8 @@ end
 
 local function count(self)
   local state = self.state
+  -- (M5 m5-renoise: Kumi's own solo, mute and loop writes for a render or an audition, put back after: not edits)
+  if state.quiet and state.quiet > 0 then return end
   state.changed = (state.changed or 0) + 1
   local undoing = self.hooks.undoing
   if undoing and undoing() then

@@ -11,6 +11,8 @@ import("changes_layout")
 import("changes_slots")
 import("changes_lua")
 import("changes_instruments")
+-- (M5 m5-renoise)
+import("changes_scratch")
 
 local M = {}
 
