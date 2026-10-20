@@ -325,13 +325,13 @@ function M.digest(job, params, epoch, extra)
   local count = rows.track_count(song)
   local values_on = params.values == true
   local content = params.content ~= false
-  local cursor
+  local cursor = { epoch = epoch, phase = 1, index = 1, lines = 0, values = 0 }
   if params.cursor ~= nil then
-    cursor = parse_cursor(params.cursor)
-    if not cursor then fail("bad-params", "cursor: the nextCursor an earlier page gave, unchanged") end
-    if cursor.epoch ~= epoch then fail("stale", "the song changed since the first page: read again") end
-  else
-    cursor = { epoch = epoch, phase = 1, index = 1, lines = 0, values = 0 }
+    local parsed = parse_cursor(params.cursor)
+    if not parsed then fail("bad-params", "cursor: the nextCursor an earlier page gave, unchanged") end
+    ---@cast parsed -nil
+    if parsed.epoch ~= epoch then fail("stale", "the song changed since the first page: read again") end
+    cursor = parsed
   end
   local first = params.cursor == nil
   local budget = { lines = cursor.lines, values = cursor.values, values_on = values_on, content = content, over = false }
