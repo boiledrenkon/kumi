@@ -20,7 +20,7 @@ const VECTORS_EPOCH: u32 = 1; // (the same, as a number)
 const PAGE_BYTES: usize = 256 * 1024 - 4096;
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
-const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
+const METHODS: [&str; 5] = ["read", "snapshot", "focus", "focus_body", "digest"];
 /// The ref kinds a device change leaves naming what they named, as the tool lists them (`kept.kinds`).
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
@@ -57,6 +57,9 @@ struct State {
     /// The first epoch of the run the song is in: epochs moved only for devices keep the tracks, and the tool takes a
     /// track ref from any epoch of the run (`kept`).
     run_start: u32,
+    /// M6: what the producer changed by hand, for the digest: tracks renamed, the tempo.
+    names: std::collections::HashMap<u64, String>,
+    bpm: Option<f64>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -162,6 +165,8 @@ impl RenoiseScript {
                 devices: Default::default(),
                 undo: vec![],
                 run_start: VECTORS_EPOCH,
+                names: Default::default(),
+                bpm: None,
             })),
         }
     }
@@ -233,6 +238,62 @@ impl RenoiseScript {
     /// The producer moves a track's volume in Renoise.
     pub fn set_volume(&self, track: u64, db: f64) {
         self.state.lock().unwrap().volume.insert(track, db);
+    }
+
+    /// M6: the producer renames a track in Renoise.
+    pub fn rename_track(&self, track: u64, name: &str) {
+        self.state.lock().unwrap().names.insert(track, name.into());
+    }
+
+    /// M6: the producer adds an EQ 10 at the end of a track's devices by hand (the epoch moves, as for any device).
+    pub fn add_device_by_hand(&self, track: u64) {
+        let mut state = self.state.lock().unwrap();
+        *state.devices.entry(track).or_default() += 1;
+        state.epoch += 1;
+    }
+
+    /// M6: the producer sets the tempo in Renoise.
+    pub fn set_bpm(&self, bpm: f64) {
+        self.state.lock().unwrap().bpm = Some(bpm);
+    }
+
+    /// M6: the digest the tool answered for the demo song, with what was changed since (each track's volume, mute, name and
+    /// the devices added to it, the tempo).
+    fn digest_now(state: &State, mut page: Value) -> Value {
+        let records = page["records"].as_array().cloned().unwrap_or_default();
+        let mut out = vec![];
+        for mut record in records {
+            let track = record["o"].as_u64().unwrap_or(0);
+            if record["k"] == "track" {
+                if let Some(db) = state.volume.get(&track) {
+                    record["f"]["mixer"]["volume"] = json!(db);
+                }
+                if let Some(muted) = state.mute.get(&track) {
+                    record["f"]["mixer"]["mute"] = json!(if *muted { "muted" } else { "active" });
+                }
+                if let Some(name) = state.names.get(&track) {
+                    record["n"] = json!(name);
+                    record.as_object_mut().unwrap().remove("dn");
+                }
+                let added = state.devices.get(&track).copied().unwrap_or(0);
+                let before = record["f"]["devices"]["count"].as_u64().unwrap_or(0);
+                record["f"]["devices"]["count"] = json!(before + added);
+                out.push(record);
+                for k in 0..added {
+                    out.push(json!({
+                        "k": "device", "n": "EQ 10", "o": before + 2 + k, "p": format!("track#/{track}"),
+                        "f": {"path": "Audio/Effects/Native/EQ 10", "active": true, "params": {"count": 0, "paramsHash": "811c9dc5"}},
+                    }));
+                }
+                continue;
+            }
+            out.push(record);
+        }
+        page["records"] = Value::Array(out);
+        if let Some(bpm) = state.bpm {
+            page["facts"]["bpm"] = json!(bpm);
+        }
+        page
     }
 
     /// Renoise's undo history, as Kumi's changes named their steps.
@@ -460,9 +521,30 @@ impl RenoiseScript {
                 return Some(full_page(lines, &asked, state.keeps_bound).map(|page| retag(&page, VECTORS_EPOCH, epoch, None)));
             }
         }
+        // (a digest is asked as the vectors hold it, with values or without: the demo song fits one page, its lines always read)
+        let asked = match method {
+            "digest" if asked.get("values") == Some(&Value::Bool(true)) => json!({"values": true}),
+            "digest" => json!({}),
+            _ => asked,
+        };
         let wanted = normal(&asked);
         if let Some(case) = state.cases.iter().find(|case| case.method == method && case.params == wanted) {
-            return Some(case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts)));
+            let response = case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts));
+            if method == "digest" {
+                // (a device edit moves the epoch, not the song: its id and identity are the run's)
+                let project = case
+                    .response
+                    .as_ref()
+                    .ok()
+                    .map(|page| restarted(retag(&page["project"], VECTORS_EPOCH, state.run_start, None), restarts));
+                return Some(response.map(|mut page| {
+                    if let Some(project) = project.filter(|p| !p.is_null()) {
+                        page["project"] = project;
+                    }
+                    Self::digest_now(&state, page)
+                }));
+            }
+            return Some(response);
         }
         if let Some(from) = from_another_epoch(params, epoch) {
             return Some(Err(stale(from)));

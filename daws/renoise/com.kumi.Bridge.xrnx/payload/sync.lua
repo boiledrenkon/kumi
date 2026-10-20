@@ -19,9 +19,11 @@ function M.new(guard, state, hooks)
   return setmetatable({ entries = {}, dirty = {}, last = {}, guard = guard, state = state or {}, hooks = hooks or {}, dead = 0 }, M)
 end
 
-local function count(self)
+local function count(self, light)
   local state = self.state
   state.changed = (state.changed or 0) + 1
+  -- (M6: the song's own content, not what's selected or where the transport is: a digest read across a selection move holds)
+  if not light then state.content = (state.content or 0) + 1 end
   local undoing = self.hooks.undoing
   if undoing and undoing() then
     state.undone = true
@@ -68,7 +70,7 @@ end
 function M:watch(observable, key)
   add(self, observable, self.guard("notifier " .. key, function()
     self.dirty[key] = true
-    count(self)
+    count(self, true)
   end))
 end
 

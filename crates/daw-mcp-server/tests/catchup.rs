@@ -8,6 +8,7 @@ use daw_bridge::files::ensure_secret;
 use daw_bridge::paths::BridgePaths;
 use daw_bridge::Daw;
 use daw_mcp_server::simulator::reaper::ReaperScript;
+use daw_mcp_server::simulator::renoise::RenoiseScript;
 use daw_mcp_server::simulator::{Simulator, SimulatorConfig};
 use serde_json::{json, Value};
 
@@ -190,4 +191,51 @@ async fn a_bridge_without_digest_says_it_cant_compare() {
     assert!(is_error, "{answer}");
     assert_eq!(answer["code"], "unsupported");
     assert!(answer["error"].as_str().unwrap().contains("update Kumi's bridge in REAPER"), "{answer}");
+}
+
+/// Renoise: the demo song the tool's vectors hold (its digest as the tool answered it), with what the producer did since.
+async fn renoise_lab() -> (tempfile::TempDir, Session, RenoiseScript, Simulator) {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let script = RenoiseScript::new();
+    let mut config = script.config(secret, "/lab/Renoise/V3.5.4");
+    config.discovery_dir = Some(paths.discovery());
+    let simulator = Simulator::start(config).await.unwrap();
+    let session = Session::start(Daw::Renoise, home.path());
+    (home, session, script, simulator)
+}
+
+#[tokio::test]
+async fn renoise_tracks_without_identity_are_matched_and_what_changed_is_told_in_its_words() {
+    let (home, mut session, script, _simulator) = renoise_lab().await;
+    let (first, _) = session.tool_full(1, "catch_up", json!({}), false).await;
+    assert_eq!(first["first"], true, "{first}");
+    assert!(first["place"].as_str().unwrap().starts_with("renoise-"), "{first}");
+    // Kumi closes; in Renoise the producer turns the Hat track down, names Bass "Sub", adds a device and speeds up.
+    let mut session = Session::start(Daw::Renoise, home.path());
+    script.set_volume(2, -6.0);
+    script.rename_track(4, "Sub");
+    script.add_device_by_hand(4);
+    script.set_bpm(140.0);
+    let (caught, is_error) = session.tool_full(2, "catch_up", json!({}), false).await;
+    assert!(!is_error, "{caught}");
+    assert_eq!(said(&caught), ["~track Hat (mixer.volume)", "~track Sub ()", "+device EQ 10"], "{caught}");
+    assert_eq!(caught["changes"][1]["before"]["name"], "Bass");
+    assert_eq!(caught["project"][0]["what"], "bpm");
+    let (again, _) = session.tool_full(3, "catch_up", json!({}), false).await;
+    assert_eq!(again["same"], true, "{again}");
+}
+
+#[tokio::test]
+async fn renoise_watching_tells_the_device_the_producer_added_on_its_track() {
+    let (_home, mut session, script, _simulator) = renoise_lab().await;
+    let (started, _) = session.tool_full(1, "watch_start", json!({}), false).await;
+    assert_eq!(started["watching"], true, "{started}");
+    script.add_device_by_hand(1);
+    let (watched, is_error) = session.tool_full(2, "watch_stop", json!({}), false).await;
+    assert!(!is_error, "{watched}");
+    // (the track's device count sums its devices up: told by the device, not twice)
+    assert_eq!(said(&watched), ["+device EQ 10"], "{watched}");
+    assert_eq!(watched["changes"][0]["item"]["on"], "Kick");
 }

@@ -1065,6 +1065,9 @@ test("reads: the answers are the vectors the host's simulator replays", function
   ask("focus_body", { kind = "phrase", ref = E .. ":phrase:1.1" })
   ask("focus_body", { kind = "instrument", ref = E .. ":instrument:1" })
   ask("focus_body", { kind = "dsp", ref = E .. ":track:1" })
+  -- M6 (m6-catchup): the song as records, for catch-up and for watch_me
+  ask("digest", {})
+  ask("digest", { values = true })
   ask("read", { kind = "nonsense" })
   ask("read", { kind = "line", track = 1 })
   ask("read", { ref = "0:track:1" })

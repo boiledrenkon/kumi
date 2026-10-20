@@ -18,6 +18,7 @@ local discovery = import("discovery")
 local log = import("log")
 local VERSION = import("version")
 local actions = import("actions")
+local digest = import("digest")
 
 local M = {}
 
@@ -827,6 +828,15 @@ function handlers.snapshot()
   return as_job(function(job) return stamped(focus.snapshot(job, job.epoch, b.changed or 0), job.layout) end)
 end
 
+-- M6: the song as records for catch-up and watch_me (digest.lua), with the song's id and identity as the project row.
+function handlers.digest(params)
+  return as_job(function(job)
+    local project = status.project(b.memory)
+    if type(project) == "table" and renoise.song() then project.identity = rows.song_extra(renoise.song()).identity end
+    return digest.digest(job, params, job.epoch, { project = project, changed = b.content or 0 })
+  end)
+end
+
 function handlers.focus()
   return stamped(focus.focus(epoch(), b.changed or 0), b.layout)
 end
@@ -1519,6 +1529,9 @@ function M.tick_jobs()
   b.alive_ms = M.now_ms()
   if jobs and jobs:pending() > 0 then jobs:run() end
 end
+
+-- M6: the digest's module, whose budgets the tests set small.
+M.digest = digest
 
 -- How many things the song is watched through (the tests count them to see that only what is new gets watched).
 function M.watching()
