@@ -631,4 +631,7 @@ function M.reset(options)
   return M
 end
 
+-- (M5 m5-renoise: rendering, Renoise's own solo, sample buffers, the playing transport)
+assert(loadfile(tests_dir .. "mock_listening.lua"))()(M, object)
+
 return M

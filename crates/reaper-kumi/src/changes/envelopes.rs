@@ -576,6 +576,44 @@ fn plan_title(ctx: &Ctx, lane: &Lane, plan: &Plan, count: usize) -> String {
     }
 }
 
+/// The most points of each side HISTORY's picture of a lane keeps.
+const DRAWN_POINTS: usize = 128;
+
+/// A lane's points before and after as HISTORY draws them (for the display only: no undo reads it): `[time, value]`, the
+/// time in seconds as the lane keeps it, the value in the envelope's units, at most `DRAWN_POINTS` a side (spread evenly,
+/// the ends kept); the units' range, and the envelope's name.
+fn drawn_curve(ctx: &Ctx, lane: &Lane, units: Units, before: &[EnvPoint], after: &[EnvPoint]) -> Value {
+    let (floor, top) = match units {
+        Units::Db(_) => (-60.0, 12.0),
+        Units::Pan | Units::Width => (-1.0, 1.0),
+        Units::Mute => (0.0, 1.0),
+        Units::Semitones => (-24.0, 24.0),
+        Units::Raw { min, max } if min.is_finite() && max.is_finite() => (min, max),
+        _ => (f64::NAN, f64::NAN),
+    };
+    let side = |points: &[EnvPoint]| -> Vec<Value> {
+        let shown = |p: &EnvPoint| {
+            let value = from_raw(ctx.reaper, units, p.value);
+            json!([p.time, if floor.is_finite() { value.max(floor) } else { value }])
+        };
+        if points.len() <= DRAWN_POINTS {
+            return points.iter().map(shown).collect();
+        }
+        let last = points.len() - 1;
+        (0..DRAWN_POINTS).map(|i| shown(&points[i * last / (DRAWN_POINTS - 1)])).collect()
+    };
+    let (before, after) = (side(before), side(after));
+    // A lane in units of its own (an FX parameter of no known range): the range its points span.
+    let (min, max) = if floor.is_finite() {
+        (floor, top)
+    } else {
+        let values = || before.iter().chain(&after).filter_map(|point| point[1].as_f64());
+        (values().fold(f64::INFINITY, f64::min), values().fold(f64::NEG_INFINITY, f64::max))
+    };
+    let (min, max) = if max > min { (min, max) } else { (min - 1.0, min + 1.0) };
+    json!({"parameter": rows::clip(&ctx.reaper.envelope_name(lane.at.envelope)), "min": min, "max": max, "before": before, "after": after})
+}
+
 fn lane_target(ctx: &Ctx, lane: &Lane) -> Done<Value> {
     Ok(json!({"ref": lane_ref(ctx, lane)?, "kind": if lane.item.is_some() { "aitem" } else { "env" }}))
 }
@@ -667,7 +705,8 @@ pub fn points_apply(ctx: &Ctx, edit: Edit, input: &Value, fence: &Value) -> Done
             ("uncertain".into(), "REAPER didn't take the points as asked, and Kumi could not put the lane back: read it".into())
         });
     }
-    Ok(Applied { applied: json!({"hash": points_hash(reaper, envelope, &after)}), display: json!({"title": title}), ..Default::default() })
+    let display = json!({"title": title, "curve": drawn_curve(ctx, &lane, units, &now, &after)});
+    Ok(Applied { applied: json!({"hash": points_hash(reaper, envelope, &after)}), display, ..Default::default() })
 }
 
 pub fn points_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -725,7 +764,7 @@ enum Shown {
     MakeTake(Take, &'static str, i32),
 }
 
-fn name_of<'a>(input: &'a Value) -> Done<&'a str> {
+fn name_of(input: &Value) -> Done<&str> {
     input.get("name").and_then(Value::as_str).ok_or_else(|| bad("name: which envelope (volume, pan, …)"))
 }
 

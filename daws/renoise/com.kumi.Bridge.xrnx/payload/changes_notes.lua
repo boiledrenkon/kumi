@@ -228,7 +228,13 @@ local READ_BUDGET = 40000
 
 -- What is in the track's columns above the ones Kumi found shown, in every pattern: nil when that is too much to look through.
 local function in_use(song, index, prior)
-  local used, reads = { note = 0, effect = 0 }, 0
+  -- (`notes`, `effects`: the columns holding something, each once)
+  local used, reads = { note = 0, effect = 0, notes = {}, effects = {} }, 0
+  local seen = { notes = {}, effects = {} }
+  local function mark(list, c)
+    local columns = list == "notes" and used.notes or used.effects
+    if not seen[list][c] then seen[list][c] = true columns[#columns + 1] = c end
+  end
   for p = 1, #song.patterns do
     local pattern = song:pattern(p)
     local pattern_track = pattern:track(index)
@@ -242,6 +248,7 @@ local function in_use(song, index, prior)
             reads = reads + 5
             if not column.is_empty then
               if c > used.note then used.note = c end
+              mark("notes", c)
               if column.volume_string ~= ".." then used.volume = true end
               if column.panning_string ~= ".." then used.panning = true end
               if column.delay_string ~= ".." then used.delay = true end
@@ -250,7 +257,10 @@ local function in_use(song, index, prior)
           end
           for c = 1, 8 do
             reads = reads + 1
-            if not line:effect_column(c).is_empty and c > used.effect then used.effect = c end
+            if not line:effect_column(c).is_empty then
+              if c > used.effect then used.effect = c end
+              mark("effects", c)
+            end
           end
           if reads > READ_BUDGET then return nil end
         end
@@ -260,17 +270,44 @@ local function in_use(song, index, prior)
   return used
 end
 
--- The columns Kumi showed are hidden again when they are still as Kumi left them and nothing is in them.
+-- What was in the track's columns before Kumi showed more of them (`applied.hidden`), when it is about to: the producer's,
+-- hidden as they had it. Nil when the track shows what the cells need already, or the song is too big to look through.
+local function hidden_use(song, index, track, needs)
+  local now = read_columns(track)
+  local raises = (needs.note > 0 and (now.note or 0) < needs.note) or (needs.effect > 0 and (now.effect or 0) < needs.effect)
+  for _, flag in ipairs({ "volume", "panning", "delay", "sampleEffects" }) do
+    if needs[flag] and now[flag] == false then raises = true end
+  end
+  if not raises then return nil end
+  return in_use(song, index)
+end
+
+-- The columns Kumi showed are hidden again when they are still as Kumi left them and nothing is in them but what was there,
+-- hidden, before Kumi showed them (`applied.hidden`): what the producer put in them since keeps them shown.
 local function lower_columns(song, index, track, prior, applied)
   if type(prior) ~= "table" or type(applied) ~= "table" then return end
   local now = read_columns(track)
   local used = in_use(song, index, prior)
   if not used then return end
+  local before = type(applied.hidden) == "table" and applied.hidden or {}
+  -- (the highest column Kumi showed that holds something it didn't before it was shown)
+  local function kept(list, from, to)
+    local had = {}
+    for _, c in ipairs(type(before[list]) == "table" and before[list] or {}) do had[c] = true end
+    local holds = {}
+    for _, c in ipairs(list == "notes" and used.notes or used.effects) do holds[c] = true end
+    for c = to, from + 1, -1 do
+      if holds[c] and not had[c] then return c end
+    end
+    return 0
+  end
   local back = {}
-  if prior.note and now.note == applied.note and applied.note > prior.note then back.note = math.max(prior.note, used.note) end
-  if prior.effect and now.effect == applied.effect and applied.effect > prior.effect then back.effect = math.max(prior.effect, used.effect) end
+  if prior.note and now.note == applied.note and applied.note > prior.note then back.note = math.max(prior.note, kept("notes", prior.note, applied.note)) end
+  if prior.effect and now.effect == applied.effect and applied.effect > prior.effect then
+    back.effect = math.max(prior.effect, kept("effects", prior.effect, applied.effect))
+  end
   for _, flag in ipairs({ "volume", "panning", "delay", "sampleEffects" }) do
-    if prior[flag] == false and applied[flag] == true and now[flag] == true and not used[flag] then back[flag] = false end
+    if prior[flag] == false and applied[flag] == true and now[flag] == true and (not used[flag] or before[flag]) then back[flag] = false end
   end
   if next(back) then set_columns(track, back) end
 end
@@ -518,6 +555,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb, planner)
       applied = { cells = {}, columns = plan.columns }, display = display, undo = { desc = desc, entry = false }, prior = preview.prior,
     }
   end
+  local hidden = hidden_use(song, plan.index, plan.track, needs_of(plan.after))
   song:describe_undo(desc)
   local written = 0
   local wrote, err = pcall(function()
@@ -548,9 +586,11 @@ local function apply_of(song, env, input, fence, desc, kind, verb, planner)
       fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col))
     end
   end
+  local columns = read_columns(plan.track)
+  columns.hidden = hidden
   return {
     applied = {
-      cells = result, columns = read_columns(plan.track),
+      cells = result, columns = columns,
       -- (what the undo needs to know whether the pattern changed since: its count of changed lines from here, and its length)
       touch = env.pattern_touch_mark and env.pattern_touch_mark(plan.p) or nil, lines = plan.pattern.number_of_lines,
     },
@@ -1080,6 +1120,7 @@ local function block_apply(song, env, input, fence, desc)
   if #to_after == 0 and #from_after == 0 then
     return { applied = applied, display = display, undo = { desc = desc, entry = false }, prior = preview.prior, target = preview.target }
   end
+  local hidden = hidden_use(song, block.to_index, block.to_track, needs_of(to_after))
   song:describe_undo(desc)
   local wrote, err = pcall(function()
     raise_columns(block.to_track, needs_of(to_after))
@@ -1103,8 +1144,10 @@ local function block_apply(song, env, input, fence, desc)
     if not same_cell(to_result[i], cell) then back() fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col)) end
   end
   for i, cell in ipairs(from_after) do from_result[i] = read_cell(block.pattern_track, cell) end
+  local columns = read_columns(block.to_track)
+  columns.hidden = hidden
   applied = {
-    cells = to_result, columns = read_columns(block.to_track),
+    cells = to_result, columns = columns,
     touch = env.pattern_touch_mark and env.pattern_touch_mark(block.to_p) or nil, lines = block.to_pattern.number_of_lines,
     source = {
       cells = from_result, touch = env.pattern_touch_mark and env.pattern_touch_mark(block.p) or nil, lines = block.pattern.number_of_lines,

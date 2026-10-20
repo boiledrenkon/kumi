@@ -1053,6 +1053,8 @@ base.register({
         end
         local at = places_.place_of(env, "phrase", n)
         local result
+        -- (the render switches the phrase to play its lines: Renoise's undo of it switches it back, which the journal hears)
+        if env.watch_undo then env.watch_undo(phrase.playback_mode_observable) env.watch_undo(phrase.number_of_lines_observable) end
         now_song:describe_undo(desc)
         local started, err = pcall(function()
           phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
@@ -1079,11 +1081,14 @@ base.register({
         phrase = places_.resolve(renoise.song() or song, "phrase", n).phrase
         local display = { title = string.format("Rendered the script of %s to %d events", plan.label, result.rendered or 0) }
         if (result.skipped or 0) > 0 then display.note = string.format("%d events didn't fit its lines (raise lpb to fit them).", result.skipped) end
+        local applied = { print = lines_print(phrase), mode = phrase.playback_mode, rendered = result.rendered, skipped = result.skipped }
         return {
-          applied = { print = lines_print(phrase), mode = phrase.playback_mode, rendered = result.rendered, skipped = result.skipped },
+          applied = applied,
           material = { at = places_.place_of(env, "phrase", n), lines = plan.lines, settings = plan.settings },
           target = places_.target_of(env, "phrase", n), display = display, undo = { desc = desc, entry = true },
-          prior = { lines = plan.lines, settings = plan.settings },
+          -- (the journal compares the phrase's lines and playback mode with what they were and what the render left)
+          prior = { lines = plan.lines, settings = plan.settings, print = fence.print, mode = fence.mode },
+          journal_applied = { print = applied.print, mode = applied.mode }, place = places_.journal_place("phrase", n),
         }
       end,
     }
@@ -1101,8 +1106,12 @@ base.register({
     phrase:clear()
     write_lines(phrase, material.lines)
     pcall(write_settings, phrase, material.settings)
+    base.note_restored(env.journal, "phrase-render", places_.journal_place("phrase", n), { print = applied.print, mode = applied.mode }, base.KINDS["phrase-render"])
     return { restored = { done = true }, display = { title = label .. "'s lines put back as they were before the render" }, undo = { desc = desc, entry = true } }
   end,
+  reread = places_.reread("phrase"),
+  read = function(phrase) return { print = lines_print(phrase), mode = phrase.playback_mode } end,
+  same = function(a, b) return a.print == b.print and a.mode == b.mode end,
 })
 
 return M

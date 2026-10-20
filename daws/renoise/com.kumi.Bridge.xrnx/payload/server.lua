@@ -258,6 +258,8 @@ end
 -- Short methods that are answered at once, even behind a long read: the host matches answers by id, and the producer's
 -- FOCUS pane follows what they say.
 M.IMMEDIATE = { ping = true, status = true, focus = true }
+-- (M5 m5-renoise: a listening job's state, its cancel and an audition's stop)
+M.IMMEDIATE.listen_status, M.IMMEDIATE.listen_cancel, M.IMMEDIATE.audition_stop = true, true, true
 
 -- A read is running: what is short among the waiting requests is answered now, out of order; the rest waits for the job.
 function M:run_immediate(record)

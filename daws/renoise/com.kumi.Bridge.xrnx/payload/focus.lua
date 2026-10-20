@@ -24,6 +24,9 @@ M.BODY_BYTES = reads.PAGE_BUDGET - 8192
 M.MAX_BODY_ROWS = 255
 -- Tracks a snapshot lists at most (`read` has the rest).
 M.SNAPSHOT_TRACKS = 200
+-- Tracks a mixer body shows by default and at most.
+M.MIXER_STRIPS = 24
+M.MAX_MIXER_STRIPS = 64
 
 -- Selection, transport, view
 
@@ -68,10 +71,13 @@ local function selection_of(song, epoch)
   return selection
 end
 
+-- (M5 m5-renoise: set by the bridge; Renoise reads as playing while it renders, which Kumi's own render isn't)
+M.rendering = function() return false end
+
 -- The play position while it plays, else the edit cursor.
 local function transport_of(song)
   local transport = song.transport
-  local playing = transport.playing
+  local playing = transport.playing and not M.rendering()
   local sequence, line, beat
   if playing then
     local at = transport.playback_pos
@@ -470,6 +476,32 @@ local function dsp_body(job, params, epoch)
   return reads.bound({ epoch = epoch, ref = refs.make(epoch, "track", at), name = song:track(at).name, nodes = array(nodes) }, { "nodes" })
 end
 
+-- The mixer: a page of the tracks' strips around the selected one (`limit` of them), each with its post-FX fader in dB, its
+-- panning (-1 to 1), and whether it is muted (Renoise's mute state) or soloed, as the mixer shows them. Renoise's Lua API
+-- gives no meters, so a strip has no level (`levels` false says so).
+local function mixer_body(job, params, epoch)
+  local limit = params.limit == nil and M.MIXER_STRIPS or integer(params.limit, "limit", 1, M.MAX_MIXER_STRIPS)
+  local song = the_song()
+  local tracks = track_count(song)
+  local from = math.max(1, math.min(song.selected_track_index - math.floor(limit / 2), tracks - limit + 1))
+  local strips = {}
+  for t = from, math.min(tracks, from + limit - 1) do
+    job.slice()
+    local track = the_song():track(t)
+    local strip = {
+      ref = refs.make(epoch, "track", t), name = track.name, type = track_type(track), color = hex(track.color),
+      volumeDb = rows.db(track.postfx_volume.value), pan = (track.postfx_panning.value - 0.5) * 2,
+      selected = t == the_song().selected_track_index,
+    }
+    if track.type ~= renoise.Track.TRACK_TYPE_MASTER then
+      strip.mute = rows.mute_name(track.mute_state)
+      strip.solo = track.solo_state
+    end
+    strips[#strips + 1] = strip
+  end
+  return reads.bound({ epoch = epoch, strips = array(strips), trackCount = tracks, from = from - 1, levels = false }, { "strips" })
+end
+
 -- focus_body {kind, ref?, window?}
 function M.focus_body(job, params, epoch)
   if type(params) ~= "table" then fail("bad-params", "focus_body needs a kind") end
@@ -479,7 +511,8 @@ function M.focus_body(job, params, epoch)
   if kind == "phrase" then return phrase_body(job, params, epoch) end
   if kind == "instrument" then return instrument_body(job, params, epoch) end
   if kind == "dsp" then return dsp_body(job, params, epoch) end
-  fail("bad-params", "unknown body " .. tostring(kind) .. " (pattern, matrix, phrase, instrument, dsp)")
+  if kind == "mixer" then return mixer_body(job, params, epoch) end
+  fail("bad-params", "unknown body " .. tostring(kind) .. " (pattern, matrix, phrase, instrument, dsp, mixer)")
 end
 
 return M

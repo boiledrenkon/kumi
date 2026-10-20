@@ -375,7 +375,10 @@ local function group_apply(song, env, input, fence, desc)
     material = material,
     display = { title = group_title(name, holder_name, want.into) }, target = base.target(env, final),
     undo = { desc = desc, entry = true },
-    prior = { index = index, group = want.into and 0 or want.group, ordinal = ordinal },
+    -- (`into`: whether the track is in a group, for the journal when the track didn't move: the producer's undo of that is
+    -- told by its output routing, which goes to the group and back)
+    prior = { index = index, group = want.into and 0 or want.group, ordinal = ordinal, into = not want.into },
+    journal_applied = { index = final, into = want.into },
     place = { track = final }, follows = final ~= index and "track" or nil,
   }
 end
@@ -437,7 +440,12 @@ end
 base.register({
   kind = "track-group", custom = true,
   preview = group_preview, apply = group_apply, restore = group_restore,
-  same = function(a, b) return a.index == b.index and a.into == b.into end,
+  reread = function(song, place)
+    if type(place.track) ~= "number" or place.track > rows.track_count(song) then return nil end
+    return { song = song, index = place.track }
+  end,
+  read = function(object) return { into = rows.group_parents(object.song)[object.index] ~= nil } end,
+  same = function(a, b) return a.into == b.into end,
 })
 
 return M

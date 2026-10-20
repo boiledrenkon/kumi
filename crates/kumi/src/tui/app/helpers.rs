@@ -106,6 +106,9 @@ pub enum Touched {
     /// A track's routing.
     #[serde(rename = "routing")]
     Routing,
+    /// The mixer's strips.
+    #[serde(rename = "mixer")]
+    Mixer,
 }
 pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Option<Touched>) -> Option<Touched> {
     let view = crate::daw::view();
@@ -121,6 +124,7 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
     // under its DSP frame).
     let own_of = |focus: &DawFocus| match (main(focus), editor(focus)) {
         (_, Some(ViewKind::Routing)) => Some(Touched::Routing),
+        (Some(ViewKind::Mixer), _) | (_, Some(ViewKind::Mixer)) => Some(Touched::Mixer),
         (Some(ViewKind::PatternEditor), _) => Some(Touched::Tracker),
         (Some(ViewKind::Sequencer), _) => Some(Touched::Matrix),
         (Some(ViewKind::Instrument), _) => Some(Touched::Keyzones),
@@ -363,6 +367,22 @@ fn devices_picture(placement: &DevicePlacement, width: i32) -> Option<Vec<Vec<Sp
             })
             .collect(),
     )
+}
+/// A controller lane across a take as one row of blocks, low to high: each cell holds the value the lane has there
+/// (a lane holds its last value until the next point); blank before its first point.
+pub fn controller_line(lane: &ControllerLane, length: f64, cells: usize) -> String {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let mut points = lane.points.clone();
+    points.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    (0..cells)
+        .map(|cell| {
+            let at = (cell as f64 + 1.) / cells as f64 * length;
+            match points.iter().take_while(|point| point[0] < at).last() {
+                Some([_, value]) => LEVELS[((value / lane.max.max(1.)).clamp(0., 1.) * 7.).round() as usize],
+                None => ' ',
+            }
+        })
+        .collect()
 }
 pub fn clip_picture(length: f64, notes: &[ClipViewNote], width: i32, rows: usize) -> Option<Vec<Vec<Span>>> {
     if length <= 0. || notes.is_empty() {

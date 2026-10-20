@@ -83,7 +83,7 @@ impl Integration for TestIntegration {
         self.name == "live"
     }
     async fn device_tree(&self, track_ref: &str, _: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
-        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![] }))
+        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![], owner: None }))
     }
 }
 fn integration(name: &'static str, error: Option<RuntimeError>, log: Rc<RefCell<Vec<String>>>) -> Rc<TestIntegration> {

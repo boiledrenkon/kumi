@@ -9,6 +9,8 @@ pub mod changes;
 pub mod csurf;
 pub mod extension;
 pub mod focus;
+// M5 listening (m5-reaper).
+pub mod listening;
 pub mod log;
 pub mod midi;
 pub mod projectconfig;
@@ -112,6 +114,10 @@ impl Loaded {
         };
         let config = Config::from_reference(&reference);
         log::set_dir(config.log_dir.clone());
+        // M5 listening (m5-reaper): renders, captures and scratch notes go into Kumi's folder beside the discovery folder.
+        if let Some(folder) = listening::folder_beside(&config.discovery_dir) {
+            self.extension.set_listening_folder(folder);
+        }
         log::line(&format!("a dialog over the main window is noticed through: {}", window::describe()));
         let started =
             config.bind().and_then(|listener| Server::start(listener, config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()));

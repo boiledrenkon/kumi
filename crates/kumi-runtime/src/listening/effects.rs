@@ -636,6 +636,15 @@ pub fn cut_tails(heard: &Heard) -> Vec<f64> {
     found
 }
 
+/// A problem as the DAW says it: what holds a part on its timeline goes by the DAW's word (Live's clip, REAPER's item).
+/// Live's are what they were.
+pub fn problem_in_words(text: &str, profile: &crate::core::daw::DawProfile) -> String {
+    text.replace(
+        "a gate, a choke or a clip ending under it",
+        &format!("a gate, a choke or {} ending under it", crate::core::daw::with_article(profile.vocab.clip)),
+    )
+}
+
 /// What's wrong with its effects: tails cut off (`at` turns seconds into where they are), echoes out of time with the
 /// tempo, repeats that don't die away, tails burying the dry hits.
 pub fn problems(heard: &Heard, effects: &Effects, tempo: Option<f64>, at: &dyn Fn(f64) -> String) -> Vec<String> {

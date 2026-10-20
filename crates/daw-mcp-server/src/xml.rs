@@ -692,7 +692,7 @@ mod tests {
                     1 => out.push_str("t&lt;x &#65;\u{e9}"),
                     2 => out.push_str("<!--c-->"),
                     _ if depth < 6 => build(next, depth + 1, out),
-                    _ => out.push_str(" "),
+                    _ => out.push(' '),
                 }
             }
             out.push_str("</");

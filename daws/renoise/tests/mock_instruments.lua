@@ -436,8 +436,10 @@ local function buffer_object(sample)
       return true
     end,
     save_as = function(_, path, format)
-      local buffer = need()
       if format ~= "wav" and format ~= "flac" then error("invalid format", 2) end
+      -- (M5: a WAV export is a real file the bridge reads back, as Renoise writes it; see mock_listening.lua)
+      if format == "wav" and M.save_wav then return M.save_wav(sample, path) end
+      local buffer = need()
       M.write_file(path, { kind = "audio", buffer = buffer, name = sample.name })
       return true
     end,
@@ -543,6 +545,8 @@ local function sample_object(instrument, s)
     for k, v in pairs(from) do if k ~= "obs" then write(sample, k, copy(v)) end end
   end
   fields.__data = sample
+  -- (M5 m5-renoise: what listening adds to a sample; see mock_listening.lua)
+  if M.sample_extras then M.sample_extras(sample, fields, getters, setters) end
   return object("renoise.Sample", fields, getters, setters)
 end
 M.sample_object = sample_object
@@ -668,7 +672,7 @@ local function script_object(phrase)
     render_to_pattern = function(_, options, done)
       if type(options) == "function" then done, options = options, {} end
       M.pending_renders = M.pending_renders or {}
-      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done }
+      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done, lines = phrase.lines }
       -- (Renoise rewrites the phrase's length by itself before the tool's next callback, well before it answers: lab 2026-10-19)
       M.idle_work = M.idle_work or {}
       M.idle_work[#M.idle_work + 1] = function()
@@ -711,7 +715,8 @@ function M.compile_scripts()
   M.pending_compiles = {}
 end
 
--- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does).
+-- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does), which
+-- also takes back the length Renoise rewrote and the switch to playing the lines (one undo reverts the whole render: lab).
 function M.finish_renders(fail)
   for _, render in ipairs(M.pending_renders or {}) do
     if fail then
@@ -725,8 +730,10 @@ function M.finish_renders(fail)
         l:note_column(1).note_string = "C-4"
         count = count + 1
       end
-      phrase.playback_mode = 1
-      M.fire(obs(phrase, "playback_mode"))
+      local before, after = render.lines, phrase.lines
+      M.record(function() phrase.lines = before; M.fire(obs(phrase, "number_of_lines")) end,
+        function() phrase.lines = after; M.fire(obs(phrase, "number_of_lines")) end)
+      write(phrase, "playback_mode", 1)
       M.callback_end()
       render.done(nil, count, 0)
     end
@@ -1075,6 +1082,8 @@ local function plugin_device_object(instrument)
   }, {
     active_preset = function(value)
       check_range("active_preset", value, 0, #(plugin.presets or {}), true)
+      -- (a plug-in that keeps its program reads none chosen, its state as it was: Apple's DLSMusicDevice, lab)
+      if plugin.keeps_program then return end
       write(plugin, "preset", value, plugin.preset_not_a_step)
       -- (a program sets the plug-in's parameters: the mock moves the first to the program's number)
       if plugin.params[1] and value > 0 then plugin.params[1].value = math.min(plugin.params[1].max or 1, value / 10) end
@@ -1578,17 +1587,33 @@ function M.app_load_instrument(path, how)
   local instruments = d.instruments
   local old = instruments[i]
   local made = M.instrument_copy(value.instrument)
+  -- (into the last instrument, Renoise first adds an empty one after it, and leaves it: lab, 2026-10-20)
+  local extra = i == #instruments and M.instrument_data({}) or nil
   local function swap_in()
+    if extra then
+      table.insert(instruments, i + 1, extra)
+      M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
+    end
     table.insert(instruments, i + 1, made)
     M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
     table.remove(instruments, i)
     M.fire(song.instruments_observable, { type = "remove", index = i })
   end
   local function swap_out()
-    table.insert(instruments, i + 1, old)
-    M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
-    table.remove(instruments, i)
-    M.fire(song.instruments_observable, { type = "remove", index = i })
+    if extra then
+      table.insert(instruments, i, old)
+      M.fire(song.instruments_observable, { type = "insert", index = i })
+      for _ = 1, 2 do
+        table.remove(instruments, i + 1)
+        M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
+      end
+      return
+    end
+    -- (Renoise's undo tells the old one back at i, then the loaded one's remove after it: lab 2026-10-20)
+    table.insert(instruments, i, old)
+    M.fire(song.instruments_observable, { type = "insert", index = i })
+    table.remove(instruments, i + 1)
+    M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
   end
   swap_in()
   M.record(swap_out, swap_in)

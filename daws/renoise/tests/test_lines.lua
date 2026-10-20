@@ -59,8 +59,14 @@ test("lines: a note that would leave C-0..B-9 refuses the whole transposition, a
   eq(record.result.display.note, "It shows note column 3 first.")
   eq(mock.data.tracks[1].note_columns, 3)
   ok(K.restore(peer, record).result)
-  eq(mock.data.tracks[1].note_columns, 3, "the column stays shown: it holds a note (Kumi hides only empty columns it showed)")
+  eq(mock.data.tracks[1].note_columns, 1, "hidden again, as the producer had it: what it holds was there, hidden, before Kumi showed it")
   eq(column(1, 1, 2, 3).note_string, "C-5")
+  -- What the producer put in a column Kumi showed (here in another pattern) keeps it shown.
+  record = K.change(peer, "notes-write", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 1), lines = { { line = 6, notes = { { col = 2, note = "D-4" } } } } })
+  eq(mock.data.tracks[1].note_columns, 2)
+  mock.ops.set_note(2, 1, 4, 2, { note = 62 })
+  ok(K.restore(peer, record).result)
+  eq(mock.data.tracks[1].note_columns, 2)
   H.no_dialogs()
 end)
 

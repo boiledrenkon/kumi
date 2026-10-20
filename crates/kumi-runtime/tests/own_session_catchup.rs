@@ -214,7 +214,7 @@ async fn a_reaper_session_catches_up_watches_a_routine_and_keeps_it_as_reapers_r
                 Box::new(|_| call("watch_me", json!({"action": "start"}))),
                 Box::new(move |_| {
                     // The producer, by hand, while Kumi watches: a ReaComp on Track 2.
-                    routine.add_fx(2, "ReaComp", &[("Threshold", 0.5)]);
+                    routine.add_fx_with(2, "ReaComp", &[("Threshold", 0.5)]);
                     call("watch_me", json!({"action": "stop"}))
                 }),
                 Box::new(|recorded| {

@@ -124,6 +124,27 @@ pub(super) fn place_label(ctx: &Ctx, item: Item) -> String {
     format!("the item on {} at {}", quoted(&track), marks::bar_text(ctx.reaper, ctx.proj, ctx.reaper.item_value(item, "D_POSITION")))
 }
 
+/// An item as HISTORY draws it (for the display only: no undo reads it): its active take's name, where it starts and how
+/// long it is (seconds), its fades, whether it's muted, and where it starts in the ruler's words.
+pub(super) fn drawn(ctx: &Ctx, item: Item) -> Value {
+    let reaper = ctx.reaper;
+    let position = reaper.item_value(item, "D_POSITION");
+    json!({
+        "name": reaper.active_take(item).map(|take| rows::clip(&reaper.take_name(take))).unwrap_or_default(),
+        "start": position,
+        "length": reaper.item_value(item, "D_LENGTH"),
+        "fadeIn": reaper.item_value(item, "D_FADEINLEN"),
+        "fadeOut": reaper.item_value(item, "D_FADEOUTLEN"),
+        "muted": reaper.item_value(item, "B_MUTE") != 0.0,
+        "at": marks::bar_text(reaper, ctx.proj, position),
+    })
+}
+
+/// The items a change leaves before and after, for HISTORY's picture.
+pub(super) fn drawn_items(before: Vec<Value>, after: Vec<Value>) -> Value {
+    json!({"before": before, "after": after})
+}
+
 /// The same, to open a title with: a name stands bare there.
 pub(super) fn label_opening(ctx: &Ctx, item: Item) -> String {
     let name = ctx.reaper.active_take(item).map(|take| rows::clip(&ctx.reaper.take_name(take))).unwrap_or_default();
@@ -348,7 +369,7 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
         applied: json!({"print": print, "position": reaper.item_value(item, "D_POSITION"), "length": reaper.item_value(item, "D_LENGTH")}),
         created: Some(json!({"ref": refs::item_ref(&guid), "kind": "item", "takeRef": take_ref})),
         material: None,
-        display: json!({"title": make_title(ctx, &make, import)}),
+        display: json!({"title": make_title(ctx, &make, import), "items": drawn_items(vec![], vec![drawn(ctx, item)])}),
         ..Default::default()
     })
 }
@@ -486,6 +507,7 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if same_place(&now, &wanted) {
         return Ok(Applied { applied: now.clone(), display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
+    let was = drawn(ctx, found.item);
     let item = put_place(ctx, &found.guid, &wanted)?;
     let after = place_of(ctx.reaper, item);
     if !same_place(&after, &wanted) {
@@ -497,7 +519,12 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             ("uncertain".into(), "REAPER didn't put the item where it was asked to, and Kumi could not put it back: read it".into())
         });
     }
-    Ok(Applied { applied: after.clone(), display: json!({"title": title, "before": now, "after": after}), ..Default::default() })
+    let items = drawn_items(vec![was], vec![drawn(ctx, item)]);
+    Ok(Applied {
+        applied: after.clone(),
+        display: json!({"title": title, "before": now, "after": after, "items": items}),
+        ..Default::default()
+    })
 }
 
 pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -567,6 +594,7 @@ pub fn split_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         )));
     }
     let title = format!("Split {} at {}", label(ctx, found.item), marks::bar_text(reaper, ctx.proj, at));
+    let whole = drawn(ctx, found.item);
     let right = reaper.split_item(found.item, at).ok_or_else(|| failed("REAPER wouldn't split the item there"))?;
     let right_guid = reaper.item_guid(right);
     ctx.reads.registry().note_item(ctx.proj, &right_guid, right);
@@ -580,7 +608,7 @@ pub fn split_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"left": left_print, "right": right_print}),
         created: Some(json!({"ref": refs::item_ref(&right_guid), "kind": "item"})),
         material: Some(json!({"chunk": chunk})),
-        display: json!({"title": title}),
+        display: json!({"title": title, "items": drawn_items(vec![whole], vec![drawn(ctx, left), drawn(ctx, right)])}),
         ..Default::default()
     })
 }
@@ -748,6 +776,7 @@ pub fn trim_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if same_edges(&now, &wanted) {
         return Ok(Applied { applied: now, display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
+    let was = drawn(ctx, found.item);
     put_edges(ctx, found.item, &wanted);
     let item = item_by_guid(ctx, &found.guid)
         .ok_or_else(|| ("uncertain".to_string(), "the item went while it was trimmed: read it".to_string()))?;
@@ -760,7 +789,11 @@ pub fn trim_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             ("uncertain".into(), "REAPER didn't trim the item as asked, and Kumi could not put it back: read it".into())
         });
     }
-    Ok(Applied { applied: after, display: json!({"title": title}), ..Default::default() })
+    Ok(Applied {
+        applied: after,
+        display: json!({"title": title, "items": drawn_items(vec![was], vec![drawn(ctx, item)])}),
+        ..Default::default()
+    })
 }
 
 pub fn trim_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -995,6 +1028,7 @@ pub fn fade_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     refuse_locked(ctx, found.item)?;
     let asks = fade_asks(ctx, input, found.item)?;
+    let was = drawn(ctx, found.item);
     write_asks(ctx.reaper, found.item, &asks);
     let after = fades_of(ctx.reaper, found.item);
     if !asks_hold(&after, &asks) {
@@ -1003,7 +1037,13 @@ pub fn fade_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("REAPER didn't take that fade; the item's fades are as they were"));
     }
     let title = fade_title(ctx, found.item, &asks, Some(&after));
-    Ok(Applied { applied: after.clone(), display: json!({"title": title}), unwritten: same_fades(&now, &after), ..Default::default() })
+    let items = drawn_items(vec![was], vec![drawn(ctx, found.item)]);
+    Ok(Applied {
+        applied: after.clone(),
+        display: json!({"title": title, "items": items}),
+        unwritten: same_fades(&now, &after),
+        ..Default::default()
+    })
 }
 
 pub fn fade_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -1518,6 +1558,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         )));
     }
     let title = format!("Deleted {}", label(ctx, found.item));
+    let was = drawn(ctx, found.item);
     let material = json!({
         "chunk": chunk,
         "track": reaper.track_guid(found.track),
@@ -1527,7 +1568,8 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("REAPER wouldn't delete the item"));
     }
     settle_lanes(ctx, &[Some(found.track)]);
-    Ok(Applied { applied: json!({"deleted": true}), material: Some(material), display: json!({"title": title}), ..Default::default() })
+    let display = json!({"title": title, "items": drawn_items(vec![was], vec![])});
+    Ok(Applied { applied: json!({"deleted": true}), material: Some(material), display, ..Default::default() })
 }
 
 /// Makes an item again from its chunk (its GUIDs with it) on the track with this GUID.
@@ -1663,7 +1705,10 @@ pub fn copy_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     Ok(Applied {
         applied: json!({"print": print, "position": reaper.item_value(item, "D_POSITION")}),
         created: Some(json!({"ref": refs::item_ref(&guid), "kind": "item"})),
-        display: json!({"title": copy_title(ctx, &copy)}),
+        display: json!({
+            "title": copy_title(ctx, &copy),
+            "items": drawn_items(vec![drawn(ctx, copy.found.item)], vec![drawn(ctx, copy.found.item), drawn(ctx, item)]),
+        }),
         ..Default::default()
     })
 }

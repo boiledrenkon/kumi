@@ -23,12 +23,17 @@ pub struct Line {
     pub text: String,
 }
 
+pub mod listening;
 pub mod reaper;
 pub mod renoise;
+mod renoise_dsp;
 
 /// What a simulated bridge answers beyond `ping` and `status`: `Some(Ok(result))`, `Some(Err((code, message)))`, or None
 /// for a method it doesn't have.
 pub type Respond = Arc<dyn Fn(&str, &Value) -> Option<Result<Value, (String, String)>> + Send + Sync>;
+
+/// `status` fields read as each status is answered (what listening the bridge can do now, M5).
+pub type StatusMore = Arc<dyn Fn() -> Map<String, Value> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SimulatorConfig {
@@ -41,6 +46,8 @@ pub struct SimulatorConfig {
     pub discovery_dir: Option<PathBuf>,
     /// The methods beyond ping and status.
     pub respond: Option<Respond>,
+    /// `status` fields read at each status.
+    pub status_more: Option<StatusMore>,
 }
 
 impl std::fmt::Debug for SimulatorConfig {
@@ -76,6 +83,7 @@ impl SimulatorConfig {
             status_extra: Map::new(),
             discovery_dir: None,
             respond: None,
+            status_more: None,
         }
     }
 
@@ -109,6 +117,7 @@ impl SimulatorConfig {
             status_extra,
             discovery_dir: None,
             respond: None,
+            status_more: None,
         }
     }
 }
@@ -338,6 +347,11 @@ fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> 
             status["busy"] = busy.map_or(Value::Bool(false), Value::from);
             for (key, value) in &config.status_extra {
                 status[key] = value.clone();
+            }
+            if let Some(more) = &config.status_more {
+                for (key, value) in more() {
+                    status[key] = value;
+                }
             }
             Frame::ok(request.id, status)
         }

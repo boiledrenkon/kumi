@@ -12,7 +12,7 @@ use crate::reaper::{Fx, FxOwner, Item, Project, Reaper, Take, Track, INPUT_FX};
 use crate::refs::{self, Ref, TrackId};
 use crate::rows;
 
-pub const BODY_KINDS: [&str; 4] = ["arrange", "midi", "fx", "routing"];
+pub const BODY_KINDS: [&str; 5] = ["arrange", "midi", "fx", "routing", "mixer"];
 /// Tracks in one arrange page, and items one track lists in the window.
 const ARRANGE_TRACKS: usize = 500;
 const ITEMS_PER_TRACK: usize = 400;
@@ -48,6 +48,9 @@ fn lower_bound(total: usize, key_at: impl Fn(usize) -> Option<f64>, target: f64)
     }
     low
 }
+/// Track strips in a mixer body by default and at most (the master's comes on top).
+const MIXER_STRIPS: usize = 24;
+const MAX_MIXER_STRIPS: usize = 64;
 /// FX nodes in a tree and sends in a list.
 const MAX_FX_NODES: usize = 500;
 const MAX_SENDS: usize = 200;
@@ -128,6 +131,7 @@ impl Reads {
             "midi" => self.midi_body(reaper, proj, params, reference, cursor)?,
             "fx" => self.fx_body(reaper, proj, reference)?,
             "routing" => self.routing_body(reaper, proj, reference)?,
+            "mixer" => self.mixer_body(reaper, proj, params)?,
             other => return Err(bad(format!("REAPER has no {other:?} body: use one of {}", BODY_KINDS.join(", ")))),
         };
         body["epoch"] = self.epoch().into();
@@ -441,6 +445,46 @@ impl Reads {
                 reaper.fx_children(fx).into_iter().filter_map(|child| self.fx_node(reaper, proj, child, budget)).collect::<Vec<_>>().into();
         }
         Some(node)
+    }
+
+    // ----- the mixer -----
+
+    /// The mixer: the master's strip, then a page of the tracks' (`around` a track: centred on it), each with its volume,
+    /// pan, mute, solo, arm and its peak level now (both channels, dB: REAPER's meters).
+    fn mixer_body(&self, reaper: &Reaper, proj: Project, params: &Value) -> Answer {
+        let limit = limit_param(params, MIXER_STRIPS, MAX_MIXER_STRIPS)?;
+        let total = reaper.track_count(proj) as usize;
+        let start = match around_param(params)? {
+            Some(around) => self.around_start(reaper, proj, around, limit, total)?,
+            None => 0,
+        };
+        let strip = |track: Track| {
+            let id = rows::track_id(reaper, track);
+            let peak = |channel: i32| reaper.track_peak(track, channel).map(rows::db);
+            let mut row = json!({
+                "ref": refs::track_ref(&id),
+                "name": rows::clip(&reaper.track_name(track)),
+                "color": reaper.track_color(track).and_then(|c| reaper.color_hex(c)),
+                "volumeDb": rows::db(reaper.track_value(track, "D_VOL")),
+                "pan": (reaper.track_value(track, "D_PAN") * 10_000.0).round() / 10_000.0,
+                "mute": reaper.track_value(track, "B_MUTE") != 0.0,
+                "solo": reaper.track_value(track, "I_SOLO") != 0.0,
+                "selected": reaper.track_value(track, "I_SELECTED") != 0.0,
+            });
+            if let (Some(left), Some(right)) = (peak(0), peak(1)) {
+                row["peakDb"] = json!([left, right]);
+            }
+            if id == TrackId::Master {
+                row["master"] = true.into();
+            } else {
+                row["arm"] = (reaper.track_value(track, "I_RECARM") != 0.0).into();
+                row["depth"] = reaper.track_depth(track).into();
+            }
+            row
+        };
+        let mut strips: Vec<Value> = reaper.master_track(proj).map(strip).into_iter().collect();
+        strips.extend((start..total.min(start + limit)).filter_map(|n| reaper.track_at(proj, n as i32)).map(strip));
+        Ok(json!({"strips": strips, "trackCount": total, "from": start}))
     }
 
     // ----- a track's routing -----
@@ -1330,10 +1374,33 @@ mod tests {
     }
 
     #[test]
+    fn the_mixer_body_has_the_masters_strip_then_a_page_of_tracks_with_their_levels() {
+        let reads = lab();
+        fake::with(|s| {
+            s.tracks[1].volume = 0.5;
+            s.tracks[1].mute = true;
+            s.tracks[1].extra.insert("peak:0".into(), 0.5);
+            s.tracks[1].extra.insert("peak:1".into(), 0.25);
+        });
+        let mixer = body(&reads, json!({"kind": "mixer"})).unwrap();
+        let strips = mixer["strips"].as_array().unwrap();
+        assert_eq!(strips[0]["master"], true, "the master's strip first");
+        assert_eq!(strips.len(), 1 + mixer["trackCount"].as_u64().unwrap() as usize);
+        let kick = strips.iter().find(|strip| strip["name"] == "Kick").unwrap();
+        assert_eq!((&kick["volumeDb"], &kick["mute"], &kick["arm"]), (&json!(-6.02), &json!(true), &json!(false)));
+        assert_eq!(kick["peakDb"], json!([-6.02, -12.04]), "REAPER's meter, both channels");
+        // A page around a track: the strips around it (the master's still first).
+        let page = body(&reads, json!({"kind": "mixer", "around": "r:track:{CCCC}", "limit": 1})).unwrap();
+        let names: Vec<&str> = page["strips"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!((names.len(), page["from"].clone()), (2, json!(2)));
+        assert!(body(&reads, json!({"kind": "mixer", "limit": 100})).is_err(), "at most 64 strips");
+    }
+
+    #[test]
     fn an_unknown_kind_or_no_project_is_refused() {
         let reads = lab();
         assert!(body(&reads, json!({})).unwrap_err().1.contains("kind"));
-        assert!(body(&reads, json!({"kind": "mixer"})).unwrap_err().1.contains("no \"mixer\" body"));
+        assert!(body(&reads, json!({"kind": "console"})).unwrap_err().1.contains("no \"console\" body"));
         assert_eq!(body(&reads, json!({"kind": "fx", "ref": 7})).unwrap_err().0, "bad-params");
         fake::with(|s| s.project = None);
         assert_eq!(body(&reads, json!({"kind": "arrange"})).unwrap_err().0, "failed");

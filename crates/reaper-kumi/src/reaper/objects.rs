@@ -316,6 +316,12 @@ impl Reaper<'_> {
         self.api.ValidatePtr2().is_some_and(|f| unsafe { f(proj.0, pointer, class.as_ptr()) })
     }
 
+    /// A track's peak level now on a channel (0 left, 1 right), as an amplitude: REAPER's meter. None where REAPER doesn't
+    /// give it.
+    pub fn track_peak(&self, track: Track, channel: i32) -> Option<f64> {
+        self.api.Track_GetPeakInfo().map(|f| unsafe { f(track.0, channel) }).filter(|peak| peak.is_finite())
+    }
+
     pub fn track_value(&self, track: Track, parm: &str) -> f64 {
         let parm = cstring(parm);
         self.api.GetMediaTrackInfo_Value().map(|f| unsafe { f(track.0, parm.as_ptr()) }).unwrap_or(0.0)
@@ -720,11 +726,13 @@ impl Reaper<'_> {
     // ----- MIDI -----
 
     /// A take's note, CC and text/sysex event counts.
+    /// A MIDI take's notes, CC events and text/sysex events. (REAPER answers their total: 0 for a take with no MIDI in it
+    /// yet, which isn't a failure. Whether a take is MIDI at all is `take_is_midi`.)
     pub fn midi_counts(&self, take: Take) -> Option<(i32, i32, i32)> {
         let f = self.api.MIDI_CountEvts()?;
         let (mut notes, mut ccs, mut texts) = (0, 0, 0);
-        let ok = unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) } != 0;
-        ok.then_some((notes, ccs, texts))
+        unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) };
+        Some((notes, ccs, texts))
     }
 
     pub fn midi_note(&self, take: Take, index: i32) -> Option<MidiNote> {

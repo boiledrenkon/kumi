@@ -207,6 +207,13 @@ base.register({
     end
     if M.UNDO_COVERS.preset then song:describe_undo(desc) end
     plan.device.active_preset = plan.index
+    -- (a plug-in may keep its program: Apple's DLSMusicDevice, one program, reads none chosen before and after, its state as
+    -- it was, lab 2026-10-20. Nothing changed: no step, no record)
+    local kept_hash = state_hash(plan.device.active_preset_data or "")
+    if plan.device.active_preset ~= plan.index and kept_hash == fence.hash then
+      display.unchanged, display.note = true, "the plug-in kept its program as it was (Renoise reads none chosen), so nothing changed"
+      return { applied = { preset = plan.device.active_preset, hash = kept_hash }, display = display, undo = { desc = desc, entry = false }, prior = { preset = plan.now }, target = places_.target_of(env, "instrument", plan.n) }
+    end
     if not M.UNDO_COVERS.preset then display.note = NOT_IN_UNDO end
     return {
       applied = { preset = plan.device.active_preset, hash = state_hash(plan.device.active_preset_data or "") }, material = { state = plan.state },

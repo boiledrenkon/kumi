@@ -23,23 +23,51 @@ fn color(value: &Value) -> Option<String> {
     value.get("color").and_then(Value::as_str).filter(|c| c.starts_with('#')).map(str::to_owned)
 }
 
-/// A device tree from `nodes` (REAPER's FX chain, Renoise's DSP chain): a container's children are one chain each
-/// branch runs (a parallel node starts a new one).
+/// A device tree from `nodes` (REAPER's FX chain with its input FX, a take's FX chain; Renoise's DSP chain): a
+/// container's children are its one chain (drawn as its devices), or one chain per lane where it has lanes (Renoise's
+/// Splitter: `lanes` names them, each child's `lane` says where it runs). What the DAW says of a device beside its name
+/// is its note: bypassed, offline, or running in parallel with the one before (REAPER's flag).
 pub fn tree(track_ref: &str, body: &Value) -> DeviceTree {
-    fn node(value: &Value) -> DeviceNode {
+    fn node(value: &Value, parent: &str) -> DeviceNode {
         let container = flag(value, "container");
-        let mut chains: Vec<ChainNode> = vec![];
+        // (a device inside a container may have no ref of its own: it's named by its place in the container)
+        let reference = match value.get("ref").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+            Some(reference) => reference.to_owned(),
+            None => {
+                let at: Vec<String> = list(value, "at").filter_map(Value::as_i64).map(|n| n.to_string()).collect();
+                format!("{parent}#{}", at.join("."))
+            }
+        };
+        let lanes: Vec<String> = list(value, "lanes").filter_map(Value::as_str).map(str::to_owned).collect();
+        let mut chains: Vec<ChainNode> = if lanes.is_empty() {
+            vec![ChainNode { r#ref: format!("{reference}#1"), name: String::new(), devices: Some(vec![]) }]
+        } else {
+            lanes
+                .iter()
+                .enumerate()
+                .map(|(at, name)| ChainNode { r#ref: format!("{reference}#{}", at + 1), name: name.clone(), devices: Some(vec![]) })
+                .collect()
+        };
         for child in list(value, "childNodes") {
-            if chains.is_empty() || flag(child, "parallel") {
-                chains.push(ChainNode {
-                    r#ref: format!("{}#{}", text(value, "ref"), chains.len() + 1),
-                    name: String::new(),
-                    devices: Some(vec![]),
-                });
+            let lane =
+                number(child, "lane").filter(|n| *n >= 1. && !lanes.is_empty()).map_or(0, |n| (n as usize - 1).min(chains.len() - 1));
+            if let Some(devices) = chains[lane].devices.as_mut() {
+                devices.push(node(child, &reference));
             }
-            if let Some(devices) = chains.last_mut().and_then(|chain| chain.devices.as_mut()) {
-                devices.push(node(child));
-            }
+        }
+        // (a container with nothing in it shows as empty, not with an empty chain)
+        if lanes.is_empty() && chains[0].devices.as_ref().is_some_and(Vec::is_empty) {
+            chains.clear();
+        }
+        let mut notes = vec![];
+        if value.get("enabled") == Some(&Value::Bool(false)) {
+            notes.push("bypassed");
+        }
+        if flag(value, "offline") {
+            notes.push("offline");
+        }
+        if flag(value, "parallel") && lanes.is_empty() && value.get("lane").is_none() {
+            notes.push("parallel");
         }
         let form = if container {
             DeviceForm::Container
@@ -49,7 +77,7 @@ pub fn tree(track_ref: &str, body: &Value) -> DeviceTree {
             DeviceForm::Native
         };
         DeviceNode {
-            r#ref: text(value, "ref"),
+            r#ref: reference,
             name: text(value, "name"),
             class_name: None,
             can_have_chains: container.then_some(true),
@@ -57,9 +85,46 @@ pub fn tree(track_ref: &str, body: &Value) -> DeviceTree {
             device_type: None,
             chains: container.then_some(chains),
             role: Some(DeviceRole { signal: DeviceSignal::Unknown, form }),
+            note: (!notes.is_empty()).then(|| notes.join(" · ")),
         }
     }
-    DeviceTree { track_ref: track_ref.into(), devices: list(body, "nodes").map(node).collect() }
+    let mut devices: Vec<DeviceNode> = list(body, "nodes").map(|value| node(value, track_ref)).collect();
+    // REAPER's input FX run before the track's: one branch of their own, first.
+    let input: Vec<DeviceNode> = list(body, "inputNodes").map(|value| node(value, track_ref)).collect();
+    if !input.is_empty() {
+        let reference = format!("{track_ref}#input");
+        devices.insert(
+            0,
+            DeviceNode {
+                r#ref: reference.clone(),
+                name: "Input FX".into(),
+                class_name: None,
+                can_have_chains: Some(true),
+                can_have_drum_pads: None,
+                device_type: None,
+                chains: Some(vec![ChainNode { r#ref: format!("{reference}#1"), name: String::new(), devices: Some(input) }]),
+                role: Some(DeviceRole { signal: DeviceSignal::Unknown, form: DeviceForm::Container }),
+                note: None,
+            },
+        );
+    }
+    let owner = (text(body, "owner") == "take").then(|| format!("take “{}”", text(body, "ownerName")));
+    DeviceTree { track_ref: track_ref.into(), devices, owner }
+}
+
+/// A controller lane's name in REAPER's words: "CC 1", "Pitch", "Program", "Channel pressure", "Poly aftertouch".
+fn lane_name(cc: &Value) -> Option<(String, f64)> {
+    Some(match cc {
+        Value::Number(n) => (format!("CC {}", n.as_i64()?), 127.),
+        Value::String(word) => match word.as_str() {
+            "pitchbend" => ("Pitch".into(), 16383.),
+            "program" => ("Program".into(), 127.),
+            "pressure" => ("Channel pressure".into(), 127.),
+            "polypressure" => ("Poly aftertouch".into(), 127.),
+            other => (other.to_owned(), 127.),
+        },
+        _ => return None,
+    })
 }
 
 /// A take's notes (REAPER's MIDI editor), in beats from the item's start.
@@ -84,6 +149,17 @@ pub fn notes(item_ref: &str, body: &Value) -> NoteView {
         length: number(body, "length").unwrap_or(0.),
         notes,
         beats_per_bar: number(body, "beatsPerBar"),
+        lanes: list(body, "ccLanes")
+            .take(16)
+            .filter_map(|lane| {
+                let (name, max) = lane_name(lane.get("cc")?)?;
+                let points = list(lane, "points")
+                    .filter_map(|point| Some([point.get(0)?.as_f64()?, point.get(1)?.as_f64()?]))
+                    .filter(|[at, value]| at.is_finite() && value.is_finite())
+                    .collect();
+                Some(ControllerLane { name, max, points })
+            })
+            .collect(),
     }
 }
 
@@ -235,6 +311,8 @@ pub fn tracker(body: &Value) -> TrackerGrid {
                 }
             })
             .collect(),
+        heading: None,
+        facts: vec![],
     }
 }
 
@@ -279,6 +357,8 @@ pub fn keyzones(item_ref: &str, body: &Value) -> KeyzoneMap {
                 velocities: range(zone.get("velocityRange"), (0, 127)),
                 base: number(zone, "baseNote").unwrap_or(48.).clamp(0., 127.) as u8,
                 note_off: text(zone, "layer") == "note-off",
+                mute_group: number(zone, "muteGroup").filter(|n| *n >= 1.).map(|n| n.min(15.) as u8),
+                slice: flag(zone, "slice"),
             })
             .collect(),
         macros: list(body, "macros").filter_map(|m| Some((text(m, "name"), number(m, "value")?))).collect(),
@@ -289,6 +369,8 @@ pub fn keyzones(item_ref: &str, body: &Value) -> KeyzoneMap {
         plays_through: word("kind").filter(|kind| kind != "sample"),
         overlap: word("overlap"),
         phrase_playback: word("phrasePlayback"),
+        modsets: number(body, "modsets").map(|n| n.max(0.) as usize),
+        chains: number(body, "chains").map(|n| n.max(0.) as usize),
     }
 }
 
@@ -313,7 +395,47 @@ pub fn routing(track_ref: &str, body: &Value) -> RoutingView {
             Route { kind, other: text(route, "otherName"), volume_db: number(route, "volumeDb"), muted: flag(route, "mute"), tap }
         })
         .collect();
-    RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool) }
+    // (REAPER's MIDI to a hardware output: its device, and channel 0 for all of them)
+    let midi_out = body.get("midiOut").filter(|out| out.is_object()).map(|out| {
+        let device = out
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("device {}", number(out, "device").unwrap_or(0.)), str::to_owned);
+        match number(out, "channel").unwrap_or(0.) as i64 {
+            0 => format!("{device} · all channels"),
+            channel => format!("{device} · channel {channel}"),
+        }
+    });
+    RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool), midi_out }
+}
+
+/// The mixer's strips (REAPER's with their meters; Renoise's without).
+pub fn mixer(body: &Value) -> MixerView {
+    let strip = |row: &Value| MixerStrip {
+        name: text(row, "name"),
+        track_ref: row.get("ref").and_then(Value::as_str).map(str::to_owned),
+        color: color(row),
+        kind: if flag(row, "master") { Some(TrackKind::Main) } else { row.get("type").and_then(Value::as_str).and_then(track_kind) },
+        volume_db: number(row, "volumeDb"),
+        pan: number(row, "pan"),
+        // (REAPER's mute is on or off; Renoise's is a state: active, off or muted)
+        mute: match row.get("mute") {
+            Some(Value::Bool(true)) => Some("muted".into()),
+            Some(Value::String(state)) if state != "active" => Some(state.clone()),
+            _ => None,
+        },
+        solo: flag(row, "solo"),
+        armed: flag(row, "arm"),
+        selected: flag(row, "selected"),
+        peak_db: row.get("peakDb").and_then(Value::as_array).and_then(|both| Some([both.first()?.as_f64()?, both.get(1)?.as_f64()?])),
+    };
+    let strips: Vec<MixerStrip> = list(body, "strips").take(80).map(strip).collect();
+    MixerView {
+        levels: body.get("levels") != Some(&Value::Bool(false)) && strips.iter().any(|strip| strip.peak_db.is_some()),
+        strips,
+        from: number(body, "from").map_or(0, |n| n.max(0.) as usize),
+        track_count: number(body, "trackCount").map(|n| n.max(0.) as usize),
+    }
 }
 
 /// The track kind FOCUS's chip shows, from a focus's `track.type`.
@@ -349,15 +471,23 @@ pub fn selected(selection: &Value, key: &str) -> Option<String> {
     selection.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
-/// The transport a focus carries, for FOCUS's beat light: `at` is when it was read (performance time).
+/// The transport a focus carries, for FOCUS's beat light: `at` is when it was read (performance time). Its beats are the
+/// DAW's own (REAPER's quarter notes through its tempo map, Renoise's beats through its lines per beat), and its bar is
+/// the time signature where the playhead is (no 4/4 assumed): `meter` says it in the DAW's words.
 pub fn transport(focus: &Value, at: f64) -> Option<Transport> {
     let transport = focus.get("transport")?;
+    let signature = transport.get("timeSignature").and_then(Value::as_array).and_then(|parts| match parts.as_slice() {
+        [num, den] => Some(format!("{}/{}", num.as_i64()?, den.as_i64()?)),
+        _ => None,
+    });
+    let lpb = number(transport, "lpb").filter(|n| *n >= 1.).map(|n| format!("LPB {n}"));
     Some(Transport {
         playing: flag(transport, "playing"),
         tempo: number(transport, "tempo"),
         beat: number(transport, "beat"),
         at,
         beats_per_bar: number(transport, "beatsPerBar"),
+        meter: signature.or(lpb),
     })
 }
 
@@ -405,6 +535,74 @@ mod tests {
         );
         assert_eq!(lanes[3].track_ref.as_deref(), Some("r:track:{B}"));
         assert_eq!((strip.lanes_from, strip.track_count), (Some(40), Some(200)));
+    }
+
+    #[test]
+    fn a_chain_tree_keeps_reapers_input_fx_take_owner_and_notes_and_renoises_lanes() {
+        let fx = |reference: &str, name: &str, more: Value| {
+            let mut node = json!({"ref": reference, "name": name, "enabled": true, "offline": false, "plugin": true, "container": false});
+            for (key, value) in more.as_object().unwrap() {
+                node[key] = value.clone();
+            }
+            node
+        };
+        let body = json!({"owner": "take", "ownerName": "kick.wav", "nodes": [
+            fx("r:fx:{A}", "ReaEQ", json!({})),
+            fx("r:fx:{B}", "ReaComp", json!({"enabled": false, "parallel": true})),
+            fx("r:fx:{C}", "Container", json!({"container": true, "plugin": false, "childNodes": [fx("r:fx:{D}", "ReaDelay", json!({"offline": true}))]})),
+        ], "inputNodes": [fx("r:fx:{I}", "ReaTune", json!({}))]});
+        let tree = tree("r:take:{T}", &body);
+        assert_eq!(tree.owner.as_deref(), Some("take “kick.wav”"));
+        let names: Vec<&str> = tree.devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Input FX", "ReaEQ", "ReaComp", "Container"], "the input FX first, as a branch of their own");
+        assert_eq!(tree.devices[2].note.as_deref(), Some("bypassed · parallel"));
+        let inside = tree.devices[3].chains.as_ref().unwrap();
+        assert_eq!((inside.len(), inside[0].name.as_str()), (1, ""), "a container's one chain, unnamed");
+        assert_eq!(inside[0].devices.as_ref().unwrap()[0].note.as_deref(), Some("offline"));
+        // Renoise's Splitter: its lanes by name, each device in its lane (an empty lane stays), inner devices named by place.
+        let splitter = json!({"nodes": [{"ref": "3:device:2.4", "name": "Splitter", "container": true, "lanes": ["Low", "High"], "childNodes": [
+            {"at": [1, 1], "name": "Gainer", "lane": 1, "enabled": true},
+            {"at": [1, 2], "name": "Cabinet", "lane": 1, "enabled": false},
+        ]}]});
+        let tree = super::tree("3:track:2", &splitter);
+        let lanes = tree.devices[0].chains.as_ref().unwrap();
+        let shown: Vec<(&str, usize)> = lanes.iter().map(|lane| (lane.name.as_str(), lane.devices.as_ref().unwrap().len())).collect();
+        assert_eq!(shown, [("Low", 2), ("High", 0)]);
+        let gainer = &lanes[0].devices.as_ref().unwrap()[0];
+        assert_eq!((gainer.r#ref.as_str(), gainer.note.as_deref()), ("3:device:2.4#1.1", None));
+        assert_eq!(lanes[0].devices.as_ref().unwrap()[1].note.as_deref(), Some("bypassed"));
+    }
+
+    #[test]
+    fn a_mixers_strips_say_their_levels_where_the_daw_meters_them() {
+        let reaper = json!({"strips": [
+            {"ref": "r:track:master", "name": "MASTER", "master": true, "volumeDb": 0.0, "pan": 0.0, "mute": false, "solo": false, "peakDb": [-3.0, -4.5]},
+            {"ref": "r:track:{K}", "name": "Kick", "volumeDb": -6.02, "pan": -0.25, "mute": true, "solo": false, "arm": true, "selected": true, "peakDb": [-150.0, -150.0]},
+        ], "trackCount": 1, "from": 0});
+        let view = mixer(&reaper);
+        assert!(view.levels);
+        assert_eq!(
+            (view.strips[0].kind, view.strips[1].mute.as_deref(), view.strips[1].armed),
+            (Some(TrackKind::Main), Some("muted"), true)
+        );
+        let renoise = json!({"strips": [
+            {"ref": "e1:track:1", "name": "Kick", "type": "sequencer", "volumeDb": 0.0, "pan": 0.0, "mute": "off", "solo": true},
+            {"ref": "e1:track:2", "name": "Bass", "type": "sequencer", "volumeDb": -3.0, "pan": 0.5, "mute": "active", "solo": false},
+        ], "trackCount": 2, "from": 0, "levels": false});
+        let view = mixer(&renoise);
+        assert!(!view.levels, "Renoise has no meters");
+        assert_eq!((view.strips[0].mute.as_deref(), view.strips[0].solo, view.strips[1].mute.as_deref()), (Some("off"), true, None));
+    }
+
+    #[test]
+    fn a_takes_controller_lanes_are_named_in_reapers_words() {
+        let body = json!({"name": "Bass", "length": 16.0, "notes": [], "ccLanes": [
+            {"cc": 1, "total": 3, "points": [[0.0, 0], [4.0, 64], [8.0, 127]]},
+            {"cc": "pitchbend", "total": 1, "points": [[2.0, 8192]]},
+        ]});
+        let view = notes("r:take:{T}", &body);
+        let lanes: Vec<(&str, f64, usize)> = view.lanes.iter().map(|lane| (lane.name.as_str(), lane.max, lane.points.len())).collect();
+        assert_eq!(lanes, [("CC 1", 127., 3), ("Pitch", 16383., 1)]);
     }
 
     #[test]

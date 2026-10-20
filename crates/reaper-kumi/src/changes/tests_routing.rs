@@ -124,6 +124,10 @@ fn a_hardware_output_is_added_to_an_output_the_device_has_and_undone_by_its_mark
     let (preview, made) =
         lab.make("hw-out-add", json!({"ref": KICK, "output": {"first": 1}, "volumeDb": -6.0}), "Kumi: Added output (kh001)");
     assert_eq!(made["display"]["title"], "Added hardware output “Kick” → output 1/2");
+    // (m4-tui) HISTORY's picture: the track to its output, made, with its volume.
+    let route = &made["display"]["route"];
+    assert_eq!((route["from"].as_str(), route["to"].as_str(), route["change"].as_str()), (Some("Kick"), Some("output 1/2"), Some("made")));
+    assert_eq!(route["values"][0]["toText"], "−6 dB");
     let outputs = kick_outputs();
     assert_eq!((outputs.len(), outputs[0].dst_chan), (1, 0));
     assert!((outputs[0].volume - 10f64.powf(-6.0 / 20.0)).abs() < 1e-12);
@@ -177,6 +181,20 @@ fn a_hardware_outputs_settings_are_changed_and_put_back_and_a_producer_change_af
     state(|s| s.tracks[1].hw_outs[0].pan = 0.25);
     let (code, _) = lab.apply("hw-out-volume", &input, &preview, "Kumi: x (ku002)").unwrap_err();
     assert_eq!((code.as_str(), kick_outputs()[0].volume), ("changed", 1.0));
+}
+
+#[test]
+fn an_outputs_mono_is_its_output_codes_mono_bit_which_reaper_keeps() {
+    // B_MONO on a hardware output reads back but REAPER neither saves nor undoes it (accept-reaper lab, 7.82: REAPER's undo
+    // took the step before Kumi's instead, and a reload loses it); the output's mono is I_DSTCHAN's 1024 bit.
+    let lab = Lab::new();
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-mono", json!({"ref": output, "mono": true}), "Kumi: x (km001)");
+    assert_eq!(kick_outputs()[0].dst_chan, 1024);
+    assert_eq!(lab.call("read", json!({"kind": "send", "parent": KICK})).unwrap()["items"][0]["mono"], true);
+    lab.undo("hw-out-mono", &preview, &made, "Kumi: undo (km002)").unwrap();
+    assert_eq!(kick_outputs()[0].dst_chan, 0);
 }
 
 #[test]

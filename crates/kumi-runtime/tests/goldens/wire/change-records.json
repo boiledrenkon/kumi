@@ -883,5 +883,106 @@
     "title": "A change",
     "state": "heard",
     "at": 1760000000000
+  },
+  {
+    "id": "c901",
+    "family": "clip",
+    "title": "Wrote 4 lines in “Drop” on “Bass”",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "lines",
+      "lines": [
+        {
+          "line": 9,
+          "before": "E-4 01 40 .. ..",
+          "after": "OFF .. .. .. .."
+        }
+      ],
+      "more": 3
+    }
+  },
+  {
+    "id": "c902",
+    "family": "mixer",
+    "title": "Added send “Drums” → “Reverb”",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "routes",
+      "routes": [
+        {
+          "from": "Drums",
+          "to": "Reverb",
+          "change": "made",
+          "values": [
+            {
+              "name": "Volume",
+              "to": -6.0,
+              "toText": "−6 dB"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "c903",
+    "family": "parameter",
+    "title": "“Snare” keyzone: notes 60-71",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "zones",
+      "before": [
+        {
+          "notes": [
+            48,
+            59
+          ],
+          "base": 48
+        }
+      ],
+      "after": [
+        {
+          "name": "Snare",
+          "notes": [
+            60,
+            71
+          ],
+          "velocities": [
+            64,
+            127
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "c904",
+    "family": "clip",
+    "title": "Moved “vox.wav” to bar 6",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "items",
+      "before": [
+        {
+          "name": "vox.wav",
+          "start": 8.0,
+          "length": 4.0
+        }
+      ],
+      "after": [
+        {
+          "name": "vox.wav",
+          "start": 10.0,
+          "length": 4.0,
+          "fadeIn": 0.05,
+          "fadeOut": 0.5,
+          "muted": true
+        }
+      ]
+    }
   }
 ]

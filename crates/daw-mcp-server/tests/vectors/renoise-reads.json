@@ -436,28 +436,36 @@
           "epoch": "1",
           "items": [
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
               "patternRef": "1:pattern:1",
+              "positionBeats": 0,
               "ref": "1:seq:1",
               "section": "Intro"
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
               "patternRef": "1:pattern:2",
+              "positionBeats": 8,
               "ref": "1:seq:2",
               "section": null
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [
                 2
               ],
               "patternRef": "1:pattern:1",
+              "positionBeats": 16,
               "ref": "1:seq:3",
               "section": null
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
               "patternRef": "1:pattern:3",
+              "positionBeats": 24,
               "ref": "1:seq:4",
               "section": null
             }

@@ -53,6 +53,8 @@ pub struct Host {
     journal: std::sync::Arc<crate::changes::Journal>,
     /// The projects' snapshots, compared on connect and while watching (M6).
     catchup: crate::catchup::Catchup,
+    /// The listening jobs started through this host (M5).
+    jobs: crate::listening::Jobs,
 }
 
 /// Which running instance a tool means, when several run.
@@ -120,6 +122,7 @@ impl Host {
             events: tokio::sync::broadcast::channel(1024).0,
             journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
             catchup: crate::catchup::Catchup::new(BridgePaths::new(kumi_home, daw).snapshots()),
+            jobs: crate::listening::Jobs::default(),
         }
     }
 
@@ -136,6 +139,14 @@ impl Host {
 
     pub(crate) fn journal(&self) -> &crate::changes::Journal {
         &self.journal
+    }
+
+    pub(crate) fn jobs(&self) -> &crate::listening::Jobs {
+        &self.jobs
+    }
+
+    pub(crate) fn paths(&self) -> &BridgePaths {
+        &self.paths
     }
 
     /// The bridge's events from now on, as `{name, data}` (a `tracks` shift, a project opened…).
@@ -232,8 +243,10 @@ impl Host {
                             Ok(status) => {
                                 row["project"] = status["project"].clone();
                                 row["busy"] = status["busy"].clone();
-                                if let Some(demo) = status.get("demo") {
-                                    row["demo"] = demo.clone();
+                                for key in ["demo", "listening"] {
+                                    if let Some(value) = status.get(key) {
+                                        row[key] = value.clone();
+                                    }
                                 }
                             }
                             Err(error) => row["busy"] = busy_word(&error).into(),
@@ -355,8 +368,11 @@ impl Host {
             Ok(status) => {
                 result["project"] = status["project"].clone();
                 result["busy"] = status.get("busy").cloned().unwrap_or(Value::Bool(false));
-                if let Some(demo) = status.get("demo") {
-                    result["demo"] = demo.clone();
+                // (Renoise's demo; what listening each bridge can do now, M5)
+                for key in ["demo", "listening"] {
+                    if let Some(value) = status.get(key) {
+                        result[key] = value.clone();
+                    }
                 }
             }
             Err(RequestError::Closed) => {
@@ -443,6 +459,8 @@ impl Host {
     }
 
     pub async fn close(&self) {
+        // A render or a capture still running is stopped, and what it changed put back, before the connection goes.
+        self.cancel_running_jobs().await;
         if let Some(open) = self.current.lock().await.take() {
             open.client.close().await;
         }

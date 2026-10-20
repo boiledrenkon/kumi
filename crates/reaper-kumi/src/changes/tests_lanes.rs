@@ -144,14 +144,14 @@ fn razor_areas_are_set_on_a_lane_or_an_envelope_and_put_back_exactly() {
     );
     // The producer's areas elsewhere are theirs; the undo clears Kumi's.
     lab.undo("razor-set", &preview, &applied).unwrap();
-    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()));
+    assert!(state(|s| !s.items.razor.contains_key("{BBBB}")));
     // An area the producer redrew since stays theirs.
     let (preview, applied) = lab.make("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]}));
     state(|s| s.items.razor.insert("{BBBB}".into(), "0.00000000000000 2.00000000000000 \"\" 0.000000 1.000000".into()));
     assert_eq!(code(lab.undo("razor-set", &preview, &applied)), "changed");
     // Clearing them, then putting them back.
     let (preview, applied) = lab.make("razor-set", json!({"ref": KICK, "areas": []}));
-    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()));
+    assert!(state(|s| !s.items.razor.contains_key("{BBBB}")));
     lab.undo("razor-set", &preview, &applied).unwrap();
     assert!(state(|s| s.items.razor.get("{BBBB}").unwrap().starts_with("0.00000000000000 2.00000000000000")));
 }
@@ -200,7 +200,7 @@ fn a_comp_makes_the_comp_lane_and_area_and_its_undo_puts_the_whole_track_back() 
         state(|s| s.items.razor.get("{DDDD}").cloned()).as_deref(),
         Some("9.00000000000000 10.00000000000000 \"\" 0.000000 1.000000")
     );
-    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()), "Kumi's razor area is gone");
+    assert!(state(|s| !s.items.razor.contains_key("{BBBB}")), "Kumi's razor area is gone");
     assert!(state(|s| s.tracks[3].selected && !s.tracks[1].selected), "the producer's selection is as it was");
     lab.undo("lane-comp", &preview, &applied).unwrap();
     assert!(state(|s| s.tracks[1].clone()) == before, "the track is exactly as before the comp");

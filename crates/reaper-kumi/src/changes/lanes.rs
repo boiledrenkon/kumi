@@ -462,7 +462,7 @@ fn areas_of(text: &str) -> Vec<Area> {
 
 fn same_areas(a: &[Area], b: &[Area]) -> bool {
     // A media-lane area with no y-range is the whole track: REAPER writes 0 and 1 for it.
-    let span = |area: &Area| if area.envelope.is_empty() { area.span.unwrap_or((0.0, 1.0)) } else { area.span.unwrap_or((0.0, 1.0)) };
+    let span = |area: &Area| area.span.unwrap_or((0.0, 1.0));
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
             let (sx, sy) = (span(x), span(y));

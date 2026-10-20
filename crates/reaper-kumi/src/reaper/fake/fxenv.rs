@@ -1332,7 +1332,8 @@ fn set_pin(owner: u64, index: c_int, output: c_int, pin: c_int, low: c_int, hi: 
     counted(|s| {
         let Some(f) = fx_mut(s, owner, index) else { return false };
         f.pins.insert((output != 0, pin), (low as u32 as u64) | ((hi as u32 as u64) << 32));
-        s.undo_dirty = true;
+        // REAPER doesn't notice a pin mapping by itself (lab 7.82): its state holds it, so a nudge makes the point.
+        s.state_changed = true;
         true
     })
 }

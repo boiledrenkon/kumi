@@ -734,6 +734,20 @@ impl TuiApp {
                 ),
                 NoticeTone::Info,
             );
+            // Where Kumi's lines reach a producer working in the DAW (Live's say so in its own settings): its status bar, or
+            // none to write to.
+            let profile = crate::daw::profile();
+            if !matches!(profile.id, Some(kumi_runtime::core::daw::DawId::Ableton) | None) {
+                let app = profile.words.app;
+                self.notice(
+                    &if profile.caps.status_line {
+                        format!("While you work in {app}, Kumi's lines show in its status bar too.")
+                    } else {
+                        format!("{app} has no status bar Kumi can write to: while you work there, Kumi tells you by notification.")
+                    },
+                    NoticeTone::Info,
+                );
+            }
             if let Some(now) = controller.conversation_now().await {
                 self.notice(&conversation_line(&now, |text| self.clean(text, 60)), NoticeTone::Info);
             }

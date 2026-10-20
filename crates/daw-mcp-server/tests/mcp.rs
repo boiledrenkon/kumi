@@ -130,7 +130,7 @@ async fn transcript_for(daw: Daw, config: fn(daw_bridge::auth::Secret, &str) -> 
     assert_eq!(session.tool(11, "discover", json!({})).await["staleRemoved"], 1);
 
     // Errors: an unknown tool, bad arguments, an unknown method.
-    session.call(json!({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"render","arguments":{}}})).await;
+    session.call(json!({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"bounce","arguments":{}}})).await;
     session.call(json!({"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"status","arguments":{"pid":"x"}}})).await;
     session.call(json!({"jsonrpc":"2.0","id":14,"method":"resources/list"})).await;
     session.call(json!({"jsonrpc":"2.0","id":15,"method":"ping"})).await;

@@ -31,7 +31,7 @@ pub const DAW: OwnDaw = OwnDaw {
     read_kinds: &["song", "track", "sequence", "pattern", "line", "automation", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
     project_kind: "song",
     fill_focus,
-    bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
+    bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones, BodyKind::Mixer],
     body_request,
     to_body,
     changes: &super::renoise_changes::CHANGES,
@@ -201,6 +201,8 @@ fn body_request(request: &BodyRequest) -> Option<JsonObject> {
         }
         BodyRequest::Matrix => body_args("matrix", None),
         BodyRequest::Keyzones { item_ref } => body_args("instrument", Some(item_ref)),
+        // (Renoise's mixer pages around the selected track)
+        BodyRequest::Mixer { .. } => body_args("mixer", None),
         _ => return None,
     })
 }
@@ -208,9 +210,28 @@ fn body_request(request: &BodyRequest) -> Option<JsonObject> {
 fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
     Some(match request {
         BodyRequest::Tree { track_ref } => FocusBody::Tree(own_views::tree(track_ref, body)),
-        BodyRequest::Tracker { .. } => FocusBody::Tracker(own_views::tracker(body)),
+        BodyRequest::Tracker { item_ref } => {
+            let mut grid = own_views::tracker(body);
+            // A phrase: the phrase editor's own words, and how it plays.
+            if item_ref.as_deref().and_then(|r| RenoiseRefs.kind_of(r)) == Some("phrase") || body.get("instrumentRef").is_some() {
+                grid.heading = Some("Phrase".into());
+                if let Some(lpb) = body.get("lpb").and_then(Value::as_f64) {
+                    grid.facts.push(format!("LPB {lpb}"));
+                }
+                match body.get("keyTracking").and_then(Value::as_str) {
+                    Some("none") => grid.facts.push("no key tracking".into()),
+                    Some(tracking) => grid.facts.push(format!("key tracking: {tracking}")),
+                    None => {}
+                }
+                if body.get("looping") == Some(&Value::Bool(true)) {
+                    grid.facts.push("loops".into());
+                }
+            }
+            FocusBody::Tracker(grid)
+        }
         BodyRequest::Matrix => FocusBody::Matrix(own_views::matrix(body)),
         BodyRequest::Keyzones { item_ref } => FocusBody::Keyzones(own_views::keyzones(item_ref, body)),
+        BodyRequest::Mixer { .. } => FocusBody::Mixer(own_views::mixer(body)),
         _ => return None,
     })
 }
@@ -321,8 +342,10 @@ pub const VIEW: ViewPresentation = ViewPresentation {
         BodyKind::Tracker => "Pattern",
         BodyKind::Matrix => "Pattern Matrix",
         BodyKind::Keyzones => "Keyzones",
+        BodyKind::Mixer => "Mixer",
         other => (ViewPresentation::NONE.heading)(other),
     },
+    open_containers: true,
     ..ViewPresentation::NONE
 };
 

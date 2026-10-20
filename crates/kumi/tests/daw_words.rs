@@ -166,7 +166,12 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         (json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"}}), None),
         (
             json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"routing","label":"Routing"}}),
-            Some(FocusBody::Routing(RoutingView { track_ref: "r:track:{B}".into(), routes: vec![], parent_send: Some(true) })),
+            Some(FocusBody::Routing(RoutingView {
+                track_ref: "r:track:{B}".into(),
+                routes: vec![],
+                parent_send: Some(true),
+                midi_out: Some("Launchpad · channel 2".into()),
+            })),
         ),
         (
             json!({"track":track,"trackRef":"r:track:{B}","device":"ReaComp","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"device-chain","label":"FX"}}),
@@ -185,6 +190,8 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         "REAPER connected",
         "REAPER isn't connected",
         "Kumi closed. Each project's conversation continues next time.",
+        // (/status: REAPER has no status bar Kumi can write to)
+        "no status bar",
     ];
     tui_states(DawId::Reaper, "REAPER — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("REAPER");
 });
@@ -199,6 +206,8 @@ case!(a_renoise_session_never_speaks_lives_words, async {
         cursor: Some(0),
         playing: None,
         lpb: Some(4.),
+        heading: None,
+        facts: vec![],
         tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells: vec!["C-4 01 .. .. ..".into()] }],
     };
     let focuses = vec![
@@ -212,7 +221,13 @@ case!(a_renoise_session_never_speaks_lives_words, async {
             Some(FocusBody::Keyzones(KeyzoneMap { item_ref: "3:instrument:1".into(), name: "Kit".into(), ..Default::default() })),
         ),
     ];
-    let seen = ["Ask Kumi about your song", "paused while Renoise plays", "Kumi closed. Each song's conversation continues next time."];
+    // (/status: Renoise's status bar shows Kumi's lines)
+    let seen = [
+        "Ask Kumi about your song",
+        "paused while Renoise plays",
+        "Kumi closed. Each song's conversation continues next time.",
+        "status bar too",
+    ];
     tui_states(DawId::Renoise, "Renoise — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("Renoise");
 });
 
@@ -321,3 +336,19 @@ case!(reapers_and_renoises_setup_never_speak_lives_words, async {
     let renoise = ["Renoise is open · restart needed", "Renoise 3 not found", "renoise.com", "chat without Renoise for now"];
     setup_states(DawId::Renoise).await.saw(&renoise.map(String::from)).assert_none("Renoise's setup");
 });
+
+/// REAPER's and Renoise's FOCUS bodies and change pictures (tui_own_bodies' goldens: each body, each family's picture in
+/// NOW and HISTORY, wide, narrow and plain) speak their DAW's words, never Live's.
+#[test]
+fn reapers_and_renoises_bodies_and_pictures_never_speak_lives_words() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/tui/daw");
+    let mut screens = 0;
+    for entry in std::fs::read_dir(&folder).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found = leaks(&text);
+        assert!(found.is_empty(), "{}: {found:?}", path.display());
+        screens += 1;
+    }
+    assert!(screens >= 50, "every scene's screens are read: {screens}");
+}

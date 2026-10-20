@@ -86,7 +86,7 @@ async fn edits_made_while_kumi_was_closed_are_told_once_and_the_snapshot_follows
     lab.restart_kumi();
     lab.script.set_volume(1, -6.0);
     lab.script.rename(2, "Bass");
-    lab.script.add_fx(3, "ReaComp", &[("Threshold", 0.5)]);
+    lab.script.add_fx_with(3, "ReaComp", &[("Threshold", 0.5)]);
     lab.script.set_tempo(124.0);
     let caught = lab.ok("catch_up").await;
     assert_eq!(said(&caught), ["~track Track 1 (mixer.volume)", "~track Bass ()", "+FX ReaComp"], "{caught}");
@@ -150,12 +150,12 @@ async fn an_unsaved_project_is_kept_by_the_identity_reaper_gives_it_while_it_run
 #[tokio::test]
 async fn watching_tells_what_the_producer_added_and_the_parameters_they_moved_by_name() {
     let mut lab = Lab::start(true).await;
-    let comp = lab.script.add_fx(1, "ReaComp", &[("Threshold", 0.5), ("Ratio", 0.1)]);
+    let comp = lab.script.add_fx_with(1, "ReaComp", &[("Threshold", 0.5), ("Ratio", 0.1)]);
     let (refused, is_error) = lab.tool("watch_stop", json!({})).await;
     assert!(is_error && refused["code"] == "not-watching", "{refused}");
     assert_eq!(lab.ok("watch_start").await["watching"], true);
     lab.script.set_param(&comp, 1, 0.4);
-    let eq = lab.script.add_fx(2, "ReaEQ", &[("Band 1 Gain", 0.5), ("Band 1 Freq", 0.25)]);
+    let eq = lab.script.add_fx_with(2, "ReaEQ", &[("Band 1 Gain", 0.5), ("Band 1 Freq", 0.25)]);
     lab.simulator.emit("selection", json!({"tracks": [{"index": 2, "guid": "{T0002}", "name": "Track 2"}]}));
     // A look while watching sees the EQ as it came…
     tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
@@ -164,11 +164,11 @@ async fn watching_tells_what_the_producer_added_and_the_parameters_they_moved_by
     let watched = lab.ok("watch_stop").await;
     assert_eq!(said(&watched), ["~FX ReaComp (parameters.parametersHash, parameters.Ratio)", "+FX ReaEQ"], "{watched}");
     let ratio = &watched["changes"][0]["details"][1];
-    assert_eq!((ratio["from"].clone(), ratio["to"].clone()), (json!(0.1), json!({"value": 0.4, "shows": "40 %"})));
+    assert_eq!((ratio["from"].clone(), ratio["to"].clone()), (json!(0.1), json!({"value": 0.4, "shows": "0.4"})));
     let added = &watched["changes"][1];
     assert_eq!(added["item"]["on"], "Track 2");
     assert_eq!(added["item"]["ref"], format!("r:fx:{eq}"), "watch_me keeps refs: the model may do it again now");
-    assert_eq!(added["madeOf"]["parameters"], json!([{"name": "Band 1 Gain", "value": {"value": 0.75, "shows": "75 %"}}]));
+    assert_eq!(added["madeOf"]["parameters"], json!([{"name": "Band 1 Gain", "value": {"value": 0.75, "shows": "0.8"}}]));
     assert_eq!(watched["selected"], json!([{"name": "Track 2", "key": "{T0002}"}]));
     assert!(watched["looks"].as_u64().unwrap() >= 1, "{watched}");
     // Another project open by the time the producer is done: nothing to compare.
@@ -244,7 +244,7 @@ async fn renoise_watching_tells_the_device_the_producer_added_on_its_track() {
 async fn a_watch_stopped_while_the_daw_is_busy_goes_on_until_it_answers() {
     let mut lab = Lab::start(true).await;
     lab.ok("watch_start").await;
-    lab.script.add_fx(1, "ReaComp", &[("Threshold", 0.5)]);
+    lab.script.add_fx_with(1, "ReaComp", &[("Threshold", 0.5)]);
     lab.simulator.set_busy(Some("modal"));
     let (busy, is_error) = lab.tool("watch_stop", json!({})).await;
     assert!(is_error, "{busy}");

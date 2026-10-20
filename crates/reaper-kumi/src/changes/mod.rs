@@ -52,6 +52,8 @@ mod templates;
 mod kits;
 mod trackprops;
 mod volatile;
+// M5 listening (m5-reaper): a scratch copy kept as the producer's track.
+mod scratch_keep;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -76,6 +78,9 @@ pub struct Ctx<'a, 'r> {
     pub reaper: &'a Reaper<'r>,
     pub reads: &'a Reads,
     pub proj: Project,
+    /// Set by an apply whose write isn't in REAPER's undo state, before or after (a parameter's modulation with no source
+    /// on, a ReaEQ band's type): REAPER's undo never takes it back, so a plan's point doesn't cover it.
+    pub unkept: std::cell::Cell<bool>,
 }
 
 /// What a change would do. `prior` is what undo puts back; `fence` what apply checks again before it writes.
@@ -192,6 +197,8 @@ enum Kind {
     FxEnv(fxkinds::Kind),
     /// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
     Items(item_kinds::Which),
+    /// M5 listening (m5-reaper): a scratch copy made a track of the producer's.
+    ScratchKeep,
 }
 
 fn kind(name: &str) -> Option<Kind> {
@@ -260,6 +267,8 @@ fn kind(name: &str) -> Option<Kind> {
         "fx-pins" => Some(Kind::FxPins),
         "run-lua" => Some(Kind::RunLua),
         "api-call" => Some(Kind::ApiCall),
+        // M5 listening (m5-reaper).
+        "scratch-keep" => Some(Kind::ScratchKeep),
         _ => None,
     }
 }
@@ -326,6 +335,7 @@ impl Kind {
             Kind::ApiCall => call::preview(ctx, input),
             Kind::FxEnv(kind) => kind.preview(ctx, input),
             Kind::Items(which) => which.preview(ctx, input),
+            Kind::ScratchKeep => scratch_keep::preview(ctx, input),
         }
     }
 
@@ -374,6 +384,7 @@ impl Kind {
             Kind::ApiCall => call::apply(ctx, input, fence),
             Kind::FxEnv(kind) => kind.apply(ctx, input, fence),
             Kind::Items(which) => which.apply(ctx, input, fence),
+            Kind::ScratchKeep => scratch_keep::apply(ctx, input, fence),
         }
     }
 
@@ -421,6 +432,7 @@ impl Kind {
             Kind::ApiCall => call::restore(ctx, restore),
             Kind::FxEnv(kind) => kind.restore(ctx, restore),
             Kind::Items(which) => which.restore(ctx, restore),
+            Kind::ScratchKeep => scratch_keep::restore(ctx, restore),
         }
     }
 }
@@ -480,7 +492,7 @@ impl Changes {
             return Err((daw_bridge::wire::code::BUSY.into(), format!("{}; nothing changed", busy.reason())));
         }
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
-        Ok(Ctx { reaper, reads, proj: info.ptr })
+        Ok(Ctx { reaper, reads, proj: info.ptr, unkept: Default::default() })
     }
 
     pub fn preview(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
@@ -545,7 +557,7 @@ impl Changes {
     ///
     /// `point` is whether a change of this kind leaves a point in REAPER's history at all. Inside a plan the answer says
     /// whether the plan's point takes the change back (`covered`): not a change that wrote nothing, nor one REAPER keeps no
-    /// history of (the repeat button).
+    /// history of (the repeat button, or a write its undo state doesn't hold: `Ctx::unkept`).
     fn in_block<T: Written>(
         &self,
         ctx: &Ctx,
@@ -560,10 +572,11 @@ impl Changes {
         }
         // (r-tracks) Where REAPER's history stood before an action: one that moved it itself (a script that undoes) is told.
         let history = (marks && !in_plan).then(|| (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
+        ctx.unkept.set(false);
         let result = write(ctx);
         if in_plan {
             return result.map(|done| {
-                let covered = point && !done.unwritten();
+                let covered = point && !done.unwritten() && !ctx.unkept.get();
                 (done, json!({"desc": desc, "entry": null, "stateCount": null, "inPlan": true, "covered": covered}))
             });
         }

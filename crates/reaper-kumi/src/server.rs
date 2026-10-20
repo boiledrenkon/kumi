@@ -78,6 +78,11 @@ const MAIN_METHODS: [&str; 17] = [
 ];
 const EVENTS: [&str; 5] =
     [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];
+// M5 listening (m5-reaper): the job's status, its cancel and a preview's stop answer off the main thread, even while it is
+// inside REAPER's render for Kumi; the rest run on it. A sweep of scratch copies an earlier session left is told.
+const LISTENING_SOCKET_METHODS: [&str; 3] = ["listen_status", "listen_cancel", "audition_stop"];
+const LISTENING_MAIN_METHODS: [&str; 5] = ["render_start", "capture_start", "audition", "audio_file", "scratch"];
+const LISTENING_EVENTS: [&str; 1] = [crate::listening::SWEPT];
 
 /// Where the reference file lives for a resource folder.
 pub fn reference_path(resource: &Path) -> PathBuf {
@@ -440,8 +445,14 @@ impl Shared {
             resource: snapshot.resource,
             project: snapshot.project.as_ref().map(project),
         };
-        let methods = SOCKET_METHODS.iter().chain(MAIN_METHODS.iter()).map(|m| m.to_string()).collect();
-        let events = EVENTS.iter().map(|e| e.to_string()).collect();
+        let methods = SOCKET_METHODS
+            .iter()
+            .chain(MAIN_METHODS.iter())
+            .chain(LISTENING_SOCKET_METHODS.iter())
+            .chain(LISTENING_MAIN_METHODS.iter())
+            .map(|m| m.to_string())
+            .collect();
+        let events = EVENTS.iter().chain(LISTENING_EVENTS.iter()).map(|e| e.to_string()).collect();
         (identity, Offer { methods, events, ..Offer::default() })
     }
 
@@ -463,7 +474,13 @@ impl Shared {
 
     /// Why the main thread can't take work now, if it can't.
     fn busy(&self) -> Option<Busy> {
-        self.stalled().or_else(|| lock(&self.snapshot).busy)
+        // M5 listening (m5-reaper): a render Kumi asked for holds every other request from when it is queued.
+        self.stalled().or_else(|| lock(&self.snapshot).busy).or_else(|| self.listening().holding().then_some(Busy::KumiRender))
+    }
+
+    /// M5 listening (m5-reaper): the jobs and the preview.
+    fn listening(&self) -> Arc<crate::listening::Board> {
+        lock(&self.snapshot).listening.clone()
     }
 
     fn status(&self) -> Value {
@@ -534,6 +551,19 @@ impl Shared {
             "ping" => return Frame::ok(id, json!({})),
             "status" => return Frame::ok(id, self.status()),
             "focus" => return self.focus(id),
+            // M5 listening (m5-reaper).
+            "listen_status" | "listen_cancel" | "audition_stop" => {
+                let board = self.listening();
+                let answer = match request.method.as_str() {
+                    "listen_status" => board.status(&request.params),
+                    "listen_cancel" => board.cancel(&request.params, crate::listening::board::CANCEL_WAIT),
+                    _ => board.stop_preview(&request.params),
+                };
+                return match answer {
+                    Ok(result) => Frame::ok(id, result),
+                    Err((code, message)) => Frame::error(id, &code, message),
+                };
+            }
             _ => {}
         }
         if self.stopping.load(Ordering::Acquire) {
@@ -547,7 +577,7 @@ impl Shared {
             Some(deadline) => Duration::from_millis(deadline - now),
             None => DEFAULT_WAIT,
         };
-        if !MAIN_METHODS.contains(&request.method.as_str()) {
+        if !MAIN_METHODS.contains(&request.method.as_str()) && !LISTENING_MAIN_METHODS.contains(&request.method.as_str()) {
             return Frame::error(id, code::UNKNOWN_METHOD, format!("the REAPER bridge has no method {:?}", request.method));
         }
         // REAPER can't take work (a dialog has the main window, it loads, saves or renders, or the main thread isn't
@@ -844,6 +874,7 @@ mod tests {
                 focus: Value::Null,
                 focus_at: None,
                 working: None,
+                listening: Default::default(),
             }));
             let hub = Hub::default();
             let (tx, jobs) = queue::channel();
@@ -994,7 +1025,7 @@ mod tests {
         let (mut stream, mut reader, welcome) = lab.authenticated();
         assert_eq!(welcome["daw"], "reaper");
         assert_eq!(welcome["project"], json!({"name": "Song.rpp", "path": "/m/Song.rpp"}));
-        assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw"]));
+        assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw", "scratch_swept"]));
 
         let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
         let main = thread::spawn(move || {

@@ -98,7 +98,7 @@ async fn what_changed_in_reaper_while_kumi_was_closed_is_told_once_in_reapers_wo
             // Kumi is closed; the producer works in REAPER.
             script.set_volume(1, -6.0);
             script.rename(2, "Bass");
-            script.add_fx(3, "ReaComp", &[("Threshold", 0.5)]);
+            script.add_fx_with(3, "ReaComp", &[("Threshold", 0.5)]);
             script.set_tempo(124.0);
 
             let second = Rc::new(Seen::default());
@@ -228,7 +228,7 @@ async fn a_routine_watched_in_reaper_comes_back_as_reapers_changes_and_a_recipe_
             // The producer, by hand: a compressor on Track 2 (selected), its threshold turned after a look saw it come in,
             // and Track 2 pulled down.
             simulator.emit("selection", json!({"tracks": [{"index": 2, "guid": "{T0002}", "name": "Track 2"}]}));
-            let comp = script.add_fx(2, "ReaComp", &[("Threshold", 0.5), ("Ratio", 0.1)]);
+            let comp = script.add_fx_with(2, "ReaComp", &[("Threshold", 0.5), ("Ratio", 0.1)]);
             tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
             script.set_param(&comp, 0, 0.3);
             script.set_volume(2, -4.5);
@@ -241,7 +241,7 @@ async fn a_routine_watched_in_reaper_comes_back_as_reapers_changes_and_a_recipe_
             assert!(changes.iter().any(|c| c["changed"] == "track" && c["name"] == "Track 2"), "{reply}");
             let added = changes.iter().find(|c| c["added"] == "FX").unwrap_or_else(|| panic!("{reply}"));
             assert_eq!(added["on"], "Track 2");
-            assert_eq!(added["parameters"], json!([{"name": "Threshold", "value": {"value": 0.3, "shows": "30 %"}}]));
+            assert_eq!(added["parameters"], json!([{"name": "Threshold", "value": {"value": 0.3, "shows": "0.3"}}]));
             let steps = reply["recipeSteps"]["steps"].as_array().unwrap();
             assert_eq!(
                 steps.iter().map(|step| step["tool"].as_str().unwrap()).collect::<Vec<_>>(),

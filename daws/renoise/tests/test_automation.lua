@@ -42,6 +42,9 @@ test("automation: an envelope made with points, as one step; Kumi's undo takes i
   local previewed = K.preview(peer, "automation-write", input)
   eq(previewed.display.title, "Automation of Gainer Gain on \226\128\156Bass\226\128\157 in \226\128\156Pattern 00\226\128\157: 3 points, curves")
   eq(previewed.prior.exists, false)
+  -- (m4-tui) HISTORY's picture names the parameter and the pattern's lines
+  eq(previewed.display.parameter, "Gain")
+  eq(previewed.display.lines, 32, "the pattern's 32 lines")
   eq(envelope(1, 3, 2, 1), nil, "a preview writes nothing")
   local record = K.change(peer, "automation-write", input, "Kumi: automate (ku01)")
   eq(record.target.ref, K.ref(record.epoch, "param", 3, 2, 1))

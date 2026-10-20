@@ -278,6 +278,7 @@ local function parameter(data, set)
   local proxy = object("renoise.DeviceParameter", {
     name = data.name, name_observable = data.name_observable or M.observable(),
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
+    value_quantum = data.quantum or 0,
     value_observable = data.value_observable or M.observable(),
     value_string_observable = M.observable(),
   }, {
@@ -915,9 +916,12 @@ function M.make_song(options)
         end)
         return M.api.automation_object(made)
       end,
-      -- (M4 n-song) a copy of another pattern's track (through its alias), its automation too; no alias after
+      -- (M4 n-song) a copy of another pattern's track (through its alias), its automation too; no alias after. (M5) Another
+      -- track's automation lands on the parameter at the same device and place of this one (measured: a scratch copy's
+      -- automation lands on its own devices), and the pattern's line notifiers hear the copy.
       copy_from = function(_, other)
         local source = M.impl(other).__ptrack
+        local from_t = source.t
         if source.alias > 0 then source = d.patterns[source.alias].tracks[source.t] or { alias = 0, lines = {} } end
         local old = { alias = data.alias, lines = data.lines, automation = data.automation }
         local function copy(value)
@@ -926,9 +930,29 @@ function M.make_song(options)
           for k, v in pairs(value) do out[k] = (k == "parameter") and v or copy(v) end
           return out
         end
-        local new = { alias = 0, lines = copy(source.lines or {}), automation = copy(source.automation or {}) }
+        local function here(parameter)
+          if from_t == t then return parameter end
+          for di, device in ipairs(d.tracks[from_t].devices or {}) do
+            for ki, candidate in ipairs(device.params or {}) do
+              local mine = d.tracks[t].devices[di] and d.tracks[t].devices[di].params and d.tracks[t].devices[di].params[ki]
+              if candidate == parameter then return mine end
+            end
+          end
+        end
+        local automation = {}
+        for _, entry in ipairs(source.automation or {}) do
+          local mine = here(entry.parameter)
+          if mine then
+            local made = copy(entry)
+            made.parameter = mine
+            automation[#automation + 1] = made
+          end
+        end
+        local new = { alias = 0, lines = copy(source.lines or {}), automation = automation }
         data.alias, data.lines, data.automation = new.alias, new.lines, new.automation
+        M.copies_from = (M.copies_from or 0) + 1
         M.fire(data.alias_observable)
+        for _, fn in ipairs(list(pattern.notifiers)) do pcall(fn, { pattern = p, track = t, line = 1 }) end
         M.record(function() data.alias, data.lines, data.automation = old.alias, old.lines, old.automation; M.fire(data.alias_observable) end,
           function() data.alias, data.lines, data.automation = new.alias, new.lines, new.automation; M.fire(data.alias_observable) end)
       end,
@@ -1440,7 +1464,7 @@ function M.make_song(options)
       function() groove.amounts = new; M.fire(transport_fields.groove_assignment_observable) end)
   end
   d.groove = groove
-  local transport = object("renoise.Transport", transport_fields, {
+  local transport_getters = {
     groove_enabled = function() return groove.enabled end,
     groove_amounts = function() return { groove.amounts[1], groove.amounts[2], groove.amounts[3], groove.amounts[4] } end,
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
@@ -1455,7 +1479,10 @@ function M.make_song(options)
       for s = 1, d.song_fields.selected_sequence_index - 1 do lines = lines + d.patterns[d.sequence[s]].lines end
       return (lines + d.song_fields.selected_line_index - 1) / transport_fields.lpb
     end,
-  }, transport_setters)
+  }
+  -- (M5 m5-renoise: the play position as it plays, the song's length, the edit position; see mock_listening.lua)
+  if M.transport_extras then M.transport_extras(transport_fields, transport_getters, transport_setters, d) end
+  local transport = object("renoise.Transport", transport_fields, transport_getters, transport_setters)
 
   local song_fields = {
     name = options.name or "", name_observable = simple_observable(), file_name = options.file_name or "",
@@ -1976,9 +2003,12 @@ function M.api.add_track_to_group(index, group)
     end
     group = group + 1
   end
-  local grouped = tracks[group]
+  local grouped, member = tracks[group], tracks[group - 1]
+  -- (its output routing becomes the group's, and goes back on Renoise's undo: told each time, lab 2026-10-20)
+  local function routed() if member.output_routing_observable then M.fire(member.output_routing_observable) end end
   grouped.members = grouped.members + 1
-  M.record(function() grouped.members = grouped.members - 1 end, function() grouped.members = grouped.members + 1 end)
+  routed()
+  M.record(function() grouped.members = grouped.members - 1 routed() end, function() grouped.members = grouped.members + 1 routed() end)
 end
 
 -- The track leaves its group: it is moved to just before the group's tracks, by swaps; the tracks it passed keep their order.
@@ -1995,9 +2025,11 @@ function M.api.remove_track_from_group(index)
     M.api.swap_tracks_at(at - 1, at, true)
     at = at - 1
   end
-  local grouped = tracks[group]
+  local grouped, member = tracks[group], tracks[start]
+  local function routed() if member.output_routing_observable then M.fire(member.output_routing_observable) end end
   grouped.members = grouped.members - 1
-  M.record(function() grouped.members = grouped.members + 1 end, function() grouped.members = grouped.members - 1 end)
+  routed()
+  M.record(function() grouped.members = grouped.members + 1 routed() end, function() grouped.members = grouped.members - 1 routed() end)
 end
 
 function M.api.delete_track_at(index)

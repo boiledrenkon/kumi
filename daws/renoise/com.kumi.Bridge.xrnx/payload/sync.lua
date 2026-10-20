@@ -21,6 +21,8 @@ end
 
 local function count(self, light)
   local state = self.state
+  -- (M5 m5-renoise: Kumi's own solo, mute and loop writes for a render or an audition, put back after: not edits)
+  if state.quiet and state.quiet > 0 then return end
   state.changed = (state.changed or 0) + 1
   -- (M6: the song's own content, not what's selected or where the transport is: a digest read across a selection move holds)
   if not light then state.content = (state.content or 0) + 1 end

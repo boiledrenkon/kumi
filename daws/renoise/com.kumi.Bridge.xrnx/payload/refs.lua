@@ -79,21 +79,61 @@ function M.relabel_surviving(params, now, survives)
 end
 
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove" | "swap", index, index2? (a swap's
--- other place) }, oldest first, one per layout. Returns the new number for the track `n`, or nil when the track is gone.
+-- other place), back? (an insert that made again the track a remove took: that remove's layout) }, oldest first, one per layout.
+-- Returns the new number for the track `n`, or nil when the track is gone. A track removed and made again (`back`) is followed.
 function M.shift(n, shifts, since)
-  for _, s in ipairs(shifts) do
+  local k = 1
+  while k <= #shifts do
+    local s = shifts[k]
     if s.layout > since then
       if s.type == "insert" then
         if n >= s.index then n = n + 1 end
       elseif s.type == "swap" then
         if n == s.index then n = s.index2 elseif n == s.index2 then n = s.index end
-      else
-        if n == s.index then return nil end
-        if n > s.index then n = n - 1 end
+      elseif n == s.index then
+        local again
+        for j = k + 1, #shifts do
+          if shifts[j].back == s.layout then again = j break end
+        end
+        if not again then return nil end
+        n, k = shifts[again].index, again
+      elseif n > s.index then
+        n = n - 1
+      end
+    end
+    k = k + 1
+  end
+  return n
+end
+
+-- The track a remove took (at layout `removed`) made again (Renoise's redo): of the inserts since, the one whose track is at `at`
+-- now is linked back to it (`back`), so a track number from before the remove follows it. False when none is.
+function M.back(shifts, removed, at)
+  for j = #shifts, 1, -1 do
+    local s = shifts[j]
+    if s.layout <= removed then break end
+    if s.type == "insert" then
+      local n = s.index
+      for k = j + 1, #shifts do
+        local later = shifts[k]
+        if later.type == "insert" then
+          if n >= later.index then n = n + 1 end
+        elseif later.type == "swap" then
+          if n == later.index then n = later.index2 elseif n == later.index2 then n = later.index end
+        elseif n == later.index then
+          n = nil
+          break
+        elseif n > later.index then
+          n = n - 1
+        end
+      end
+      if n == at then
+        s.back = removed
+        return true
       end
     end
   end
-  return n
+  return false
 end
 
 -- The same for a place among the tracks rather than a track: where a track deleted from there would go back. A track removed

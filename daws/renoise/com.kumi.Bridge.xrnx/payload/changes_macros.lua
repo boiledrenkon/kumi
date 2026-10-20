@@ -13,6 +13,7 @@ local refs = import("refs")
 local base = import("changes_base")
 local presets = import("changes_presets")
 local json = import("json")
+local instruments_ = import("instruments")
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -291,7 +292,7 @@ end
 local function load_file(song, env, i, file, name)
   with_selected(song, i, function()
     env.replacing_instrument(i, function()
-      local loaded = renoise.app():load_instrument(file)
+      local loaded = instruments_.load_xrni(song, i, file)
       if loaded == false then error({ code = "failed", message = "Renoise couldn't load the instrument file Kumi's host made" }, 0) end
     end)
     if type(name) == "string" then song:instrument(i).name = name end

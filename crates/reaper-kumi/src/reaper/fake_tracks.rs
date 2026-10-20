@@ -35,6 +35,8 @@ pub struct Extra {
     pub sampler_refuses_files: bool,
     /// (m6-library) Note names a track was given (`SetTrackMIDINoteNameEx`): (track GUID, pitch, channel, name).
     pub note_names: Vec<(String, i32, i32, String)>,
+    /// The track REAPER takes as last touched once an action made it so (40914, by GUID); else the first selected one.
+    pub last_touched: Option<String>,
 }
 
 impl Default for Extra {
@@ -94,6 +96,7 @@ impl Default for Extra {
             no_choke: false,
             sampler_refuses_files: false,
             note_names: vec![],
+            last_touched: None,
         }
     }
 }
@@ -405,7 +408,13 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
         e.made_from_templates += made.len() as u32;
         first
     });
+    // REAPER puts the template's tracks after the last touched track, the end only when that's the last (lab 7.82).
+    let touched = extra(|e| e.last_touched.clone());
     with(|s| {
+        let mut at = touched
+            .and_then(|guid| s.tracks.iter().position(|t| t.guid == guid))
+            .or_else(|| s.tracks.iter().position(|t| t.selected))
+            .map_or(s.tracks.len(), |at| at + 1);
         for t in s.tracks.iter_mut() {
             t.selected = false;
         }
@@ -424,7 +433,8 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
                     fx
                 })
                 .collect();
-            s.tracks.push(track);
+            s.tracks.insert(at, track);
+            at += 1;
         }
         s.undo_dirty = true;
     });

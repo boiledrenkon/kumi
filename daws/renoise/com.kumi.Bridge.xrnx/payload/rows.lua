@@ -623,6 +623,7 @@ M.hex = hex
 M.integer = integer
 M.array = array
 M.track_type = track_type
+M.db, M.mute_name = db, mute_name
 M.key_tracking_name = key_tracking_name
 M.group_parents = group_parents
 M.song_row = song_row

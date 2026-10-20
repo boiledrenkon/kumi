@@ -14,16 +14,20 @@ use std::{env, fs};
 const FUNCTIONS_HEADER: &str = "sdk/reaper_plugin_functions.h";
 const PLUGIN_HEADER: &str = "sdk/reaper_plugin.h";
 const SHIM: &str = "shim/csurf.cpp";
+/// The preview listening plays out loud (M5): REAPER's preview_register_t, made where the OS's lock type is known.
+const PREVIEW_SHIM: &str = "shim/preview.cpp";
 
 fn main() {
     println!("cargo:rerun-if-changed={FUNCTIONS_HEADER}");
     println!("cargo:rerun-if-changed={PLUGIN_HEADER}");
     println!("cargo:rerun-if-changed={SHIM}");
+    println!("cargo:rerun-if-changed={PREVIEW_SHIM}");
     println!("cargo:rerun-if-changed=build.rs");
 
     let functions_header = fs::read_to_string(FUNCTIONS_HEADER).expect("read reaper_plugin_functions.h");
     let plugin_header = fs::read_to_string(PLUGIN_HEADER).expect("read reaper_plugin.h");
     let shim = fs::read_to_string(SHIM).expect("read the shim");
+    let preview_shim = fs::read_to_string(PREVIEW_SHIM).expect("read the preview shim");
 
     let functions = parse_functions(&functions_header);
     check_loader_table(&functions_header, &functions);
@@ -35,7 +39,8 @@ fn main() {
     fs::write(out_dir.join("reaper_generic.rs"), emit_generic(&functions)).expect("write reaper_generic.rs");
 
     check_shim(&plugin_header, &shim);
-    build_shim(Path::new(SHIM));
+    check_preview(&plugin_header, &preview_shim);
+    build_shim(&[Path::new(SHIM), Path::new(PREVIEW_SHIM)]);
     // The name the library gives itself on macOS: the linker's default is the absolute path it was built at. REAPER
     // loads it by path, so this only keeps the build folder out of the file Kumi ships.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -271,9 +276,51 @@ fn virtuals(source: &str, class: &str) -> Vec<String> {
         .collect()
 }
 
-fn build_shim(shim: &Path) {
+// The preview shim declares preview_register_t itself (the header needs SWELL outside Windows): its fields must be the
+// header's, in the header's order, since REAPER reads the struct Kumi hands it.
+fn check_preview(plugin_header: &str, shim: &str) {
+    let header = fields(plugin_header, "typedef struct _REAPER_preview_register_t");
+    let ours = fields(shim, "typedef struct _REAPER_preview_register_t");
+    assert!(header.len() >= 8, "preview_register_t not found in {PLUGIN_HEADER}");
+    assert_eq!(ours, header, "{PREVIEW_SHIM}'s preview_register_t differs from {PLUGIN_HEADER}'s");
+}
+
+fn fields(source: &str, start: &str) -> Vec<String> {
+    let at = source.find(start).unwrap_or_else(|| panic!("{start} not found"));
+    let body = &source[at..];
+    let open = body.find('{').expect("the struct's body");
+    let end = body.find("} preview_register_t;").expect("the struct's end");
+    let mut out = Vec::new();
+    let mut in_comment = false;
+    for line in body[open + 1..end].lines() {
+        let mut line = line.trim();
+        if in_comment {
+            match line.find("*/") {
+                Some(close) => {
+                    in_comment = false;
+                    line = line[close + 2..].trim();
+                }
+                None => continue,
+            }
+        }
+        if line.starts_with("/*") {
+            in_comment = !line.contains("*/");
+            continue;
+        }
+        let line = line.split("//").next().unwrap().trim();
+        if !line.is_empty() {
+            out.push(line.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    out
+}
+
+fn build_shim(shims: &[&Path]) {
     let mut build = cc::Build::new();
-    build.cpp(true).file(shim).warnings(true);
+    build.cpp(true).warnings(true);
+    for shim in shims {
+        build.file(shim);
+    }
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // REAPER's C++ interfaces need the MSVC ABI; a static CRT means no VC++ runtime to install. cc follows the
         // target feature (/MT), so the release build passes -C target-feature=+crt-static.

@@ -18,23 +18,22 @@ async fn the_read_methods_on_the_wire() {
     let script = ReaperScript::new(3, 0);
     let simulator = Simulator::start(script.config(secret.clone(), "/lab/REAPER")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
-    assert_eq!(
-        client.welcome().methods,
-        [
-            "ping",
-            "status",
-            "read",
-            "snapshot",
-            "focus",
-            "focus_body",
-            "change_preview",
-            "change_apply",
-            "change_restore",
-            "undo_step_begin",
-            "undo_step_end",
-            "digest"
-        ]
-    );
+    let mut methods = vec![
+        "ping",
+        "status",
+        "read",
+        "snapshot",
+        "focus",
+        "focus_body",
+        "change_preview",
+        "change_apply",
+        "change_restore",
+        "undo_step_begin",
+        "undo_step_end",
+        "digest",
+    ];
+    methods.extend(daw_mcp_server::simulator::reaper::LISTENING_METHODS);
+    assert_eq!(client.welcome().methods, methods);
 
     let page = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 2);

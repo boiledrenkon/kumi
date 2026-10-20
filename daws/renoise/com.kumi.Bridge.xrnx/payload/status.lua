@@ -10,8 +10,16 @@ local byte, sub = string.byte, string.sub
 
 local M = {}
 
-M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore", "undo_step_begin", "undo_step_end", "transport_stop", "transport_play", "audition_note", "select", "project_save", "instrument_save", "status_message", "digest" }
+M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore", "undo_step_begin", "undo_step_end", "transport_stop", "transport_play", "audition_note", "select", "project_save", "instrument_save", "show_status", "digest" }
 M.EVENTS = { "project", "tracks", "selection", "transport", "undone_in_daw" }
+-- (M5 m5-renoise: listening)
+for _, method in ipairs({ "render_start", "listen_status", "listen_cancel", "audition", "audition_stop", "audio_file", "scratch" }) do
+  M.METHODS[#M.METHODS + 1] = method
+end
+M.EVENTS[#M.EVENTS + 1] = "scratch_swept"
+-- Set by the bridge: the listening flags (contract §2.8), and why Kumi's own render keeps Renoise busy (nil when none runs).
+M.listening = nil
+M.kumi_busy = nil
 
 -- Kept across payload reloads (the bridge sets it to its own state).
 M.cache = {}
@@ -170,6 +178,10 @@ function M.status(memory, bundle_path)
   local rendering = song ~= nil and song.rendering
   status.busy = rendering and "rendering" or false
   if rendering then status.busyReason = "Renoise is rendering the song" end
+  -- (M5 m5-renoise: Kumi's render job keeps Renoise busy between its renders too)
+  local kumi = M.kumi_busy and M.kumi_busy() or nil
+  if kumi then status.busy, status.busyReason = "rendering", kumi end
+  if M.listening then status.listening = M.listening() end
   return status
 end
 

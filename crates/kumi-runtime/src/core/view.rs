@@ -116,6 +116,9 @@ pub struct DawFocus {
     /// Why the DAW answers late, in words ("a dialog is open"), while it does: what it shows may be stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy: Option<String>,
+    /// The device chain open when it isn't the track's own (REAPER's take FX): FOCUS's tree is that chain's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_ref: Option<String>,
 }
 
 /// What the producer is looking at, as Live's integration has always sent it.
@@ -224,6 +227,8 @@ pub enum FocusBody {
     Keyzones(KeyzoneMap),
     /// A track's sends and receives.
     Routing(RoutingView),
+    /// The mixer: each track's strip.
+    Mixer(MixerView),
 }
 
 /// The kind of a body FOCUS draws.
@@ -238,6 +243,7 @@ pub enum BodyKind {
     Matrix,
     Keyzones,
     Routing,
+    Mixer,
 }
 
 /// A body to read: a track's tree, an item's notes, a track's grid around a section, the timeline.
@@ -266,6 +272,10 @@ pub enum BodyRequest {
     Routing {
         track_ref: String,
     },
+    /// The mixer's strips around a track (the selected one when None).
+    Mixer {
+        track_ref: Option<String>,
+    },
 }
 
 impl BodyRequest {
@@ -279,6 +289,7 @@ impl BodyRequest {
             BodyRequest::Matrix => BodyKind::Matrix,
             BodyRequest::Keyzones { .. } => BodyKind::Keyzones,
             BodyRequest::Routing { .. } => BodyKind::Routing,
+            BodyRequest::Mixer { .. } => BodyKind::Mixer,
         }
     }
 }
@@ -296,6 +307,9 @@ pub struct ViewPresentation {
     /// Whether an item in the note editor over the timeline shows its notes (REAPER's MIDI editor), rather than the
     /// timeline (Live's Arrangement clips).
     pub timeline_notes: bool,
+    /// Whether a container's insides can't be selected on their own (REAPER's containers, Renoise's Doofers and
+    /// Splitters): FOCUS shows a focused one open, its one unnamed chain as its devices.
+    pub open_containers: bool,
 }
 
 impl ViewPresentation {
@@ -312,8 +326,10 @@ impl ViewPresentation {
             BodyKind::Matrix => "Sequence",
             BodyKind::Keyzones => "Keyzones",
             BodyKind::Routing => "Routing",
+            BodyKind::Mixer => "Mixer",
         },
         timeline_notes: false,
+        open_containers: false,
     };
 }
 
@@ -344,6 +360,10 @@ pub struct Transport {
     pub at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beats_per_bar: Option<f64>,
+    /// The DAW's words for its time beside the tempo: REAPER's time signature where the playhead is ("7/8"), Renoise's
+    /// lines per beat ("LPB 4").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter: Option<String>,
 }
 
 /// The transport, as Live's integration has always sent it.
@@ -448,7 +468,7 @@ pub struct TimelineItem {
 
 /// A tracker pattern (or phrase) around its cursor, as FOCUS draws it: each track's lines in the DAW's own notation.
 /// Names and cells are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TrackerGrid {
     pub item_ref: String,
     pub name: String,
@@ -465,6 +485,12 @@ pub struct TrackerGrid {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lpb: Option<f64>,
     pub tracks: Vec<TrackerTrack>,
+    /// FOCUS's heading for it when it isn't the DAW's pattern (Renoise's phrase), in the DAW's word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    /// What else the DAW says of it, in its words ("LPB 4", "loops", "key tracking: transpose").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<String>,
 }
 
 /// One track of a tracker grid: its name, colour, and each shown line's cells as the DAW writes them ("C-4 01 ..").
@@ -530,6 +556,11 @@ pub struct KeyzoneMap {
     /// The phrase every note plays in program mode: its place in `phrases`, from 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<usize>,
+    /// How many modulation sets and sample FX chains it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modsets: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chains: Option<usize>,
 }
 
 /// A sample's zone: its notes (MIDI, both included), velocities (0–127) and base note.
@@ -542,6 +573,12 @@ pub struct Keyzone {
     /// It plays on note-off, not note-on.
     #[serde(default)]
     pub note_off: bool,
+    /// Its mute group (1–15), when it's in one: a note in the group cuts the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute_group: Option<u8>,
+    /// A slice of a sliced sample (its keys follow the slice markers).
+    #[serde(default)]
+    pub slice: bool,
 }
 
 /// A track's sends and receives, and whether it feeds its parent.
@@ -551,6 +588,49 @@ pub struct RoutingView {
     pub routes: Vec<Route>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_send: Option<bool>,
+    /// Where it sends its MIDI out of the DAW, in the DAW's words ("Launchpad · channel 2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_out: Option<String>,
+}
+
+/// The mixer as FOCUS draws it: a page of the tracks' strips (from `from`, 0 the first track, of `track_count`), and
+/// whether the DAW gives their levels (REAPER's meters; Renoise has none).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixerView {
+    pub strips: Vec<MixerStrip>,
+    #[serde(default)]
+    pub from: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_count: Option<usize>,
+    #[serde(default)]
+    pub levels: bool,
+}
+
+/// One track's strip: its fader (dB), pan (-1 left to 1 right), mute (in the DAW's word when it has kinds of mute:
+/// Renoise's "off" and "muted"), solo and arm, and its peak level now (dB, left and right) where the DAW meters it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixerStrip {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TrackKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute: Option<String>,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub armed: bool,
+    #[serde(default)]
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_db: Option<[f64; 2]>,
 }
 
 /// One route: to or from which track (or hardware output), how loud, and where it taps the track.
@@ -595,6 +675,18 @@ pub struct ClipView {
     /// A bar's beats; four when not said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beats_per_bar: Option<f64>,
+    /// Its controller lanes (REAPER's CC lanes: a controller, pitch bend, program, pressure), each a few points.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<ControllerLane>,
+}
+
+/// One controller lane of a MIDI take: what it controls ("CC 1", "Pitch") and its values as `[beat, value]` from the
+/// take's start, in the lane's range (`max`: 127, or 16383 for pitch bend).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerLane {
+    pub name: String,
+    pub max: f64,
+    pub points: Vec<[f64; 2]>,
 }
 
 /// Live's device type, when the bridge sends it.
@@ -627,6 +719,9 @@ pub struct DeviceNode {
     /// a tree serializes as the DAW's bridge described it.
     #[serde(default, skip_serializing)]
     pub role: Option<DeviceRole>,
+    /// What the DAW says of it beside its name, in its words: bypassed, offline, runs in parallel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl ClipView {
@@ -729,6 +824,9 @@ pub struct ChainNode {
 pub struct DeviceTree {
     pub track_ref: String,
     pub devices: Vec<DeviceNode>,
+    /// Whose chain it is when it isn't the track's own, in the DAW's words ("take “kick.wav”").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 #[cfg(test)]

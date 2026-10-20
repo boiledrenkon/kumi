@@ -9,6 +9,10 @@ pub mod items;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+// M5 listening (m5-reaper): render settings and renders, the audio device, sources, previews, accessors, the hook.
+mod listening;
+pub use listening::{audio_block, press_render_cancel, render_action, FakeListening, FakeMedia, FakeSource, RenderSeen};
+
 // m4-r-fxenv: FX in every chain, envelopes, points, automation items.
 mod fxenv;
 pub use fxenv::{chunk_of, points_of};
@@ -533,6 +537,8 @@ pub struct State {
     pub ext_state: HashMap<(String, String), String>,
     /// How often a script's registration was committed to REAPER's key map file (`reaper-kb.ini`).
     pub kb_writes: u32,
+    /// M5 listening (m5-reaper).
+    pub listening: FakeListening,
     // m4-r-fxenv
     /// Automation item pools: their points, from an item's start.
     pub pools: HashMap<i64, Vec<FakePoint>>,
@@ -611,6 +617,7 @@ impl Default for State {
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
+            listening: FakeListening::default(),
             pools: HashMap::new(),
             pool_names: HashMap::new(),
             pool_made: 0,
@@ -1027,6 +1034,11 @@ unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
     });
 }
 unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
+    // "Track: Set first selected track as last touched track"
+    if command == 40914 {
+        let first = with(|s| s.tracks.iter().find(|t| t.selected).map(|t| t.guid.clone()));
+        extra(|e| e.last_touched = first);
+    }
     let (hook, script, on_script) = with(|s| {
         s.actions.push(command);
         (s.on_action, s.scripts.iter().find(|(id, _)| *id == command).map(|(_, path)| path.clone()), s.on_script)
@@ -1345,8 +1357,19 @@ unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, maste
     })
 }
 unsafe extern "C" fn get_last_touched_track() -> *mut MediaTrack {
-    counted(|s| s.tracks.iter().position(|t| t.selected).map_or(ptr::null_mut(), track_ptr))
+    let touched = extra(|e| e.last_touched.clone());
+    counted(|s| {
+        touched
+            .and_then(|guid| s.tracks.iter().position(|t| t.guid == guid))
+            .or_else(|| s.tracks.iter().position(|t| t.selected))
+            .map_or(ptr::null_mut(), track_ptr)
+    })
 }
+/// A track's meter: the fake keeps it in `extra` as `peak:<channel>` (amplitude), which REAPER has no attribute for.
+unsafe extern "C" fn track_get_peak_info(track: *mut MediaTrack, channel: c_int) -> f64 {
+    counted(|s| track_of(s, track as u64).and_then(|t| t.extra.get(&format!("peak:{channel}")).copied()).unwrap_or(0.0))
+}
+
 unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *const c_char) -> f64 {
     let parm = name_of(parm);
     counted(|s| {
@@ -1734,7 +1757,7 @@ unsafe extern "C" fn track_fx_set_pin_mappings(
     counted(|s| {
         let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) else { return false };
         f.pins.insert((output != 0, pin), (low as u32 as u64) | ((hi as u32 as u64) << 32));
-        s.undo_dirty = true;
+        s.state_changed = true;
         true
     })
 }
@@ -2986,7 +3009,11 @@ pub fn api_without(missing: &[&str]) -> Api {
 }
 
 fn lookup(name: &CStr) -> *mut c_void {
-    // Items and takes (m4-r-items) first: some of its functions stand in for the reads-only ones below, and its
+    // M5 listening (m5-reaper): its functions first; each passes on whatever isn't listening's to the rest below.
+    if let Some(f) = listening::lookup(name) {
+        return f;
+    }
+    // Then items and takes (m4-r-items): some of its functions stand in for the reads-only ones below, and its
     // GetItemStateChunk, GetTrackStateChunk and Main_OnCommandEx hand on to m4-r-fxenv's.
     let mine = items::lookup(name);
     if !mine.is_null() {
@@ -3051,6 +3078,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
         b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
         b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"Track_GetPeakInfo" => track_get_peak_info as unsafe extern "C" fn(*mut MediaTrack, c_int) -> f64,
         b"SetMediaTrackInfo_Value" => set_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char, f64) -> bool,
         b"InsertTrackAtIndex" => insert_track_at_index as unsafe extern "C" fn(c_int, bool),
         b"DeleteTrack" => delete_track as unsafe extern "C" fn(*mut MediaTrack),

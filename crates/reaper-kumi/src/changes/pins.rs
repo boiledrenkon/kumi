@@ -1,6 +1,10 @@
 //! An FX's pins: which of its track's channels each input pin takes from and each output pin gives to. A sidechain's
 //! channels (a compressor's inputs 3 and 4) are met here. Pins and channels count from 1, as REAPER's pin connector shows
 //! them; the mapping is kept whole (every channel a pin has) and put back whole.
+//!
+//! REAPER doesn't notice a pin mapping written through its API (lab 7.82: a block with only that write makes no undo
+//! point, and REAPER's undo of the step before it takes that step instead): each write ends with the FX's wet nudged
+//! there and back (`mark_fx`), and REAPER then keeps a point whose undo and redo bring the pins back exactly.
 
 use serde_json::{json, Value};
 
@@ -126,6 +130,9 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             wrote = true;
         }
     }
+    if wrote {
+        super::fxchain::mark_fx(ctx.reaper, fx);
+    }
     let after = read(ctx, fx, &pins)?;
     Ok(Applied { applied: json!({"pins": after}), display: json!({"title": title(&name, &pins)}), unwritten: !wrote, ..Default::default() })
 }
@@ -160,6 +167,9 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             }
             wrote = true;
         }
+    }
+    if wrote {
+        super::fxchain::mark_fx(ctx.reaper, fx);
     }
     Ok(Restored {
         restored: json!({"pins": read(ctx, fx, &prior)?}),

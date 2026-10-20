@@ -38,6 +38,35 @@ local function setup()
   return env, peer
 end
 
+test("sequence: after Renoise's own undo and redo of a clone or of patterns made unique, Kumi's undo takes the copies away; a copy edited since stays", function()
+  for _, case in ipairs({
+    { "slot-clone", function(E) return { ref = K.ref(E, "seq", 2) } end, "1,2,4,1,3", 4 },
+    { "slot-unique", function(E) return { ref = K.ref(E, "seq", 1), last = K.ref(E, "seq", 3) } end, "4,2,5,3", 4 },
+  }) do
+    for _, edited in ipairs({ false, true }) do
+      local _, peer = setup()
+      local desc = "Kumi: " .. case[1] .. " (kq01)"
+      local record = K.change(peer, case[1], case[2](K.place(peer)), desc)
+      local after = seq()
+      ok(K.told(peer) == "", "nothing told yet")
+      mock.song:undo()
+      eq(seq(), "1,2,1,3", case[1] .. ": Renoise's undo")
+      ok(K.told(peer):find("undo:" .. desc, 1, true), case[1] .. ": the undo told")
+      mock.song:redo()
+      eq(seq(), after, case[1] .. ": Renoise's redo")
+      ok(K.told(peer):find("redo:" .. desc, 1, true), case[1] .. ": the redo told")
+      if edited then mock.ops.set_note(case[4], 2, 5, 1, { note = 60 }) end
+      local undone = K.restore(peer, record, nil, { of = desc })
+      if edited then
+        K.failure(undone, "changed")
+      else
+        ok(undone.result, case[1] .. ": what Renoise's redo made again: " .. T.load_payload_module("json").encode(undone.error or {}))
+        eq(seq(), "1,2,1,3", case[1])
+      end
+    end
+  end
+end)
+
 test("sequence: a cloned slot gets a copy of its pattern, its mutes and section; Kumi's undo takes both away", function()
   local _, peer = setup()
   local E = K.place(peer)

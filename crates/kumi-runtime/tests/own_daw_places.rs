@@ -652,7 +652,7 @@ async fn walk_away_tells_renoises_status_bar_and_each_daw_says_whether_it_record
             let script = ReaperScript::new(2, 0);
             let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
             assert!(!own.session.daw_message("Kumi · done").await.unwrap(), "REAPER has no status line");
-            assert!(!script.asked().iter().any(|(method, _)| method == "status_message"), "nothing sent");
+            assert!(!script.asked().iter().any(|(method, _)| method == "show_status"), "nothing sent");
             assert_eq!(own.session.daw_recording().await.unwrap(), Some(false));
             own.close().await;
         })
