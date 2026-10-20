@@ -235,6 +235,15 @@ local function settings_restore(kind, song, env, restore, desc, what)
   watch_all(env, t, d, device)
   local ok, err = pcall(function() device.active_preset_data = material.presetData end)
   if not ok then fail("failed", "Renoise wouldn't take the settings back: " .. tostring(err)) end
+  -- (written settings leave no preset chosen: when the device played a preset whose settings these are, it plays it again,
+  -- in the same step; otherwise the written settings stay)
+  local preset = prior.preset
+  if type(preset) == "number" and preset >= 1 and preset <= #device.presets then
+    local chosen = pcall(function() device.active_preset = preset end)
+    if not chosen or M.print_of(device.active_preset_data) ~= prior.print then
+      pcall(function() device.active_preset_data = material.presetData end)
+    end
+  end
   base.note_restored_at(env.journal, kind, { track = t, device = d })
   return {
     restored = { preset = device.active_preset }, display = { title = label .. ": settings put back" }, undo = { desc = desc, entry = true },

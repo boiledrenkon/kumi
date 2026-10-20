@@ -157,6 +157,18 @@ test("devices m4: a preset is chosen in one step and its undo writes back the se
   H.no_dialogs()
 end)
 
+test("devices m4: the undo of a preset chosen over another preset chooses that one again (written settings leave none chosen)", function()
+  local _, peer = setup()
+  local epoch = place(peer)
+  local record = change(peer, "device-preset", { ref = epoch .. ":device:2.2", preset = "bright" })
+  eq(device_data(2, 2).preset, 2)
+  ok(restore(peer, "device-preset", record).result)
+  eq(device_data(2, 2).preset, 1, "Init again, as it was")
+  eq(value(2, 2, 1), 0)
+  eq(value(2, 2, 2), 0)
+  H.no_dialogs()
+end)
+
 test("devices m4: a preset is named by number, name or the last part of a name; a wrong one is refused with the list", function()
   local _, peer = setup()
   local epoch = place(peer)
