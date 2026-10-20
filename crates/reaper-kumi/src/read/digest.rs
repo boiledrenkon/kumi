@@ -27,8 +27,8 @@ const MOST_MARKERS: usize = 2_000;
 /// Parameters a digest reads for its fingerprints, and per FX.
 const PARAMS_BUDGET: usize = 100_000;
 const PARAMS_PER_FX: i32 = 512;
-/// Parameter values a digest lists (watch_me).
-const VALUES_BUDGET: usize = 20_000;
+/// Parameter values a digest lists (watch_me): about 1 MB of pages more at most.
+const VALUES_BUDGET: usize = 100_000;
 /// Envelope points a digest reads for its fingerprints.
 const POINTS_BUDGET: usize = 200_000;
 /// A page's share of the answer, and of REAPER's main thread.

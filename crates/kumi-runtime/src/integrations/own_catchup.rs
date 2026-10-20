@@ -137,6 +137,8 @@ pub fn changes_of(answer: &Value, words: &CatchUpWords) -> Vec<ProjectChange> {
 pub struct Remembered {
     /// The open project (as this run of the DAW names it) catch-up last ran for, and what it told of it.
     caught: RefCell<Option<String>>,
+    /// Every project catch-up ran for in this run: one seen again (a tab switched back to) is told only what changed.
+    seen: RefCell<std::collections::HashSet<String>>,
     context: RefCell<Option<(String, JsonObject)>>,
     /// The DAW went away after a project was seen: the next catch-up tells what changed while it was away.
     away: Cell<bool>,
@@ -259,11 +261,16 @@ impl Remembered {
             }
         };
         *self.caught.borrow_mut() = Some(identity.clone());
+        let again = !self.seen.borrow_mut().insert(identity.clone());
         *self.context.borrow_mut() = None;
         self.saved_at.set(Some(Instant::now()));
         self.took_ms.set(answer.get("ms").and_then(Value::as_u64).unwrap_or(0));
         self.moved_at.set(None);
         let Some(described) = caught_up(&answer, words) else { return };
+        // (back to a project seen in this run, unchanged: a tab switched back to, nothing to say)
+        if again && described.lines.is_empty() && !after_reconnect {
+            return;
+        }
         let last_seen_at = answer.get("lastSeenAt").and_then(Value::as_i64).unwrap_or(0);
         let mut context = JsonObject::new();
         context.insert("lastSeen".into(), kumi_common::time::since(last_seen_at as f64, kumi_common::time::now_ms() as f64).into());
@@ -688,6 +695,58 @@ mod tests {
         for param in draft["params"].as_array().unwrap() {
             assert!(regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap().is_match(param["name"].as_str().unwrap()), "{param}");
         }
+    }
+
+    /// A host that answers catch_up from a list, in turn.
+    struct Answers(RefCell<Vec<Value>>);
+    #[async_trait(?Send)]
+    impl McpEndpoint for Answers {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Ok(serde_json::from_value(json!({"tools": []})).unwrap())
+        }
+        async fn call(&self, _: &str, _: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            let answer = self.0.borrow_mut().remove(0);
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": false})).unwrap())
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_seen_again_unchanged_is_not_told_again() {
+        let host: Rc<dyn McpEndpoint> = Rc::new(Answers(RefCell::new(vec![
+            json!({"same": true, "lastSeenAt": 1}),
+            json!({"first": true}),
+            json!({"same": true, "lastSeenAt": 1}),
+            json!({"project": [{"what": "tempo", "from": 120, "to": 121}], "lastSeenAt": 1}),
+        ])));
+        let told: Rc<RefCell<Vec<CatchUp>>> = Rc::default();
+        let into = told.clone();
+        let on: Option<Rc<dyn Fn(CatchUp)>> = Some(Rc::new(move |c| into.borrow_mut().push(c)));
+        let remembered = Rc::new(Remembered::default());
+        for identity in ["A", "B", "A", "A"] {
+            remembered.clone().catch_up(host.clone(), identity.into(), "Song".into(), &WORDS, on.clone(), Signal::new()).await;
+        }
+        // A first: nothing changed, said as Live says it at a start; B new; A again unchanged: quiet; A changed: told.
+        let lines: Vec<Vec<String>> = told.borrow().iter().map(|c| c.lines.clone()).collect();
+        assert_eq!(lines, [vec![], vec!["Tempo 120 → 121 BPM".to_string()]]);
+        assert!(remembered.since("A").is_some() && remembered.since("B").is_none());
     }
 
     #[test]

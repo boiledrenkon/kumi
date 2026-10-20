@@ -266,3 +266,42 @@ async fn a_routine_watched_in_reaper_comes_back_as_reapers_changes_and_a_recipe_
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unsaved_reaper_project_is_caught_up_while_reaper_keeps_it_open_and_a_new_one_has_nothing_to_tell() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = start_simulator(script.config(secret.clone(), "/lab/REAPER"), &paths).await;
+            let first = Rc::new(Seen::default());
+            let reaper = kumi(Daw::Reaper, home.path(), first.clone());
+            reaper.start(Signal::new()).await.unwrap();
+            assert!(reaper.observe(Signal::new(), None).await.unwrap().project.is_none(), "unsaved: REAPER's unsaved place");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            reaper.close().await.unwrap();
+            // Kumi closes and opens again; REAPER kept the same unsaved project open, and the producer changed it.
+            script.set_volume(2, -9.0);
+            let second = Rc::new(Seen::default());
+            let reaper = kumi(Daw::Reaper, home.path(), second.clone());
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            until(|| !second.catch_ups.borrow().is_empty()).await;
+            assert_eq!(second.catch_ups.borrow()[0].lines, ["Changed track “Track 2” (mixer)"]);
+            reaper.close().await.unwrap();
+            // REAPER restarted on a new unsaved project: another project, nothing to compare.
+            simulator.stop();
+            script.restart();
+            let _again = start_simulator(script.config(secret, "/lab/REAPER"), &paths).await;
+            let third = Rc::new(Seen::default());
+            let reaper = kumi(Daw::Reaper, home.path(), third.clone());
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(third.catch_ups.borrow().is_empty(), "{:?}", third.catch_ups.borrow());
+            reaper.close().await.unwrap();
+        })
+        .await;
+}

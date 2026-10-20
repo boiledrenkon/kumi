@@ -23,7 +23,7 @@ local byte, format = string.byte, string.format
 local M = {}
 
 M.LINES_BUDGET = 300000
-M.VALUES_BUDGET = 20000
+M.VALUES_BUDGET = 100000
 M.PAGE_BYTES = 192 * 1024
 
 local function fail(code, message)
