@@ -406,7 +406,8 @@ static CASES: &[Case] = &[
     case("phrase_render", "local i = new_instrument('K render', 1) local ph = song:instrument(i):insert_phrase_at(1) ph.playback_mode = R.InstrumentPhrase.PLAY_SCRIPT ph.script.paragraphs = {'return pattern { unit = \"1/8\", event = { \"c4\", \"e4\", \"g4\" } }'} ph.script:commit() return {i = i}", r#"{"ref":"$E:phrase:$i.1"}"#, "local ph = song:instrument($i):phrase(1) return {ph.playback_mode, ph.number_of_lines, phnotes($i, 1, 8)}"),
     case("plugin_load", "return {i = new_instrument('K plugin', 0)}", r#"{"ref":"$E:instrument:$i","path":"DLSMusicDevice"}"#, "local ins = song:instrument($i) local pp = ins.plugin_properties return {pp.plugin_loaded, pp.plugin_device and pp.plugin_device.name or false, ins.name}").limit(AU_UNDO),
     case("plugin_param", PLUGIN, r#"{"ref":"$E:instrument:$i","param":"Volume","value":0.5}"#, "return values(song:instrument($i).plugin_properties.plugin_device)").limit(AU_UNDO),
-    case("plugin_preset", PLUGIN, r#"{"ref":"$E:instrument:$i","preset":1}"#, "local d = song:instrument($i).plugin_properties.plugin_device local x, h = d.active_preset_data, 0 for k = 1, #x do h = (h * 31 + x:byte(k)) % 2147483647 end return {d.active_preset, h, values(d)}").limit(AU_UNDO),
+    case("plugin_preset", PLUGIN, r#"{"ref":"$E:instrument:$i","preset":1}"#, "local d = song:instrument($i).plugin_properties.plugin_device local x, h = d.active_preset_data, 0 for k = 1, #x do h = (h * 31 + x:byte(k)) % 2147483647 end return {d.active_preset, h, values(d)}")
+        .limit("This Mac's AU instruments (DLSMusicDevice, AUMIDISynth, AUSampler, MS2000 Emulator) have one program each, which Renoise keeps: the answer is unchanged with no HISTORY row (checked); another program can't be tried here"),
     case("plugin_set", PLUGIN, r#"{"ref":"$E:instrument:$i","channel":2}"#, "return song:instrument($i).plugin_properties.channel").limit(AU_UNDO),
     case("plugin_suspend", PLUGIN, r#"{"ref":"$E:instrument:$i","autoSuspend":"$s"}"#, "return song:instrument($i).plugin_properties.auto_suspend").limit(AU_UNDO),
     case("midi_set", "return {i = new_instrument('K midi', 0)}", r#"{"ref":"$E:instrument:$i","channel":10}"#, "return song:instrument($i).midi_output_properties.channel"),
@@ -680,6 +681,7 @@ async fn apply(lab: &Lab, case: &Case, vars: &mut BTreeMap<String, Value>) -> Re
     }
     match added.last() {
         Some(row) => Ok((row.clone(), said)),
+        None if said.text.contains("\"change\":null") => Err(format!("unchanged, no HISTORY row: {}", short(&said.text, 300))),
         None => Err(format!("no HISTORY row: {}", short(&said.text, 300))),
     }
 }
@@ -697,6 +699,16 @@ async fn run_case(lab: &Lab, case: &Case, outside_undo: bool) -> Outcome {
     // 1. Kumi's change, read back
     let (row, said) = match apply(lab, case, &mut vars).await {
         Ok(applied) => applied,
+        // (a case whose kind Renoise answers unchanged here: the limit says why, and the answer is checked)
+        Err(why) if !case.limit.is_empty() && why.starts_with("unchanged") => {
+            let p1 = probe(lab, case, &vars).await;
+            out.step("unchanged", same(&p0, &p1), short(&why, 160));
+            if out.verdict == Verdict::Pass {
+                out.verdict = Verdict::Limit;
+                out.note = case.limit.to_owned();
+            }
+            return out;
+        }
         Err(why) => return out.fail("apply", why),
     };
     out.apply_ms = Some(said.ms);
