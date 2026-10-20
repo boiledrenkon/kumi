@@ -232,7 +232,8 @@ local function in_use(song, index, prior)
   local used, reads = { note = 0, effect = 0, notes = {}, effects = {} }, 0
   local seen = { notes = {}, effects = {} }
   local function mark(list, c)
-    if not seen[list][c] then seen[list][c] = true used[list][#used[list] + 1] = c end
+    local columns = list == "notes" and used.notes or used.effects
+    if not seen[list][c] then seen[list][c] = true columns[#columns + 1] = c end
   end
   for p = 1, #song.patterns do
     local pattern = song:pattern(p)
@@ -294,7 +295,7 @@ local function lower_columns(song, index, track, prior, applied)
     local had = {}
     for _, c in ipairs(type(before[list]) == "table" and before[list] or {}) do had[c] = true end
     local holds = {}
-    for _, c in ipairs(used[list]) do holds[c] = true end
+    for _, c in ipairs(list == "notes" and used.notes or used.effects) do holds[c] = true end
     for c = to, from + 1, -1 do
       if holds[c] and not had[c] then return c end
     end

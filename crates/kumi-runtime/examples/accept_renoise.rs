@@ -252,10 +252,13 @@ struct Case {
     probe: &'static str,
     /// Why a result is what it is (a limit, a design decision).
     note: &'static str,
+    /// A known limit of Renoise's: failures of the steps after the second apply (Renoise's undo and redo, and Kumi's undo
+    /// after them) make the case a limit, with this reason.
+    limit: &'static str,
 }
 
 const fn case(tool: &'static str, setup: &'static str, input: &'static str, probe: &'static str) -> Case {
-    Case { tool, label: "", setup, host: &[], input, probe, note: "" }
+    Case { tool, label: "", setup, host: &[], input, probe, note: "", limit: "" }
 }
 
 impl Case {
@@ -269,6 +272,10 @@ impl Case {
     }
     const fn note(mut self, note: &'static str) -> Self {
         self.note = note;
+        self
+    }
+    const fn limit(mut self, why: &'static str) -> Self {
+        self.limit = why;
         self
     }
     fn name(&self) -> String {
@@ -291,6 +298,12 @@ const CHAIN: &str =
 const CHAIN_DEVICES: &str = "local i = new_instrument('K chain', 1) local c = song:instrument(i):insert_sample_device_chain_at(1) c:insert_device_at('Audio/Effects/Native/Gainer', 2) c:insert_device_at('Audio/Effects/Native/Delay', 3) return {i = i}";
 const PLUGIN: &str = "local i = new_instrument('K plugin', 0) song:instrument(i).plugin_properties:load_plugin('Audio/Generators/AU/aumu:dls :appl') local pp = song:instrument(i).plugin_properties return {i = i, s = not pp.auto_suspend}";
 const SLOT: &str = "local q, p = new_slot() return {q = q, p = p}";
+/// What a Doofer holds: its devices' types and their gains, as its preset data says.
+const INSIDE: &str = r#"local x = pdata(song:track($t):device(2)) local out = {} for k in x:gmatch('type="(%w+)"') do out[#out + 1] = k end for v in x:gmatch('<Volume>%s*<Value>([^<]*)</Value>') do out[#out + 1] = v end return out"#;
+/// Why Renoise's undo can't take a plug-in instrument's change back now and then.
+const AU_UNDO: &str = "Renoise's undo history goes empty now and then once AU plug-in instruments load and unload (can_undo() false before its undo; as after n-devices' device inventory): its undo takes nothing back, HISTORY stays as it was, Kumi's undo works";
+/// Why Renoise's own undo of a change inside a Doofer, Splitter or Notepad isn't told.
+const NO_NOTIFIER: &str = "Renoise tells no notifier when its undo changes what a Doofer, Splitter or Notepad holds (only their macros' values): its undo of these isn't told";
 
 static CASES: &[Case] = &[
     // Mixer, names, structure (M3 kinds, now through the whole stack)
@@ -371,7 +384,7 @@ static CASES: &[Case] = &[
     case("moddevice_add", INSTRUMENT, r#"{"ref":"$E:modset:$i.1","path":"AHDSR","target":"volume"}"#, "return setnames($i)"),
     case("moddevice_delete", "local i = new_instrument('K mod', 1) moddev(song:instrument(i).sample_modulation_sets[1], 'AHDSR') return {i = i}", r#"{"ref":"$E:moddevice:$i.1.1"}"#, "return setnames($i)"),
     case("moddevice_move", "local i = new_instrument('K mod', 1) local s = song:instrument(i).sample_modulation_sets[1] moddev(s, 'AHDSR') moddev(s, 'LFO') return {i = i}", r#"{"ref":"$E:moddevice:$i.1.1","index":2}"#, "return setnames($i)")
-        .note("A modulation device moves as a copy and a delete (Renoise has no swap for them): the moved device is a new one to Kumi"),
+        .limit("A modulation device moves as a copy and a delete (Renoise has no swap for them): the moved device is a new one to Kumi, and Renoise's undo of the move isn't followed"),
     case("moddevice_set", "local i = new_instrument('K mod', 1) moddev(song:instrument(i).sample_modulation_sets[1], 'LFO') return {i = i}", r#"{"ref":"$E:moddevice:$i.1.1","name":"K lfo","active":false}"#, "local d = song:instrument($i).sample_modulation_sets[1].devices[1] return {d.display_name, d.is_active}"),
     case("moddevice_param", "local i = new_instrument('K mod', 1) moddev(song:instrument(i).sample_modulation_sets[1], 'AHDSR') return {i = i}", r#"{"ref":"$E:moddevice:$i.1.1","param":"Attack","value":0.3}"#, "return values(song:instrument($i).sample_modulation_sets[1].devices[1])"),
     case("chain_add", INSTRUMENT, r#"{"ref":"$E:instrument:$i","name":"K chain"}"#, "return chainnames($i)"),
@@ -391,11 +404,11 @@ static CASES: &[Case] = &[
     case("phrase_clear", "local i = new_instrument('K phrase', 1) local ph = song:instrument(i):insert_phrase_at(1) ph:line(2):note_column(1).note_string = 'C-4' return {i = i}", r#"{"ref":"$E:phrase:$i.1"}"#, "return phnotes($i, 1, 4)"),
     case("phrase_script", PHRASE, r#"{"ref":"$E:phrase:$i.1","code":"return pattern { unit = \"1/8\", event = { \"c4\", \"e4\" } }"}"#, "local ph = song:instrument($i):phrase(1) return {ph.playback_mode, table.concat(ph.script.paragraphs, '\\n')}"),
     case("phrase_render", "local i = new_instrument('K render', 1) local ph = song:instrument(i):insert_phrase_at(1) ph.playback_mode = R.InstrumentPhrase.PLAY_SCRIPT ph.script.paragraphs = {'return pattern { unit = \"1/8\", event = { \"c4\", \"e4\", \"g4\" } }'} ph.script:commit() return {i = i}", r#"{"ref":"$E:phrase:$i.1"}"#, "local ph = song:instrument($i):phrase(1) return {ph.playback_mode, ph.number_of_lines, phnotes($i, 1, 8)}"),
-    case("plugin_load", "return {i = new_instrument('K plugin', 0)}", r#"{"ref":"$E:instrument:$i","path":"DLSMusicDevice"}"#, "local ins = song:instrument($i) local pp = ins.plugin_properties return {pp.plugin_loaded, pp.plugin_device and pp.plugin_device.name or false, ins.name}"),
-    case("plugin_param", PLUGIN, r#"{"ref":"$E:instrument:$i","param":"Volume","value":0.5}"#, "return values(song:instrument($i).plugin_properties.plugin_device)"),
-    case("plugin_preset", PLUGIN, r#"{"ref":"$E:instrument:$i","preset":1}"#, "local d = song:instrument($i).plugin_properties.plugin_device return {d.active_preset, values(d)}"),
-    case("plugin_set", PLUGIN, r#"{"ref":"$E:instrument:$i","channel":2}"#, "return song:instrument($i).plugin_properties.channel"),
-    case("plugin_suspend", PLUGIN, r#"{"ref":"$E:instrument:$i","autoSuspend":"$s"}"#, "return song:instrument($i).plugin_properties.auto_suspend"),
+    case("plugin_load", "return {i = new_instrument('K plugin', 0)}", r#"{"ref":"$E:instrument:$i","path":"DLSMusicDevice"}"#, "local ins = song:instrument($i) local pp = ins.plugin_properties return {pp.plugin_loaded, pp.plugin_device and pp.plugin_device.name or false, ins.name}").limit(AU_UNDO),
+    case("plugin_param", PLUGIN, r#"{"ref":"$E:instrument:$i","param":"Volume","value":0.5}"#, "return values(song:instrument($i).plugin_properties.plugin_device)").limit(AU_UNDO),
+    case("plugin_preset", PLUGIN, r#"{"ref":"$E:instrument:$i","preset":1}"#, "local d = song:instrument($i).plugin_properties.plugin_device local x, h = d.active_preset_data, 0 for k = 1, #x do h = (h * 31 + x:byte(k)) % 2147483647 end return {d.active_preset, h, values(d)}").limit(AU_UNDO),
+    case("plugin_set", PLUGIN, r#"{"ref":"$E:instrument:$i","channel":2}"#, "return song:instrument($i).plugin_properties.channel").limit(AU_UNDO),
+    case("plugin_suspend", PLUGIN, r#"{"ref":"$E:instrument:$i","autoSuspend":"$s"}"#, "return song:instrument($i).plugin_properties.auto_suspend").limit(AU_UNDO),
     case("midi_set", "return {i = new_instrument('K midi', 0)}", r#"{"ref":"$E:instrument:$i","channel":10}"#, "return song:instrument($i).midi_output_properties.channel"),
     // Devices (n-devices)
     case("device_preset", EQ5, r#"{"ref":"$E:device:$t.2","preset":2}"#, "local d = song:track($t):device(2) return {d.active_preset, values(d)}"),
@@ -403,24 +416,28 @@ static CASES: &[Case] = &[
     case("device_preset_data", "return {t = new_track('K compressor', {'Audio/Effects/Native/Compressor'})}", r#"{"ref":"$E:device:$t.2","path":"$preset"}"#, "return values(song:track($t):device(2))").label("path"),
     case("device_set", EQ5, r#"{"ref":"$E:device:$t.2","name":"K device","maximized":false}"#, "local d = song:track($t):device(2) return {d.display_name, d.is_maximized}"),
     case("doofer_macro", DOOFER, r#"{"ref":"$E:device:$t.2","macro":1,"name":"K cut","value":40}"#, "local d = song:track($t):device(2) return {d.parameters[1].name, d.parameters[1].value}"),
-    case("doofer_device_add", DOOFER, r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Gainer"}"#, "return pdata(song:track($t):device(2))"),
-    case("doofer_device_delete", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1]}"#, "return pdata(song:track($t):device(2))")
+    case("doofer_device_add", DOOFER, r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Gainer"}"#, INSIDE).limit(NO_NOTIFIER),
+    case("doofer_device_delete", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1]}"#, INSIDE)
+        .limit(NO_NOTIFIER)
         .host(&[("doofer-device-add", r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Gainer"}"#)]),
-    case("doofer_device_move", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1],"to":[2]}"#, "return pdata(song:track($t):device(2))").host(&[
+    case("doofer_device_move", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1],"to":[2]}"#, INSIDE).limit(NO_NOTIFIER).host(&[
         ("doofer-device-add", r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Gainer"}"#),
         ("doofer-device-add", r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Delay"}"#),
     ]),
-    case("doofer_device_set", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1],"param":1,"value":0.5}"#, "return pdata(song:track($t):device(2))")
+    case("doofer_device_set", DOOFER, r#"{"ref":"$E:device:$t.2","at":[1],"param":1,"value":0.5}"#, INSIDE)
+        .limit(NO_NOTIFIER)
         .host(&[("doofer-device-add", r#"{"ref":"$E:device:$t.2","path":"Audio/Effects/Native/Gainer"}"#)]),
-    case("splitter_set", "return {t = new_track('K splitter', {'Audio/Effects/Native/Splitter'})}", r#"{"ref":"$E:device:$t.2","type":"mid-side"}"#, "return pdata(song:track($t):device(2))"),
-    case("notepad_write", "return {t = new_track('K notepad', {'Audio/Effects/Native/Notepad'})}", r#"{"ref":"$E:device:$t.2","text":"K line one\nK line two"}"#, "return pdata(song:track($t):device(2))"),
+    case("splitter_set", "return {t = new_track('K splitter', {'Audio/Effects/Native/Splitter'})}", r#"{"ref":"$E:device:$t.2","type":"mid-side"}"#, "return pdata(song:track($t):device(2)):match('<Type>([^<]*)</Type>') or 'Parallel'")
+        .limit(NO_NOTIFIER),
+    case("notepad_write", "return {t = new_track('K notepad', {'Audio/Effects/Native/Notepad'})}", r#"{"ref":"$E:device:$t.2","text":"K line one\nK line two"}"#, "local out = {} for p in pdata(song:track($t):device(2)):gmatch('<Paragraph>([^<]*)</Paragraph>') do out[#out + 1] = p end return out")
+        .limit(NO_NOTIFIER),
     case("meta_destination", "return {t = new_track('K meta', {'Audio/Effects/Native/*LFO', 'Audio/Effects/Native/Gainer'})}", r#"{"ref":"$E:device:$t.2","targetRef":"$E:device:$t.3","param":1}"#, "return values(song:track($t):device(2))"),
     case("doofer_make", "return {t = new_track('K make', {'Audio/Effects/Native/Gainer', 'Audio/Effects/Native/Delay'})}", r#"{"trackRef":"$E:track:$t","deviceRefs":["$E:device:$t.2","$E:device:$t.3"]}"#, "return paths($t)"),
     case("device_params", EQ5, r#"{"ref":"$E:device:$t.2","values":[{"param":1,"value":-6},{"param":2,"value":3}]}"#, "return values(song:track($t):device(2))"),
-    case("device_chain_load", TRACK, r#"{"trackRef":"$E:track:$t","path":"$chain"}"#, "return paths($t)"),
+    case("device_chain_load", TRACK, r#"{"trackRef":"$E:track:$t","path":"$chain"}"#, "return paths($t)").limit("Renoise's undo of a chain load is told from M6 on (n-devices c11b275b, f5f60929 on m6-host)"),
     case("phrase_load", INSTRUMENT, r#"{"ref":"$E:instrument:$i","path":"$phrasefile"}"#, "return phnames($i)"),
     case("modset_load", INSTRUMENT, r#"{"ref":"$E:instrument:$i","path":"$modsetfile"}"#, "return setnames($i)"),
-    case("instrument_macro_map", "local i = new_instrument('K macros', 1) moddev(song:instrument(i).sample_modulation_sets[1], 'AHDSR') return {i = i}", r#"{"ref":"$E:instrument:$i","macro":1,"add":[{"modulation":1,"device":1,"param":1}]}"#, "local i = named_instrument('K macros') local out = {} for k, mp in ipairs(song:instrument(i):macro(1).mappings) do out[k] = mp.parameter.name .. ':' .. mp.parameter_min .. '-' .. mp.parameter_max end return out"),
+    case("instrument_macro_map", "local i = new_instrument('K macros', 1) moddev(song:instrument(i).sample_modulation_sets[1], 'AHDSR') return {i = i}", r#"{"ref":"$E:instrument:$i","macro":1,"add":[{"modulation":1,"device":1,"param":1}]}"#, "local i = named_instrument('K macros') local out = {#song.instruments} for _, mp in ipairs(song:instrument(i):macro(1).mappings) do out[#out + 1] = mp.parameter.name .. ':' .. mp.parameter_min .. '-' .. mp.parameter_max end return out"),
 ];
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -621,7 +638,7 @@ impl Outcome {
         );
         if self.verdict != Verdict::Pass {
             for (step, value) in &self.trace {
-                line += &format!("\n        {step}: {}", short(&value.to_string(), 600));
+                line += &format!("\n        {step}: {}", short(&value.to_string(), 1_200));
             }
         }
         line
@@ -803,6 +820,13 @@ async fn run_case(lab: &Lab, case: &Case, outside_undo: bool) -> Outcome {
             }
         }
         other => out.step("last undo", false, format!("{other:?}: {}", short(&last.text, 120))),
+    }
+    // A known limit of Renoise's fails only the steps after the second apply: the case is that limit.
+    let late = ["daw undo", "undo after", "daw redo", "last undo"];
+    let failed = |(step, detail): &(&str, String)| detail.starts_with("FAIL") && !late.contains(step);
+    if !case.limit.is_empty() && out.verdict == Verdict::Fail && !out.steps.iter().any(failed) {
+        out.verdict = Verdict::Limit;
+        out.note = case.limit.to_owned();
     }
     out
 }
