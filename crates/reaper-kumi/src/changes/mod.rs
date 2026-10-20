@@ -40,6 +40,14 @@ mod fx_params;
 mod fxchain;
 mod fxkinds;
 mod modulation;
+// (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod actions;
+mod groups;
+mod hwout;
+mod projectitems;
+mod templates;
+mod trackprops;
+mod volatile;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -123,6 +131,32 @@ impl Written for Restored {
 #[derive(Clone, Copy)]
 enum Kind {
     TrackProp(&'static tracks::Prop),
+    /// (r-tracks) A track setting beyond the fader: polarity, record arm and input, monitoring, the parent send, pan mode…
+    TrackSetting(&'static trackprops::Prop),
+    /// (r-tracks) A receive made from the receiving track: the send from the other one.
+    ReceiveAdd,
+    /// (r-tracks) A track's hardware outputs.
+    HwOutProp(&'static hwout::Prop),
+    HwOutAdd,
+    HwOutRemove,
+    /// (r-tracks) The project beyond its tracks.
+    TimeSelection,
+    ProjectNotes,
+    ProjectInfo,
+    ProjectGrid,
+    ProjectTimebase,
+    RulerLane,
+    RulerLaneAdd,
+    RegionRender,
+    /// (r-tracks) Track groups and VCAs.
+    TrackGroup,
+    TrackGroupName,
+    /// (r-tracks) Any action, by id or name: a row only when REAPER made an undo point of it.
+    RunAction,
+    /// (r-tracks) A track template inserted as tracks.
+    TemplateInsert,
+    /// (r-tracks) The ruler lane a marker or region sits in, held by the lane's id.
+    MarkerLane,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -159,6 +193,12 @@ fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
     }
+    if let Some(prop) = trackprops::prop(name) {
+        return Some(Kind::TrackSetting(prop));
+    }
+    if let Some(prop) = hwout::prop(name) {
+        return Some(Kind::HwOutProp(prop));
+    }
     if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::SendProp(prop));
     }
@@ -188,6 +228,22 @@ fn kind(name: &str) -> Option<Kind> {
         "marker-delete" => Some(Kind::MarkerDelete),
         "send-add" => Some(Kind::SendAdd),
         "send-remove" => Some(Kind::SendRemove),
+        "receive-add" => Some(Kind::ReceiveAdd),
+        "hw-out-add" => Some(Kind::HwOutAdd),
+        "hw-out-remove" => Some(Kind::HwOutRemove),
+        "time-selection" => Some(Kind::TimeSelection),
+        "project-notes" => Some(Kind::ProjectNotes),
+        "project-info" => Some(Kind::ProjectInfo),
+        "project-grid" => Some(Kind::ProjectGrid),
+        "project-timebase" => Some(Kind::ProjectTimebase),
+        "ruler-lane" => Some(Kind::RulerLane),
+        "ruler-lane-add" => Some(Kind::RulerLaneAdd),
+        "region-render" => Some(Kind::RegionRender),
+        "track-group" => Some(Kind::TrackGroup),
+        "track-group-name" => Some(Kind::TrackGroupName),
+        "run-action" => Some(Kind::RunAction),
+        "track-template-insert" => Some(Kind::TemplateInsert),
+        "marker-lane" => Some(Kind::MarkerLane),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -209,9 +265,33 @@ impl Kind {
         }
     }
 
+    /// (r-tracks) Whether REAPER alone decides whether it makes a point: an action marks what it changes itself, and its block
+    /// ends with flags 0, so a view, selection or transport action makes none (and commits none of the producer's edits).
+    fn marks_itself(self) -> bool {
+        matches!(self, Kind::RunAction)
+    }
+
     fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
+            Kind::TrackSetting(prop) => trackprops::preview(ctx, prop, input),
+            Kind::ReceiveAdd => sends::receive_add_preview(ctx, input),
+            Kind::HwOutProp(prop) => hwout::prop_preview(ctx, prop, input),
+            Kind::HwOutAdd => hwout::add_preview(ctx, input),
+            Kind::HwOutRemove => hwout::remove_preview(ctx, input),
+            Kind::TimeSelection => projectitems::time_selection_preview(ctx, input),
+            Kind::ProjectNotes => projectitems::notes_preview(ctx, input),
+            Kind::ProjectInfo => projectitems::info_preview(ctx, input),
+            Kind::ProjectGrid => projectitems::grid_preview(ctx, input),
+            Kind::ProjectTimebase => projectitems::timebase_preview(ctx, input),
+            Kind::RulerLane => projectitems::lane_preview(ctx, input),
+            Kind::RulerLaneAdd => projectitems::lane_add_preview(ctx, input),
+            Kind::RegionRender => projectitems::matrix_preview(ctx, input),
+            Kind::TrackGroup => groups::preview(ctx, input),
+            Kind::TrackGroupName => groups::name_preview(ctx, input),
+            Kind::RunAction => actions::preview(ctx, input),
+            Kind::TemplateInsert => templates::preview(ctx, input),
+            Kind::MarkerLane => marks::lane_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -240,6 +320,24 @@ impl Kind {
     fn apply(self, ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_apply(ctx, prop, input, fence),
+            Kind::TrackSetting(prop) => trackprops::apply(ctx, prop, input, fence),
+            Kind::ReceiveAdd => sends::receive_add_apply(ctx, input, fence),
+            Kind::HwOutProp(prop) => hwout::prop_apply(ctx, prop, input, fence),
+            Kind::HwOutAdd => hwout::add_apply(ctx, input, fence),
+            Kind::HwOutRemove => hwout::remove_apply(ctx, input, fence),
+            Kind::TimeSelection => projectitems::time_selection_apply(ctx, input, fence),
+            Kind::ProjectNotes => projectitems::notes_apply(ctx, input, fence),
+            Kind::ProjectInfo => projectitems::info_apply(ctx, input, fence),
+            Kind::ProjectGrid => projectitems::grid_apply(ctx, input, fence),
+            Kind::ProjectTimebase => projectitems::timebase_apply(ctx, input, fence),
+            Kind::RulerLane => projectitems::lane_apply(ctx, input, fence),
+            Kind::RulerLaneAdd => projectitems::lane_add_apply(ctx, input, fence),
+            Kind::RegionRender => projectitems::matrix_apply(ctx, input, fence),
+            Kind::TrackGroup => groups::apply(ctx, input, fence),
+            Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
+            Kind::RunAction => actions::apply(ctx, input, fence),
+            Kind::TemplateInsert => templates::apply(ctx, input, fence),
+            Kind::MarkerLane => marks::lane_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -268,6 +366,24 @@ impl Kind {
     fn restore(self, ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_restore(ctx, prop, restore),
+            Kind::TrackSetting(prop) => trackprops::restore(ctx, prop, restore),
+            Kind::ReceiveAdd => sends::add_restore(ctx, restore),
+            Kind::HwOutProp(prop) => hwout::prop_restore(ctx, prop, restore),
+            Kind::HwOutAdd => hwout::add_restore(ctx, restore),
+            Kind::HwOutRemove => hwout::remove_restore(ctx, restore),
+            Kind::TimeSelection => projectitems::time_selection_restore(ctx, restore),
+            Kind::ProjectNotes => projectitems::notes_restore(ctx, restore),
+            Kind::ProjectInfo => projectitems::info_restore(ctx, restore),
+            Kind::ProjectGrid => projectitems::grid_restore(ctx, restore),
+            Kind::ProjectTimebase => projectitems::timebase_restore(ctx, restore),
+            Kind::RulerLane => projectitems::lane_restore(ctx, restore),
+            Kind::RulerLaneAdd => projectitems::lane_add_restore(ctx, restore),
+            Kind::RegionRender => projectitems::matrix_restore(ctx, restore),
+            Kind::TrackGroup => groups::restore(ctx, restore),
+            Kind::TrackGroupName => groups::name_restore(ctx, restore),
+            Kind::RunAction => actions::restore(ctx, restore),
+            Kind::TemplateInsert => templates::restore(ctx, restore),
+            Kind::MarkerLane => marks::lane_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -368,8 +484,11 @@ impl Changes {
         let ctx = self.context(reaper, reads, params)?;
         let kind = kind_of(params)?;
         let (input, fence, desc) = (object(params, "input")?, object(params, "fence")?, text(params, "desc")?);
-        let applied = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.apply(ctx, input, fence))?;
-        let (applied, undo) = applied;
+        let applied = self.in_block(&ctx, desc, kind.leaves_point(), kind.marks_itself(), |ctx| kind.apply(ctx, input, fence))?;
+        let (mut applied, undo) = applied;
+        if kind.marks_itself() {
+            actions::after(&mut applied, &undo);
+        }
         let mut answer = Map::new();
         answer.insert("epoch".into(), reads.epoch().into());
         answer.insert("applied".into(), applied.applied);
@@ -396,7 +515,7 @@ impl Changes {
             material: params.get("material").filter(|v| !v.is_null()),
             discard: params.get("discard") == Some(&Value::Bool(true)),
         };
-        let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.restore(ctx, &restore))?;
+        let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), false, |ctx| kind.restore(ctx, &restore))?;
         // (a restore that found it back already wrote nothing: said, so Kumi doesn't tell it as an undo it made)
         let mut display = restored.display;
         if restored.unwritten && display.get("note").is_none_or(Value::is_null) {
@@ -411,11 +530,20 @@ impl Changes {
     /// `point` is whether a change of this kind leaves a point in REAPER's history at all. Inside a plan the answer says
     /// whether the plan's point takes the change back (`covered`): not a change that wrote nothing, nor one REAPER keeps no
     /// history of (the repeat button).
-    fn in_block<T: Written>(&self, ctx: &Ctx, desc: &str, point: bool, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
+    fn in_block<T: Written>(
+        &self,
+        ctx: &Ctx,
+        desc: &str,
+        point: bool,
+        marks: bool,
+        write: impl FnOnce(&Ctx) -> Done<T>,
+    ) -> Done<(T, Value)> {
         let in_plan = self.plan.borrow().is_some();
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
+        // (r-tracks) Where REAPER's history stood before an action: one that moved it itself (a script that undoes) is told.
+        let history = (marks && !in_plan).then(|| (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
         let result = write(ctx);
         if in_plan {
             return result.map(|done| {
@@ -426,7 +554,20 @@ impl Changes {
         // A change that refused, or found everything as it should be, wrote nothing: its block makes no point (flags 0),
         // and pending bare edits of the producer's stay where they were.
         let wrote = result.as_ref().is_ok_and(|done| !done.unwritten());
-        ctx.reaper.undo_end(ctx.proj, desc, if wrote { -1 } else { 0 });
+        // (r-tracks) An action's block ends with flags 0: REAPER makes a point only of what the action marked itself.
+        // Inside the block REAPER's history doesn't move, but for an undo or redo the action ran: then the watch isn't told
+        // the history is Kumi's own, and its next look tells HISTORY what was taken back or made again.
+        let moved = history.is_some_and(|before| before != (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
+        ctx.reaper.undo_end(ctx.proj, desc, if wrote && !marks { -1 } else { 0 });
+        if moved {
+            if wrote {
+                ctx.reaper.refresh_after_change();
+            }
+            self.watch.borrow_mut().nudge();
+            let entry = ctx.reaper.undo_can_undo(ctx.proj).as_deref() == Some(desc);
+            let undo = json!({"desc": desc, "entry": entry, "stateCount": ctx.reaper.state_change_count(ctx.proj), "historyMoved": true});
+            return result.map(|done| (done, undo));
+        }
         let undo = self.after_block(ctx, desc, wrote);
         result.map(|done| (done, undo))
     }
@@ -557,6 +698,8 @@ impl Changes {
                 self.close(reaper, reads, plan);
             }
         }
+        // (r-tracks, NIT-7) The FX Kumi looked at lately are looked at again for parameters that move by themselves.
+        volatile::tick(reaper, reads);
         let Some(info) = reaper.current_project() else { return };
         // A plan's block is open: its points are not the producer's undo either.
         if self.plan.borrow().is_some() {
@@ -625,3 +768,16 @@ mod tests_lanes;
 mod tests_midi;
 #[cfg(test)]
 mod tests_takes;
+// (r-tracks) M4's tests of its kinds and of M3's carried fixes.
+#[cfg(test)]
+mod tests_actions;
+#[cfg(test)]
+mod tests_carried;
+#[cfg(test)]
+mod tests_lab;
+#[cfg(test)]
+mod tests_project;
+#[cfg(test)]
+mod tests_routing;
+#[cfg(test)]
+mod tests_tracks;

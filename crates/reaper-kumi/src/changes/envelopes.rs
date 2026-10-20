@@ -732,6 +732,9 @@ fn name_of<'a>(input: &'a Value) -> Done<&'a str> {
 /// The send a send ref names (REAPER gives a send no id: the ref says which of the sends to one track it is, of how many,
 /// and as two or more were then).
 fn send_index(ctx: &Ctx, reference: &str, field: &str) -> Done<(Track, i32)> {
+    // (a receive's ref names its send: r-tracks' `sends::canonical`)
+    let reference =
+        &super::sends::canonical(reference).map_err(|(code, message)| (code, message.replacen("ref must", &format!("{field} must"), 1)))?;
     let Ref::Send { track, category, other, repeat, of, seen } = Ref::parse(reference).map_err(bad)? else {
         return Err(bad(format!("{field} must be a send ref")));
     };

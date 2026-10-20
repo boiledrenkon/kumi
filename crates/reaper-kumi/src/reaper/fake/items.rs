@@ -1297,6 +1297,14 @@ pub(super) unsafe extern "C" fn kbd_get_text_from_cmd(command: c_int, section: *
 pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // The FX chains as m4-r-fxenv writes their entries (its FX kinds read them back), in stable text.
+        let chains = super::fxenv::chain_block(s, track as u64, "FXCHAIN", &t.fx)
+            + &super::fxenv::chain_block(s, track as u64, "FXCHAIN_REC", &t.input_fx);
+        // (r-tracks) Chunks that read the same while the track is the same, for the tests that compare them.
+        if let Some(text) = super::m4::stable_chunk(&t, &chains) {
+            write(buf, size, &text);
+            return true;
+        }
         // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
         t.sends.clear();
         let n = match s.chunks.iter().position(|kept| *kept == t) {
@@ -1308,10 +1316,9 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
         };
         let comping = t.extra.get("COMPLANE").copied().unwrap_or(0.0) != 0.0;
         let lanerec = if comping { "LANEREC -1 0 -1 0\n" } else { "LANEREC -1 -1 -1 0\n" };
-        // The FX chains as m4-r-fxenv writes their entries (its FX kinds read them back), in stable text.
-        let chains = super::fxenv::chain_block(s, track as u64, "FXCHAIN", &t.fx)
-            + &super::fxenv::chain_block(s, track as u64, "FXCHAIN_REC", &t.input_fx);
-        let text = format!("<TRACK {}\nNAME \"{}\"\n{lanerec}FAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
+        // (r-tracks) A track whose controls are locked says so in its state.
+        let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
+        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}FAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
         write(buf, size, &text);
         true
     })

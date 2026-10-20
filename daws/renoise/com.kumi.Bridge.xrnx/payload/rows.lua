@@ -214,6 +214,9 @@ local function macros_of(instrument)
   for k = 1, #instrument.macros do
     local macro = instrument:macro(k)
     macros[k] = { name = macro.name, value = macro.value }
+    -- (n-instruments: how many parameters each is mapped to; the mappings themselves are the instrument's XML)
+    local mapped = #macro.mappings
+    if mapped > 0 then macros[k].mappings = mapped end
   end
   return array(macros)
 end
@@ -225,7 +228,16 @@ local function midi_type_name(kind)
   return "external"
 end
 
--- What the instrument plays through: its samples, a plug-in, or a MIDI port (its settings under `midi`).
+-- n-instruments: Renoise's numbered settings by the names Kumi's changes take.
+local OVERLAP_NAMES = { [0] = "all", [1] = "cycle", [2] = "random" }
+local PLAYBACK_NAMES = { "off", "program", "keymap" }
+local QUANTIZE_NAMES = { "none", "line", "beat", "bar" }
+local KEY_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
+local NNA_NAMES = { "cut", "off", "continue" }
+local SYNC_NAMES = { "repitch", "percussion", "texture" }
+local INTERPOLATION_NAMES = { "none", "linear", "cubic", "sinc" }
+
+-- What the instrument plays through: its samples, a plug-in, or a MIDI port (its settings under `midi`); and its own settings.
 local function instrument_row(song, epoch, i)
   local instrument = song:instrument(i)
   local plugin = instrument.plugin_properties
@@ -236,6 +248,7 @@ local function instrument_row(song, epoch, i)
   elseif instrument.active_tab == renoise.Instrument.TAB_EXT_MIDI then
     kind = "midi"
   end
+  local trigger = instrument.trigger_options
   local row = {
     ref = refs.make(epoch, "instrument", i),
     index = i,
@@ -245,7 +258,28 @@ local function instrument_row(song, epoch, i)
     phraseCount = #instrument.phrases,
     plugin = plugin.plugin_loaded and plugin.plugin_device.name or json.null,
     macros = macros_of(instrument),
+    -- n-instruments
+    volumeDb = db(instrument.volume),
+    transpose = instrument.transpose,
+    overlap = OVERLAP_NAMES[instrument.sample_mapping_overlap_mode] or instrument.sample_mapping_overlap_mode,
+    phrasePlayback = PLAYBACK_NAMES[instrument.phrase_playback_mode] or instrument.phrase_playback_mode,
+    modsetCount = #instrument.sample_modulation_sets,
+    chainCount = #instrument.sample_device_chains,
+    quantize = QUANTIZE_NAMES[trigger.quantize] or trigger.quantize,
+    monophonic = trigger.monophonic,
   }
+  local program = instrument.phrase_program
+  if program >= 1 and program <= #instrument.phrases then row.phraseProgramRef = refs.make(epoch, "phrase", i, program) end
+  if trigger.monophonic then row.glide = trigger.monophonic_glide end
+  if trigger.scale_mode ~= "None" then row.scale, row.scaleKey = trigger.scale_mode, KEY_NAMES[trigger.scale_key] end
+  if plugin.plugin_loaded then
+    local device = plugin.plugin_device
+    row.pluginPath = device.device_path
+    row.pluginParamCount = #device.parameters
+    local preset = device.active_preset
+    if preset and preset > 0 and preset <= #device.presets then row.pluginPreset = device:preset(preset) end
+    row.pluginChannel, row.pluginTranspose = plugin.channel, plugin.transpose
+  end
   if kind == "midi" then
     row.midi = {
       device = out.device_name, type = midi_type_name(out.instrument_type), channel = out.channel, program = out.program,
@@ -260,9 +294,10 @@ local function range(pair)
 end
 
 local function sample_row(song, epoch, i, s)
-  local sample = song:instrument(i):sample(s)
+  local instrument = song:instrument(i)
+  local sample = instrument:sample(s)
   local mapping = sample.sample_mapping
-  return {
+  local row = {
     ref = refs.make(epoch, "sample", i, s),
     index = s,
     name = sample.name,
@@ -274,12 +309,43 @@ local function sample_row(song, epoch, i, s)
     mapVelocityToVolume = mapping.map_velocity_to_volume,
     loop = loop_name(sample.loop_mode),
     muteGroup = sample.mute_group,
+    -- n-instruments: every setting sample-set takes, by its names
+    volumeDb = db(sample.volume),
+    panning = sample.panning * 2 - 1,
+    transpose = sample.transpose,
+    fineTune = sample.fine_tune,
+    nna = NNA_NAMES[sample.new_note_action] or sample.new_note_action,
+    interpolation = INTERPOLATION_NAMES[sample.interpolation_mode] or sample.interpolation_mode,
   }
+  if sample.loop_mode ~= renoise.Sample.LOOP_MODE_OFF then
+    row.loopStart, row.loopEnd, row.loopRelease = sample.loop_start, sample.loop_end, sample.loop_release
+  end
+  if sample.beat_sync_enabled then row.beatSync, row.beatSyncLines, row.beatSyncMode = true, sample.beat_sync_lines, SYNC_NAMES[sample.beat_sync_mode] end
+  if sample.oneshot then row.oneshot = true end
+  if sample.autoseek then row.autoseek = true end
+  if sample.autofade then row.autofade = true end
+  if sample.oversample_enabled then row.oversample = true end
+  if mapping.read_only then row.keyzoneReadOnly = true end
+  if sample.is_slice_alias then row.slice = true end
+  local markers = sample.slice_markers
+  if #markers > 0 then row.sliceMarkers = array(markers) end
+  local set, chain = sample.modulation_set_index, sample.device_chain_index
+  row.modulationSetRef = set > 0 and refs.make(epoch, "modset", i, set) or json.null
+  row.fxChainRef = chain > 0 and refs.make(epoch, "chain", i, chain) or json.null
+  local buffer = sample.sample_buffer
+  if buffer.has_sample_data then
+    row.frames, row.rate, row.channels, row.bits = buffer.number_of_frames, buffer.sample_rate, buffer.number_of_channels, buffer.bit_depth
+  else
+    row.frames = 0
+  end
+  return row
 end
+
+local PLAY_NAMES = { "pattern", "script" }
 
 local function phrase_row(song, epoch, i, p)
   local phrase = song:instrument(i):phrase(p)
-  return {
+  local row = {
     ref = refs.make(epoch, "phrase", i, p),
     index = p,
     name = phrase.name,
@@ -287,6 +353,96 @@ local function phrase_row(song, epoch, i, p)
     lpb = phrase.lpb,
     keyTracking = key_tracking_name(phrase.key_tracking),
     looping = phrase.looping,
+    -- n-instruments
+    playback = PLAY_NAMES[phrase.playback_mode] or phrase.playback_mode,
+    baseNote = phrase.base_note,
+    loopStart = phrase.loop_start,
+    loopEnd = phrase.loop_end,
+    shuffle = phrase.shuffle,
+    autoseek = phrase.autoseek,
+    noteColumns = phrase.visible_note_columns,
+    effectColumns = phrase.visible_effect_columns,
+  }
+  local mapping = phrase.mapping
+  if mapping then
+    row.keyRange = range(mapping.note_range)
+    row.keyTrackingInKeymap, row.baseNoteInKeymap = key_tracking_name(mapping.key_tracking), mapping.base_note
+  else
+    row.keyRange = json.null
+  end
+  if phrase.playback_mode == renoise.InstrumentPhrase.PLAY_SCRIPT then
+    local script = phrase.script
+    row.scriptLines = #script.paragraphs
+    if script.compile_error ~= "" then row.compileError = script.compile_error end
+    if script.runtime_error ~= "" then row.runtimeError = script.runtime_error end
+    if script.pending_changes > 0 then row.uncommitted = true end
+  end
+  return row
+end
+
+-- n-instruments: an instrument's modulation sets, with their devices (and the devices' parameters, which are few), and its sample
+-- FX chains with their devices (their parameters are read as `param` rows of the device).
+local TARGET_NAMES = { "volume", "panning", "pitch", "cutoff", "resonance", "drive" }
+local OPERATOR_NAMES = { "add", "subtract", "multiply", "divide" }
+local INPUT_FIELDS = { volume = "volume_input", panning = "panning_input", pitch = "pitch_input", cutoff = "cutoff_input",
+  resonance = "resonance_input", drive = "drive_input" }
+local TARGET_WORDS = { "Volume ", "Panning ", "Pitch ", "Cutoff ", "Resonance ", "Drive " }
+
+local function moddevice_row(epoch, i, m, d, device)
+  local params = {}
+  for k = 1, #device.parameters do
+    local parameter = device:parameter(k)
+    params[k] = { index = k, name = parameter.name, value = parameter.value, valueString = parameter.value_string, min = parameter.value_min, max = parameter.value_max }
+  end
+  local kind = device.name
+  for _, word in ipairs(TARGET_WORDS) do
+    if kind:sub(1, #word) == word then kind = kind:sub(#word + 1) end
+  end
+  local row = {
+    ref = refs.make(epoch, "moddevice", i, m, d), index = d, name = device.display_name, type = kind,
+    target = TARGET_NAMES[device.target] or device.target, operator = OPERATOR_NAMES[device.operator] or device.operator,
+    bipolar = device.bipolar, active = device.is_active, params = array(params),
+  }
+  if device.tempo_sync_switching_allowed then row.tempoSynced = device.tempo_synced end
+  local ok, points = pcall(function() return device.points end)
+  if ok and type(points) == "table" then
+    row.points = #points
+    row.length = device.length
+  end
+  return row
+end
+
+local function modset_row(song, epoch, i, m)
+  local set = song:instrument(i):sample_modulation_set(m)
+  local inputs = {}
+  for key, field in pairs(INPUT_FIELDS) do inputs[key] = set[field].value end
+  local devices = {}
+  for d = 1, #set.devices do devices[d] = moddevice_row(epoch, i, m, d, set:device(d)) end
+  return {
+    ref = refs.make(epoch, "modset", i, m), index = m, name = set.name, pitchRange = set.pitch_range, filterType = set.filter_type,
+    filterVersion = set.filter_version, inputs = inputs, devices = array(devices),
+  }
+end
+
+local function chain_row(song, epoch, i, c)
+  local chain = song:instrument(i):sample_device_chain(c)
+  local devices = {}
+  for d = 1, #chain.devices do
+    local device = chain:device(d)
+    local preset = device.active_preset
+    devices[d] = {
+      ref = refs.make(epoch, "chaindevice", i, c, d), index = d, name = device.display_name ~= "" and device.display_name or device.name,
+      path = device.device_path, active = device.is_active, paramCount = #device.parameters,
+      preset = (preset and preset > 0 and preset <= #device.presets) and device:preset(preset) or json.null,
+    }
+  end
+  return { ref = refs.make(epoch, "chain", i, c), index = c, name = chain.name, outputRouting = chain.output_routing, devices = array(devices) }
+end
+
+local function parameter_row(reference, k, parameter)
+  return {
+    ref = reference, index = k, name = parameter.name, value = parameter.value, valueString = parameter.value_string,
+    min = parameter.value_min, max = parameter.value_max,
   }
 end
 
@@ -394,6 +550,7 @@ M.instrument_row = instrument_row
 M.sample_row = sample_row
 M.phrase_row = phrase_row
 M.device_row = device_row
+M.modset_row, M.chain_row, M.parameter_row = modset_row, chain_row, parameter_row -- (n-instruments)
 M.param_row = param_row
 M.line_row = line_row
 M.column_state = column_state

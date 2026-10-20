@@ -1394,6 +1394,11 @@ fn a_sends_automation_mode_is_set_and_put_back() {
     assert_eq!(mode(), 1.0, "nothing written");
     let (preview, _) = lab.make("send-automation-mode", json!({"ref": send, "mode": "track"}));
     assert_eq!((preview["display"]["title"].clone(), mode()), (json!("Send “Drums” → “Reverb” automation as its track's"), -1.0));
+    // The receive's ref names the same send.
+    let (preview, applied) = lab.make("send-automation-mode", json!({"ref": "r:send:{DDDD}:-1:{AAAA}", "mode": "read"}));
+    assert_eq!((preview["display"]["title"].clone(), mode()), (json!("Send “Drums” → “Reverb” automation read"), 1.0));
+    lab.undo("send-automation-mode", &preview, &applied).unwrap();
+    assert_eq!(mode(), -1.0);
     // The send gone: `gone`.
     let (preview, applied) = lab.make("send-automation-mode", input.clone());
     state(|s| s.tracks[0].sends.clear());

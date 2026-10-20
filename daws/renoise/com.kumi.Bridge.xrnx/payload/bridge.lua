@@ -34,6 +34,7 @@ function M.now_ms()
 end
 
 local host, st, b, conns, observers, jobs
+local instrument_scope -- (n-instruments; defined with the structural notifier)
 
 -- The epoch: refs are valid within one. It moves, at once and inside the notifier that saw it, when a song is switched and
 -- when something happens to the song that the tool can't map into the refs it handed out (instruments, patterns or the
@@ -61,6 +62,19 @@ local BREAKS = {
   instruments = { "instruments" }, sequence = { "sequence" },
 }
 local EVERYTHING = { "document", "tracks", "devices", "samples", "phrases", "patterns", "instruments", "sequence" }
+-- n-instruments: an instrument's modulation sets and their devices, its sample FX chains and their devices (and their
+-- parameters), and a plug-in instrument's parameters are lists of their own.
+for _, category in ipairs({ "modsets", "moddevices", "chains", "chaindevices", "plugins" }) do
+  CATEGORIES[#CATEGORIES + 1] = category
+  EVERYTHING[#EVERYTHING + 1] = category
+  BREAKS[category] = { category }
+end
+DEPENDS.modset = { "document", "instruments", "modsets" }
+DEPENDS.moddevice = { "document", "instruments", "modsets", "moddevices" }
+DEPENDS.chain = { "document", "instruments", "chains" }
+DEPENDS.chaindevice = { "document", "instruments", "chains", "chaindevices" }
+DEPENDS.chainparam = { "document", "instruments", "chains", "chaindevices" }
+DEPENDS.pluginparam = { "document", "instruments", "plugins" }
 
 local function bump_epoch(reason, tracks_kept, broken, keep_shifts)
   b.epoch_n = b.epoch_n + 1
@@ -322,6 +336,7 @@ end
 local function watch_sample(sample, token, instrument_token)
   observers:owned(token, instrument_token, function()
     observers:watch_changes(sample.name_observable)
+    observers:watch_changes(sample.sample_buffer_observable) -- (n-instruments: a sample loaded)
     local mapping = sample.sample_mapping
     if not mapping then return end
     observers:watch_changes(mapping.note_range_observable)
@@ -334,13 +349,43 @@ local function watch_sample(sample, token, instrument_token)
 end
 
 local function watch_phrase(phrase, token, instrument_token)
+  -- (n-instruments: the count of its changed lines, under an id of this watch, as a pattern's: a phrase change's undo goes
+  -- through only if none came since its step)
+  b.ids = (b.ids or 0) + 1
+  token.pid, token.touches = "ph" .. b.ids, 0
   observers:owned(token, instrument_token, function()
-    observers:watch_lines(phrase)
+    observers:watch_lines(phrase, token)
     observers:watch_changes(phrase.name_observable)
     observers:watch_layout(phrase.number_of_lines_observable)
     observers:watch_changes(phrase.lpb_observable)
     observers:watch_changes(phrase.visible_note_columns_observable)
     observers:watch_changes(phrase.visible_effect_columns_observable)
+    for _, name in ipairs({ "looping", "key_tracking", "base_note", "playback_mode" }) do
+      observers:watch_changes(phrase[name .. "_observable"])
+    end
+  end)
+end
+
+-- n-instruments: a modulation set's devices and a sample FX chain's devices are lists of their own (with their logs: a new one
+-- for every watch, as a track's devices have).
+local function watch_modset(set, token, instrument_token)
+  b.ids = (b.ids or 0) + 1
+  token.log, token.parent, token.devices = places.new("m" .. b.ids), instrument_token, {}
+  for d = 1, #set.devices do token.devices[d] = group() end
+  observers:owned(token, instrument_token, function()
+    observers:watch_changes(set.name_observable)
+    observers:watch_structural(set.devices_observable, "a modulation set's devices changed", "moddevices", set, token)
+  end)
+end
+
+local function watch_chain(chain, token, instrument_token)
+  b.ids = (b.ids or 0) + 1
+  token.log, token.parent, token.devices = places.new("c" .. b.ids), instrument_token, {}
+  for d = 1, #chain.devices do token.devices[d] = group() end
+  observers:owned(token, instrument_token, function()
+    observers:watch_changes(chain.name_observable)
+    observers:watch_changes(chain.output_routing_observable)
+    observers:watch_structural(chain.devices_observable, "a sample FX chain's devices changed", "chaindevices", chain, token)
   end)
 end
 
@@ -348,6 +393,11 @@ local function watch_instrument(song, i)
   local instrument = song:instrument(i)
   local token = b.groups.instruments[i]
   token.samples, token.phrases = {}, {}
+  -- n-instruments: the logs of its lists, new for every watch (a place from before the instrument was watched anew is unknown)
+  b.ids = (b.ids or 0) + 1
+  token.slog, token.phlog = places.new("s" .. b.ids), places.new("ph" .. b.ids)
+  token.mlog, token.clog = places.new("ms" .. b.ids), places.new("cs" .. b.ids)
+  token.modsets, token.chains = {}, {}
   observers:owned(token, nil, function()
     observers:watch_changes(instrument.name_observable)
     for k = 1, #instrument.macros do
@@ -357,6 +407,14 @@ local function watch_instrument(song, i)
     end
     observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples", instrument, token)
     observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument, token)
+    -- n-instruments
+    for _, name in ipairs({ "volume", "transpose", "sample_mapping_overlap_mode", "phrase_playback_mode", "phrase_program", "active_tab" }) do
+      observers:watch_changes(instrument[name .. "_observable"])
+    end
+    observers:watch_changes(instrument.phrase_mappings_observable)
+    observers:watch_structural(instrument.sample_modulation_sets_observable, "an instrument's modulation sets changed", "modsets", instrument, token)
+    observers:watch_structural(instrument.sample_device_chains_observable, "an instrument's sample FX chains changed", "chains", instrument, token)
+    observers:watch_structural(instrument.plugin_properties.plugin_device_observable, "an instrument's plug-in changed", "plugins", instrument, token)
   end)
   for s = 1, #instrument.samples do
     token.samples[s] = group()
@@ -365,6 +423,14 @@ local function watch_instrument(song, i)
   for ph = 1, #instrument.phrases do
     token.phrases[ph] = group()
     watch_phrase(instrument:phrase(ph), token.phrases[ph], token)
+  end
+  for m = 1, #instrument.sample_modulation_sets do
+    token.modsets[m] = group()
+    watch_modset(instrument:sample_modulation_set(m), token.modsets[m], token)
+  end
+  for c = 1, #instrument.sample_device_chains do
+    token.chains[c] = group()
+    watch_chain(instrument:sample_device_chain(c), token.chains[c], token)
   end
 end
 
@@ -431,11 +497,46 @@ local function remember(list, index)
   return exact
 end
 
+-- n-instruments: the logs of an instrument's lists (on its group), and of a set's or chain's devices (on theirs).
+local INSTRUMENT_LOGS = { samples = "slog", phrases = "phlog", modsets = "mlog", chains = "clog", moddevices = "log", chaindevices = "log" }
+-- The key of the journal's places each list moves.
+local INSTRUMENT_JOURNAL = {
+  instruments = "instrument", samples = "sample", phrases = "phrase", modsets = "modset", chains = "chain",
+  moddevices = "moddevice", chaindevices = "chaindevice",
+}
+
+local function position(list, token)
+  for k, candidate in ipairs(list or {}) do
+    if candidate == token then return k end
+  end
+  return nil
+end
+
+-- Which entries a list's operation moves: those of the instrument (and the set or chain) whose list it is; nil when the owner
+-- isn't found (the lists are out of step: the song is watched anew).
+instrument_scope = function(kind, token)
+  if kind == "instruments" then return {} end
+  if not token or not b.groups then return nil end
+  if kind == "moddevices" or kind == "chaindevices" then
+    local parent = token.parent
+    local i = position(b.groups.instruments, parent)
+    local at = parent and position(kind == "moddevices" and parent.modsets or parent.chains, token)
+    if not i or not at then return nil end
+    return kind == "moddevices" and { instrument = i, modset = at } or { instrument = i, chain = at }
+  end
+  local i = position(b.groups.instruments, token)
+  return i and { instrument = i } or nil
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
+  -- (n-instruments: a modulation set's devices notifier names each place one higher than the list has it: lab 2026-10-19)
+  if kind == "moddevices" and op then
+    op = { type = op.type, index = type(op.index) == "number" and op.index - 1 or op.index, index2 = type(op.index2) == "number" and op.index2 - 1 or op.index2 }
+  end
   bump_epoch(reason, true, BREAKS[kind])
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
   if kind == "devices" and token and token.dlog then
@@ -444,12 +545,20 @@ local function on_structural(reason, kind, op, owner, token)
     places.note(b.plog, op)
   elseif kind == "instruments" then
     places.note(b.ilog, op)
+  elseif token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]] then
+    places.note(token[INSTRUMENT_LOGS[kind]], op) -- (n-instruments)
   end
   local song = renoise.song()
   if not song then return end
   local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
   if token then
     lists.devices, lists.samples, lists.phrases = token.devices, token.samples, token.phrases
+    lists.modsets, lists.chains, lists.moddevices, lists.chaindevices = token.modsets, token.chains, token.devices, token.devices
+  end
+  -- (n-instruments: the journal's places of instruments and what is in them move with the list's operations)
+  if op and INSTRUMENT_JOURNAL[kind] then
+    local scope = instrument_scope(kind, token)
+    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, op.type, op.index, op.index2, song:is_undo_redoing()) end
   end
   if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
@@ -477,6 +586,10 @@ local function on_structural(reason, kind, op, owner, token)
         watch_sample(owner:sample(op.index), list[op.index], token)
       elseif kind == "phrases" then
         watch_phrase(owner:phrase(op.index), list[op.index], token)
+      elseif kind == "modsets" then
+        watch_modset(owner:sample_modulation_set(op.index), list[op.index], token)
+      elseif kind == "chains" then
+        watch_chain(owner:sample_device_chain(op.index), list[op.index], token)
       end
     end
   elseif op and op.type == "remove" then
@@ -641,6 +754,20 @@ local function watch_param(track_index, device_index, k)
   observers:owned(device_token, token, function() observers:watch_undo(parameter.value_observable) end)
 end
 
+-- n-instruments: what a change of Kumi's wrote is watched for the producer's undo (and nothing else), once per observable: an
+-- instrument's, a sample's or a phrase's settings aren't all watched otherwise. The watcher lives as long as the song's.
+local undo_watch_fn
+local function watch_undo(observable)
+  if not observers or not observable then return end
+  undo_watch_fn = undo_watch_fn or guard("undo watch", function()
+    local song = renoise.song()
+    if song and changes.journal_active(b.journal) and song:is_undo_redoing() then b.undone = true end
+  end)
+  local ok, has = pcall(function() return observable:has_notifier(undo_watch_fn) end)
+  if not ok or has then return end
+  observers:owned(nil, nil, function() observers:watch_undo_with(observable, undo_watch_fn) end)
+end
+
 -- Changes (M3): see changes.lua. Every request carries the epoch (and the layout) its refs were made in.
 -- A dialog holds Renoise's timers while its sockets keep answering (measured, 3.5.4: no tool timer ran in 3 s behind the
 -- "unsaved changes" prompt; with Renoise in the background they run as ever, 57-73 ms apart for 50). So a change that finds
@@ -680,6 +807,22 @@ end
 
 local function unknown_log() return nil, "unknown" end
 
+-- n-instruments: the log of a list of the instrument now at `i`, or of the set or chain now at `at` in it.
+local function instrument_log(kind, i, at)
+  local token = b.groups and b.groups.instruments[i]
+  if not token then return nil end
+  if kind == "moddevices" or kind == "chaindevices" then
+    local owner = (kind == "moddevices" and token.modsets or token.chains or {})[at]
+    return owner and owner.log or nil
+  end
+  return token[INSTRUMENT_LOGS[kind]]
+end
+
+local function phrase_token(i, ph)
+  local token = b.groups and b.groups.instruments[i]
+  return token and token.phrases and token.phrases[ph] or nil
+end
+
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -713,6 +856,35 @@ local place_env = {
   pattern_at = function(p, mark) return places.item(b.plog, p, mark) end,
   instrument_mark = function() return places.mark(b.ilog) end,
   instrument_at = function(i, mark) return places.item(b.ilog, i, mark) end,
+  -- n-instruments: where an instrument deleted from place `i` goes back; the logs of an instrument's lists (`kind` samples,
+  -- phrases, modsets or chains, of the instrument now at `i`) and of a set's or chain's devices (`kind` moddevices or
+  -- chaindevices, `i` and `at` the instrument and the set or chain now); a phrase's count of changed lines.
+  instrument_after = function(i, mark) return places.after(b.ilog, i, mark) end,
+  list_mark = function(kind, i, at)
+    local log_ = instrument_log(kind, i, at)
+    return log_ and places.mark(log_) or nil
+  end,
+  list_at = function(kind, i, at, n, mark)
+    local log_ = instrument_log(kind, i, at)
+    if not log_ then return unknown_log() end
+    return places.item(log_, n, mark)
+  end,
+  list_after = function(kind, i, at, n, mark, first)
+    local log_ = instrument_log(kind, i, at)
+    if not log_ then return unknown_log() end
+    return places.after(log_, n, mark, first)
+  end,
+  phrase_touch_mark = function(i, ph)
+    local token = phrase_token(i, ph)
+    return token and token.pid and (token.pid .. "=" .. token.touches) or nil
+  end,
+  phrase_touched_since = function(i, ph, mark)
+    local token = phrase_token(i, ph)
+    local pid, count
+    if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
+    if not token or not pid or pid ~= token.pid then return nil, "unknown" end
+    return token.touches > tonumber(count)
+  end,
 }
 
 local function change_env()
@@ -720,6 +892,7 @@ local function change_env()
     epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
     watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted, place_shifted = place_shifted,
     survives = function(from, kind) return survives(from, kind) end,
+    watch_undo = watch_undo, -- (n-instruments)
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
   }
@@ -737,6 +910,11 @@ end
 
 function handlers.change_restore(params)
   return changes.restore(params, change_env())
+end
+
+-- n-instruments: an instrument written to a file (an action: no undo step, nothing in the song changes).
+function handlers.instrument_save(params)
+  return changes.save_instrument(params, change_env())
 end
 
 -- A step of undo around a plan: Renoise has none that spans callbacks, so every change stays its own step (merged: false).
@@ -840,11 +1018,12 @@ local function carried(params, carry)
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, instrument_save = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
-local ALL_KINDS = { "song", "track", "device", "param", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase" }
+local ALL_KINDS = { "song", "track", "device", "param", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase",
+  "modset", "moddevice", "chain", "chaindevice", "chainparam", "pluginparam" }
 local function say_kept(result, from)
   if type(result) ~= "table" or type(from) ~= "string" or type(result.epoch) ~= "string" or result.epoch == from then return result end
   local kinds = {}
@@ -869,7 +1048,10 @@ function M.handle(_, request)
     if type(params) == "table" then
       local left
       params, left = refs.relabel_surviving(params, epoch(), survives)
-      if type(from) == "string" and from ~= epoch() and not left[from] and survives(from, "song") then
+      -- (n-instruments: a restore that finds what it changed by its places, not by its refs, goes ahead in the same song though
+      -- its refs went stale; it reads none of them, and any ref read still goes through refs.expect)
+      local by_place = request.method == "change_restore" and changes.restores_by_place(params.kind)
+      if type(from) == "string" and from ~= epoch() and (by_place or not left[from]) and survives(from, "song") then
         local copy = {}
         for k, v in pairs(params) do copy[k] = v end
         copy.epoch = epoch()
@@ -949,7 +1131,12 @@ function M.start(h, reloading)
     tracks = on_tracks,
     -- (every changed line counts for its pattern: the producer's edits, Renoise's undo and redo, Kumi's own writes. A notes
     -- change's undo goes through only if none came since its step; see changes_notes.lua)
-    lines = function(pos)
+    lines = function(pos, owner)
+      -- (n-instruments: a phrase's lines count for the phrase)
+      if owner then
+        if owner.touches then owner.touches = owner.touches + 1 end
+        return
+      end
       local token = type(pos) == "table" and type(pos.pattern) == "number" and b.groups and b.groups.patterns[pos.pattern]
       if token and token.touches then token.touches = token.touches + 1 end
     end,

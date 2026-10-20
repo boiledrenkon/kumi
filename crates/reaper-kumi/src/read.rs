@@ -2288,9 +2288,9 @@ mod tests {
         fake::with(|s| s.tracks[0].sends.push(FakeSend::to(3)));
         let (_, message) = lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}"})).unwrap_err();
         assert!(message.contains("2 such sends now") && message.contains("when there was one"), "{message}");
-        // Receives are told apart the same way.
+        // Receives are told apart the same way, with the pair's state as their send's refs carry it (M4).
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
-        assert_eq!(reverb[0]["ref"], "r:send:{DDDD}:-1:{AAAA}:1of2");
+        assert!(reverb[0]["ref"].as_str().unwrap().starts_with("r:send:{DDDD}:-1:{AAAA}:1of2."), "{}", reverb[0]["ref"]);
     }
 
     /// A hardware output is named by the output it goes to, so removing another output doesn't rename it.

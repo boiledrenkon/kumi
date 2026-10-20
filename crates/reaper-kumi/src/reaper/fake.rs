@@ -624,6 +624,11 @@ thread_local! {
     pub static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
+// (r-tracks) M4's track, routing, project and action functions, beside the fake's own.
+#[path = "fake_tracks.rs"]
+mod m4;
+pub use m4::{extra, mark_changed};
+
 pub fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
@@ -1073,7 +1078,7 @@ unsafe extern "C" fn kbd_get_text_from_cmd(cmd: c_int, _section: *mut c_void) ->
         40886 => c"File: Close all projects".as_ptr(),
         41824 => c"File: Render project, using the most recent render settings".as_ptr(),
         54000 => c"Script: kumi.lua".as_ptr(),
-        _ => c"".as_ptr(),
+        _ => m4::action_name(cmd).map_or(c"".as_ptr(), keep),
     }
 }
 unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
@@ -1235,11 +1240,19 @@ unsafe extern "C" fn set_region_or_marker_info_value(
 
 unsafe extern "C" fn enum_region_render_matrix(_proj: *mut ReaProject, number: c_int, n: c_int) -> *mut MediaTrack {
     counted(|s| {
-        let Some(id) = s.render_matrix.get(&number).and_then(|list| list.get(n as usize)) else { return ptr::null_mut() };
-        if id == "master" {
+        // (r-tracks) A track deleted since is in no matrix, as in REAPER.
+        let present: Vec<&String> = s
+            .render_matrix
+            .get(&number)
+            .into_iter()
+            .flatten()
+            .filter(|id| *id == "master" || s.tracks.iter().any(|t| t.guid == **id))
+            .collect();
+        let Some(id) = present.get(n as usize) else { return ptr::null_mut() };
+        if *id == "master" {
             return master_ptr();
         }
-        s.tracks.iter().position(|t| t.guid == *id).map_or(ptr::null_mut(), track_ptr)
+        s.tracks.iter().position(|t| t.guid == **id).map_or(ptr::null_mut(), track_ptr)
     })
 }
 
@@ -1358,7 +1371,7 @@ fn new_track_default(parm: &str) -> f64 {
     match parm {
         "I_NCHAN" => 2.0,
         "B_SHOWINTCP" | "B_SHOWINMIXER" | "I_FXEN" | "D_WIDTH" => 1.0,
-        "D_PANLAW" | "I_RECINPUT" => -1.0,
+        "D_PANLAW" | "I_RECINPUT" | "I_MIDIHWOUT" => -1.0,
         "I_PANMODE" => 3.0,
         _ => 0.0,
     }
@@ -2114,7 +2127,12 @@ unsafe extern "C" fn get_track_send_info_value(track: *mut MediaTrack, category:
             "I_SENDMODE" => send.mode as f64,
             "I_SRCCHAN" => send.src_chan as f64,
             "I_DSTCHAN" => send.dst_chan as f64,
-            other => send.extra.get(other).copied().unwrap_or(if other == "I_AUTOMODE" { -1.0 } else { 0.0 }),
+            // (r-tracks) A send follows the track's automation mode and the project's pan law, and has no slot hint, at first.
+            other => send.extra.get(other).copied().unwrap_or(if matches!(other, "I_AUTOMODE" | "D_PANLAW" | "I_SLOT_HINT") {
+                -1.0
+            } else {
+                0.0
+            }),
         }
     })
 }
@@ -2131,8 +2149,10 @@ unsafe extern "C" fn get_set_track_send_info(
         let own = unpack(track as u64).1;
         match (parm.as_str(), category) {
             ("P_DESTTRACK", 0) => send_of(s, track as u64, 0, index).map_or(ptr::null_mut(), |send| track_ptr(send.dest).cast()),
-            (env, 0) if env.starts_with("P_ENV:") => {
-                let chunk = &env["P_ENV:".len()..];
+            // (r-tracks) A hardware output's envelopes are the track's with "hw" before the chunk name.
+            (env, c) if c >= 0 && env.starts_with("P_ENV:") => {
+                let chunk = if c == 0 { env["P_ENV:".len()..].to_string() } else { format!("hw{}", &env["P_ENV:".len()..]) };
+                let chunk = chunk.as_str();
                 let t = track_of(s, track as u64);
                 let found = t.and_then(|t| {
                     t.envelopes.iter().position(|e| e.send.as_ref().is_some_and(|(send, c)| *send == index as usize && c == chunk))
@@ -2162,10 +2182,24 @@ unsafe extern "C" fn get_set_track_send_info_string(
     let value = if set { name_of(buf) } else { String::new() };
     counted(|s| {
         if set {
-            // The fake writes a send of the track itself (a send of category 0).
-            let Some(send) = track_mut(s, track as u64).filter(|_| category == 0).and_then(|t| t.sends.get_mut(index as usize)) else {
-                return false;
+            // A send of the track (category 0), a hardware output of it (above 0), or a receive (below 0: the sending
+            // track's send, the one object REAPER keeps for both).
+            let own = unpack(track as u64).1;
+            let place = match category {
+                0 => Some((own as usize, false, index as usize)),
+                c if c > 0 => Some((own as usize, true, index as usize)),
+                _ if own != MASTER => receives(s, own as usize).get(index.max(0) as usize).map(|&(src, n)| (src, false, n)),
+                _ => None,
             };
+            let send = place.and_then(|(at, hw, n)| {
+                let t = if at as u64 == MASTER { Some(&mut s.master) } else { s.tracks.get_mut(at) }?;
+                if hw {
+                    t.hw_outs.get_mut(n)
+                } else {
+                    t.sends.get_mut(n)
+                }
+            });
+            let Some(send) = send else { return false };
             send.ext.insert(parm, value);
             s.undo_dirty = true;
             return true;
@@ -2203,6 +2237,8 @@ unsafe extern "C" fn set_media_track_info_value(track: *mut MediaTrack, parm: *c
             "D_PAN" => t.pan = value,
             "B_MUTE" => t.mute = value != 0.0,
             "I_SOLO" => t.solo = value as i32,
+            // (r-tracks) A track whose controls are locked takes no arm (7.82 lab).
+            "I_RECARM" if t.extra.get("LOCK") == Some(&1.0) => {}
             "I_RECARM" => t.arm = value != 0.0,
             "I_SELECTED" => t.selected = value != 0.0,
             "I_FOLDERDEPTH" => t.folder = value as i32,
@@ -2272,9 +2308,16 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // (r-tracks) Chunks that read the same while the track is the same, for the tests that compare them.
+        if let Some(text) = m4::stable_chunk(&t, &fx_chain_text(&t.fx)) {
+            write(buf, size, &text);
+            return true;
+        }
         // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
         t.sends.clear();
-        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
+        // (r-tracks) A track whose controls are locked says so in its state.
+        let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
+        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}FAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
         s.chunks.push(t);
         if text.len() + 1 > size as usize {
             // Too small: REAPER fills what fits; the caller grows its buffer.
@@ -2308,9 +2351,12 @@ unsafe extern "C" fn create_track_send(track: *mut MediaTrack, dest: *mut MediaT
         s.undo_dirty = true;
         let Some(t) = track_mut(s, track as u64) else { return -1 };
         match dest_at {
+            // (r-tracks) REAPER lists a track's sends by their destination's place, two to one track in the order they were
+            // made (7.82 lab): a new one goes in its place there, and its index says where.
             Some(dest) => {
-                t.sends.push(FakeSend::to(dest));
-                t.sends.len() as c_int - 1
+                let at = t.sends.iter().position(|send| send.dest > dest).unwrap_or(t.sends.len());
+                t.sends.insert(at, FakeSend::to(dest));
+                at as c_int
             }
             None => {
                 t.hw_outs.push(FakeSend::to(0));
@@ -2406,6 +2452,8 @@ unsafe extern "C" fn reorder_selected_tracks(before: c_int, _folder: c_int) -> b
             for send in track.sends.iter_mut() {
                 send.dest = position[send.dest];
             }
+            // (r-tracks) Still listed by their destination's place.
+            track.sends.sort_by_key(|send| send.dest);
         }
         s.undo_dirty = true;
         true
@@ -2506,14 +2554,19 @@ unsafe extern "C" fn undo_end_block2(_proj: *mut ReaProject, desc: *const c_char
     let desc = name_of(desc);
     with(|s| {
         s.undo_depth = (s.undo_depth - 1).max(0);
-        if s.undo_depth > 0 || flags == 0 {
+        if s.undo_depth > 0 {
+            return;
+        }
+        // (r-tracks) A block ended with flags 0 makes a point only when REAPER marked a change of its own in it (an action).
+        let marked = m4::take_marked();
+        if flags == 0 && !marked {
             return;
         }
         // REAPER counts a flagged block whether or not it made a point.
         s.state_count += 1;
         let params_moved = s.block_params.values().any(|(before, now)| before != now);
         let noticed = !s.block_params.is_empty() && s.state_changed;
-        if s.undo_dirty || params_moved || noticed {
+        if s.undo_dirty || marked || params_moved || noticed {
             push_undo_point(s, &desc);
             s.undo_dirty = false;
         }
@@ -2843,7 +2896,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         ($($name:literal => $f:expr),* $(,)?) => {
             match name.to_bytes() {
                 $($name => $f as *mut c_void,)*
-                _ => ptr::null_mut(),
+                _ => m4::lookup(name),
             }
         };
     }
@@ -3031,6 +3084,7 @@ pub fn reset() {
             ..State::default()
         }
     });
+    m4::reset();
 }
 
 /// A colour as REAPER stores one (the OS's order, set flag): `(r, g, b)`.

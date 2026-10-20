@@ -426,6 +426,9 @@ impl Extension {
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
             // m4-r-fxenv
             "fx_chain_save" => self.changes.fx_chain_save(&self.reaper(), &self.reads, params),
+            // (r-tracks) Saving: actions, no change.
+            "project_save" => self.changes.project_save(&self.reaper(), &self.reads, params),
+            "track_template_save" => self.changes.track_template_save(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }

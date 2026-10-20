@@ -32,12 +32,22 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "autoitem",
             ],
             bodies: &["arrange", "midi", "fx", "routing"],
-            outside_undo: &["loop-repeat", "fx-eq-band", "automation-override"],
+            // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
+            outside_undo: &[
+                "loop-repeat",
+                "fx-eq-band",
+                "automation-override",
+                "project-notes",
+                "project-info",
+                "project-grid",
+                "project-timebase",
+            ],
         },
         Daw::Renoise => Kinds {
-            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
+            // (an instrument's modulation sets and sample FX chains: n-instruments)
+            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
-            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern"],
+            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern", "plugin-suspend"],
         },
     }
 }

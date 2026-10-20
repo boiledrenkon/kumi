@@ -10,6 +10,8 @@ use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, T
 
 pub mod generic;
 mod items;
+// (r-tracks) M4's track, routing, project and action calls.
+mod io;
 mod objects;
 mod write;
 pub use items::*;

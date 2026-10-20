@@ -597,9 +597,8 @@ fn a_send_change_is_refused_when_the_send_or_its_neighbours_moved() {
             .0,
         "changed"
     );
-    // The ways to ask wrongly.
+    // The ways to ask wrongly. (A receive's ref names its send since M4: see tests_routing.)
     for (kind, input) in [
-        ("send-volume", json!({"ref": "r:send:{DDDD}:-1:{AAAA}", "volumeDb": 0.0})),
         ("send-volume", json!({"ref": "r:send:{DDDD}:1:hw2", "volumeDb": 0.0})),
         ("send-volume", json!({"ref": "r:track:{AAAA}", "volumeDb": 0.0})),
         ("send-volume", json!({"ref": DRUMS_TO_REVERB, "volumeDb": 99.0})),

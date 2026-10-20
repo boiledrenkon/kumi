@@ -450,6 +450,10 @@ fn route(ctx: &Ctx, track: Track, category: i32, index: i32) -> Option<Value> {
         "phase": value("B_PHASE"),
         "mono": value("B_MONO"),
         "autoMode": value("I_AUTOMODE"),
+        // (r-tracks, N10) Its pan law, and its slot in REAPER's send list (the UI's own order, -1 unhinted): REAPER puts a
+        // route made again in its place by the tracks' order itself (7.82 lab), and the hint keeps a producer's own order.
+        "panLaw": value("D_PANLAW"),
+        "slotHint": value("I_SLOT_HINT"),
     }))
 }
 
@@ -717,6 +721,12 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             ("I_AUTOMODE", "autoMode"),
         ] {
             set(parm, key);
+        }
+        // (r-tracks, N10) Kept since M4: a delete Kumi made before has none, and its route takes REAPER's defaults.
+        for (parm, key) in [("D_PANLAW", "panLaw"), ("I_SLOT_HINT", "slotHint")] {
+            if route.get(key).is_some_and(Value::is_number) {
+                set(parm, key);
+            }
         }
         remade += 1;
     }
