@@ -9,6 +9,7 @@
 //! the answers carry the new epoch.
 use super::listening::SimListening;
 use super::reaper::LISTENING_METHODS;
+use super::renoise_dsp::Chains;
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -61,6 +62,8 @@ struct State {
     run_start: u32,
     /// Pattern tracks' lines a test writes (`set_lines`), by pattern and track: read by `line`, written by `notes-write`.
     lines: std::collections::HashMap<(u64, u64), Vec<Value>>,
+    /// The DSP chains a test put on tracks (`add_device`): read and changed as the tool does (M5).
+    chains: Chains,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -100,6 +103,35 @@ fn from_another_epoch(params: &Value, epoch: u32) -> Option<u32> {
         Value::Array(items) => items.iter().find_map(|item| from_another_epoch(item, epoch)),
         Value::Object(map) => map.values().find_map(|value| from_another_epoch(value, epoch)),
         _ => None,
+    }
+}
+
+/// `params` with every track ref (and the `epoch`) of an earlier epoch of the run made this epoch's, as the tool carries a
+/// request's refs that still name the same things (epochs moved only for devices keep the tracks); the first ref that
+/// can't be carried (another kind, or from before the run), as the epoch it names.
+fn carried_tracks(params: &Value, epoch: u32, run_start: u32, key: Option<&str>) -> Result<Value, u32> {
+    let run = run_start..epoch;
+    match params {
+        Value::String(text) if key == Some("epoch") => match text.parse::<u32>() {
+            Ok(from) if run.contains(&from) => Ok(Value::String(epoch.to_string())),
+            _ => Ok(params.clone()),
+        },
+        Value::String(text) => match epoch_of(text) {
+            Some(from) if from != epoch && run.contains(&from) && text.split(':').nth(1) == Some("track") => {
+                Ok(Value::String(format!("{epoch}{}", &text[text.find(':').expect("a ref")..])))
+            }
+            Some(from) if from != epoch => Err(from),
+            _ => Ok(params.clone()),
+        },
+        Value::Array(items) => {
+            items.iter().map(|item| carried_tracks(item, epoch, run_start, key)).collect::<Result<Vec<_>, _>>().map(Value::Array)
+        }
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| carried_tracks(v, epoch, run_start, Some(k)).map(|v| (k.clone(), v)))
+            .collect::<Result<serde_json::Map<_, _>, _>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
     }
 }
 
@@ -168,6 +200,7 @@ impl RenoiseScript {
                 undo: vec![],
                 run_start: VECTORS_EPOCH,
                 lines: Default::default(),
+                chains: Chains::default(),
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -240,6 +273,17 @@ impl RenoiseScript {
             state.mute.get(&track).copied().unwrap_or(false),
             state.devices.get(&track).copied().unwrap_or(0),
         )
+    }
+
+    /// A native device a test puts on a track, after its TrackVolPan and what it has (by path or name: EQ 10, Maximizer,
+    /// Gainer): its place in the chain (from 1). The track's devices are read and changed from then on as the tool does.
+    pub fn add_device(&self, track: u64, path: &str) -> u64 {
+        self.state.lock().unwrap().chains.add(track, path).unwrap_or_else(|| panic!("the simulator has no device {path}"))
+    }
+
+    /// A parameter's value on a track's device (its place from 1), by the parameter's name.
+    pub fn device_value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
+        self.state.lock().unwrap().chains.value(track, at, name)
     }
 
     /// A pattern track's lines, as the line read gives them (`[{line, notes: [{col, note, …}]}]`): groove reads them, and
@@ -387,6 +431,16 @@ impl RenoiseScript {
         if kind == "notes-write" {
             return Self::notes_write(state, method, params);
         }
+        if matches!(kind, "device-param" | "device-params") {
+            // (a device or parameter ref names its place in this epoch only: a device-add since moves it)
+            if let Some(from) =
+                params["input"]["ref"].as_str().and_then(epoch_of).filter(|from| method != "change_restore" && *from != epoch)
+            {
+                return Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again")));
+            }
+            let State { chains, undo, .. } = state;
+            return chains.change(epoch, method, params, undo);
+        }
         // Lua run in the song: one step of Renoise's undo, which only Renoise's own undo takes back.
         if kind == "run-lua" {
             let title = "Ran Lua: song.transport.bpm = 140";
@@ -488,10 +542,11 @@ impl RenoiseScript {
                         json!({"target": {"ref": reference, "kind": "track"}, "prior": {"devices": count + 1}, "fence": {"devices": count + 1}, "display": {"title": format!("Added “{path}” to “Track {track}”")}}),
                     )),
                     "change_apply" => {
+                        let at = state.chains.added(track, &path);
                         state.devices.insert(track, count + 1);
                         state.epoch += 1;
                         state.undo.push(desc.clone());
-                        let made = format!("{}:device:{track}.{}", state.epoch, count + 2);
+                        let made = format!("{}:device:{track}.{}", state.epoch, at.unwrap_or(count + 2));
                         Ok(answer(
                             state,
                             // Only the devices moved: the tracks are where they were, and their refs from before still name them.
@@ -505,6 +560,9 @@ impl RenoiseScript {
                         if made_in != epoch || count == 0 {
                             return Err(("changed".into(), "the devices changed since Kumi added it".into()));
                         }
+                        if let Some((_, at)) = place(params["created"]["ref"].as_str(), "device") {
+                            state.chains.removed(track, at.get(1).copied().unwrap_or(0));
+                        }
                         state.devices.insert(track, count - 1);
                         state.epoch += 1;
                         state.undo.push(desc);
@@ -515,7 +573,7 @@ impl RenoiseScript {
                     }
                 }
             }
-            _ => Err(bad("the simulator makes only track-volume, track-mute and device-add")),
+            _ => Err(bad("the simulator makes only track-volume, track-mute, device-add, device-param(s), notes-write and run-lua")),
         }
     }
 
@@ -550,10 +608,16 @@ impl RenoiseScript {
 
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
         if LISTENING_METHODS.contains(&method) {
-            let epoch = self.state.lock().unwrap().epoch;
-            if let Some(from) = from_another_epoch(params, epoch) {
-                return Some(Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again"))));
-            }
+            let (epoch, run_start) = {
+                let state = self.state.lock().unwrap();
+                (state.epoch, state.run_start)
+            };
+            let params = &match carried_tracks(params, epoch, run_start, None) {
+                Ok(carried) => carried,
+                Err(from) => {
+                    return Some(Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again"))))
+                }
+            };
             // Any track of the song's epoch (the sim's song has its tracks numbered from 1).
             let prefix = format!("{epoch}:track:");
             let known = |reference: &str| reference.strip_prefix(&prefix).is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n >= 1));
@@ -594,6 +658,17 @@ impl RenoiseScript {
         let restarts = state.restarts;
         let epoch = state.epoch;
         let stale = |from: u32| ("stale".to_string(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again"));
+        // A track with a test's chain answers from it: a track ref from any epoch of the run (only devices moved since), a
+        // device ref from this one only (a device-add moves them, as the tool's epoch says).
+        if method == "read" {
+            let primary = params.get("ref").or(params.get("parent")).and_then(Value::as_str).unwrap_or_default();
+            let from = epoch_of(primary).unwrap_or(epoch);
+            if let Some(page) = state.chains.read(epoch, params) {
+                let names_track = primary.split(':').nth(1) == Some("track");
+                let fresh = if names_track { (state.run_start..=epoch).contains(&from) } else { from == epoch };
+                return Some(if fresh { Ok(page) } else { Err(stale(from)) });
+            }
+        }
         // The vectors were made in epoch 1. In a later one the same questions have that epoch's refs, and anything from
         // before is refused.
         if epoch != VECTORS_EPOCH {

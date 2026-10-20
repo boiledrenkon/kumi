@@ -427,6 +427,64 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_goal_settles_its_winner_as_one_device_params_change_that_kumis_undo_takes_back() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let eq = script.add_device(4, "EQ 10");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate { track: "Bass".into(), clip: None, label: Some("bass".into()), mix: None }],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let rig = renoise.goal(&request, Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            assert_eq!(slots[0].chain, "TrackVolPan → EQ 10 → Maximizer", "a safety Maximizer last");
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name.starts_with("Gain 2 ")).cloned().collect();
+            assert_eq!(knobs.len(), 1, "{:?}", slots[0].knobs);
+            let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![6.], fresh: None };
+            let generation = rig.generation(&[trial], Signal::new(), None).await.unwrap();
+            assert!(generation.scores.contains_key(&slots[0].name), "{generation:?}");
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[6.], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(0.), "the track itself is untouched while searching");
+            // The copies moved Renoise's epoch since the knobs were read: the winner settles all the same, in one change.
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[6.], Signal::new()).await.unwrap(), None);
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(6.));
+            let applied: Vec<Value> = script
+                .asked()
+                .into_iter()
+                .filter(|(method, params)| {
+                    method == "change_apply" && params["kind"].as_str().is_some_and(|kind| kind.starts_with("device-param"))
+                })
+                .map(|(_, params)| params["input"].clone())
+                .collect();
+            assert_eq!(applied.len(), 2, "the settle and the safety Maximizer's Boost at 0 dB: {applied:?}");
+            assert_eq!(applied[0]["values"], json!([{"param": 2, "value": 6.0}]), "{applied:?}");
+            rig.close().await.unwrap();
+            // Kumi's undo takes the settle back as a new step.
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            let undo = tool(&observed, "undo_change").execute(object(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!undo.is_error && undo.text.contains("EQ 10 1 parameter"), "{}", undo.text);
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(0.));
+            assert_ours(&told.borrow());
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// A two-bar 8th-note part: on the beat at `on`, off it at `off`, `late` beats behind the 8th.
 fn eighths(late: f64, on: i64, off: i64) -> Vec<(i64, f64, f64, i64)> {
     let mut notes: Vec<(i64, f64, f64, i64)> = (0..16)
