@@ -23,8 +23,8 @@ pub const DAW: OwnDaw = OwnDaw {
     host_flag: "renoise",
     instructions: INSTRUCTIONS,
     read_tool: "renoise_read",
-    read_description: "Read Renoise: the song, its tracks, and what's in them (the sequence, patterns and their lines, instruments, samples, phrases, devices and parameters), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. A track's groupRef is the group it's in; pan runs -1 to 1. Lines list only lines with something on them, numbered from 1. A note column: note (C-4, OFF), instrument (hex, 00 the first), volume (hex 00-80, 80 full, or a column effect), panning (hex 00-80, 40 centre), delay (hex 00-FF, 256ths of a line), fx (the column's own effect: two characters, then a hex amount). effects are the line's effect columns: number and amount (0A and 20 is 0A20). A pattern is lines long, at the song's lines per beat.",
-    read_kinds: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
+    read_description: "Read Renoise: the song, its tracks, and what's in them (the sequence, patterns and their lines, instruments, samples, phrases, devices and parameters; an instrument's modulation sets and sample FX chains, and the parameters of their devices and of a plug-in instrument), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. A track's groupRef is the group it's in; pan runs -1 to 1. Lines list only lines with something on them, numbered from 1. A note column: note (C-4, OFF), instrument (hex, 00 the first), volume (hex 00-80, 80 full, or a column effect), panning (hex 00-80, 40 centre), delay (hex 00-FF, 256ths of a line), fx (the column's own effect: two characters, then a hex amount). effects are the line's effect columns: number and amount (0A and 20 is 0A20). A pattern is lines long, at the song's lines per beat. A pattern's automation (parent the pattern, with track) lists each automated parameter's points: time in lines from 1, value 0 to 1 of the parameter's range.",
+    read_kinds: &["song", "track", "sequence", "pattern", "line", "automation", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
     project_kind: "song",
     fill_focus,
     bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
@@ -138,13 +138,19 @@ impl RefScheme for RenoiseRefs {
     }
     fn moved(&self, shift: &Shift, reference: &str) -> Moved {
         let Some((epoch, kind, mut numbers)) = parts(reference) else { return Moved::Same };
-        if !matches!(kind, "track" | "device" | "param") || numbers.is_empty() {
+        // Which of its numbers is a track's: the first, but a pattern track's second (pattern.track).
+        let at = match kind {
+            "track" | "device" | "param" | "slot" => 0,
+            "ptrack" => 1,
+            _ => return Moved::Same,
+        };
+        if numbers.len() <= at {
             return Moved::Same;
         }
-        match moved_index(numbers[0], &shift.tracks_gone, &shift.tracks_made) {
-            Some(now) if now == numbers[0] => Moved::Same,
+        match moved_index(numbers[at], &shift.tracks_gone, &shift.tracks_made) {
+            Some(now) if now == numbers[at] => Moved::Same,
             Some(now) => {
-                numbers[0] = now;
+                numbers[at] = now;
                 let numbers: Vec<String> = numbers.iter().map(usize::to_string).collect();
                 Moved::To(format!("{epoch}:{kind}:{}", numbers.join(".")))
             }
@@ -164,9 +170,10 @@ impl RefScheme for RenoiseRefs {
     fn parents(&self, kind: &str) -> Option<Vec<String>> {
         let parents: &[&str] = match kind {
             "line" => &["pattern"],
-            "sample" | "phrase" => &["instrument"],
+            "sample" | "phrase" | "modset" | "chain" => &["instrument"],
             "device" => &["track"],
-            "param" => &["device"],
+            // (a track's device; a sample FX chain's device, or a plug-in instrument: n-instruments)
+            "param" => &["device", "chaindevice", "instrument"],
             _ => return None,
         };
         Some(parents.iter().map(|parent| parent.to_string()).collect())

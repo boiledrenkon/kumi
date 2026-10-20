@@ -492,6 +492,7 @@ name = "daw-mcp-server"
 version = "0.1.0"
 dependencies = [
  "daw-bridge",
+ "flate2",
  "libc",
  "serde",
  "serde_json",
@@ -1235,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "kumi"
-version = "1.19.2"
+version = "1.19.3"
 dependencies = [
  "ableton-mcp-server",
  "async-trait",
@@ -1272,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "kumi-common"
-version = "1.19.2"
+version = "1.19.3"
 dependencies = [
  "icu_collator",
  "icu_locale_core",
@@ -1285,8 +1286,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumi-runtime"
+name = "kumi-genexpr"
 version = "1.19.2"
+
+[[package]]
+name = "kumi-runtime"
+version = "1.19.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1303,6 +1308,7 @@ dependencies = [
  "home",
  "indexmap",
  "kumi-common",
+ "kumi-genexpr",
  "kumi-store",
  "libc",
  "md-5",

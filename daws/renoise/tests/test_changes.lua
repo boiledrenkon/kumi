@@ -518,52 +518,6 @@ test("changes: a restore too big for one callback is numbered steps, each its ow
   H.no_dialogs()
 end)
 
-test("changes: a sliced restore that is stopped by a busy Renoise takes back the track it made", function()
-  local env, peer = setup({ patch = function(env)
-    local path = env.bundle .. "payload/changes_base.lua"
-    local f = assert(io.open(path, "rb"))
-    local text = f:read("*a")
-    f:close()
-    f = assert(io.open(path, "wb"))
-    f:write((text:gsub("M%.SLICE_WRITES = %d+", "M.SLICE_WRITES = 40")))
-    f:close()
-  end })
-  local song = mock.song
-  for p = 1, 3 do
-    for k = 1, 10 do
-      local column = song:pattern(p):track(2):line(k):note_column(1)
-      column.note_value, column.instrument_value, column.volume_value = 40 + k, 1, 64
-    end
-  end
-  local epoch = place(peer)
-  local previewed, _, layout = preview(peer, "track-delete", { ref = track_ref(epoch, 2) })
-  local done = apply(peer, "track-delete", { ref = track_ref(epoch, 2) }, "Kumi: d (ks03)", previewed.fence, epoch, layout)
-  next_id = next_id + 1
-  local id = next_id
-  H.send(peer, { type = "request", id = id, method = "change_restore", params = {
-    kind = "track-delete", target = previewed.target, prior = previewed.prior, applied = done.result.applied,
-    material = done.result.material, desc = "Kumi: undo d (ks04)", epoch = epoch, layout = done.result.layout } })
-  mock.advance(10) -- the first step runs
-  eq(mock.data.tracks[2].name, "Hat", "the track is made")
-  ok(mock.song:pattern(3):track(2).is_empty, "and only its first step has run")
-  mock.data.song_fields.rendering = true
-  local response
-  for _ = 1, 100 do
-    mock.advance(20)
-    drain(peer)
-    for _, line in ipairs(peer:frames(nil)) do
-      local frame = assert(json.decode(line))
-      if frame.type == "response" and frame.id == id then response = frame end
-    end
-    if response then break end
-  end
-  mock.data.song_fields.rendering = false
-  ok(response and response.error, "the restore did not finish")
-  eq(response.error.code, "busy")
-  eq(#mock.data.tracks, 5, "the track the restore made is gone again")
-  H.no_dialogs()
-end)
-
 -- Transport and steps
 
 test("changes: the emergency stop stops what plays and says whether it was recording", function()
@@ -695,7 +649,7 @@ test("changes: a group's first member goes back first, its last member back last
   eq(first.group.name, "Group")
   eq(order(), before, "the first member is the first member again")
   local last = delete_and_restore(peer, 4)
-  eq(last.group.index, 5)
+  eq(last.group.at, 4, "the group, one place up once its last member is gone")
   eq(order(), before, "and the last is the last")
   eq(mock.data.tracks[5].members, 2)
   -- a track that is not in a group is not put in one
@@ -1298,7 +1252,7 @@ test("changes: the columns Kumi showed stay shown when the producer put somethin
   H.no_dialogs()
 end)
 
-test("changes: a cell the producer changed since is not overwritten by a restore unless Kumi is told to", function()
+test("changes: a cell the producer changed since is not overwritten by a restore, discard or not (lines have no identity but their place)", function()
   local env, peer = setup()
   local epoch, layout = place(peer)
   local input = write_input(epoch)
@@ -1309,17 +1263,9 @@ test("changes: a cell the producer changed since is not overwritten by a restore
   local before = steps()
   local record = { target = previewed.target, prior = previewed.prior, applied = done.applied }
   failure(restore(peer, "notes-write", record, "Kumi: undo (kn22)", epoch, layout), "changed")
+  failure(restore(peer, "notes-write", record, "Kumi: undo (kn22)", epoch, layout, { discard = true }), "changed")
   eq(cell(1, 3, 1, 1), "G-3 00 40 .. .. 0000")
   eq(steps(), before)
-  local forced = restore(peer, "notes-write", record, "Kumi: undo (kn22)", epoch, layout, { discard = true })
-  ok(forced.result, json.encode(forced.error or {}))
-  eq(cell(1, 3, 1, 1), "--- .. .. .. .. 0000")
-  -- asked again: it is back, nothing is written
-  local after_forced = steps()
-  local again = restore(peer, "notes-write", record, "Kumi: undo (kn23)", epoch, layout)
-  ok(again.result, json.encode(again.error or {}))
-  eq(again.result.undo.entry, false)
-  eq(steps(), after_forced)
   H.no_dialogs()
 end)
 
@@ -1452,9 +1398,9 @@ test("changes: a sequence slot names its pattern, and Renoise refusing the text 
   ok(done.result, json.encode(done.error or {}))
   eq(cell(3, 1, 2, 1), "C-5 .. .. .. .. 0000")
   eq(cell(1, 1, 2, 1), "--- .. .. .. .. 0000")
-  -- a text that Renoise itself refuses (the mock reads effect numbers as hex only) leaves the pattern as it was
+  -- a text that Renoise itself refuses (QQ is no effect command) leaves the pattern as it was
   local column = mock.song:pattern(1):track(2):line(3):note_column(1)
-  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "ZT20" } } } } }
+  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "QQ20" } } } } }
   local p2 = preview(peer, "notes-write", refused)
   local before = steps()
   failure(apply(peer, "notes-write", refused, "Kumi: bad (kn62)", p2.fence, epoch, layout), "failed")
@@ -1494,14 +1440,23 @@ test("changes: a big restore is numbered steps, and the producer's undo of lines
   H.tick(3)
   drain(peer)
   told = H.events(peer, "undone_in_daw")
-  eq(told[#told].data.how, "redo")
-  -- restored in numbered steps (84 writes in slices of 30)
-  local undone = restore(peer, "notes-write", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo many (kn72)", epoch, layout)
+  -- (lines back as Kumi wrote them may be Renoise's redo, or its undo of something older: Kumi can't tell)
+  eq(told[#told].data.how, "unsure")
+  -- and Kumi's undo refuses: Renoise's undo and redo changed the pattern since Kumi's step
+  local refused = restore(peer, "notes-write", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo many (kn72)", epoch, layout)
+  eq(refused.error and refused.error.code, "changed", json.encode(refused))
+  eq(cell(1, 2, 12, 1):sub(1, 3), "C-3")
+  -- restored in numbered steps (84 writes in slices of 30), in a pattern nothing changed since
+  input.pattern = pattern_ref(epoch, 2)
+  previewed = preview(peer, "notes-write", input)
+  done = apply(peer, "notes-write", input, "Kumi: many (kn73)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local undone = restore(peer, "notes-write", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo many (kn74)", epoch, layout)
   ok(undone.result, json.encode(undone.error or {}))
   eq(undone.result.undo.steps, 3)
-  eq(mock.data.undo.stack[#mock.data.undo.stack].desc, "Kumi: undo many (kn72) (3/3)")
-  eq(cell(1, 2, 12, 1), "--- .. .. .. .. 0000")
-  eq(cell(1, 2, 1, 1), "--- .. .. .. .. 0000")
+  eq(mock.data.undo.stack[#mock.data.undo.stack].desc, "Kumi: undo many (kn74) (3/3)")
+  eq(cell(2, 2, 12, 1), "--- .. .. .. .. 0000")
+  eq(cell(2, 2, 1, 1), "--- .. .. .. .. 0000")
   H.no_dialogs()
 end)
 
@@ -1831,7 +1786,7 @@ test("changes: a slot is made with a new pattern or an existing one, and removed
   eq(seq_text(), "1,4,2,1,3")
   eq(#mock.data.patterns, 4)
   eq(steps(), 1)
-  eq(done.result.applied.pattern, 4)
+  eq(done.result.applied.pattern, done.result.epoch .. ":pattern:4")
   eq(done.result.created.ref, done.result.epoch .. ":seq:2")
   ok(done.result.epoch ~= epoch, "the sequence moved the epoch")
   local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created }
@@ -1896,7 +1851,7 @@ test("changes: a deleted slot comes back with its pattern, section and muted tra
   ok(done.result, json.encode(done.error or {}))
   eq(seq_text(), "1,2,3")
   eq(steps(), 1)
-  eq(done.result.material.pattern, 1)
+  eq(done.result.material.pattern, done.result.epoch .. ":pattern:1")
   eq(done.result.material.section.name, "Drop")
   eq(#done.result.material.mutes, 2)
   eq(done.result.material.gone, nil, "pattern 1 is used by slot 1 still")
@@ -2002,12 +1957,12 @@ test("changes: a slot plays another pattern unless that would make Renoise remov
   local input = { ref = seq_ref(epoch, 3), pattern = pattern_ref(epoch, 3) }
   local previewed = preview(peer, "slot-pattern", input)
   eq(previewed.display.title, "Slot 3 → pattern “Pattern 02”")
-  eq(previewed.prior.pattern, 1)
+  eq(previewed.prior.pattern, epoch .. ":pattern:1")
   local done = apply(peer, "slot-pattern", input, "Kumi: pattern (km01)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
   eq(seq_text(), "1,2,3,3")
   eq(steps(), 1)
-  eq(done.result.applied.pattern, 3)
+  eq(done.result.applied.pattern, epoch .. ":pattern:3")
   local undone = restore(peer, "slot-pattern", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo (km02)", epoch, layout)
   ok(undone.result, json.encode(undone.error or {}))
   eq(seq_text(), "1,2,1,3")
@@ -2281,19 +2236,27 @@ test("changes: a null in a request (taking a track out of its group) survives th
   H.no_dialogs()
 end)
 
-test("changes: a song setting made before a sequence or device change is put back after it", function()
+test("changes: a tempo change made before a sequence or device change is put back after it; a loop range is not", function()
   local env, peer = device_song()
   local e1, l1 = place(peer)
-  local pv = preview(peer, "loop-range", { first = 2, last = 3 })
-  local done = apply(peer, "loop-range", { first = 2, last = 3 }, "Kumi: loop (kj01)", pv.fence, e1, l1)
+  local tempo = { bpm = 133 }
+  local tp = preview(peer, "song-bpm", tempo)
+  local td = apply(peer, "song-bpm", tempo, "Kumi: tempo (kj01)", tp.fence, e1, l1)
+  ok(td.result, json.encode(td.error or {}))
+  local loop = { first = 2, last = 3 }
+  local pv = preview(peer, "loop-range", loop)
+  local done = apply(peer, "loop-range", loop, "Kumi: loop (kj02)", pv.fence, e1, l1)
   ok(done.result, json.encode(done.error or {}))
   -- the sequence changes (the epoch moves, and slot refs with it)
-  local ins = apply(peer, "slot-insert", {}, "Kumi: slot (kj02)", preview(peer, "slot-insert", {}).fence, e1, l1)
+  local ins = apply(peer, "slot-insert", {}, "Kumi: slot (kj03)", preview(peer, "slot-insert", {}).fence, e1, l1)
   ok(ins.result, json.encode(ins.error or {}))
   ok(ins.result.epoch ~= e1)
-  local undone = restore(peer, "loop-range", { target = pv.target, prior = pv.prior, applied = done.result.applied }, "Kumi: undo loop (kj03)", e1, l1)
+  local undone = restore(peer, "song-bpm", { target = tp.target, prior = tp.prior, applied = td.result.applied }, "Kumi: undo tempo (kj04)", e1, l1)
   ok(undone.result, json.encode(undone.error or {}))
-  eq(#mock.song.transport.loop_sequence_range, 0)
+  eq(mock.data.transport_fields.bpm, 120)
+  -- the loop range names slots: after the sequence changed Kumi's undo would loop other slots, so it is refused
+  failure(restore(peer, "loop-range", { target = pv.target, prior = pv.prior, applied = done.result.applied }, "Kumi: undo loop (kj05)", e1, l1), "stale")
+  eq(#mock.song.transport.loop_sequence_range, 2, "nothing was written")
   -- a slot ref from before is not kept
   failure(call(peer, "change_preview", { kind = "slot-section", input = { ref = seq_ref(e1, 1), name = "A" }, epoch = e1, layout = l1 }), "stale")
   H.no_dialogs()

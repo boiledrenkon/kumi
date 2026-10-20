@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FilterDevicePreset doc_version="14">
+  <DeviceSlot type="NotePadDevice">
+    <IsMaximized>true</IsMaximized>
+    <Paragraphs>
+      <Paragraph>Bass: keep it mono &amp; dry</Paragraph>
+      <Paragraph>Line two — été</Paragraph>
+    </Paragraphs>
+  </DeviceSlot>
+</FilterDevicePreset>

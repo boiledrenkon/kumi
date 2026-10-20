@@ -97,6 +97,9 @@ pub type SpawnFuture = Pin<Box<dyn Future<Output = Result<Box<dyn SpawnedBridge>
 /// Starts a bridge for the host, given Kumi's folder (what the bridge gets as `--kumi-home`): a future, so a test can
 /// start a simulator in its place.
 pub type Spawner = Box<dyn Fn(PathBuf) -> SpawnFuture + Send + Sync>;
+/// What the host asks again on a fresh connection when the old one was lost: the reads (and a preview, which writes
+/// nothing). A write is never sent twice.
+const RESENT: [&str; 6] = ["read", "snapshot", "focus", "focus_body", "status", "change_preview"];
 
 /// The host for one DAW.
 pub struct Host {
@@ -196,7 +199,7 @@ impl Host {
             bridge_binary: None,
             spawn_wait: SPAWN_WAIT,
             spawned: tokio::sync::Mutex::new(None),
-            journal: std::sync::Arc::default(),
+            journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
         }
     }
 
@@ -545,6 +548,11 @@ impl Host {
                 // new one); if not, the DAW is busy and the old connection is kept, as it was.
                 if client.busy() && client.request("ping", json!({}), PING_PROBE).await == Err(RequestError::Timeout) {
                     let Some(fresh) = self.fresh_connection(&client, pid, &resource).await else { return Err(CallError::Timeout) };
+                    // Only a read is asked again: a write the old connection carried may have been made, and making it twice
+                    // (or refusing it as changed) would be wrong; its caller is told it timed out (uncertain).
+                    if !RESENT.contains(&method) {
+                        return Err(CallError::Timeout);
+                    }
                     return match fresh.request(method, params, timeout).await {
                         Ok(answer) => Ok(answer),
                         Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),

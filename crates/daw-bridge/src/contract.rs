@@ -7,7 +7,8 @@
 use serde_json::Value;
 
 /// The kinds a ref names, for every DAW (`r:track:{GUID}`, `E:pattern:3`, Logic's `1:region:2`).
-const REF_KINDS: [&str; 19] = [
+const REF_KINDS: [&str; 20] = [
+    "aitem",
     "track",
     "item",
     "take",

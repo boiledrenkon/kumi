@@ -23,8 +23,8 @@ pub const DAW: OwnDaw = OwnDaw {
     host_flag: "reaper",
     instructions: INSTRUCTIONS,
     read_tool: "reaper_read",
-    read_description: "Read REAPER: the project, its tracks, and what's in them (items, FX, parameters, sends, markers, regions, MIDI notes, envelopes), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in project order: depth is how deep in folders a track sits (0 at the top), folder 1 starts a folder and -1 or less closes one or more; pan runs -1 to 1. A send's mode is 0 post-fader, 1 pre-FX, 3 pre-fader (modeName says it). Items' position and length are seconds; markers and regions add positionBeats; a note's start (from its item's start) and length are quarter notes, its channel 1-16.",
-    read_kinds: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
+    read_description: "Read REAPER: the project, its tracks, and what's in them (items, FX, parameters, sends, markers, regions, MIDI notes, envelopes), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in project order: depth is how deep in folders a track sits (0 at the top), folder 1 starts a folder and -1 or less closes one or more; pan runs -1 to 1. A send's mode is 0 post-fader, 1 pre-FX, 3 pre-fader (modeName says it). Items' position and length are seconds; markers and regions add positionBeats; a note's start (from its item's start) and length are quarter notes, its channel 1-16. Kind event lists a MIDI take's events beyond notes (cc, pitchbend, program, pressure, poly-pressure, text, sysex; start in quarter notes from the item's start) with the index the MIDI event changes take; a take read alone lists its stretch and take markers with theirs. Kind call calls one of REAPER's API functions that only reads, by name (fn), with args in order or by the SDK's parameter names (refs for tracks, items, takes and envelopes): its result, and in out the values it writes back. An FX's parent is a track (its input FX follow its main chain, input: true), a take or a container; one FX read by ref also gives its state chunk, presets, wet and delta. Envelopes come with their units; kind point reads an envelope's (or an automation item's) points in those units, kind autoitem an envelope's automation items.",
+    read_kinds: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call", "point", "autoitem"],
     project_kind: "project",
     fill_focus,
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
@@ -137,8 +137,11 @@ impl RefScheme for ReaperRefs {
             "item" | "send" => &["track"],
             "fx" => &["track", "take"],
             "param" => &["fx"],
-            "note" => &["take"],
-            "envelope" => &["track", "fx"],
+            "note" | "event" => &["take"],
+            "envelope" => &["track", "fx", "take", "item"],
+            // m4-r-fxenv
+            "point" => &["env", "aitem"],
+            "autoitem" => &["env"],
             _ => return None,
         };
         Some(parents.iter().map(|parent| parent.to_string()).collect())

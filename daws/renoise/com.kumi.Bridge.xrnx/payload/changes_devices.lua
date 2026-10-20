@@ -39,11 +39,36 @@ local function device_target(env, index, at)
   return { ref = refs.make(env.epoch(), "device", index, at), kind = "device" }
 end
 
+-- (kumi-51: a device change's undo finds the device by its place, kept in `material`, so a device made, deleted or moved
+-- since on any track doesn't make it stale; a record without one is found by its ref)
+local function device_kept(env, index, at, device)
+  return { track = index, dev = material_.device_place(env, index, at, device), label = M.label(device) }
+end
+
+M.device_kept = device_kept
+
+local function kept_input(restore)
+  local material = restore.material
+  if type(material) == "table" and type(material.dev) == "table" then return { material = material } end
+  return nil
+end
+
 local function device_prop(spec)
   spec.locate = function(song, env, input)
-    local index, at, _, device, name = device_of(song, env, input.ref, spec.kind, 2)
-    return { object = device, name = name, place = { track = index, device = at }, target = device_target(env, index, at) }
+    local index, at, track, device, name
+    if input.material then
+      index, at, track, device = material_.device_by_place(song, env, input.material, "Kumi changed it")
+      name = M.label(device) .. " on " .. base.named(index, track)
+    else
+      index, at, track, device, name = device_of(song, env, input.ref, spec.kind, 2)
+    end
+    return {
+      object = device, device = device, name = name, place = { track = index, device = at }, target = device_target(env, index, at),
+      id = base.track_id(track) .. "|" .. device.device_path,
+    }
   end
+  spec.material = function(env, loc) return device_kept(env, loc.place.track, loc.place.device, loc.device) end
+  spec.restore_input, spec.by_place = kept_input, true
   spec.reread = function(song, place)
     if place.track > rows.track_count(song) then return nil end
     local track = song:track(place.track)
@@ -70,17 +95,61 @@ local function param_state(parameter)
   return { value = parameter.value, valueString = parameter.value_string }
 end
 
+-- A parameter whose value is a place: a #Send's or #Multiband Send's Receiver (a send track, counted among the sends from
+-- 0) and a meta device's or #Sidechain's track (Dest. Track, *Hydra's OutN Track and the like: a track counted from 0).
+-- Renoise moves these values with the tracks made and deleted, so a record keeps the track the value names as a track ref,
+-- which the layout carries; the value is worked out from it again.
+local function points_at(device, parameter)
+  local path, name = device.device_path, parameter.name
+  if (path:find("#Send", 1, true) or path:find("#Multiband Send", 1, true)) and name:match("^Receiver") then return "send" end
+  if (path:find("/Native/*", 1, true) or path:find("/Native/#Sidechain", 1, true)) and name:match("Track$") then return "track" end
+  return nil
+end
+
+-- A Receiver (any of #Send's and #Multiband Send's) is a send track among the sends, from 0: Renoise takes any number
+-- silently, so a number past the sends, or -1, is refused here.
 local function receiver_check(device, parameter, value, song)
-  if device.device_path:find("#Send", 1, true) and parameter.name == "Receiver" then
+  if points_at(device, parameter) == "send" then
     local sends = song.send_track_count
     if value ~= math.floor(value) or value < 0 or value >= sends then
-      bad(string.format("Receiver is a send track's number from 0 to %d (there are %d send tracks)", sends - 1, sends))
+      bad(string.format("%s is a send track's number from 0 to %d (there are %d send tracks)", parameter.name, sends - 1, sends))
     end
   end
 end
 
+local function master_of(song) return song.sequencer_track_count + 1 end
+
+local function track_of_value(song, points, value)
+  if type(value) ~= "number" or value < 0 or value ~= math.floor(value) then return nil end
+  local n = points == "send" and master_of(song) + 1 + value or value + 1
+  if n < 1 or n > rows.track_count(song) then return nil end
+  return n
+end
+
+local function value_of_track(song, points, n)
+  return points == "send" and n - master_of(song) - 1 or n - 1
+end
+
 local param_spec = {
   kind = "device-param", noun = "parameter", undoable = true,
+  wire = function(state, env, loc)
+    if not (loc and loc.points) or type(state) ~= "table" then return state end
+    local n = track_of_value(renoise.song(), loc.points, state.value)
+    if not n then return state end
+    local out = {}
+    for k, v in pairs(state) do out[k] = v end
+    out.at = refs.make(env.epoch(), "track", n)
+    return out
+  end,
+  unwire = function(state, env, loc)
+    if type(state) ~= "table" or type(state.at) ~= "string" or not (loc and loc.points) then return state end
+    -- (carried to where that track is now; a ref of another epoch is `stale`)
+    local n = refs.expect(state.at, "track", 1, env.epoch())[1]
+    local out = {}
+    for k, v in pairs(state) do out[k] = v end
+    out.at, out.value, out.valueString = nil, value_of_track(renoise.song(), loc.points, n), nil
+    return out
+  end,
   read = function(parameter) return param_state(parameter) end,
   wanted = function(parameter, input)
     if type(input.value) == "number" then
@@ -119,6 +188,26 @@ local param_spec = {
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }
 
+-- A value that is a place may be given as text, read as Renoise 3.5.4 reads it (lab, 2026-10-19): the number it begins with
+-- ("3: Hats" is 3), a track counted from 1 (Dest. Track's "2" is the value 1) and a send from 0 (a Receiver's text is its
+-- value). It is fenced as the number is. Text without a number Renoise ignores, and "-1" or "None" would set the first entry,
+-- not none: Kumi refuses those.
+param_spec.wanted_at = function(loc, input)
+  -- (None, -1, is a track parameter's place value too, though its minimum is 0: Renoise takes it as a value, not as text;
+  -- a Receiver has no None)
+  if loc.points == "track" and input.value == -1 then return { value = -1 } end
+  if loc.points and type(input.valueString) == "string" then
+    local n = tonumber(input.valueString:match("^%s*(%d+)"))
+    local first = loc.points == "send" and 0 or 1
+    if not n or n < first then
+      bad(string.format("%s names a %s: give its number (%s) as text, or value", loc.name, loc.points,
+        loc.points == "send" and "a send among the sends, from 0" or "a track, from 1"))
+    end
+    return param_spec.wanted(loc.object, { value = n - first })
+  end
+  return param_spec.wanted(loc.object, input)
+end
+
 -- Which parameter of a device a request means: its number from 1, or its name (any case).
 local function parameter_number(device, wanted)
   local count = #device.parameters
@@ -148,23 +237,35 @@ end
 -- A parameter is named by its ref, or by its device's ref and `param`.
 param_spec.locate = function(song, env, input)
   local parsed = type(input.ref) == "string" and refs.parse(input.ref) or nil
-  local index, at, device, name, k
-  if parsed and parsed.kind == "device" then
-    local _
-    index, at, _, device, name = device_of(song, env, input.ref, param_spec.kind, 2)
+  local index, at, track, device, name, k
+  if input.material then
+    index, at, track, device = material_.device_by_place(song, env, input.material, "Kumi changed it")
+    name = M.label(device) .. " on " .. base.named(index, track)
+    k = input.material.param
+    if type(k) ~= "number" or k > #device.parameters then
+      fail("changed", string.format("%s has fewer parameters than when Kumi changed it", base.q(name)))
+    end
+  elseif parsed and parsed.kind == "device" then
+    index, at, track, device, name = device_of(song, env, input.ref, param_spec.kind, 2)
     k = parameter_number(device, input.param)
   else
-    local _
-    index, at, _, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
+    index, at, track, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
   end
   if k < 1 or k > #device.parameters then fail("gone", "that parameter isn't on the device any more") end
   local parameter = device:parameter(k)
   if input.value ~= nil then receiver_check(device, parameter, input.value, song) end
   return {
-    object = parameter, name = name .. " " .. parameter.name, place = { track = index, device = at, param = k },
+    object = parameter, device = device, name = name .. " " .. parameter.name, place = { track = index, device = at, param = k },
     target = { ref = refs.make(env.epoch(), "param", index, at, k), kind = "param" },
+    id = base.track_id(track) .. "|" .. device.device_path .. "|" .. k, points = points_at(device, parameter),
   }
 end
+param_spec.material = function(env, loc)
+  local kept = device_kept(env, loc.place.track, loc.place.device, loc.device)
+  kept.param = loc.place.param
+  return kept
+end
+param_spec.restore_input, param_spec.by_place = kept_input, true
 param_spec.reread = function(song, place)
   if place.track > rows.track_count(song) then return nil end
   local track = song:track(place.track)
@@ -176,6 +277,10 @@ end
 -- The producer's undo moves a parameter: asked of its observable, once.
 param_spec.watch = function(env, loc) env.watch_param(loc.place.track, loc.place.device, loc.place.param) end
 base.register(param_spec)
+
+-- (M4 n-devices: device-params, several parameters of one device, asks and checks them as device-param does)
+M.param_spec, M.parameter_number, M.points_at, M.receiver_check = param_spec, parameter_number, points_at, receiver_check
+M.track_of_value, M.value_of_track = track_of_value, value_of_track
 
 
 -- Putting a device in, taking it out, moving it. These change the track's list of devices, so the epoch moves (the answer is in
@@ -239,13 +344,15 @@ local function add_input(song, track, input)
 end
 
 local function add_signature(index, track)
-  return { name = track.name, index = index, devices = #track.devices }
+  return { name = base.track_id(track), index = index, devices = #track.devices }
 end
 
 local function add_preview(song, env, input)
   local index, track = base.find(song, env, input.ref, "device-add")
   local info, at = add_input(song, track, input)
   local now = add_signature(index, track)
+  -- (the send the receiver names, as a track the layout carries: one made before it by the apply refuses `changed`)
+  if input.receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + input.receiver) end
   local display = {
     title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
     before = { devices = now.devices }, after = { devices = now.devices + 1, path = info.path, index = at },
@@ -264,6 +371,11 @@ local function add_apply(song, env, input, fence, desc)
   local ok, index, track = pcall(base.find, song, env, input.ref, "device-add")
   if not ok then base.gone_is_changed(index) end
   local now = add_signature(index, track)
+  if type(fence.receiver) == "string" then
+    local send = refs.expect(fence.receiver, "track", 1, env.epoch())[1]
+    if input.receiver ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
+    now.receiver = fence.receiver
+  end
   if not base.same_table(now, fence) then fail("changed", base.named(index, track) .. "'s devices changed since the preview") end
   local info, at = add_input(song, track, input)
   song:describe_undo(desc)
@@ -297,7 +409,9 @@ local function add_apply(song, env, input, fence, desc)
   return {
     applied = { index = at, path = info.path, state = state },
     created = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
-    material = { track = index },
+    target = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
+    -- (where its undo finds it: its place, followed through the devices made, deleted and moved since)
+    material = device_kept(env, index, at, device),
     display = {
       title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
       before = { devices = now.devices }, after = { devices = #track.devices, path = info.path, index = at },
@@ -308,13 +422,18 @@ local function add_apply(song, env, input, fence, desc)
 end
 
 local function add_restore(song, env, restore, desc)
-  local created = restore.created
-  if type(created) ~= "table" or type(created.ref) ~= "string" then bad("created: the device the change made") end
-  local numbers = refs.expect(created.ref, "device", 2, env.epoch())
-  local index, at = numbers[1], numbers[2]
-  local track = base.track_at(song, index)
-  if at < 2 or at > #track.devices then fail("gone", "the device isn't on the track any more") end
-  local device = track:device(at)
+  local index, at, track, device
+  if kept_input(restore) then
+    index, at, track, device = material_.device_by_place(song, env, restore.material, "Kumi made it")
+  else
+    local created = restore.created
+    if type(created) ~= "table" or type(created.ref) ~= "string" then bad("created: the device the change made") end
+    local numbers = refs.expect(created.ref, "device", 2, env.epoch())
+    index, at = numbers[1], numbers[2]
+    track = base.track_at(song, index)
+    if at < 2 or at > #track.devices then fail("gone", "the device isn't on the track any more") end
+    device = track:device(at)
+  end
   local applied = restore.applied
   if type(applied) ~= "table" then bad("applied: what the change wrote") end
   local now = material_.device_state(device)
@@ -334,20 +453,21 @@ local function add_restore(song, env, restore, desc)
 end
 
 base.register({
-  kind = "device-add", custom = true, shape = "made",
+  kind = "device-add", custom = true, shape = "made", by_place = true,
   preview = add_preview, apply = add_apply, restore = add_restore,
 })
 
 -- Deleting a device keeps its path, name, bypass, preset data and automation to make it again.
-local function delete_signature(_, at, device)
+local function delete_signature(track, at, device)
   local state = material_.device_state(device)
   state.index = at
+  state.track = base.track_id(track) -- (the device on another track at that place is not this one)
   return state
 end
 
 local function delete_preview(song, env, input)
   local index, at, track, device, name = device_of(song, env, input.ref, "device-delete", 2)
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   local display = {
     title = string.format("Deleted %s from %s", q(M.label(device)), q(base.named(index, track))),
     before = { devices = #track.devices }, after = { devices = #track.devices - 1 },
@@ -359,11 +479,17 @@ end
 local function delete_apply(song, env, input, fence, desc)
   local ok, index, at, track, device, name = pcall(device_of, song, env, input.ref, "device-delete", 2)
   if not ok then base.gone_is_changed(index) end
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
+  local automation = material_.read_automation(song, index, track, at)
+  local patterns = {}
+  for _, saved in ipairs(automation) do patterns[saved.pattern] = true end
   local material = {
-    track = index, index = at, device = material_.read_device(device), state = state,
-    automation = material_.read_automation(song, index, track, at),
+    -- (its place: where it goes back is after the device before it, followed through the track's devices since; see places.lua)
+    track = index, index = at, after = env.device_mark and env.device_mark(index) or nil,
+    device = material_.read_device(device, song, index, false, env), state = state,
+    automation = automation, pool = material_.keep_pool(song, env, patterns),
+    routes = material_.read_routes(song, index, at, env),
   }
   local size = #json.encode(material)
   if size > base.MAX_MATERIAL_BYTES then
@@ -372,12 +498,52 @@ local function delete_apply(song, env, input, fence, desc)
   local title = string.format("Deleted %s from %s", q(M.label(device)), q(base.named(index, track)))
   song:describe_undo(desc)
   track:delete_device_at(at)
+  -- (the mark just after it went: when Kumi puts it back, the places kept of it before follow it there)
+  material.removed = env.device_mark and env.device_mark(index) or nil
   return {
     applied = { deleted = true }, material = material,
-    display = { title = title },
+    display = { title = title, note = material_.routes_note(#material.routes) }, target = device_target(env, index, at),
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index, device = at }, shape = "deleted",
   }
+end
+
+-- Where a track numbered in layout `layout` is now (as numbered then when the layout isn't known).
+function M.carried_from(env, layout)
+  return function(n)
+    if type(layout) ~= "number" then return n end
+    return (env.shifted(n, layout))
+  end
+end
+
+-- Puts a kept device (`kept`: {device (read_device), automation, routes}) back at `at` on track `index`: the device, where
+-- it sent its values, its automation in the patterns that still are (`pattern_now`), and what aimed at it. Counts into
+-- `tally`; returns the device and the patterns its automation can't go back to. When Renoise refuses, the device goes
+-- again and the error is raised.
+function M.put_back(song, env, index, track, at, kept, pattern_now, moved, tally)
+  local saved = kept.device
+  local device = material_.restore_device(track, at, saved)
+  local lost = 0
+  local ok, err = pcall(function()
+    for _, status in ipairs(material_.restore_destinations(song, device, saved, index, moved, env)) do material_.count(tally, status) end
+    local list = {}
+    for _, entry in ipairs(kept.automation or {}) do
+      local p = pattern_now(entry.pattern)
+      if p then
+        list[#list + 1] = { pattern = p, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
+      else
+        lost = lost + 1
+      end
+    end
+    material_.write_automation(song, track, index, list, nil)
+  end)
+  if ok then material_.write_routes(song, kept.routes, { on = index, device = at }, moved, tally, env) end
+  if not ok then
+    pcall(function() track:delete_device_at(at) end)
+    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
+    error(err, 0)
+  end
+  return device, lost
 end
 
 local function delete_restore(song, env, restore, desc)
@@ -390,38 +556,48 @@ local function delete_restore(song, env, restore, desc)
   local saved = material.device
   local label = (saved.display ~= nil and saved.display ~= "" and saved.display or saved.name or saved.path)
   local track_name = base.named(index, track)
+  -- Where it goes back: after the device that was before it, followed through the devices made, deleted and moved on the track
+  -- since. When that can't be told, nothing is written.
+  local at = type(material.index) == "number" and env.device_after and env.device_after(index, material.index, material.after) or nil
+  if not at then
+    fail("stale", string.format("the devices on %s changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where it goes: nothing was put back", q(track_name), q(label)))
+  end
+  at = math.max(2, math.min(at or 2, #track.devices + 1))
   -- It is back already (the producer's undo, or an earlier restore): nothing to write.
-  local present = track.devices[material.index] and material.index >= 2 and track:device(material.index) or nil
+  local present = at <= #track.devices and track:device(at) or nil
   if present and present.device_path == saved.path then
     local state = material_.device_state(present)
     if state.state == (material.state or {}).state and state.display == (material.state or {}).display then
-      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false } }
+      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false }, unwritten = true }
     end
   end
-  local at = math.max(2, math.min(material.index or 2, #track.devices + 1))
+  local pattern_now = material_.pool_now(song, env, material.pool)
+  if not pattern_now then
+    fail("stale", string.format("the song's patterns changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where its automation goes: nothing was put back", q(label)))
+  end
   song:describe_undo(desc)
-  local device = material_.restore_device(track, at, saved)
-  local ok, err = pcall(function()
-    local list = {}
-    for i, entry in ipairs(material.automation or {}) do
-      list[i] = { pattern = entry.pattern, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
-    end
-    material_.write_automation(song, track, index, list, nil)
-  end)
-  if not ok then
-    pcall(function() track:delete_device_at(at) end)
-    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
-    error(err, 0)
-  end
+  local tally = material_.new_tally()
+  local device, lost = M.put_back(song, env, index, track, at, material, pattern_now, M.carried_from(env, restore.layout), tally)
+  if env.device_back and type(material.removed) == "string" then env.device_back(index, material.removed, at) end
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {
     restored = { ref = refs.make(env.epoch(), "device", index, at), name = device.display_name },
-    display = { title = string.format("%s put back on %s", q(label), q(track_name)) }, undo = { desc = desc, entry = true },
+    display = {
+      title = string.format("%s put back on %s", q(label), q(track_name)),
+      note = (function()
+        local note = material_.tally_note(tally)
+        if lost == 0 then return note end
+        local more = string.format("Its automation in %s isn't put back: %s deleted or changed in Renoise since.",
+          lost == 1 and "1 pattern" or (lost .. " patterns"), lost == 1 and "that pattern was" or "those patterns were")
+        return note and (note .. " " .. more) or more
+      end)(),
+    },
+    undo = { desc = desc, entry = true },
   }
 end
 
 base.register({
-  kind = "device-delete", custom = true, shape = "deleted",
+  kind = "device-delete", custom = true, shape = "deleted", by_place = true,
   preview = delete_preview, apply = delete_apply, restore = delete_restore,
 })
 
@@ -437,7 +613,7 @@ end
 local function move_preview(song, env, input)
   local index, at, track, device, name = device_of(song, env, input.ref, "device-move", 2)
   local to = move_wanted(track, input, at)
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   local display = {
     title = string.format("Moved %s on %s to place %d", q(M.label(device)), q(base.named(index, track)), to),
     before = { index = at }, after = { index = to },
@@ -449,17 +625,25 @@ end
 local function move_apply(song, env, input, fence, desc)
   local ok, index, at, track, device, name = pcall(device_of, song, env, input.ref, "device-move", 2)
   if not ok then base.gone_is_changed(index) end
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
   local to = move_wanted(track, input, at)
   local display = {
     title = string.format("Moved %s on %s to place %d", q(M.label(device)), q(base.named(index, track)), to),
     before = { index = at }, after = { index = to },
   }
+  -- (where its undo finds it and where it goes back, as places followed through the devices made, deleted and moved
+  -- since: the device, the one it followed before (`was`), the one it follows now (`now`); the mixer device is `mixer`)
+  local function neighbour(n)
+    if n <= 1 then return { mixer = true } end
+    return device_kept(env, index, n, track:device(n))
+  end
   if to == at then
     display.unchanged = true
+    local material = device_kept(env, index, at, device)
+    material.was, material.now = neighbour(at - 1), neighbour(at - 1)
     return {
-      applied = { index = to, state = state }, material = { track = index }, display = display, undo = { desc = desc, entry = false },
+      applied = { index = to, state = state }, material = material, display = display, undo = { desc = desc, entry = false },
       prior = { index = at },
     }
   end
@@ -468,49 +652,55 @@ local function move_apply(song, env, input, fence, desc)
   for i = at, to - step, step do track:swap_devices_at(i, i + step) end
   local after = material_.device_state(track:device(to))
   if after.state ~= state.state or after.path ~= state.path then fail("failed", "Renoise didn't move " .. name) end
+  local material = device_kept(env, index, to, track:device(to))
+  material.was, material.now = neighbour(to > at and at - 1 or at), neighbour(to - 1)
   return {
-    applied = { index = to, state = delete_signature(index, to, track:device(to)) }, material = { track = index }, display = display,
+    applied = { index = to, state = delete_signature(track, to, track:device(to)) }, material = material, display = display,
+    target = device_target(env, index, to),
     undo = { desc = desc, entry = true },
     prior = { index = at }, place = { track = index, device = to }, follows = "device",
   }
 end
 
+-- Where a kept neighbour is now (the mixer device is always 1), or nil and why.
+local function neighbour_now(song, env, t, kept)
+  if type(kept) ~= "table" then return nil, "unknown" end
+  if kept.mixer then return 1 end
+  return material_.device_now(song, env, t, kept.dev)
+end
+
 local function move_restore(song, env, restore, desc)
-  local material, applied, prior = restore.material, restore.applied, restore.prior
-  if type(material) ~= "table" or type(material.track) ~= "number" then bad("material: the track the device is on") end
-  if type(applied) ~= "table" or type(prior) ~= "table" then bad("prior and applied: the places the device moved between") end
-  local index = material.track
-  local track = base.track_at(song, index)
-  local function is_it(at)
-    if at < 2 or at > #track.devices then return false end
-    local state = material_.device_state(track:device(at))
-    local wanted = applied.state or {}
-    return state.path == wanted.path and state.state == wanted.state and state.display == wanted.display
+  local material = restore.material
+  if type(material) ~= "table" or type(material.dev) ~= "table" then bad("material: where the device and its neighbours were") end
+  local index, d, track, device = material_.device_by_place(song, env, material, "Kumi moved it")
+  local label = q(M.label(device)) .. " on " .. q(base.named(index, track))
+  local was, why = neighbour_now(song, env, index, material.was)
+  if not was then
+    local whose = q((material.was or {}).label or "the device")
+    fail(why == "unknown" and "stale" or "changed", string.format("%s, which %s followed before Kumi moved it, %s, so Kumi can't tell where it goes back: nothing was moved",
+      whose, label, why == "gone" and "was deleted" or why == "changed" and "isn't at its place any more" or "moved in a way Kumi couldn't follow"))
   end
-  local to, from = applied.index, prior.index
-  local found
-  if is_it(to) then
-    found = to
-  elseif is_it(from) then
-    return { restored = { index = from }, display = { title = "The device is back at place " .. from .. " already" }, undo = { desc = desc, entry = false } }
-  elseif restore.discard then
-    fail("gone", "the device isn't on the track any more")
-  else
-    fail("changed", "the device isn't at place " .. to .. " any more: it was moved or changed in Renoise since Kumi moved it")
+  if was == d - 1 then
+    return { restored = { index = d }, display = { title = label .. " is back after the device it followed already" }, undo = { desc = desc, entry = false }, unwritten = true }
   end
-  if from < 2 or from > #track.devices then fail("changed", "place " .. from .. " isn't on the track any more") end
+  local now = neighbour_now(song, env, index, material.now)
+  if now ~= d - 1 and not restore.discard then
+    fail("changed", string.format("%s was moved in Renoise since Kumi moved it", label))
+  end
+  -- (after the device it followed: one place on when that device is before it, its place when it is after)
+  local to = was < d and was + 1 or was
   song:describe_undo(desc)
-  local step = from > found and 1 or -1
-  for i = found, from - step, step do track:swap_devices_at(i, i + step) end
-  base.note_restored(env.journal, "device-move", { track = index, device = from }, applied, base.KINDS["device-move"])
+  local step = to > d and 1 or -1
+  for i = d, to - step, step do track:swap_devices_at(i, i + step) end
+  base.note_restored(env.journal, "device-move", { track = index, device = to }, restore.applied, base.KINDS["device-move"])
   return {
-    restored = { index = from }, display = { title = string.format("Moved back to place %d", from) },
+    restored = { index = to }, display = { title = string.format("Moved %s back to place %d", label, to) },
     undo = { desc = desc, entry = true },
   }
 end
 
 base.register({
-  kind = "device-move", custom = true,
+  kind = "device-move", custom = true, by_place = true,
   preview = move_preview, apply = move_apply, restore = move_restore,
   same = function(a, b) return a.index == b.index end,
 })

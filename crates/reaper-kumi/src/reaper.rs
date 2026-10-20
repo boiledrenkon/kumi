@@ -8,9 +8,17 @@ use serde_json::{json, Value};
 
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
+pub mod generic;
+mod items;
+// (r-tracks) M4's track, routing, project and action calls.
+mod io;
 mod objects;
 mod write;
+pub use items::*;
 pub use objects::*;
+// m4-r-fxenv: FX in any chain, envelopes, points and automation items.
+mod fxenv;
+pub use fxenv::{EnvPoint, EqParam};
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;
@@ -84,6 +92,9 @@ pub enum Busy {
     /// The main thread stopped ticking: a modal dialog, or a long load or render.
     Modal,
     Starting,
+    /// The main thread has been running one request for longer than a stall: a plug-in loading, or a dialog that request
+    /// opened (a licence prompt), which nothing else can get past.
+    Working,
 }
 
 impl Busy {
@@ -93,6 +104,7 @@ impl Busy {
             Busy::Rendering => "rendering",
             Busy::Modal => "modal",
             Busy::Starting => "starting",
+            Busy::Working => "working",
         }
     }
 
@@ -102,6 +114,7 @@ impl Busy {
             Busy::Rendering => "REAPER is rendering",
             Busy::Modal => "REAPER isn't answering: a dialog may be open",
             Busy::Starting => "REAPER is starting",
+            Busy::Working => "REAPER is still running a long request (a plug-in loading, or a dialog that request opened)",
         }
     }
 }

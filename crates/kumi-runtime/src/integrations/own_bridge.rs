@@ -14,7 +14,7 @@ use crate::{
     },
     integrations::{
         none::no_access,
-        own_changes::{Link, OwnPlan},
+        own_changes::{Ending, Link, OwnPlan},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
@@ -173,6 +173,10 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         tempo: Rc::default(),
         file: Rc::default(),
         step_titles: RefCell::default(),
+        outside_daw_undo: RefCell::default(),
+        undo_unanswered: RefCell::default(),
+        in_plan: RefCell::default(),
+        maybe_redone: RefCell::default(),
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
@@ -222,6 +226,27 @@ const PAGE_TEXT_BYTES: usize = 60 * 1024;
 /// A turn's short ref (`track:3`): the shape of a name this turn gave.
 pub(super) static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
 
+/// A call's arguments (`args`, in order or by name) with this turn's short refs anywhere in them made long: they sit under no
+/// ref-named field, so the book's own walk passes them by.
+pub(super) fn lengthen_anywhere<S: RefScheme>(book: &Book<S>, value: &Value) -> Value {
+    match value {
+        Value::String(text) if SHORT_REF.is_match(text) => book.lengthen(&json!({"ref": text}))["ref"].clone(),
+        Value::Array(items) => Value::Array(items.iter().map(|item| lengthen_anywhere(book, item)).collect()),
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (key.clone(), lengthen_anywhere(book, item))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// What a call answered (`result`, `out`) with the DAW's refs anywhere in it made this turn's short ones.
+pub(super) fn shorten_anywhere<S: RefScheme>(book: &mut Book<S>, value: &Value) -> Value {
+    match value {
+        Value::String(text) if book.scheme.kind_of(text).is_some() => json!(book.short_ref(text)),
+        Value::Array(items) => Value::Array(items.iter().map(|item| shorten_anywhere(book, item)).collect()),
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (key.clone(), shorten_anywhere(book, item))).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Why a host tool answered an error: its words, and whether the DAW is there at all (it quit, or its bridge did).
 pub(super) struct Refused {
     pub(super) why: String,
@@ -230,9 +255,17 @@ pub(super) struct Refused {
     pub(super) busy: bool,
     /// The host's code for it (`stale`, `changed`, `failed`…).
     pub(super) code: Option<String>,
-    /// Sent, and not confirmed: the DAW may have done it (no answer came, or the bridge wrote and couldn't read the
-    /// value back). The host's journal keeps such a change uncertain, never applied or undone again blindly.
-    pub(super) uncertain: bool,
+    /// The DAW answered, and couldn't say how it ended (an undo it answered `uncertain`), rather than not answering.
+    pub(super) answered: bool,
+}
+
+/// A host call's outcome, with a failure that came of the call's own signal (the caller stopped, or its time ran out) as
+/// Aborted: the MCP client reports both as plain errors, and neither means the host is gone.
+pub(super) fn stopped_or<T>(outcome: Result<T, RuntimeError>, signal: &Signal) -> Result<T, RuntimeError> {
+    match outcome {
+        Err(_) if signal.is_cancelled() => Err(RuntimeError::Aborted),
+        other => other,
+    }
 }
 
 /// The JSON a host tool answered with, or why it couldn't.
@@ -251,9 +284,10 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
         return Err(Refused {
             why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
             there: value.get("connected") != Some(&Value::Bool(false)),
-            busy: value.get("code").and_then(Value::as_str) == Some("busy"),
+            // The bridge's busy, or the host's own word that the DAW didn't answer in time (a dialog may be open).
+            busy: value.get("code").and_then(Value::as_str) == Some("busy") || value.get("busy") == Some(&Value::Bool(true)),
             code: value.get("code").and_then(Value::as_str).map(str::to_owned),
-            uncertain: value.get("state").and_then(Value::as_str) == Some("uncertain"),
+            answered: value.get("answered") == Some(&Value::Bool(true)),
         });
     }
     Ok(value)
@@ -265,6 +299,7 @@ pub fn busy_words(code: &str, profile: &DawProfile) -> String {
         "modal" => "a dialog is open".into(),
         "loading" => format!("a {} is loading", profile.words.place),
         "rendering" => "it's rendering".into(),
+        "working" => "it's still running a long request (a plug-in loading, or a dialog that request opened)".into(),
         other => other.into(),
     }
 }
@@ -302,11 +337,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
         // A host started again has a new journal: Kumi's changes before it can't be undone through it.
         if self.hosts.replace(self.hosts.get() + 1) > 0 {
-            let own_undo = self.daw.profile.vocab.own_undo;
-            self.changes.history.retire(&format!(
-                "Kumi's link to {} started again, so Kumi can't undo this anymore; {own_undo} can.",
-                self.daw.profile.words.app
-            ));
+            self.changes.retire_all(Ending::Restart);
         }
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
@@ -373,6 +404,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 None => layout.set(Some(now)),
             }
         }));
+        // The host went away (it exited, or its pipe closed): the next call starts another.
+        let (held, gone) = (self.endpoint.clone(), Rc::downgrade(&endpoint));
+        let undisconnect = endpoint.on_disconnect(Rc::new(move || {
+            let same = held.borrow().as_ref().zip(gone.upgrade()).is_some_and(|(now, it)| Rc::ptr_eq(now, &it));
+            if same {
+                held.borrow_mut().take();
+            }
+        }));
+        let unlisten: Box<dyn Fn()> = Box::new(move || {
+            unlisten();
+            undisconnect();
+        });
         if let Some(before) = self.unlisten.replace(Some(unlisten)) {
             before();
         }
@@ -380,18 +423,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// A host tool's answer: Ok with its JSON, Err with why (the host's words) when it answered an error.
+    /// The host stays through a failed call (the caller's stop, a time limit): only its going away (`on_disconnect`) lets
+    /// the next call start another, whose journal is empty.
     async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let endpoint = self.endpoint(signal.clone()).await?;
         let args = args.as_object().cloned().unwrap_or_default();
         let bounded = abort::any([signal, abort::timeout(CALL_MS)]);
-        match endpoint.call(tool, args, bounded).await {
-            Ok(result) => Ok(answer_of(&result)),
-            Err(error) => {
-                // The host went away: the next call starts it again.
-                self.endpoint.borrow_mut().take();
-                Err(error)
-            }
-        }
+        stopped_or(endpoint.call(tool, args, bounded.clone()).await.map(|result| answer_of(&result)), &bounded)
     }
 
     /// Refs a new epoch made stale go: a positional DAW's refs carry their epoch; a stable DAW's never change.
@@ -1052,16 +1090,21 @@ pub(super) fn follow_epoch<S: RefScheme>(
 /// Whether a request names something on a track (a track, a device or a parameter), the refs a track shift moves: only
 /// those carry the layout they were made in.
 pub(super) fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
-    ["ref", "parent", "trackRef", "track", "around"].iter().any(|key| match args.get(*key) {
-        Some(Value::String(reference)) => matches!(scheme.kind_of(reference), Some("track" | "device" | "param")),
-        Some(Value::Number(_)) => *key == "track",
-        _ => false,
-    })
+    // Any string anywhere in it (a change's `group`, a list of refs), as the tool looks; a bare track number too.
+    fn walk<S: RefScheme>(scheme: &S, value: &Value, depth: usize) -> bool {
+        match value {
+            Value::String(text) => matches!(scheme.kind_of(text), Some("track" | "device" | "param" | "ptrack" | "slot")),
+            Value::Array(items) if depth < 8 => items.iter().any(|item| walk(scheme, item, depth + 1)),
+            Value::Object(row) if depth < 8 => row.values().any(|item| walk(scheme, item, depth + 1)),
+            _ => false,
+        }
+    }
+    args.get("track").is_some_and(Value::is_number) || args.values().any(|value| walk(scheme, value, 0))
 }
 
 /// An answer's layout against the book's.
 #[derive(Debug, PartialEq, Eq)]
-enum Layout {
+pub(super) enum Layout {
     /// The same (or the DAW's refs aren't positions): its refs name what the book's names do.
     Same,
     /// Newer, and no tracks event brought the book there (one was lost): the book's names went, and it takes the answer's.
@@ -1071,7 +1114,7 @@ enum Layout {
 }
 
 /// Where an answer's layout stands against the book's. A tracks event on its way is waited for a moment first.
-async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
+pub(super) async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
     let Some(answered) = answered.filter(|_| book.borrow().scheme.positional()) else { return Layout::Same };
     for _ in 0..4 {
         match layout.get() {
@@ -1161,6 +1204,11 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                 "limit": {"type": "integer", "minimum": 1, "maximum": MOST_ROWS, "description": "How many rows (50 by default)"},
             },
         });
+        // A REAPER API function that only reads, by name, with its arguments.
+        if self.daw.read_kinds.contains(&"call") {
+            schema["properties"]["fn"] = json!({"type": "string", "description": "For kind call: a REAPER API function that only reads (GetMediaTrackInfo_Value, TrackFX_GetParamName…)"});
+            schema["properties"]["args"] = json!({"type": ["array", "object"], "description": "For kind call: its arguments, in order or by the SDK's names; tracks, items, takes and envelopes as refs"});
+        }
         // A tracker's lines are read one track at a time.
         if self.daw.read_kinds.contains(&"line") {
             schema["properties"]["trackRef"] = json!({"type": "string", "description": "For kind line: the track (its ref, from this turn) whose lines of the parent pattern to read"});
@@ -1175,6 +1223,9 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         };
         let args = self.book.borrow().lengthen(&Value::Object(input.clone()));
         let mut args = args.as_object().cloned().unwrap_or_default();
+        if let Some(call_args) = args.get("args").cloned() {
+            args.insert("args".into(), lengthen_anywhere(&self.book.borrow(), &call_args));
+        }
         // A short ref this turn doesn't know (an earlier song's, or made up) is refused in Kumi's words, not the DAW's.
         for key in ["ref", "parent", "trackRef"] {
             let (Some(asked), Some(sent)) = (input.get(key).and_then(Value::as_str), args.get(key).and_then(Value::as_str)) else {
@@ -1219,6 +1270,13 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                         return Ok(ToolResult::error(format!("{app} changed while reading (tracks were added or removed): read it again")));
                     }
                     note_epoch(&self.seen_in, &self.book.borrow().scheme, &page);
+                    let mut page = page;
+                    // (a call's answer holds refs under no ref-named field)
+                    for key in ["result", "out"] {
+                        if let Some(value) = page.get(key).cloned() {
+                            page[key] = shorten_anywhere(&mut self.book.borrow_mut(), &value);
+                        }
+                    }
                     let text = stringify(&self.book.borrow_mut().shorten(&page));
                     let rows = page.get("items").and_then(Value::as_array).map_or(0, Vec::len);
                     let asked = args.get("limit").and_then(Value::as_u64).map_or(rows, |limit| (limit as usize).min(rows));

@@ -11,15 +11,23 @@ test_home="$(mktemp -d "${TMPDIR:-/tmp}/kumi-test-home-XXXXXX")"
 trap 'rm -rf "$test_home"' EXIT INT TERM
 export HOME="$test_home" USERPROFILE="$test_home" APPDATA="$test_home/AppData/Roaming" LOCALAPPDATA="$test_home/AppData/Local" XDG_CONFIG_HOME="$test_home/.config" KUMI_HOME="$test_home/.kumi"
 unset KUMI_REMOTE_SCRIPTS_DIR KUMI_LIVE_EXTENSIONS_DIR
-# The whole workspace, or only the packages named in KUMI_PACKAGES (space separated), with every test of theirs.
+# The whole workspace, or only the packages named in KUMI_PACKAGES (space separated), with every test of theirs: a
+# bridge lane's crates, or the Logic bridge's CI job.
 scope="--workspace"
 if [ -n "${KUMI_PACKAGES:-}" ]; then
   scope=""
   for package in $KUMI_PACKAGES; do scope="$scope -p $package"; done
 fi
 if [ "${KUMI_NEXTEST:-}" = 1 ]; then
+  # A profile that names its test binaries (`binary(…)` in its default-filter, .config/nextest.toml) builds only those:
+  # nextest builds every binary it could run, whatever the filter, and runs the ones the filter leaves.
+  only=""
+  if [ -n "${KUMI_NEXTEST_BUILD_PROFILE:-}" ]; then
+    only="$(awk -v p="[profile.$KUMI_NEXTEST_BUILD_PROFILE]" '$0 == p { on = 1; next } /^\[/ { on = 0 } on' .config/nextest.toml \
+      | grep -o 'binary([a-z0-9_]*)' | sed 's/^binary(\(.*\))$/--test \1/' | tr '\n' ' ')"
+  fi
   # shellcheck disable=SC2086
-  cargo nextest run $scope --locked "$@"
+  cargo nextest run $scope --locked $only "$@"
 else
   # shellcheck disable=SC2086
   cargo test $scope --locked "$@"

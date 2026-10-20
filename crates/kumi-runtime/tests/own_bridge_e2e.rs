@@ -12,6 +12,7 @@ use kumi_common::abort::{self, Signal};
 use kumi_runtime::core::{
     context::IntegrationContext,
     contracts::*,
+    errors::RuntimeError,
     view::{BodyKind, BodyRequest, DawFocus, FocusBody, RouteKind},
 };
 use kumi_runtime::integrations::{
@@ -604,6 +605,19 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             assert_eq!(undo_steps.len(), 1, "{undo_steps:?}");
             assert!(undo_steps[0].starts_with("Kumi: Track 1 volume -6 dB and 3 more (k"), "{undo_steps:?}");
 
+            // A look the producer stops (Esc) while REAPER is slow to answer: the host stays, with its journal, and HISTORY
+            // with it (a host started again would retire every change).
+            simulator.hold("snapshot");
+            let stop = Signal::new();
+            let stopper = stop.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                stopper.cancel();
+            });
+            let stopped = reaper.observe(stop, None).await;
+            assert!(stopped.as_ref().is_err_and(RuntimeError::is_aborted), "{:?}", stopped.map(|o| o.label));
+            simulator.release();
+
             // The next look lists them for the model, each applied.
             let again = reaper.observe(Signal::new(), None).await.unwrap();
             let latest = serde_json::from_str::<Value>(&again.context).unwrap()["kumiChanges"].clone();
@@ -790,11 +804,325 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let kept = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(kept.is_error && kept.text.contains("changed in Renoise since Kumi set it"), "{}", kept.text);
             assert_eq!(script.track_state(1).0, -1.0);
+            // Lua run in Renoise: a HISTORY row, and only Renoise's own undo takes it back (Kumi's undo leaves it, in Renoise's words).
+            let ran = plan
+                .execute(input(json!({"steps": [{"tool": "run_lua", "input": {"code": "song.transport.bpm = 140"}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!ran.is_error && ran.text.contains("Ran Lua"), "{}", ran.text);
+            assert!(
+                ran.text.contains("\"printed\":[\"set\"]") && ran.text.contains("\"result\":140"),
+                "what it printed and returned: {}",
+                ran.text
+            );
+            assert!(script.undo_history().last().is_some_and(|step| step.contains("Ran Lua")), "{:?}", script.undo_history());
+            let left = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(left.is_error && left.text.contains("Renoise's own undo can"), "{}", left.text);
+            let row = told.borrow().iter().rev().find(|record| record.title.starts_with("Ran Lua")).cloned().unwrap();
+            assert_eq!(row.state, ChangeState::Kept, "{row:?}");
             // The song changed behind Kumi's back (another epoch): the tool refuses, and Kumi says so in the model's ref.
             script.switch_song();
             let stale = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -2})), Signal::new()).await.unwrap();
             assert!(stale.is_error && stale.text.starts_with(&format!("{kick} is from before the song changed")), "{}", stale.text);
             renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is_never_undone_blindly() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper =
+                create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
+
+            // Kumi undoes a change; the producer's Cmd-Z takes Kumi's undo back (REAPER names the undo's own step), so the
+            // change is back: HISTORY follows, and Kumi's next undo is made again, not answered from before.
+            let volume = tool(&observed, "track_volume");
+            let made = volume.execute(input(json!({"ref": "track:2", "volumeDb": -6})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            let undo = tool(&observed, "undo_change");
+            assert!(!undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap().is_error);
+            assert_eq!(script.volume(1), 0.0);
+            let restore = script.undo_history().last().cloned().unwrap();
+            assert!(restore.starts_with("Kumi: undo "), "{restore}");
+            script.set_volume(1, -6.0);
+            simulator.emit("undone_in_daw", json!({"descs": [restore], "how": "undo"}));
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if state_of("Track 1 volume -6 dB") == Some(ChangeState::Applied) {
+                    break;
+                }
+            }
+            assert_eq!(state_of("Track 1 volume -6 dB"), Some(ChangeState::Applied), "the change is back");
+            let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!again.is_error, "{}", again.text);
+            assert_eq!(script.volume(1), 0.0, "undone again, for real");
+
+            // An apply REAPER took and couldn't say how it ended: Unsure, the plan stops, and Kumi never undoes it blindly.
+            script.uncertain_once();
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_mute", "input": {"ref": "track:2", "mute": true}},
+                {"tool": "track_volume", "input": {"ref": "track:3", "volumeDb": -9}},
+            ]});
+            let stopped = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(stopped.is_error && stopped.text.contains("may or may not have happened"), "{}", stopped.text);
+            assert_eq!(script.volume(2), 0.0, "the step after it never ran");
+            assert_eq!(state_of("Track 1 muted"), Some(ChangeState::Unsure));
+            let blind = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(blind.is_error && blind.text.contains("won't undo it blindly"), "{}", blind.text);
+            assert_eq!(script.track(1)["mute"], json!(true), "left as REAPER has it");
+            let note = told.borrow().iter().rev().find(|record| record.title == "Track 1 muted").and_then(|record| record.note.clone());
+            assert!(note.as_deref().is_some_and(|note| note.contains("together with the plan's other changes")), "{note:?}");
+
+            // Kumi's undo REAPER answered without being able to say how it ended: Unsure, with REAPER's own words leading
+            // (in the answer and on the row), and never sent again.
+            let made = volume.execute(input(json!({"ref": "track:3", "volumeDb": -4})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            script.uncertain_restore_once();
+            let unsure = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(unsure.is_error && unsure.text.contains("REAPER couldn't finish Kumi's undo"), "{}", unsure.text);
+            assert!(unsure.text.contains("didn't finish putting it back in time"), "REAPER's words are kept: {}", unsure.text);
+            assert!(!unsure.text.contains("didn't confirm"), "REAPER answered: {}", unsure.text);
+            assert_eq!(state_of("Track 2 volume -4 dB"), Some(ChangeState::Unsure));
+            let note =
+                told.borrow().iter().rev().find(|record| record.title == "Track 2 volume -4 dB").and_then(|record| record.note.clone());
+            assert!(
+                note.as_deref().is_some_and(|note| note.starts_with("Kumi's undo didn't finish: ") && note.contains("in time")),
+                "{note:?}"
+            );
+            let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
+            let kept =
+                told.borrow().iter().rev().find(|record| record.title == "Track 2 volume -4 dB").and_then(|record| record.note.clone());
+            assert_eq!(kept, note, "a refused repeat keeps what the row said of the undo before it");
+
+            // An undo REAPER made in part says what it left out, in its answer and on the row: never read as whole.
+            let made = volume.execute(input(json!({"ref": "track:2", "volumeDb": -5})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            script.left_out_once("Its 2 send envelope(s) were not put back.");
+            let partial = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!partial.is_error && partial.text.contains("were not put back"), "{}", partial.text);
+            let row = told.borrow().iter().rev().find(|record| record.title == "Track 1 volume -5 dB").cloned().unwrap();
+            assert_eq!(row.state, ChangeState::Undone);
+            assert_eq!(row.note.as_deref(), Some("Its 2 send envelope(s) were not put back."));
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+// (r-tracks) An action REAPER makes no undo point of is no row in HISTORY; one it does is a row only REAPER's undo takes
+// back; and a save is an action, with the refs it names lengthened for the host.
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_actions_make_a_row_only_with_a_point_and_saves_are_no_change() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper =
+                create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let first = tracks[1]["ref"].as_str().unwrap().to_owned();
+            let plan = tool(&observed, "make_changes");
+            // Unselect all: no point of REAPER's, so no row, and the answer says why.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40297}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("no row in HISTORY"), "{}", done.text);
+            assert!(told.borrow().is_empty(), "no row");
+            // Insert track: a row, which only REAPER's undo takes back.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40001}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let rows: Vec<(String, Option<String>)> = told.borrow().iter().map(|r| (r.title.clone(), r.note.clone())).collect();
+            assert_eq!(
+                rows,
+                [(
+                    "Ran action “Track: Insert new track”".to_string(),
+                    Some("Only REAPER's own undo can take this back (Edit > Undo).".to_string())
+                )]
+            );
+            // Saving tracks as a template: an action, its track refs the host's long ones.
+            let done = plan
+                .execute(
+                    input(json!({"steps": [{"tool": "save_track_template", "input": {"trackRefs": [first], "name": "Kit"}}]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let asked = script.asked();
+            let (_, params) = asked.iter().rev().find(|(method, _)| method == "track_template_save").expect("asked");
+            assert_eq!(params["trackRefs"], json!(["r:track:{T0001}"]));
+            assert!(params["epoch"].is_string(), "{params}");
+            assert_eq!(told.borrow().len(), 1, "no row for a save");
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// The host in process, with the tools it was asked and what each answered, in order.
+struct Recorded {
+    inner: InProcess,
+    calls: RefCell<Vec<(String, Value, Value)>>,
+}
+#[async_trait::async_trait(?Send)]
+impl McpEndpoint for Recorded {
+    fn pid(&self) -> Option<u32> {
+        self.inner.pid()
+    }
+    fn server_info(&self) -> Option<kumi_runtime::mcp::types::Implementation> {
+        self.inner.server_info()
+    }
+    async fn list(&self, cursor: Option<&str>, signal: Signal) -> Result<kumi_runtime::mcp::types::ListToolsResult, RuntimeError> {
+        self.inner.list(cursor, signal).await
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<kumi_runtime::mcp::types::CallToolResult, RuntimeError> {
+        let answer = self.inner.call(name, args.clone(), signal).await;
+        let shown = answer.as_ref().ok().and_then(|result| serde_json::to_value(result).ok()).unwrap_or(Value::Null);
+        self.calls.borrow_mut().push((name.to_string(), Value::Object(args), shown));
+        answer
+    }
+    fn on_catalog_changed(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        self.inner.on_catalog_changed(listener)
+    }
+    fn on_disconnect(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        self.inner.on_disconnect(listener)
+    }
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        self.inner.on_live_event(listener)
+    }
+    fn stderr_status(&self) -> kumi_runtime::mcp::client::StderrStatus {
+        self.inner.stderr_status()
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        self.inner.close().await
+    }
+}
+
+impl Recorded {
+    /// The transactions the host was told to release.
+    fn released(&self) -> Vec<String> {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|(name, _, _)| name == "change_release")
+            .flat_map(|(_, args, _)| args["transactionIds"].as_array().cloned().unwrap_or_default())
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The transaction of the last answer to `tool` whose structured answer `pick` takes.
+    fn last_transaction(&self, tool: &str, pick: impl Fn(&Value) -> bool) -> Option<String> {
+        self.calls.borrow().iter().rev().find(|(name, _, answer)| name == tool && pick(&answer["structuredContent"])).and_then(
+            |(_, args, answer)| {
+                answer["structuredContent"]["transactionId"].as_str().or_else(|| args["transactionId"].as_str()).map(str::to_owned)
+            },
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_m3_kinds_no_op_and_change_are_as_before_and_an_action_reaper_made_no_point_of_is_released_at_the_host() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(Recorded {
+                inner: InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) },
+                calls: RefCell::default(),
+            });
+            let recorded = endpoint.clone();
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper =
+                create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let first = tracks[1]["ref"].as_str().unwrap().to_owned();
+            let plan = tool(&observed, "make_changes");
+            let settle = || async {
+                for _ in 0..200 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            // An M3 kind asked for what is so already: the preview says so, nothing is applied, no row, the host forgets it.
+            let volume = |db: f64| input(json!({"steps": [{"tool": "track_volume", "input": {"ref": first, "volumeDb": db}}]}));
+            let done = plan.execute(volume(0.0), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("it was so already"), "{}", done.text);
+            settle().await;
+            assert!(told.borrow().is_empty(), "no row");
+            assert!(recorded.calls.borrow().iter().all(|(name, _, _)| name != "change_apply"), "nothing applied");
+            let previewed = recorded.last_transaction("change_preview", |_| true).expect("a preview");
+            assert!(recorded.released().contains(&previewed), "the host forgets the preview");
+            // An M3 change: applied, a row, as ever (its apply says nothing of unchanged).
+            let done = plan.execute(volume(-6.0), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let applied = recorded.last_transaction("change_apply", |_| true).expect("an apply");
+            settle().await;
+            assert_eq!(told.borrow().len(), 1);
+            assert!(!recorded.released().contains(&applied), "its record is kept for its undo");
+            // An action REAPER made no point of: applied, no row, and the host forgets its record too.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40297}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("no row in HISTORY"), "{}", done.text);
+            let action = recorded
+                .last_transaction("change_apply", |answer| answer["display"]["unchanged"] == true)
+                .expect("an apply that changed nothing the project keeps");
+            settle().await;
+            assert!(recorded.released().contains(&action), "the host forgets it");
+            assert_eq!(told.borrow().len(), 1, "no row for it");
+            reaper.close().await.unwrap();
             simulator.stop();
         })
         .await;
@@ -1004,11 +1332,18 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 "Logic took the pan; the mute was never asked"
             );
             let row = told.borrow().iter().rev().find(|record| record.title == "Vocal pan 25% right").cloned().unwrap();
-            assert_eq!((row.state, row.note.as_deref()), (ChangeState::Unsure, Some("Logic Pro didn't confirm this change.")));
+            // (a pan is no step of Logic's undo: the row says to change it back by hand if it went through)
+            assert_eq!(row.state, ChangeState::Unsure);
+            assert!(
+                row.note.as_deref().is_some_and(|note| note.starts_with("Kumi isn't sure this went through (Vocal pan 25% right)")
+                    && note.contains("Logic Pro's own undo (Cmd-Z in Logic Pro) doesn't take this back")),
+                "{:?}",
+                row.note
+            );
             let blind = tool(&latest, "undo_change").execute(input(json!({"change": row.id})), Signal::new()).await.unwrap();
             assert!(blind.is_error && blind.text.contains("won't undo it blindly"), "{}", blind.text);
             let row = told.borrow().iter().rev().find(|record| record.title == "Vocal pan 25% right").cloned().unwrap();
-            assert_eq!(row.note.as_deref(), Some("Whether this change reached Logic Pro isn't known, so Kumi won't undo it blindly."));
+            assert!(row.note.as_deref().is_some_and(|note| note.starts_with("Kumi isn't sure this went through")), "{:?}", row.note);
             let look = logic.observe(Signal::new(), None).await.unwrap();
             let listed = serde_json::from_str::<Value>(&look.context).unwrap()["kumiChanges"].clone();
             assert!(
@@ -1016,7 +1351,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 "{listed}"
             );
 
-            // An undo Logic doesn't answer after: unsure too, and never sent again.
+            // An undo Logic doesn't answer after: unsure too, Logic's words leading, and never sent again.
             let soloed = tool(&look, "make_changes")
                 .execute(input(json!({"steps": [{"tool": "track_solo", "input": {"ref": vocal, "solo": true}}]})), Signal::new())
                 .await
@@ -1028,17 +1363,20 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             assert!(unsure.is_error && unsure.text.contains("didn't answer after the change was sent"), "{}", unsure.text);
             assert_eq!(script.track(1)["solo"], json!(false), "Logic put it back");
             let row = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").cloned().unwrap();
-            assert_eq!(
-                (row.state, row.note.as_deref()),
-                (
-                    ChangeState::Unsure,
-                    Some("Logic Pro didn't confirm the undo, so whether it went through isn't known; Kumi won't send it again.")
-                )
+            assert_eq!(row.state, ChangeState::Unsure);
+            assert!(
+                row.note.as_deref().is_some_and(
+                    |note| note.starts_with("Kumi's undo didn't finish: ") && note.contains("didn't answer after the change was sent")
+                ),
+                "{:?}",
+                row.note
             );
-            // Asked again, the host answers the undo's key what it answered before, and nothing reaches Logic.
+            // Asked again, the host refuses without sending, the row keeps what it said, and nothing reaches Logic.
             let restores = script.asked().iter().filter(|(method, _)| method == "change_restore").count();
             let again = tool(&look, "undo_change").execute(input(json!({"change": solo.id})), Signal::new()).await.unwrap();
-            assert!(again.is_error && again.text == unsure.text, "{}", again.text);
+            assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
+            let kept = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").and_then(|record| record.note.clone());
+            assert_eq!(kept, row.note, "a refused repeat keeps what the row said of the undo before it");
             assert_eq!(script.asked().iter().filter(|(method, _)| method == "change_restore").count(), restores, "nothing sent twice");
             assert_eq!(state_of("Vocal soloed"), Some(ChangeState::Unsure));
             logic.close().await.unwrap();

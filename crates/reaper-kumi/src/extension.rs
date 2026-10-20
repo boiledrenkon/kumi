@@ -86,6 +86,10 @@ pub struct Snapshot {
     pub focus: Value,
     /// When `focus` was polled.
     pub focus_at: Option<Instant>,
+    /// The main thread is running a request it claimed, since then: it isn't ticking, and it isn't stuck (a plug-in
+    /// loading, a big take). That request's socket waits for its answer as long as the request allows; others are told
+    /// REAPER is busy once it has run longer than a stall.
+    pub working: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -387,6 +391,10 @@ impl Extension {
         let mut seen = mark();
         queue::drain(&self.jobs, self.budget, |job| {
             refresh.hold();
+            // The socket threads are told the main thread is working, not stalled, for as long as this takes; whatever
+            // unwinds, they are told it stopped.
+            self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).working = Some(Instant::now());
+            let _working = StopWorking(&self.snapshot);
             // A job before this one switched tabs or loaded a project (an action, a script): the project is looked at
             // again first, so this one is answered about the project REAPER has now, under its epoch.
             let now = mark();
@@ -416,6 +424,11 @@ impl Extension {
             "cursor_set" => self.changes.cursor_set(&self.reaper(), &self.reads, params),
             "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
+            // m4-r-fxenv
+            "fx_chain_save" => self.changes.fx_chain_save(&self.reaper(), &self.reads, params),
+            // (r-tracks) Saving: actions, no change.
+            "project_save" => self.changes.project_save(&self.reaper(), &self.reads, params),
+            "track_template_save" => self.changes.track_template_save(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }
@@ -548,6 +561,7 @@ impl Extension {
         }
         // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
         if let Some(info) = info.as_ref().filter(|_| settled) {
+            self.reads.note_project(info.ptr);
             self.reads.project_id(&reaper, info.ptr, info);
         }
         if (changed && !first) || replaced {
@@ -604,7 +618,8 @@ impl Extension {
                 let went_unsaved = !watch.path.is_empty() && info.path.is_empty();
                 let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
                 let mut replaced = false;
-                if loaded || file_changed || counter_went_back || history_reset || due {
+                let look = loaded || file_changed || counter_went_back || history_reset || due;
+                if look {
                     let now = track_guids(reaper, info.ptr);
                     let moves = Moves { file_changed, counter_went_back, history_reset: history_reset || loaded, went_unsaved };
                     replaced = is_another_project(&watch.tracks, &now, moves);
@@ -614,8 +629,11 @@ impl Extension {
                 watch.loads = crate::projectconfig::loads_of(addr);
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
-                watch.count = count;
-                watch.undo = undo;
+                // A change the throttle held back is still a change when the window is over: the counter stays what it was.
+                if look || count == watch.count {
+                    watch.count = count;
+                    watch.undo = undo;
+                }
                 (false, replaced)
             }
         }
@@ -714,6 +732,18 @@ impl Extension {
             Driver::Timer => rates.timer += 1,
             Driver::Surface => rates.surface += 1,
         }
+    }
+}
+
+/// Tells the socket threads the main thread is done with the request it was running.
+struct StopWorking<'a>(&'a Mutex<Snapshot>);
+
+impl Drop for StopWorking<'_> {
+    fn drop(&mut self) {
+        let mut snapshot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.working = None;
+        // (the main thread is back from the request: the time it spent there is no stall of the next request's)
+        snapshot.last_tick = Some(Instant::now());
     }
 }
 
@@ -1123,6 +1153,25 @@ mod tests {
         let after = epoch_and_identity(&extension, &tx);
         assert_ne!(after.0, before.0);
         assert_ne!(after.1, before.1);
+    }
+
+    #[test]
+    fn a_change_inside_the_throttle_window_is_looked_at_when_it_is_over() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // Every track replaced at once (a script, a paste of a whole project), a moment after the tracks were last read.
+        fake::with(|s| {
+            s.tracks = vec![fake::FakeTrack::new("{NEW-1}", "Keys")];
+            s.state_count += 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before, "held back by the throttle");
+        // The counter does not move again; the change is not forgotten.
+        extension.watch.borrow_mut().tracks_at = None;
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
     }
 
     #[test]

@@ -67,19 +67,37 @@ pub enum Ref {
     /// A send or receive of `track`, named by the track at its other end, or a hardware output by the output it goes to:
     /// never by position, which a reorder moves. Two or more to the same place are told apart by which of them this is
     /// (`repeat`, from 1) among how many there are (`of`): the ref stops reading anything once that count changes,
-    /// since REAPER gives a send no identity of its own to follow.
+    /// since REAPER gives a send no identity of its own to follow. A send of two or more to one track also carries the
+    /// state of those sends as the ref was read (`seen`): a change through it is refused once the producer has changed
+    /// them, since the place may name another send by then.
     Send {
         track: TrackId,
         category: i32,
         other: SendEnd,
         repeat: u32,
         of: u32,
+        seen: Option<String>,
     },
     Marker(String),
     Region(String),
     Envelope {
         track: TrackId,
         which: EnvelopeId,
+    },
+    // m4-r-fxenv: a take's envelopes and automation items.
+    /// A take's envelope (its volume, pan, mute or pitch, or a take FX parameter's), by the take's GUID and its own.
+    TakeEnvelope {
+        take: String,
+        guid: String,
+    },
+    /// An automation item of a track's envelope. REAPER gives one no id of its own (its pool's name and data are shared by
+    /// every copy), so it is named by its pool and where it starts; two of one pool at one place name neither.
+    AutoItem {
+        track: TrackId,
+        envelope: String,
+        pool: i64,
+        /// Seconds, as REAPER's own number prints: exactly what `D_POSITION` reads.
+        position: String,
     },
 }
 
@@ -134,15 +152,23 @@ impl Ref {
             ("param", [guid, index]) => Ref::Param { fx: guid_of(guid, "an FX id")?, index: number(index, "a parameter index")? },
             ("send", [track, category, other]) | ("send", [track, category, other, _]) => {
                 let category = number(category, "a send category")?;
-                let (repeat, of) = match rest.get(3) {
-                    None => (1, 1),
-                    Some(text) => text
-                        .split_once("of")
-                        .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
-                        .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
-                        .ok_or_else(|| {
-                            format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
-                        })?,
+                let (repeat, of, seen) = match rest.get(3) {
+                    None => (1, 1, None),
+                    Some(text) => {
+                        let (count, seen) = match text.split_once('.') {
+                            Some((count, seen)) => (count, Some(seen)),
+                            None => (*text, None),
+                        };
+                        let (repeat, of) = count
+                            .split_once("of")
+                            .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
+                            .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
+                            .filter(|_| seen.is_none_or(|seen| !seen.is_empty() && seen.chars().all(|c| c.is_ascii_hexdigit())))
+                            .ok_or_else(|| {
+                                format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
+                            })?;
+                        (repeat, of, seen.map(str::to_string))
+                    }
                 };
                 let other = match other.strip_prefix("hw") {
                     Some(_) if category == 1 => SendEnd::parse_hardware(other).ok_or_else(bad)?,
@@ -150,10 +176,25 @@ impl Ref {
                     None if matches!(category, -1 | 0) => SendEnd::Track(TrackId::parse(other)?),
                     None => return Err(bad()),
                 };
-                Ref::Send { track: TrackId::parse(track)?, category, other, repeat, of }
+                Ref::Send { track: TrackId::parse(track)?, category, other, repeat, of, seen }
             }
             ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
             ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
+            // m4-r-fxenv
+            ("env", ["take", take, guid]) => {
+                Ref::TakeEnvelope { take: guid_of(take, "a take id")?, guid: guid_of(guid, "an envelope id")? }
+            }
+            ("env", ["take", ..]) => return Err(bad()),
+            ("aitem", [track, envelope, pool, position]) => {
+                let pool = pool.parse::<i64>().ok().filter(|pool| *pool >= 0).ok_or_else(bad)?;
+                let at = position.parse::<f64>().ok().filter(|at| at.is_finite() && *at >= 0.0).ok_or_else(bad)?;
+                Ref::AutoItem {
+                    track: TrackId::parse(track)?,
+                    envelope: guid_of(envelope, "an envelope id")?,
+                    pool,
+                    position: position_text(at),
+                }
+            }
             ("env", [track, name]) => {
                 let which = if looks_like_guid(name) {
                     EnvelopeId::Guid(name.to_string())
@@ -168,7 +209,7 @@ impl Ref {
                 track: TrackId::parse(track)?,
                 which: EnvelopeId::Param { fx: guid_of(fx, "an FX id")?, index: number(index, "a parameter index")? },
             },
-            ("track" | "item" | "take" | "fx" | "param" | "send" | "marker" | "region" | "env", _) => return Err(bad()),
+            ("track" | "item" | "take" | "fx" | "param" | "send" | "marker" | "region" | "env" | "aitem", _) => return Err(bad()),
             _ => return Err(format!("{text:?}: REAPER has no ref kind {kind:?}")),
         })
     }
@@ -183,7 +224,8 @@ impl Ref {
             Ref::Send { .. } => "send",
             Ref::Marker(_) => "marker",
             Ref::Region(_) => "region",
-            Ref::Envelope { .. } => "env",
+            Ref::Envelope { .. } | Ref::TakeEnvelope { .. } => "env",
+            Ref::AutoItem { .. } => "aitem",
         }
     }
 
@@ -194,10 +236,12 @@ impl Ref {
             Ref::Take(guid) => take_ref(guid),
             Ref::Fx(guid) => fx_ref(guid),
             Ref::Param { fx, index } => param_ref(fx, *index),
-            Ref::Send { track, category, other, repeat, of } => send_ref(track, *category, other, *repeat, *of),
+            Ref::Send { track, category, other, repeat, of, seen } => send_ref(track, *category, other, *repeat, *of, seen.as_deref()),
             Ref::Marker(guid) => marker_ref(guid),
             Ref::Region(guid) => region_ref(guid),
             Ref::Envelope { track, which } => envelope_ref(track, which),
+            Ref::TakeEnvelope { take, guid } => take_envelope_ref(take, guid),
+            Ref::AutoItem { track, envelope, pool, position } => format!("{PREFIX}:aitem:{}:{envelope}:{pool}:{position}", track.text()),
         }
     }
 }
@@ -217,12 +261,12 @@ pub fn fx_ref(guid: &str) -> String {
 pub fn param_ref(fx_guid: &str, index: i32) -> String {
     format!("{PREFIX}:param:{fx_guid}:{index}")
 }
-pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32, of: u32) -> String {
+pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32, of: u32, seen: Option<&str>) -> String {
     let base = format!("{PREFIX}:send:{}:{category}:{}", track.text(), other.text());
-    if of >= 2 {
-        format!("{base}:{repeat}of{of}")
-    } else {
-        base
+    match seen {
+        _ if of < 2 => base,
+        Some(seen) => format!("{base}:{repeat}of{of}.{seen}"),
+        None => format!("{base}:{repeat}of{of}"),
     }
 }
 pub fn marker_ref(guid: &str) -> String {
@@ -236,6 +280,26 @@ pub fn envelope_ref(track: &TrackId, which: &EnvelopeId) -> String {
         EnvelopeId::Guid(guid) => format!("{PREFIX}:env:{}:{guid}", track.text()),
         EnvelopeId::Chunk(name) => format!("{PREFIX}:env:{}:{name}", track.text()),
         EnvelopeId::Param { fx, index } => format!("{PREFIX}:env:{}:{fx}:{index}", track.text()),
+    }
+}
+
+// m4-r-fxenv
+pub fn take_envelope_ref(take: &str, guid: &str) -> String {
+    format!("{PREFIX}:env:take:{take}:{guid}")
+}
+pub fn auto_item_ref(track: &TrackId, envelope: &str, pool: i64, position: f64) -> String {
+    format!("{PREFIX}:aitem:{}:{envelope}:{pool}:{}", track.text(), position_text(position))
+}
+/// A position as an automation item's ref holds it: the shortest text that reads back as the same number.
+pub fn position_text(position: f64) -> String {
+    // To a nanosecond: REAPER's undo and redo bring a position back from text with its last bits changed, and the ref
+    // should still read the same.
+    let text = format!("{:.9}", if position == 0.0 { 0.0 } else { position });
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.to_string()
     }
 }
 
@@ -333,7 +397,9 @@ impl Registry {
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
+        // A GUID the map holds with a pointer that no longer names it means the map is out of date, not a recent miss.
+        let stale = self.items.contains_key(guid);
+        if !stale && Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
             return None;
         }
         self.items.clear();
@@ -373,11 +439,15 @@ impl Registry {
             if self.fx_matches(reaper, proj, fx, guid) {
                 return Some(fx);
             }
-            // The chain was reordered: the same owner's chain is the first place it can have gone.
-            self.index_chain(reaper, fx.owner);
-            if let Some(&fx) = self.fx.get(guid) {
-                if self.fx_matches(reaper, proj, fx, guid) {
-                    return Some(fx);
+            // The chain was reordered: the same owner's chain is the first place it can have gone, while REAPER still has
+            // that owner. One REAPER replaced (its undo puts a track back as a new object) is never read: its chain is
+            // freed memory (a crash in the lab, 2026-10-19: REAPER's undo and redo of a change whose FX the watch followed).
+            if self.owner_valid(reaper, proj, fx.owner) {
+                self.index_chain(reaper, fx.owner);
+                if let Some(&fx) = self.fx.get(guid) {
+                    if self.fx_matches(reaper, proj, fx, guid) {
+                        return Some(fx);
+                    }
                 }
             }
         }
@@ -412,12 +482,15 @@ impl Registry {
         self.fx.get(guid).copied()
     }
 
-    fn fx_matches(&self, reaper: &Reaper, proj: Project, fx: Fx, guid: &str) -> bool {
-        let owner_valid = match fx.owner {
+    fn owner_valid(&self, reaper: &Reaper, proj: Project, owner: FxOwner) -> bool {
+        match owner {
             FxOwner::Track(track) => reaper.track_valid(proj, track),
             FxOwner::Take(take) => reaper.take_valid(proj, take),
-        };
-        owner_valid && reaper.fx_guid(fx) == guid
+        }
+    }
+
+    fn fx_matches(&self, reaper: &Reaper, proj: Project, fx: Fx, guid: &str) -> bool {
+        self.owner_valid(reaper, proj, fx.owner) && reaper.fx_guid(fx) == guid
     }
 
     /// Remembers every FX in an owner's chain, containers' children and a track's input chain included.
@@ -500,16 +573,26 @@ mod tests {
             Ref::Take(guid.into()),
             Ref::Fx(fx.into()),
             Ref::Param { fx: fx.into(), index: 7 },
-            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1, of: 1 },
-            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 3, of: 3 },
-            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 1, of: 2 },
-            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1, of: 1 },
-            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2 },
+            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1, of: 1, seen: None },
+            Ref::Send {
+                track: track.clone(),
+                category: 0,
+                other: SendEnd::Track(TrackId::Master),
+                repeat: 3,
+                of: 3,
+                seen: Some("0a1b2c3d".into()),
+            },
+            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 1, of: 2, seen: None },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1, of: 1, seen: None },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2, seen: None },
             Ref::Marker(guid.into()),
             Ref::Region(fx.into()),
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Guid(guid.into()) },
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Chunk("VOLENV2".into()) },
-            Ref::Envelope { track, which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
+            Ref::Envelope { track: track.clone(), which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
+            Ref::TakeEnvelope { take: guid.into(), guid: fx.into() },
+            Ref::AutoItem { track: track.clone(), envelope: fx.into(), pool: 3, position: "12.5".into() },
+            Ref::AutoItem { track, envelope: fx.into(), pool: 0, position: "0".into() },
         ] {
             let text = reference.text();
             assert_eq!(Ref::parse(&text).as_ref(), Ok(&reference), "{text}");
@@ -546,6 +629,13 @@ mod tests {
             ("r:env:{A}:VOL ENV", "well-formed"),
             // A position in the envelope list names a different envelope once the list changes: no ref has one.
             ("r:env:{A}:i3", "well-formed"),
+            ("r:env:take:{A}", "well-formed"),
+            ("r:env:take:{A}:x", "envelope id"),
+            ("r:aitem:{A}:{B}:1", "well-formed"),
+            ("r:aitem:{A}:{B}:-1:2", "well-formed"),
+            ("r:aitem:{A}:{B}:1:x", "well-formed"),
+            ("r:aitem:{A}:{B}:1:-2", "well-formed"),
+            ("r:aitem:{A}:B:1:2", "envelope id"),
         ] {
             let error = Ref::parse(text).unwrap_err();
             assert!(error.contains(needle), "{text}: {error}");

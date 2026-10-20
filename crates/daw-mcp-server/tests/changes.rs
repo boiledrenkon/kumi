@@ -7,6 +7,7 @@ use daw_bridge::files::ensure_secret;
 use daw_bridge::paths::BridgePaths;
 use daw_bridge::Daw;
 use daw_mcp_server::simulator::reaper::ReaperScript;
+use daw_mcp_server::simulator::renoise::RenoiseScript;
 use daw_mcp_server::simulator::Simulator;
 use serde_json::{json, Value};
 
@@ -137,4 +138,64 @@ async fn a_change_previewed_in_another_project_is_refused_and_released_changes_a
     assert!(is_error && gone["code"] == "unknown", "{gone}");
     let (bad, is_error) = lab.tool("change_release", json!({"transactionIds": []})).await;
     assert!(is_error && bad["code"] == "bad-params", "{bad}");
+}
+
+#[tokio::test]
+async fn an_undo_the_daw_couldnt_say_it_finished_is_never_sent_again() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview(-6.0).await;
+    lab.apply(&preview, "a1").await;
+    lab.script.uncertain_restore_once();
+    let (unsure, is_error) = lab.undo(&preview, "u1", false).await;
+    assert!(is_error && unsure["code"] == "undo-uncertain", "{unsure}");
+    let restores = lab.script.undo_history().len();
+    // Asked again (a new key): refused, nothing sent, so the restore isn't made twice.
+    let (again, is_error) = lab.undo(&preview, "u2", false).await;
+    assert!(is_error && again["code"] == "undo-uncertain", "{again}");
+    assert_eq!(lab.script.undo_history().len(), restores);
+}
+
+// (r-tracks) REAPER's saves are no change: the host hands them to the bridge by name, its answer back, no journal.
+#[tokio::test]
+async fn reapers_saves_go_to_the_bridge_by_name_and_are_no_change() {
+    let mut lab = Lab::start().await;
+    let (answer, is_error) = lab.tool("project_save", json!({"version": true, "epoch": "e1"})).await;
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/Projects/Sim.rpp");
+    let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit"})).await;
+    assert!(is_error, "the epoch is needed: {answer}");
+    let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit", "epoch": "e1"})).await;
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/REAPER/TrackTemplates/Kit.RTrackTemplate");
+    let asked = lab.script.asked();
+    let (_, sent) = asked.iter().find(|(method, _)| method == "project_save").expect("asked by name");
+    assert_eq!(sent, &json!({"version": true, "epoch": "e1"}), "the arguments as they came");
+    // Nothing is kept for undo.
+    let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
+    assert_eq!(released["released"], 0, "{released}");
+}
+
+#[tokio::test]
+async fn renoises_song_is_saved_through_the_same_tool_and_a_version_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let script = RenoiseScript::new();
+    let mut config = script.config_with_changes(secret, "/lab/Renoise");
+    config.discovery_dir = Some(paths.discovery());
+    let _simulator = Simulator::start(config).await.unwrap();
+    let mut session = Session::start(Daw::Renoise, home.path());
+    let (snapshot, is_error) = session.tool_full(1, "snapshot", json!({}), false).await;
+    assert!(!is_error, "{snapshot}");
+    let epoch = snapshot["epoch"].clone();
+    let (answer, is_error) = session.tool_full(2, "project_save", json!({"epoch": epoch}), false).await;
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/Renoise/Sim.xrns");
+    let (answer, is_error) = session.tool_full(3, "project_save", json!({"epoch": epoch, "version": true}), false).await;
+    assert!(is_error, "{answer}");
+    assert_eq!(answer["code"], "bad-params");
+    // REAPER's track templates are no tool of Renoise's.
+    let message = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "track_template_save", "arguments": {"trackRefs": ["track:1"], "name": "Kit", "epoch": epoch}}});
+    let answer = session.call_as(message, false).await;
+    assert_eq!(answer["error"]["code"], -32602, "{answer}");
 }

@@ -3,7 +3,8 @@
 // reaper_plugin_functions.h declares each function on one line, `ret (*REAPERAPI_FUNCNAME(Name))(args);`, and
 // that line is all we read: the function's name, its C signature (kept as text for the generic call) and a typed
 // Rust function pointer, resolved at load time through GetFunc. Nothing is listed by hand, so a newer header
-// brings its new functions with it.
+// brings its new functions with it. The header's own loader table names every function a second time: a
+// prototype this parser can't read fails the build there, by name, instead of going missing.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -25,14 +26,21 @@ fn main() {
     let shim = fs::read_to_string(SHIM).expect("read the shim");
 
     let functions = parse_functions(&functions_header);
+    check_loader_table(&functions_header, &functions);
     let sdk_version = generated_by(&functions_header);
     let mut out = String::new();
     emit(&mut out, &sdk_version, &functions, &plugin_header);
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::write(out_dir.join("reaper_api.rs"), out).expect("write reaper_api.rs");
+    fs::write(out_dir.join("reaper_generic.rs"), emit_generic(&functions)).expect("write reaper_generic.rs");
 
     check_shim(&plugin_header, &shim);
     build_shim(Path::new(SHIM));
+    // The name the library gives itself on macOS: the linker's default is the absolute path it was built at. REAPER
+    // loads it by path, so this only keeps the build folder out of the file Kumi ships.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/reaper_kumi.dylib");
+    }
 }
 
 struct Function {
@@ -69,6 +77,24 @@ fn parse_functions(header: &str) -> Vec<Function> {
     let names: BTreeSet<_> = functions.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names.len(), functions.len(), "a function is declared twice");
     functions
+}
+
+// REAPERAPI_LoadAPI's table, `{(void**)&REAPERAPI_FUNCNAME(Name),"Name"},`: every function the header declares,
+// listed apart from the prototypes. Each one must have been read from its prototype, and nothing else.
+fn check_loader_table(header: &str, functions: &[Function]) {
+    const ENTRY: &str = "{(void**)&REAPERAPI_FUNCNAME(";
+    let mut listed = BTreeSet::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim_start().strip_prefix(ENTRY) else { continue };
+        let (name, quoted) = rest.split_once("),\"").unwrap_or_else(|| panic!("unexpected loader entry: {line}"));
+        assert_eq!(quoted.strip_suffix("\"},"), Some(name), "a loader entry names two functions: {line}");
+        assert!(listed.insert(name.to_string()), "{name} is in the loader table twice");
+    }
+    let parsed: BTreeSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+    let unread: Vec<_> = listed.difference(&parsed).collect();
+    let unlisted: Vec<_> = parsed.difference(&listed).collect();
+    assert!(unread.is_empty(), "{FUNCTIONS_HEADER} declares functions build.rs couldn't read from their prototypes: {unread:?}");
+    assert!(unlisted.is_empty(), "build.rs read prototypes the loader table doesn't list: {unlisted:?}");
 }
 
 fn split_top_level(args: &str) -> Vec<String> {
@@ -259,4 +285,203 @@ fn build_shim(shim: &Path) {
         build.flag("-std=c++11").flag("-fno-exceptions").flag("-fno-rtti").flag("-fvisibility=hidden").flag("-Wno-unused-parameter");
     }
     build.compile("reaper_kumi_shim");
+}
+
+// ----- the generic call: every function the API table has, called by name with JSON arguments -----
+//
+// Each parameter is read from the call's arguments by what its C type and name say it is: a number or a flag, text, a
+// buffer REAPER writes into (with its size, which the caller never passes), a value REAPER writes back (`…Out`), a handle
+// given as a ref (a track, item, take, envelope or project). A function with any other parameter or return (callbacks,
+// windows, bitmaps, sources) can't be called this way: run-lua can.
+
+const HANDLES: [&str; 5] = ["MediaTrack", "MediaItem", "MediaItem_Take", "TrackEnvelope", "ReaProject"];
+
+fn scalar_kind(base: &str) -> Option<&'static str> {
+    Some(match base {
+        "int" | "char" => "int",
+        "unsigned int" | "UINT" => "uint",
+        "INT64" => "int64",
+        "INT_PTR" => "isize",
+        "size_t" => "usize",
+        "double" => "double",
+        "float" => "float",
+        "bool" => "bool",
+        _ => return None,
+    })
+}
+
+// What the call reads an argument as, and the Rust expression that makes it (`k` is its place among the inputs).
+fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut bool) -> Result<String, String> {
+    let ty = p.ty.trim();
+    let name = &p.name;
+    let optional = name.contains("Optional");
+    let in_out = name.contains("InOut");
+    let out_only = !in_out && (name.ends_with("Out") || name.contains("OutOptional"));
+    let at = |k: Option<usize>| match k {
+        Some(k) => format!("Some({k})"),
+        None => "None".to_string(),
+    };
+    if p.callback {
+        return Err("a callback".into());
+    }
+    let stars = ty.matches('*').count();
+    let base = ty.trim_end_matches(['*', ' ']);
+    let (constant, base) = match base.strip_prefix("const ") {
+        Some(rest) => (true, rest.trim()),
+        None => (false, base),
+    };
+    match (stars, constant, base) {
+        (0, _, b) => match scalar_kind(b) {
+            Some(kind) => Ok(match kind {
+                "int" => format!("c.int({}, {name:?}, {optional})? as _", at(k)),
+                "uint" | "usize" | "isize" | "int64" => format!("c.int({}, {name:?}, {optional})? as _", at(k)),
+                "double" => format!("c.double({}, {name:?}, {optional})?", at(k)),
+                "float" => format!("c.double({}, {name:?}, {optional})? as f32", at(k)),
+                _ => format!("c.boolean({}, {name:?}, {optional})?", at(k)),
+            }),
+            None => Err(format!("a {ty}")),
+        },
+        (1, true, "char") => Ok(format!("c.text({}, {name:?}, {optional})?", at(k))),
+        (1, false, "char") => {
+            let size = next.filter(|n| n.ty.trim() == "int" && n.name == format!("{name}_sz"));
+            let input = in_out || name.contains("NeedBig") && !out_only;
+            *sized = size.is_some();
+            let k = if input { at(k) } else { "None".into() };
+            Ok(format!("c.buf({k}, {name:?})?"))
+        }
+        (1, true, b) if scalar_kind(b).is_some() => Ok(format!("c.in_ptr_{}({}, {name:?})? as _", scalar_kind(b).unwrap(), at(k))),
+        (1, false, b) if scalar_kind(b).is_some() => {
+            let kind = scalar_kind(b).unwrap();
+            if kind == "float" || kind == "isize" || kind == "usize" {
+                return Err(format!("a {ty}"));
+            }
+            let k = if out_only { "None".into() } else { at(k) };
+            Ok(format!("c.out_{kind}({k}, {name:?})? as _"))
+        }
+        (2, true, "char") if out_only => Ok(format!("c.out_text({name:?})")),
+        (1, false, b) if HANDLES.contains(&b) => Ok(format!("c.handle({}, {name:?}, {b:?}, {optional})? as *mut {b}", at(k))),
+        _ => Err(format!("a {ty}")),
+    }
+}
+
+// Whether a parameter is something the caller passes (an input), as opposed to what the call makes up itself.
+fn is_input(p: &Param) -> bool {
+    let ty = p.ty.trim();
+    let name = &p.name;
+    let in_out = name.contains("InOut");
+    let out_only = !in_out && (name.ends_with("Out") || name.contains("OutOptional"));
+    if ty == "char*" {
+        return in_out || (name.contains("NeedBig") && !out_only);
+    }
+    if ty == "const char**" {
+        return false;
+    }
+    if ty.ends_with('*') && !ty.starts_with("const") && scalar_kind(ty.trim_end_matches(['*', ' '])).is_some() {
+        return !out_only;
+    }
+    true
+}
+
+fn ret_expr(ret: &str) -> Result<String, String> {
+    let ty = ret.trim();
+    let stars = ty.matches('*').count();
+    let base = ty.trim_end_matches(['*', ' ']);
+    let base = base.strip_prefix("const ").map(str::trim).unwrap_or(base);
+    match (stars, base) {
+        (0, "void") => Ok("Value::Null".into()),
+        (0, b) if scalar_kind(b).is_some() => Ok(match scalar_kind(b).unwrap() {
+            "float" => "Value::from(r as f64)".into(),
+            "isize" => "Value::from(r as i64)".into(),
+            "usize" => "Value::from(r as u64)".into(),
+            "int" if b == "char" => "Value::from(r as i64)".into(),
+            _ => "Value::from(r)".into(),
+        }),
+        (1, "char") => Ok("c.ret_text(r as *const c_char)".into()),
+        (1, b) if HANDLES.contains(&b) => Ok(format!("c.ret_handle({b:?}, r as *mut c_void)")),
+        _ => Err(format!("returns a {ty}")),
+    }
+}
+
+fn emit_generic(functions: &[Function]) -> String {
+    let mut out = String::new();
+    let mut arms = String::new();
+    let mut why = String::new();
+    let mut inputs_table = String::new();
+    for (index, f) in functions.iter().enumerate() {
+        let mut exprs = Vec::new();
+        let mut reason = ret_expr(&f.ret).err();
+        let mut k = 0usize;
+        let mut names = Vec::new();
+        let mut skip = false;
+        for (i, p) in f.params.iter().enumerate() {
+            if skip {
+                skip = false;
+                continue;
+            }
+            let input = is_input(p);
+            let mut sized = false;
+            match param_expr(p, f.params.get(i + 1), input.then_some(k), &mut sized) {
+                Ok(expr) => {
+                    if sized {
+                        // (the buffer and its size: one call that answers both)
+                        exprs.push(format!("{{ let (b, n) = {expr}; (b, n) }}"));
+                        skip = true;
+                    } else {
+                        exprs.push(expr);
+                    }
+                }
+                Err(e) if reason.is_none() => reason = Some(format!("{} takes {e}", p.name)),
+                Err(_) => {}
+            }
+            if input {
+                names.push(format!("{:?}", p.name));
+                k += 1;
+            }
+        }
+        writeln!(inputs_table, "    &[{}],", names.join(", ")).unwrap();
+        match reason {
+            Some(reason) => {
+                writeln!(why, "    Some({reason:?}),").unwrap();
+            }
+            None => {
+                writeln!(why, "    None,").unwrap();
+                // A sized buffer is one expression that makes two arguments.
+                let mut lets = String::new();
+                let mut call_args = Vec::new();
+                for (n, expr) in exprs.iter().enumerate() {
+                    if expr.starts_with("{ let (b, n)") {
+                        writeln!(lets, "            let (a{n}, a{n}_sz) = {expr};").unwrap();
+                        call_args.push(format!("a{n}"));
+                        call_args.push(format!("a{n}_sz"));
+                    } else if expr.starts_with("c.buf(") {
+                        writeln!(lets, "            let (a{n}, _) = {expr};").unwrap();
+                        call_args.push(format!("a{n}"));
+                    } else {
+                        writeln!(lets, "            let a{n} = {expr};").unwrap();
+                        call_args.push(format!("a{n}"));
+                    }
+                }
+                let ret = ret_expr(&f.ret).unwrap();
+                writeln!(arms, "        {index} => {{").unwrap();
+                writeln!(arms, "            let f = api.{}().ok_or_else(|| \"this REAPER has no {}\".to_string())?;", f.name, f.name)
+                    .unwrap();
+                arms.push_str(&lets);
+                writeln!(arms, "            if c.dry() {{ return Ok(Value::Null); }}").unwrap();
+                writeln!(arms, "            #[allow(clippy::let_unit_value, unused_variables)]").unwrap();
+                writeln!(arms, "            let r = unsafe {{ f({}) }};", call_args.join(", ")).unwrap();
+                writeln!(arms, "            Ok({ret})").unwrap();
+                writeln!(arms, "        }}").unwrap();
+            }
+        }
+    }
+    writeln!(out, "// Generated by build.rs from sdk/reaper_plugin_functions.h: the generic call. Don't edit.").unwrap();
+    writeln!(out, "/// Why each function can't be called by name (None: it can), in the table's order.").unwrap();
+    writeln!(out, "pub static UNCALLABLE: [Option<&str>; {}] = [\n{why}];", functions.len()).unwrap();
+    writeln!(out, "/// The arguments each function takes from the caller, by their C names, in order.").unwrap();
+    writeln!(out, "pub static INPUTS: [&[&str]; {}] = [\n{inputs_table}];", functions.len()).unwrap();
+    writeln!(out, "/// Calls function `index` of the table with the call's arguments.").unwrap();
+    writeln!(out, "#[allow(unused_unsafe, clippy::unnecessary_cast, clippy::useless_conversion)]").unwrap();
+    writeln!(out, "pub fn dispatch(api: &Api, index: usize, c: &mut Call) -> Result<Value, String> {{").unwrap();
+    writeln!(out, "    match index {{\n{arms}        _ => Err(UNCALLABLE.get(index).copied().flatten().unwrap_or(\"no such function\").to_string()),\n    }}\n}}").unwrap();
+    out
 }

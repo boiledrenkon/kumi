@@ -81,6 +81,11 @@ function M:watch_undo(observable)
   end))
 end
 
+-- The same with a function of the caller's (one function for many observables: has_notifier tells it is there already).
+function M:watch_undo_with(observable, fn)
+  add(self, observable, fn)
+end
+
 -- Only counts: a name, a colour, a mute.
 function M:watch_changes(observable)
   add(self, observable, self.guard("notifier", function() count(self) end))
@@ -117,11 +122,24 @@ function M:watch_structural(observable, reason, kind, owner, group)
   end))
 end
 
--- A pattern's lines: any change counts (the handler only counts; clearing a pattern fires hundreds).
-function M:watch_lines(pattern)
-  local fn = self.guard("line notifier", function() count(self) end)
+-- A pattern's lines: any change counts (the handler only counts; clearing a pattern fires hundreds). A phrase's lines name no
+-- phrase: `token` (the phrase's group) goes with them.
+function M:watch_lines(pattern, token)
+  local fn = self.guard("line notifier", function(pos)
+    count(self)
+    if self.hooks.lines then self.hooks.lines(pos, token) end
+  end)
   pattern:add_line_notifier(fn)
   self.entries[#self.entries + 1] = { remove = function() pattern:remove_line_notifier(fn) end, a = self.owner_a, b = self.owner_b }
+end
+
+-- A pattern track made an alias or not: its lines change with no line notifier, so `hooks.alias` counts it for the pattern
+-- (`token`).
+function M:watch_alias(observable, token)
+  add(self, observable, self.guard("alias notifier", function()
+    count(self)
+    if self.hooks.alias then self.hooks.alias(token) end
+  end))
 end
 
 -- A change that moves things inside what a read steps through (a pattern's number of lines).

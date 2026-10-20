@@ -337,7 +337,8 @@ async fn a_write_logic_doesnt_answer_after_is_uncertain_and_is_never_sent_twice(
     );
     assert_eq!(lab.script.asked().len(), asked, "nothing reached the bridge");
 
-    // An undo Logic doesn't answer after: uncertain, kept under its key, never sent again.
+    // An undo Logic doesn't answer after: the restore may have run, so the change is uncertain and the undo is never
+    // sent again, under any key.
     let (pan, applied) = lab.make("track-pan", json!({"ref": "1:track:1", "pan": 0.25}), "a3").await;
     assert_eq!(
         (applied["display"]["title"].clone(), applied["applied"].clone()),
@@ -345,12 +346,17 @@ async fn a_write_logic_doesnt_answer_after_is_uncertain_and_is_never_sent_twice(
     );
     lab.script.uncertain_once();
     let (unsure, is_error) = lab.undo(&pan, "u2", false).await;
-    assert!(is_error && unsure["state"] == "uncertain" && unsure["code"] == "uncertain", "{unsure}");
+    assert!(is_error && unsure["state"] == "uncertain" && unsure["code"] == "undo-uncertain" && unsure["answered"] == true, "{unsure}");
+    assert!(unsure["error"].as_str().unwrap().contains("didn't answer after the change was sent"), "{unsure}");
     assert_eq!(lab.script.track(1)["pan"], json!(0), "Logic put the pan back");
     let asked = lab.script.asked().len();
-    assert_eq!(lab.undo(&pan, "u2", false).await, (unsure, true), "the same key answers the same");
-    let (refused, is_error) = lab.undo(&pan, "u3", false).await;
-    assert!(is_error && refused["code"] == "uncertain" && refused["error"].as_str().unwrap().contains("won't send it again"), "{refused}");
+    for key in ["u2", "u3"] {
+        let (refused, is_error) = lab.undo(&pan, key, false).await;
+        assert!(
+            is_error && refused["code"] == "undo-uncertain" && refused["error"].as_str().unwrap().contains("won't undo it again"),
+            "{key}: {refused}"
+        );
+    }
     assert_eq!(lab.script.asked().len(), asked, "nothing reached the bridge");
     lab.simulator.stop();
 }

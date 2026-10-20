@@ -7,7 +7,7 @@ use super::tracks::colour_of;
 use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
 use crate::read::{bad, failed};
 use crate::reaper::{Marker, Reaper};
-use crate::refs::{self, Ref};
+use crate::refs::{self, Ref, TrackId};
 use crate::rows;
 
 fn changed(message: impl Into<String>) -> Fault {
@@ -183,7 +183,13 @@ pub fn add_apply(ctx: &Ctx, input: &Value, region: bool) -> Done<Applied> {
     } else {
         format!("{word}{name} at {}", bar_text(ctx.reaper, ctx.proj, marker.start))
     };
-    Ok(Applied { applied: state(&marker), created: Some(target(&marker)), material: None, display: json!({"title": title}) })
+    Ok(Applied {
+        applied: state(&marker),
+        created: Some(target(&marker)),
+        material: None,
+        display: json!({"title": title}),
+        ..Default::default()
+    })
 }
 
 /// What a marker is, exactly: where, what it is called, its colour and number.
@@ -212,6 +218,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"deleted": reference(&marker)}),
         display: json!({"title": format!("{} taken away again", label(&marker))}),
+        ..Default::default()
     })
 }
 
@@ -244,7 +251,22 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !same_state(&state(&marker), fence) {
         return Err(changed(format!("{} changed since the preview", label(&marker))));
     }
-    let material = json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker)});
+    // What a marker is besides its state: the ruler lane it sits in, and for a region the tracks it renders in the region
+    // render matrix (by id, "master" for the master).
+    let matrix: Vec<String> = if marker.is_region {
+        ctx.reaper
+            .region_render_tracks(ctx.proj, marker.number)
+            .into_iter()
+            .map(|track| match super::tracks::track_id_of(ctx, track) {
+                TrackId::Master => "master".to_string(),
+                TrackId::Guid(guid) => guid,
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    // (r-tracks) The lane's id too: its number moves when lanes are reordered.
+    let material = json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker), "lane": marker.lane, "laneGuid": super::projectitems::lane_guid(ctx, marker.lane as i64), "matrix": matrix});
     if !ctx.reaper.delete_marker(ctx.proj, &marker.guid) {
         return Err(failed("REAPER wouldn't delete the marker"));
     }
@@ -253,6 +275,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: Some(material),
         display: json!({"title": format!("Deleted {}", label(&marker).to_lowercase_first())}),
+        ..Default::default()
     })
 }
 
@@ -266,9 +289,23 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Ok(Restored {
                 restored: json!({"ref": reference(&existing)}),
                 display: json!({"title": format!("{} is back already", label(&existing))}),
+                unwritten: true,
             });
         }
         return Err(changed("a marker with that id is in the project again"));
+    }
+    // One made again is a new id, so a retry (the first answer was lost) must know it by what it is: the same kind of
+    // marker in the same place, with the same name, colour and number, is the one made already.
+    let reaper = ctx.reaper;
+    let same = (0..reaper.marker_count(ctx.proj))
+        .filter_map(|index| reaper.marker(ctx.proj, index))
+        .find(|candidate| candidate.is_region == region && same_state(&state(candidate), saved));
+    if let Some(made) = same {
+        return Ok(Restored {
+            restored: json!({"ref": reference(&made), "was": material["was"]}),
+            display: json!({"title": format!("{} is back already", label(&made))}),
+            unwritten: true,
+        });
     }
     let start = saved["start"].as_f64().unwrap_or(0.0);
     let end = saved["end"].as_f64().unwrap_or(start);
@@ -280,10 +317,38 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if let Some(number) = saved["number"].as_i64() {
         ctx.reaper.set_marker_value(ctx.proj, &guid, "I_NUMBER", number as f64);
     }
+    // The ruler lane it sat in (by the lane's id: r-tracks), and the render matrix a region had (the tracks that no longer
+    // exist are left out).
+    let mut lane_gone = false;
+    let lane = match material["laneGuid"].as_str() {
+        Some(lane_guid) => {
+            let found = super::projectitems::lane_by_guid(ctx, lane_guid);
+            lane_gone = found.is_none();
+            found
+        }
+        None => material["lane"].as_i64(),
+    };
+    if let Some(lane) = lane.filter(|lane| *lane != 0) {
+        ctx.reaper.set_marker_value(ctx.proj, &guid, "I_LANENUMBER", lane as f64);
+    }
     let marker = ctx.reaper.marker_by_guid(ctx.proj, &guid).ok_or_else(|| failed("the marker made again isn't in the project"))?;
+    for id in material["matrix"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let track = match id {
+            "master" => ctx.reaper.master_track(ctx.proj),
+            guid => ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(guid.to_string())).ok(),
+        };
+        if let Some(track) = track {
+            ctx.reaper.add_to_region_render(ctx.proj, marker.number, track);
+        }
+    }
+    let mut note = "REAPER gives a marker made again a new id.".to_string();
+    if lane_gone {
+        note.push_str(" The ruler lane it sat in is gone, so it sits in the first lane.");
+    }
     Ok(Restored {
         restored: json!({"ref": reference(&marker), "was": material["was"]}),
-        display: json!({"title": format!("{} put back", label(&marker)), "note": "REAPER gives a marker made again a new id."}),
+        display: json!({"title": format!("{} put back", label(&marker)), "note": note}),
+        ..Default::default()
     })
 }
 
@@ -412,13 +477,15 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         created: None,
         material: None,
         display: json!({"title": (prop.title)(ctx, &marker, &after), "before": now, "after": after}),
+        unwritten: (prop.same)(&now, &wanted),
     })
 }
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
     let marker = find_for_restore(ctx, &restore.target["ref"])?;
     let now = (prop.read)(&marker);
-    if !(prop.same)(&now, restore.prior) {
+    let already = (prop.same)(&now, restore.prior);
+    if !already {
         if !restore.discard && !(prop.same)(&now, restore.applied) {
             return Err(changed(format!("{}'s {} changed in REAPER since Kumi set it", label(&marker), prop.noun)));
         }
@@ -434,5 +501,104 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     Ok(Restored {
         restored: after.clone(),
         display: json!({"title": format!("{} (put back)", (prop.title)(ctx, &marker, &after)), "before": now, "after": after}),
+        unwritten: already,
+    })
+}
+
+// ----- (r-tracks, M4) the ruler lane a marker sits in -----
+
+/// A marker's lane (REAPER 7.62+: counted from 0, as the rows' lane says) and the lane's id, which holds when lanes are
+/// reordered.
+fn lane_state(ctx: &Ctx, lane: i64) -> Value {
+    json!({"lane": lane, "laneGuid": super::projectitems::lane_guid(ctx, lane)})
+}
+
+/// Two lane states name the same lane: by the lane's id when REAPER gives both one, else by number.
+fn same_lane(a: &Value, b: &Value) -> bool {
+    match (a["laneGuid"].as_str(), b["laneGuid"].as_str()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a["lane"].as_i64() == b["lane"].as_i64(),
+    }
+}
+
+fn lane_wanted(ctx: &Ctx, input: &Value) -> Done<i64> {
+    let count = ctx.reaper.project_info(ctx.proj, "RULER_LANE_COUNT").unwrap_or(1.0) as i64;
+    let lane = input.get("lane").and_then(Value::as_i64).ok_or_else(|| bad("lane must be a ruler lane's number, from 0"))?;
+    if !(0..count).contains(&lane) {
+        return Err(bad(format!("the project has {count} ruler lanes, 0 to {}: add one first (ruler_lane_add)", count - 1)));
+    }
+    Ok(lane)
+}
+
+fn lane_title(ctx: &Ctx, marker: &Marker, lane: i64) -> String {
+    let name = ctx.reaper.project_text(ctx.proj, &format!("RULER_LANE_NAME:{lane}")).unwrap_or_default();
+    let name = if name.is_empty() { String::new() } else { format!(" ({})", super::quoted(&name)) };
+    format!("Moved {} to ruler lane {lane}{name}", label(marker).to_lowercase_first())
+}
+
+fn write_lane(ctx: &Ctx, marker: &Marker, lane: i64) -> Done<Value> {
+    if !ctx.reaper.set_marker_value(ctx.proj, &marker.guid, "I_LANENUMBER", lane as f64) {
+        return Err(failed("REAPER wouldn't take the ruler lane"));
+    }
+    let after = ctx.reaper.marker_by_guid(ctx.proj, &marker.guid).ok_or_else(|| failed("the marker went while it was changed"))?;
+    if after.lane as i64 != lane {
+        return Err(failed(format!("REAPER kept {}'s ruler lane as it was", label(marker))));
+    }
+    Ok(lane_state(ctx, lane))
+}
+
+pub fn lane_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+    let marker = find(ctx, &input["ref"])?;
+    let lane = lane_wanted(ctx, input)?;
+    let (now, to) = (lane_state(ctx, marker.lane as i64), lane_state(ctx, lane));
+    let mut display = json!({"title": lane_title(ctx, &marker, lane), "before": now, "after": to});
+    if marker.lane as i64 == lane {
+        display["unchanged"] = true.into();
+    }
+    // The lane the number named at the preview: the apply moves it there or nowhere.
+    Ok(Preview { target: target(&marker), prior: now.clone(), fence: json!({"now": now, "to": to}), display })
+}
+
+pub fn lane_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+    let marker = find_for_apply(ctx, &input["ref"])?;
+    let lane = lane_wanted(ctx, input)?;
+    let now = lane_state(ctx, marker.lane as i64);
+    if now != fence["now"] || lane_state(ctx, lane) != fence["to"] {
+        return Err(changed(format!("{}'s ruler lane, or the ruler lanes, changed since the preview", label(&marker))));
+    }
+    let unwritten = marker.lane as i64 == lane;
+    let after = if unwritten { now.clone() } else { write_lane(ctx, &marker, lane)? };
+    Ok(Applied {
+        applied: after.clone(),
+        created: None,
+        material: None,
+        display: json!({"title": lane_title(ctx, &marker, lane), "before": now, "after": after}),
+        unwritten,
+    })
+}
+
+pub fn lane_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
+    let marker = find_for_restore(ctx, &restore.target["ref"])?;
+    let now = lane_state(ctx, marker.lane as i64);
+    let already = same_lane(&now, restore.prior);
+    let back = if already {
+        now.clone()
+    } else {
+        if !restore.discard && !same_lane(&now, restore.applied) {
+            return Err(changed(format!("{}'s ruler lane changed in REAPER since Kumi set it", label(&marker))));
+        }
+        // The lane it was in, by its id wherever it is now; gone, there is nowhere to put it back to.
+        let lane = match restore.prior["laneGuid"].as_str() {
+            Some(guid) => super::projectitems::lane_by_guid(ctx, guid)
+                .ok_or_else(|| changed("the ruler lane it was in isn't in the project any more: nothing was written"))?,
+            None => restore.prior["lane"].as_i64().unwrap_or(0),
+        };
+        write_lane(ctx, &marker, lane)?
+    };
+    let lane = back["lane"].as_i64().unwrap_or(0);
+    Ok(Restored {
+        restored: back.clone(),
+        display: json!({"title": format!("{} (put back)", lane_title(ctx, &marker, lane)), "before": now, "after": back}),
+        unwritten: already,
     })
 }

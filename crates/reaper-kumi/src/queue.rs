@@ -61,6 +61,12 @@ impl Waiter {
         self.wait_unless(timeout, closing, &|| false)
     }
 
+    /// Whether the main thread has claimed the job: it runs, or ran.
+    pub fn claimed(&self) -> impl Fn() -> bool {
+        let state = self.state.clone();
+        move || state.load(Ordering::Acquire) == CLAIMED
+    }
+
     /// As `wait`, and gives up early, as a timeout does, once `give_up` says so (checked every few milliseconds): a
     /// request that waits for a main thread that has been found to be in a dialog.
     pub fn wait_unless(self, timeout: Duration, closing: &AtomicBool, give_up: &dyn Fn() -> bool) -> Outcome {

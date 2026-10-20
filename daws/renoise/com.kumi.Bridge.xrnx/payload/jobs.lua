@@ -42,9 +42,9 @@ function M:add(record, request, fn)
     repeat coroutine.yield() until ctx.now_ms() >= resume_at
     job.check()
   end
-  -- The work changed the song's shape itself (it made a track): that is not a change to stop for.
+  -- The work changed the song's shape itself (it made a track, and a device on it moved the epoch): that is not a change to stop for.
   function job.rebase()
-    job.shape, job.layout = ctx.shape(), ctx.layout()
+    job.shape, job.layout, job.epoch = ctx.shape(), ctx.layout(), ctx.epoch()
   end
   job.co = coroutine.create(fn)
   self.list[#self.list + 1] = job
@@ -70,13 +70,19 @@ function M:cancel(record)
   if #self.list == 0 then self.ctx.on_active(false) end
 end
 
--- Ends every job with an error (the payload is going away).
+-- Ends every job with an error (the payload is going away). A job that wrote to the song (`job.wrote` says what it was doing)
+-- can't take back what it wrote any more: it answers `uncertain`, so the change isn't asked again over what is half there.
 function M:abort_all(code, message)
   local any = false
   -- (Ending one answers the requests that waited behind it, which may start more.)
   while self.list[1] do
     any = true
-    self.ctx.finish(table.remove(self.list, 1), false, { code = code, message = message })
+    local job = table.remove(self.list, 1)
+    local err = { code = code, message = message }
+    if job.wrote then
+      err = { code = "uncertain", message = job.wrote .. " stopped when " .. message:gsub(": ask again$", "") .. ": part of it may be in the song, look for it" }
+    end
+    self.ctx.finish(job, false, err)
   end
   if any then self.ctx.on_active(false) end
 end

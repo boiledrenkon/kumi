@@ -21,7 +21,7 @@ fn cstring(text: &str) -> CString {
 }
 
 /// Reads a string a getter writes into a big buffer.
-fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
+pub(super) fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
     let mut buf = vec![0u8; BIG];
     if !fill(buf.as_mut_ptr().cast()) {
         return None;
@@ -50,6 +50,8 @@ pub struct Marker {
     /// The number REAPER shows (editable, and may repeat).
     pub number: i32,
     pub color: i32,
+    /// The ruler lane it sits in (0 is the first).
+    pub lane: i32,
 }
 
 /// A tempo or time signature marker.
@@ -229,7 +231,14 @@ impl Reaper<'_> {
             name: string(c"P_NAME"),
             number: value(c"I_NUMBER") as i32,
             color: value(c"I_CUSTOMCOLOR") as i32,
+            lane: value(c"I_LANENUMBER") as i32,
         })
+    }
+
+    /// The tracks (the master among them) a region renders in the region render matrix, by the region's number.
+    pub fn region_render_tracks(&self, proj: Project, number: i32) -> Vec<Track> {
+        let Some(f) = self.api.EnumRegionRenderMatrix() else { return vec![] };
+        (0..4096).map_while(|n| Some(unsafe { f(proj.0, number, n) }).filter(|t| !t.is_null())).map(Track).collect()
     }
 
     pub fn tempo_marker_count(&self, proj: Project) -> i32 {

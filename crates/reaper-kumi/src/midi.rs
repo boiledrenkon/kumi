@@ -26,6 +26,21 @@ pub struct NoteSpec {
     pub selected: bool,
 }
 
+impl NoteSpec {
+    /// The note as `MIDI_GetNote` gives one: channel 0 to 15, positions in ticks.
+    pub fn midi(&self) -> crate::reaper::MidiNote {
+        crate::reaper::MidiNote {
+            selected: self.selected,
+            muted: self.muted,
+            start_ppq: self.start as f64,
+            end_ppq: self.end as f64,
+            channel: self.channel as i32,
+            pitch: self.pitch as i32,
+            velocity: self.velocity as i32,
+        }
+    }
+}
+
 pub fn decode(buf: &[u8]) -> Option<Vec<Event>> {
     let (mut at, mut pos) = (0usize, 0i64);
     let mut events = Vec::new();

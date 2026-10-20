@@ -110,9 +110,10 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
             assert_eq!(context["tracks"][1]["ref"], "track:2");
             assert_eq!(context["selection"]["trackRef"], "track:2");
             assert!(!seen.context.contains("{8A5D"), "no GUID reaches the model: {}", seen.context);
-            // The read, REAPER's core change kinds and actions, the plan and the undo.
+            // With every request: the read, REAPER's core change kinds and actions, the plan and the undo (the other kinds wait
+            // behind find_tools).
             assert_eq!(
-                seen.tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(),
+                seen.tools.iter().filter(|tool| !tool.deferred()).map(|tool| tool.name().to_string()).collect::<Vec<_>>(),
                 [
                     "reaper_read",
                     "track_volume",
@@ -799,6 +800,86 @@ async fn a_busy_daw_is_looked_at_again_once_it_is_free_not_every_second() {
             ));
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             assert_eq!(looks_again.get(), 1, "looked at again once it was free");
+        })
+        .await;
+}
+
+/// A host whose calls can fail (the caller stopped, a time limit) and that can go away (its pipe closed).
+struct Leaving {
+    inner: Rc<Host>,
+    fail: std::cell::Cell<bool>,
+    gone: RefCell<Vec<Rc<dyn Fn()>>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for Leaving {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        None
+    }
+    async fn list(&self, cursor: Option<&str>, signal: Signal) -> Result<ListToolsResult, RuntimeError> {
+        self.inner.list(cursor, signal).await
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
+        if self.fail.replace(false) {
+            return Err(RuntimeError::plain("MCP request cancelled"));
+        }
+        self.inner.call(name, args, signal).await
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        self.gone.borrow_mut().push(listener);
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_call_keeps_kumis_host_and_only_its_going_away_starts_another() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let inner = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", reaper_snapshot(), false)]),
+                asked: RefCell::default(),
+            });
+            let host = Rc::new(Leaving { inner, fail: std::cell::Cell::new(false), gone: RefCell::default() });
+            let started = Rc::new(std::cell::Cell::new(0));
+            let (hosts, endpoint) = (started.clone(), host.clone());
+            let connect: Connect = Rc::new(move |_| {
+                hosts.set(hosts.get() + 1);
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let options = OwnOptions {
+                context: IntegrationContext::new(Rc::new(|_, _| {})),
+                kumi_home: std::env::temp_dir(),
+                connect: Some(connect),
+                open_file: None,
+            };
+            let reaper = create_reaper_integration(options);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(started.get(), 1);
+            // A call that fails (Esc, a time limit) leaves the host as it is: its journal holds Kumi's changes.
+            host.fail.set(true);
+            let _ = reaper.observe(Signal::new(), None).await;
+            reaper.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(started.get(), 1, "the same host after a failed call");
+            // The host goes away: the next call starts another.
+            let listeners = host.gone.borrow().clone();
+            for gone in listeners {
+                gone();
+            }
+            reaper.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(started.get(), 2, "another host once the first is gone");
         })
         .await;
 }

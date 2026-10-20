@@ -90,6 +90,21 @@ async fn a_connection_the_bridge_lost_track_of_is_replaced_by_a_fresh_one_that_a
     simulator.stop();
 }
 
+/// A write on a connection the bridge lost track of may have been made: the connection is replaced, but the write is never
+/// sent again (that could make it twice); its caller is told it timed out, which the journal keeps as uncertain.
+#[tokio::test]
+async fn a_write_on_a_lost_connection_is_never_sent_again_on_the_fresh_one() {
+    let (_home, host, simulator) = lab(100).await;
+    host.call("snapshot", json!({}), &anyone(), WAIT).await.unwrap();
+    simulator.go_silent();
+    let params = json!({"kind": "track-volume", "input": {}, "fence": {}, "desc": "Kumi: Kick volume −6 dB (k0000)", "epoch": "1"});
+    let answer = host.call("change_apply", params, &anyone(), Duration::from_millis(600)).await;
+    assert!(matches!(answer, Err(CallError::Timeout)), "{answer:?}");
+    let sent = simulator.transcript().iter().filter(|line| line.from_host && line.text.contains("\"change_apply\"")).count();
+    assert_eq!(sent, 1, "sent once, on the lost connection only");
+    simulator.stop();
+}
+
 /// A frozen DAW (a plug-in loading, a long script) answers neither the old connection nor a new handshake: that is busy, not
 /// a lost connection. Nothing is dropped, and when it thaws the same connection answers.
 #[tokio::test]

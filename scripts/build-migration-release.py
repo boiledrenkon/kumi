@@ -39,10 +39,11 @@ def build(inputs: list[Path], out: Path, node: str, timestamp: int = 0, release_
         releases[target] = (value, path.parent / bundle)
     if not releases:
         raise ValueError("at least one target release is required")
-    versions = {(value[0]["kumi"], value[0].get("bridge")) for value in releases.values()}
+    # One commit's bundles: the same Kumi, Live's bridge, REAPER's extension and Renoise's tool on every target.
+    versions = {tuple(value[0].get(key) for key in ("kumi", "bridge", "reaper", "renoise")) for value in releases.values()}
     if len(versions) != 1:
-        raise ValueError("all targets must have the same Kumi and bridge versions")
-    version, bridge = versions.pop()
+        raise ValueError("all targets must have the same Kumi, bridge, REAPER extension and Renoise tool versions")
+    version, bridge, _, _ = versions.pop()
     targets = {target: item[0] for target, item in sorted(releases.items())}
     base = (release_base or f"https://github.com/user1303836/kumi/releases/download/v{version}").rstrip("/")
     if not re.fullmatch(r"https?://[^\s]+", base):

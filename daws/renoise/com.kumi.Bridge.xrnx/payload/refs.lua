@@ -78,15 +78,32 @@ function M.relabel_surviving(params, now, survives)
   return moved, left
 end
 
--- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
--- layout. Returns the new number for the track `n`, or nil when the track is gone.
+-- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove" | "swap", index, index2? (a swap's
+-- other place) }, oldest first, one per layout. Returns the new number for the track `n`, or nil when the track is gone.
 function M.shift(n, shifts, since)
   for _, s in ipairs(shifts) do
     if s.layout > since then
       if s.type == "insert" then
         if n >= s.index then n = n + 1 end
+      elseif s.type == "swap" then
+        if n == s.index then n = s.index2 elseif n == s.index2 then n = s.index end
       else
         if n == s.index then return nil end
+        if n > s.index then n = n - 1 end
+      end
+    end
+  end
+  return n
+end
+
+-- The same for a place among the tracks rather than a track: where a track deleted from there would go back. A track removed
+-- at the place leaves it where it is (the next one took it); a swap moves no place.
+function M.shift_place(n, shifts, since)
+  for _, s in ipairs(shifts) do
+    if s.layout > since then
+      if s.type == "insert" then
+        if n >= s.index then n = n + 1 end
+      elseif s.type == "remove" then
         if n > s.index then n = n - 1 end
       end
     end

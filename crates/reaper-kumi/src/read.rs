@@ -15,6 +15,9 @@ use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
 mod bodies;
+pub(crate) mod item_rows;
+// m4-r-fxenv: points, automation items and take envelopes.
+mod envelopes;
 
 pub use bodies::BODY_KINDS;
 
@@ -48,7 +51,9 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
+const KINDS: [&str; 15] = [
+    "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call", "point", "autoitem",
+];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -88,6 +93,9 @@ pub struct Reads {
     /// What `GetTouchedOrFocusedFX` said (touched, focused) when the tab last changed: it names the track by its number in
     /// whichever project is active, and takes no project, so the same answer after a switch may be another project's.
     stale_fx: RefCell<[Option<crate::reaper::FxHit>; 2]>,
+    /// The project each recent epoch was about (its identity), so that a look at another tab and back doesn't make what
+    /// was done before it un-undoable: the epoch moved, the project is the same.
+    eras: RefCell<std::collections::VecDeque<(String, String)>>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -249,6 +257,24 @@ impl Reads {
         *self.stale_fx.borrow_mut() = [reaper.touched_or_focused_fx(0), reaper.touched_or_focused_fx(1)];
     }
 
+    /// Remembers which project the epoch now is about.
+    pub fn note_project(&self, proj: Project) {
+        let epoch = self.epoch();
+        let mut eras = self.eras.borrow_mut();
+        if eras.iter().all(|(known, _)| *known != epoch) {
+            eras.push_back((epoch, self.identity(proj)));
+            while eras.len() > 64 {
+                eras.pop_front();
+            }
+        }
+    }
+
+    /// Whether an epoch, current or past, was about this project.
+    pub fn epoch_is_of(&self, epoch: &str, proj: Project) -> bool {
+        let identity = self.identity(proj);
+        self.eras.borrow().iter().any(|(known, of)| known == epoch && *of == identity)
+    }
+
     /// Refs stop meaning what they meant: a tab switch, or a new project in the tab.
     pub fn bump_epoch(&self) {
         self.epoch.borrow_mut().bump();
@@ -406,6 +432,25 @@ impl Reads {
 
     // ----- resolving refs -----
 
+    pub(crate) fn envelope_by_ref(
+        &self,
+        reaper: &Reaper,
+        proj: Project,
+        track: &TrackId,
+        which: &EnvelopeId,
+    ) -> Result<Envelope, (String, String)> {
+        let track = self.track_by_id(reaper, proj, track)?;
+        self.envelope_of(reaper, proj, track, which)
+    }
+
+    pub(crate) fn item_by_ref(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Item, (String, String)> {
+        self.item_by_guid(reaper, proj, guid)
+    }
+
+    pub(crate) fn take_by_ref(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Take, (String, String)> {
+        self.take_by_guid(reaper, proj, guid)
+    }
+
     pub(crate) fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
         let mut registry = self.registry.borrow_mut();
         registry.track(reaper, proj, id).ok_or_else(|| match id {
@@ -470,10 +515,13 @@ impl Reads {
             return self.read_one(reaper, proj, reference);
         }
         let kind = request.kind.as_deref().unwrap_or_default();
+        if kind == "call" {
+            return self.read_call(reaper, proj, params);
+        }
         let pager = Pager::new(request.limit, ANSWER_BYTES);
         let cursor = request.cursor.as_deref();
         let parent = request.parent.as_deref();
-        match kind {
+        let answer = match kind {
             "project" => {
                 let mut pager = pager;
                 pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()));
@@ -488,9 +536,44 @@ impl Reads {
             "marker" => self.read_markers(reaper, proj, pager, false, cursor),
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
+            "event" => self.read_events(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
+            // m4-r-fxenv
+            "point" => self.read_points(reaper, proj, pager, parent, cursor),
+            "autoitem" => self.read_auto_items(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
+        };
+        // Where a row's `index` starts counting, which is where the change that takes the same index starts too: a track's
+        // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
+        let from = match kind {
+            "track" => Some(1),
+            "fx" | "param" | "note" | "event" | "point" | "autoitem" => Some(0),
+            _ => None,
+        };
+        answer.map(|mut answer| {
+            if let Some(from) = from {
+                answer["indexFrom"] = from.into();
+            }
+            answer
+        })
+    }
+
+    /// `read {kind: "call", fn, args}`: one of REAPER's API functions that only reads, called by name (see reaper/generic.rs).
+    /// One that changes the project is a change: the api-call kind.
+    fn read_call(&self, reaper: &Reaper, proj: Project, params: &Value) -> Answer {
+        use crate::reaper::generic;
+        let name = params.get("fn").and_then(Value::as_str).ok_or_else(|| bad("fn: the name of a REAPER API function"))?;
+        let index = generic::function(name).map_err(bad)?;
+        if let Some(why) = generic::denied(index) {
+            return Err(bad(why));
         }
+        let args = params.get("args").cloned().unwrap_or(Value::Array(vec![]));
+        if !generic::reads_only(index, &args) {
+            return Err(bad(format!("{name} changes the project: make it a change, the api-call kind, which REAPER's undo takes back")));
+        }
+        let handles = CallRefs { reads: self, reaper, proj };
+        let (result, out) = reaper.call(index, &args, &handles, false).map_err(bad)?;
+        Ok(json!({"epoch": self.epoch(), "fn": name, "result": result, "out": out}))
     }
 
     /// `read {ref}`: the one object a ref names.
@@ -501,7 +584,10 @@ impl Reads {
             Ref::Take(guid) => take_row(reaper, self.take_by_guid(reaper, proj, &guid)?, None),
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
-                rows::fx_row(reaper, fx, chain_position(reaper, fx))
+                // m4-r-fxenv: one FX read alone also says its state chunk, presets, wet and delta.
+                let mut row = rows::fx_row(reaper, fx, chain_position(reaper, fx));
+                envelopes::add_fx_details(reaper, fx, &mut row);
+                row
             }
             Ref::Param { fx: guid, index } => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
@@ -510,7 +596,7 @@ impl Reads {
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, other, repeat, of } => {
+            Ref::Send { track, category, other, repeat, of, seen } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let keys = rows::send_keys(reaper, owner, category);
                 let key = rows::SendKey { other, repeat, of };
@@ -530,6 +616,15 @@ impl Reads {
                     };
                     return Err(failed(format!("that send isn't there: {why}")));
                 };
+                // One of two or more sends to one track is the send it was read as only while those sends are as the ref saw
+                // them (or as Kumi's own writes made them): never another send at that place.
+                if category == 0 && of >= 2 {
+                    let receiver = reaper.send_peer(owner, 0, index as i32);
+                    // (answered in these words, not as a ref of another project: the project is the same, the sends aren't)
+                    if !receiver.is_some_and(|receiver| crate::changes::send_seen_holds(reaper, owner, receiver, seen.as_deref())) {
+                        return Err(failed("the sends between those tracks changed since that ref was read: read the track's sends again"));
+                    }
+                }
                 rows::send_row(reaper, owner, category, index as i32, &key)
             }
             Ref::Marker(guid) => self.marker_by_guid(reaper, proj, &guid, false)?,
@@ -537,8 +632,10 @@ impl Reads {
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
-                rows::envelope_row(reaper, &track, envelope)
+                self.track_envelope_row(reaper, proj, &track, envelope)
             }
+            // m4-r-fxenv
+            other @ (Ref::TakeEnvelope { .. } | Ref::AutoItem { .. }) => self.read_one_m4(reaper, proj, &other)?,
         };
         Ok(json!({"items": [row], "epoch": self.epoch()}))
     }
@@ -784,8 +881,9 @@ impl Reads {
             })
             .collect();
         let this = rows::track_id(reaper, track);
-        let key =
-            |position: usize| all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of));
+        let key = |position: usize| {
+            all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of, None))
+        };
         let mut position = self.resume_number(cursor, all.len(), key)?;
         let mut next = None;
         while position < all.len() {
@@ -839,24 +937,44 @@ impl Reads {
             }
             other => return Err(bad(format!("parent: a take ref, not r:{}", other.kind()))),
         };
-        let (notes, _, _) = reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
+        reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
+        // The notes as the changes see and write them, from the one buffer REAPER gives the take's MIDI in: `MIDI_GetNote`
+        // ends two overlapping notes of one pitch at the first note-off, where the buffer pairs them in order, and a model
+        // that reads a length and changes the note must see the length Kumi writes.
+        let events = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let notes = crate::midi::notes(&events);
         let item_qn = take_start_qn(reaper, proj, take);
-        let mut position = self.position_within(cursor, notes.max(0) as usize)?;
+        let mut position = self.position_within(cursor, notes.len())?;
         let mut next = None;
-        while position < notes.max(0) as usize {
-            if !pager.open() {
+        while let Some(note) = notes.get(position) {
+            if !pager.open() || !pager.push(rows::note_row(reaper, take, item_qn, position as i32, &note.midi())) {
                 next = Some(position);
                 break;
             }
-            if let Some(note) = reaper.midi_note(take, position as i32) {
-                if !pager.push(rows::note_row(reaper, take, item_qn, position as i32, &note)) {
-                    next = Some(position);
-                    break;
-                }
+            position += 1;
+        }
+        self.page(pager, next, Some(notes.len()))
+    }
+
+    /// A MIDI take's events that aren't notes (controllers, pitch bend, program changes, pressure, text, sysex), from the
+    /// one buffer the changes edit, with the indexes the event changes take (from 0); the source's end marker isn't one.
+    fn read_events(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
+        let parent = parent.ok_or_else(|| bad("event: pass the MIDI take as parent"))?;
+        let take = self.midi_take(reaper, proj, Some(parent))?;
+        let buffer = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let events = crate::changes::midi_events_of(&buffer);
+        let item_qn = take_start_qn(reaper, proj, take);
+        let mut position = self.position_within(cursor, events.len())?;
+        let mut next = None;
+        while let Some((event, _)) = events.get(position) {
+            let beats = reaper.ppq_to_quarter_notes(take, event.pos as f64).map_or(0.0, |qn| qn - item_qn);
+            if !pager.open() || !pager.push(crate::changes::midi_event_row(event, position, beats)) {
+                next = Some(position);
+                break;
             }
             position += 1;
         }
-        self.page(pager, next, Some(notes.max(0) as usize))
+        self.page(pager, next, Some(events.len()))
     }
 
     // ----- envelopes -----
@@ -871,7 +989,14 @@ impl Reads {
     }
 
     fn read_envelopes(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
-        let parent = parent.ok_or_else(|| bad("envelope: pass the track or FX as parent"))?;
+        let parent = parent.ok_or_else(|| bad("envelope: pass the track, take or FX as parent"))?;
+        // m4-r-fxenv: a take's envelopes (and a take FX's).
+        let take_fx = |guid: &str| self.fx_by_guid(reaper, proj, guid).is_ok_and(|fx| matches!(fx.owner, FxOwner::Take(_)));
+        match Ref::parse(parent).map_err(bad)? {
+            Ref::Take(_) | Ref::Item(_) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            Ref::Fx(guid) if take_fx(&guid) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            _ => {}
+        }
         let found: Vec<(TrackId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
             Ref::Track(id) => {
                 let track = self.track_by_id(reaper, proj, &id)?;
@@ -903,7 +1028,7 @@ impl Reads {
                 break;
             }
             let (track, envelope) = &found[position];
-            if !pager.push(rows::envelope_row(reaper, track, *envelope)) {
+            if !pager.push(self.track_envelope_row(reaper, proj, track, *envelope)) {
                 next = Some(position);
                 break;
             }
@@ -991,7 +1116,47 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["noteCount"] = notes.into();
         row["ccCount"] = ccs.into();
     }
+    item_rows::take_details(reaper, take, &mut row, place.is_none());
     row
+}
+
+/// The refs of a generic call: a ref in its arguments is the object it names, and an object REAPER gives back is named
+/// by its ref.
+pub(crate) struct CallRefs<'a, 'r> {
+    pub reads: &'a Reads,
+    pub reaper: &'a Reaper<'r>,
+    pub proj: Project,
+}
+
+impl crate::reaper::generic::Handles for CallRefs<'_, '_> {
+    fn find(&self, base: &str, reference: &str) -> Result<*mut std::ffi::c_void, String> {
+        use crate::reaper::generic::{pointer, Handle};
+        let parsed = Ref::parse(reference).map_err(|e| format!("{reference:?} isn't a ref: {e}"))?;
+        let (reads, reaper, proj) = (self.reads, self.reaper, self.proj);
+        let handle = match (base, parsed) {
+            ("MediaTrack", Ref::Track(id)) => Handle::Track(reads.track_by_id(reaper, proj, &id).map_err(|e| e.1)?),
+            ("MediaItem", Ref::Item(guid)) => Handle::Item(reads.item_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
+            ("MediaItem_Take", Ref::Take(guid)) => Handle::Take(reads.take_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
+            ("TrackEnvelope", Ref::Envelope { track, which }) => {
+                Handle::Envelope(reads.envelope_by_ref(reaper, proj, &track, &which).map_err(|e| e.1)?)
+            }
+            // m4-r-fxenv
+            ("TrackEnvelope", Ref::TakeEnvelope { take, guid }) => {
+                let take = reads.take_by_ref(reaper, proj, &take).map_err(|e| e.1)?;
+                let envelope = (0..reaper.take_envelope_count(take))
+                    .filter_map(|i| reaper.take_envelope(take, i))
+                    .find(|e| reaper.envelope_guid(*e).is_some_and(|g| g.eq_ignore_ascii_case(&guid)))
+                    .ok_or("that take has no such envelope")?;
+                Handle::Envelope(envelope)
+            }
+            (base, other) => return Err(format!("{reference} is r:{}, where a {base} is wanted", other.kind())),
+        };
+        Ok(pointer(handle))
+    }
+
+    fn name(&self, base: &str, pointer: *mut std::ffi::c_void) -> Value {
+        self.reaper.ref_of(self.proj, base, pointer)
+    }
 }
 
 #[cfg(test)]
@@ -1834,11 +1999,17 @@ mod tests {
             // A marker's GUID isn't a region's.
             "r:region:{MARK-1}",
             "r:marker:{REG-1}",
-            "r:env:{AAAA}:PANENV",
+            "r:env:{AAAA}:{NOPE}",
         ] {
             let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
             assert_eq!(code, "failed", "{reference}: {message}");
         }
+        // REAPER hands out a track's built-in envelope before it is shown (m4-r-fxenv, lab 7.82): hidden, off, no points.
+        let pan = lab.read(json!({"ref": "r:env:{AAAA}:PANENV"})).unwrap();
+        assert_eq!(
+            (pan["items"][0]["active"].clone(), pan["items"][0]["visible"].clone(), pan["items"][0]["pointCount"].clone()),
+            (json!(false), json!(false), json!(0))
+        );
         for reference in
             ["track:{AAAA}", "r:pattern:3", "r:track:", "r:param:{FX-EQ}:x", "r:send:{AAAA}:0:5", "r:send:{AAAA}:0", "r:marker:3"]
         {
@@ -1946,7 +2117,8 @@ mod tests {
             ask(&format!("r:item:{{I{t}-3}}"));
         }
         let calls = fake::with(|s| s.calls);
-        assert!(calls < 3 * 40, "{calls} calls for three cached items");
+        // (a row reads some 50 attributes, an item's fades and lock among them; a walk would be thousands)
+        assert!(calls < 3 * 60, "{calls} calls for three cached items");
     }
 
     fn snapshot(lab: &Lab) -> Answer {
@@ -2060,16 +2232,30 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), FakeSend::to(1), loud, louder]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        // The three sends to Reverb carry the state of the three as one mark; the send alone to Kick carries none.
+        let seen = refs[0].rsplit_once('.').unwrap().1;
+        assert_eq!(seen.len(), 8);
         assert_eq!(
             refs,
-            ["r:send:{AAAA}:0:{DDDD}:1of3", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2of3", "r:send:{AAAA}:0:{DDDD}:3of3"]
+            [
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:1of3.{seen}"),
+                "r:send:{AAAA}:0:{BBBB}".into(),
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:2of3.{seen}"),
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:3of3.{seen}"),
+            ]
         );
         let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
+        assert_eq!(volume(&lab, refs[3]), json!(-12.04));
         // A send to another track moves to the front: the others keep their refs, and so their sends.
         fake::with(|s| s.tracks[0].sends.swap(0, 1));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2of3"), json!(-6.02));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
+        assert_eq!(volume(&lab, refs[2]), json!(-6.02));
+        assert_eq!(volume(&lab, refs[3]), json!(-12.04));
+        // A ref without the state of the sends it is one of names none of them.
+        assert_eq!(lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}:3of3"})).unwrap_err().0, "failed");
+        // The producer changes one of the sends to Reverb: a ref read before reads none of them, never the send at its place now.
+        fake::with(|s| s.tracks[0].sends[1].volume = 0.9);
+        let (code, message) = lab.read(json!({"ref": refs[3]})).unwrap_err();
+        assert_eq!((code.as_str(), message.contains("read the track's sends again")), ("failed", true));
         assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
     }
 
@@ -2084,7 +2270,8 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), quiet]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
-        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
+        let plain: Vec<&str> = refs.iter().map(|r| r.rsplit_once('.').unwrap().0).collect();
+        assert_eq!(plain, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
         assert_eq!(lab.rows(json!({"ref": refs[0]}))[0]["volumeDb"], json!(0.0));
         // The producer deletes the 0 dB send. Its ref no longer reads the quiet one, and the quiet one's own ref says why.
         fake::with(|s| {
@@ -2101,9 +2288,9 @@ mod tests {
         fake::with(|s| s.tracks[0].sends.push(FakeSend::to(3)));
         let (_, message) = lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}"})).unwrap_err();
         assert!(message.contains("2 such sends now") && message.contains("when there was one"), "{message}");
-        // Receives are told apart the same way.
+        // Receives are told apart the same way, with the pair's state as their send's refs carry it (M4).
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
-        assert_eq!(reverb[0]["ref"], "r:send:{DDDD}:-1:{AAAA}:1of2");
+        assert!(reverb[0]["ref"].as_str().unwrap().starts_with("r:send:{DDDD}:-1:{AAAA}:1of2."), "{}", reverb[0]["ref"]);
     }
 
     /// A hardware output is named by the output it goes to, so removing another output doesn't rename it.

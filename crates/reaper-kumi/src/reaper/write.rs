@@ -4,7 +4,7 @@
 use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
-use super::{Project, Reaper, Take, Track};
+use super::{Fx, FxOwner, Project, Reaper, Take, Track};
 use crate::api::{self, ProjectMarker};
 
 /// The most a track's chunk may grow to when it is read: the plug-in states in it are what take the room.
@@ -111,6 +111,54 @@ impl Reaper<'_> {
         self.api.RemoveTrackSend().is_some_and(|f| unsafe { f(track.0, category, index) })
     }
 
+    /// A send's text attribute (`P_EXT:…`): None when it has none.
+    pub fn send_text(&self, track: Track, category: i32, index: i32, parm: &str) -> Option<String> {
+        let parm = cstring(parm);
+        let f = self.api.GetSetTrackSendInfo_String()?;
+        // Asked for a read, REAPER writes the text without being told the buffer's size: the big buffer of its other such reads.
+        let text = super::objects::big_string(|buf| unsafe { f(track.0, category, index, parm.as_ptr(), buf, false) })?;
+        (!text.is_empty()).then_some(text)
+    }
+
+    pub fn set_send_text(&self, track: Track, category: i32, index: i32, parm: &str, value: &str) -> bool {
+        let (parm, value) = (cstring(parm), cstring(value));
+        let Some(f) = self.api.GetSetTrackSendInfo_String() else { return false };
+        let mut buf = value.into_bytes_with_nul();
+        unsafe { f(track.0, category, index, parm.as_ptr(), buf.as_mut_ptr().cast(), true) }
+    }
+
+    /// The channels an FX pin takes from (input) or gives to (output), as bits 0 to 63: a track's FX or a take's.
+    pub fn fx_pin(&self, fx: Fx, output: bool, pin: i32) -> Option<u64> {
+        let mut high = 0;
+        let low = match fx.owner {
+            FxOwner::Track(track) => unsafe { self.api.TrackFX_GetPinMappings()?(track.0, fx.index, i32::from(output), pin, &mut high) },
+            FxOwner::Take(take) => unsafe { self.api.TakeFX_GetPinMappings()?(take.0, fx.index, i32::from(output), pin, &mut high) },
+        };
+        Some((low as u32 as u64) | ((high as u32 as u64) << 32))
+    }
+
+    pub fn set_fx_pin(&self, fx: Fx, output: bool, pin: i32, mask: u64) -> bool {
+        let (low, high) = (mask as u32 as i32, (mask >> 32) as u32 as i32);
+        match fx.owner {
+            FxOwner::Track(track) => {
+                self.api.TrackFX_SetPinMappings().is_some_and(|f| unsafe { f(track.0, fx.index, i32::from(output), pin, low, high) })
+            }
+            FxOwner::Take(take) => {
+                self.api.TakeFX_SetPinMappings().is_some_and(|f| unsafe { f(take.0, fx.index, i32::from(output), pin, low, high) })
+            }
+        }
+    }
+
+    /// How many input and output pins an FX has.
+    pub fn fx_io(&self, fx: Fx) -> Option<(i32, i32)> {
+        let (mut ins, mut outs) = (0, 0);
+        let kind = match fx.owner {
+            FxOwner::Track(track) => unsafe { self.api.TrackFX_GetIOSize()?(track.0, fx.index, &mut ins, &mut outs) },
+            FxOwner::Take(take) => unsafe { self.api.TakeFX_GetIOSize()?(take.0, fx.index, &mut ins, &mut outs) },
+        };
+        (kind >= 0).then_some((ins, outs))
+    }
+
     pub fn set_send_value(&self, track: Track, category: i32, index: i32, parm: &str, value: f64) -> bool {
         let parm = cstring(parm);
         self.api.SetTrackSendInfo_Value().is_some_and(|f| unsafe { f(track.0, category, index, parm.as_ptr(), value) })
@@ -207,6 +255,17 @@ impl Reaper<'_> {
         // What it returns is not documented as a success flag: the change reads the marker again.
         unsafe { f(proj.0, marker, parm.as_ptr(), value) };
         true
+    }
+
+    /// Puts a track in the region render matrix of the region with this number.
+    pub fn add_to_region_render(&self, proj: Project, number: i32, track: Track) -> bool {
+        match self.api.SetRegionRenderMatrix() {
+            Some(f) => {
+                unsafe { f(proj.0, number, track.0, 1) };
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn set_marker_name(&self, proj: Project, guid: &str, name: &str) -> bool {

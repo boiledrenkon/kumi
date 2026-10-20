@@ -16,25 +16,68 @@ pub const MAX_LIMIT: u64 = 200;
 /// How many times a page the bridge made too big is asked for again with half the rows.
 const SMALLER_PAGES: usize = 4;
 
-/// What a DAW's `read` takes as a kind, and its `focus_body` as a body.
+/// What a DAW's `read` takes as a kind, and its `focus_body` as a body; and the change kinds the DAW's own undo never takes
+/// back (they make no step in its history), so that its undo of a step never counts them, answered or not.
 pub struct Kinds {
     pub read: &'static [&'static str],
     pub bodies: &'static [&'static str],
+    pub outside_undo: &'static [&'static str],
 }
 
 pub fn kinds(daw: Daw) -> Kinds {
     match daw {
         Daw::Reaper => Kinds {
-            read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
+            read: &[
+                "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
+                "autoitem",
+            ],
             bodies: &["arrange", "midi", "fx", "routing"],
+            // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
+            outside_undo: &[
+                "loop-repeat",
+                "fx-eq-band",
+                "automation-override",
+                "project-notes",
+                "project-info",
+                "project-grid",
+                "project-timebase",
+            ],
         },
         Daw::Renoise => Kinds {
-            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
+            // (an instrument's modulation sets and sample FX chains: n-instruments)
+            read: &[
+                "song",
+                "track",
+                "sequence",
+                "pattern",
+                "line",
+                "automation",
+                "instrument",
+                "sample",
+                "phrase",
+                "device",
+                "param",
+                "modset",
+                "chain",
+            ],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+            outside_undo: &[
+                "track-mute",
+                "track-solo",
+                "loop-range",
+                "loop-pattern",
+                // M4 (n-song): the metronome switch and the editing settings (measured in 3.5.4)
+                "metronome-switch",
+                "edit-settings",
+                "plugin-suspend",
+            ],
         },
         Daw::Logic => Kinds {
             read: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo"],
             bodies: &["tree", "notes", "timeline", "routing"],
+            // Logic keeps no step of its history for a mixer move, the tempo or a bypass (the M3 lab): those are put
+            // back by value, never by Logic's own undo.
+            outside_undo: &["track-volume", "track-pan", "track-mute", "track-solo", "track-arm", "tempo-set", "fx-bypass"],
         },
     }
 }
@@ -190,7 +233,15 @@ impl Host {
             Err(answer) => return answer,
         };
         match read_params(arguments) {
-            Ok(params) => self.paged("read", params, &pick, READ_TIMEOUT).await,
+            Ok(params) => {
+                let by_ref = params.get("ref").is_some();
+                let (mut answer, is_error) = self.paged("read", params, &pick, READ_TIMEOUT).await;
+                // (M4 n-devices) A Renoise device read by ref: what a Doofer, Splitter or Notepad holds, from its preset data.
+                if !is_error && by_ref && self.daw() == Daw::Renoise {
+                    self.renoise_inside(&mut answer, &pick, arguments.get("presetData") == Some(&Value::Bool(true))).await;
+                }
+                (answer, is_error)
+            }
             Err(why) => (json!({"error": why}), true),
         }
     }
@@ -218,7 +269,15 @@ impl Host {
             Err(answer) => return answer,
         };
         match body_params(arguments, self.daw()) {
-            Ok(params) => self.paged("focus_body", params, &pick, READ_TIMEOUT).await,
+            Ok(params) => {
+                let dsp = params.get("kind").and_then(Value::as_str) == Some("dsp");
+                let (mut answer, is_error) = self.paged("focus_body", params, &pick, READ_TIMEOUT).await;
+                // (M4 n-devices) Renoise's DSP chain: each Doofer's and Splitter's devices as its branches.
+                if !is_error && dsp && self.daw() == Daw::Renoise {
+                    self.renoise_dsp_children(&mut answer, &pick).await;
+                }
+                (answer, is_error)
+            }
             Err(why) => (json!({"error": why}), true),
         }
     }

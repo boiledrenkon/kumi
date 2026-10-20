@@ -26,7 +26,7 @@ const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
 /// The ref kinds a device change leaves naming what they named, as the tool lists them (`kept.kinds`).
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
-const CHANGE_METHODS: [&str; 3] = ["change_preview", "change_apply", "change_restore"];
+const CHANGE_METHODS: [&str; 4] = ["change_preview", "change_apply", "change_restore", "project_save"];
 
 struct State {
     /// The epoch the song is in now (the vectors were made in [`EPOCH`]).
@@ -193,6 +193,29 @@ impl RenoiseScript {
         if method != "change_restore" && params.get("epoch").and_then(Value::as_str) != Some(&epoch.to_string()) {
             return Err(("stale".into(), format!("that change is from an earlier epoch (now {epoch}): read again")));
         }
+        // Lua run in the song: one step of Renoise's undo, which only Renoise's own undo takes back.
+        if kind == "run-lua" {
+            let title = "Ran Lua: song.transport.bpm = 140";
+            let mut value = match method {
+                "change_preview" => {
+                    json!({"target": {"ref": format!("{epoch}:song:1"), "kind": "song"}, "prior": {}, "fence": {}, "display": {"title": title}})
+                }
+                "change_apply" => {
+                    let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                    state.undo.push(desc.clone());
+                    json!({"applied": {"changed": true, "printed": ["set"], "result": 140}, "display": {"title": title}, "undo": {"desc": desc, "entry": true}})
+                }
+                _ => {
+                    return Err((
+                        "daw-only".into(),
+                        "Kumi can't take back what a Lua chunk did: Renoise's own undo can (Edit > Undo)".into(),
+                    ))
+                }
+            };
+            value["epoch"] = epoch.to_string().into();
+            value["layout"] = 0.into();
+            return Ok(value);
+        }
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
             _ => (params["input"]["ref"].as_str(), &params["input"]),
@@ -338,6 +361,17 @@ impl RenoiseScript {
         }
         if method.starts_with("change_") {
             return Some(Self::change(&mut state, method, params));
+        }
+        // (r-tracks) Saving the song: the tool's `project_save`, refused from another epoch; Renoise has no versions.
+        if method == "project_save" {
+            let epoch = state.epoch.to_string();
+            return Some(if params.get("epoch").and_then(Value::as_str) != Some(epoch.as_str()) {
+                Err(("stale".into(), format!("that save is from another epoch (now {epoch}): read again")))
+            } else if params.get("version").is_some_and(|v| !v.is_null()) {
+                Err(("bad-params".into(), "Renoise keeps no versions of a song: save it, or under path".into()))
+            } else {
+                Ok(json!({"epoch": epoch, "saved": "/lab/Renoise/Sim.xrns", "dirty": false}))
+            });
         }
         let restarts = state.restarts;
         let epoch = state.epoch;

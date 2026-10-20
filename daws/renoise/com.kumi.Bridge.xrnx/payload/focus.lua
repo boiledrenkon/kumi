@@ -202,7 +202,7 @@ local function fit(result, entries, from, to, cut)
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
         effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
-        mutedColumns = entry.mutedColumns,
+        mutedColumns = entry.mutedColumns, automation = entry.automation,
       }
     end
     result.window = { from = from, to = to }
@@ -212,6 +212,31 @@ local function fit(result, entries, from, to, cut)
     to = math.max(from, from + math.floor((to - from + 1) * 0.6) - 1)
     cut = true
   end
+end
+
+-- M4 (n-song): a pattern track's automation lanes in the window, cheaply (the track's list of envelopes, no search through its
+-- devices): each its device's and parameter's names, play mode and the points from `from` to `to` (at most LANE_POINTS).
+M.LANES = 8
+M.LANE_POINTS = 32
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+function M.lanes(pattern_track, from, to)
+  local out = {}
+  for _, automation in ipairs(pattern_track.automation) do
+    if #out >= M.LANES then break end
+    local device, parameter = automation.dest_device, automation.dest_parameter
+    if device and parameter then
+      local points = {}
+      for _, point in ipairs(automation.points) do
+        if point.time >= from and point.time < to + 1 and #points < M.LANE_POINTS then points[#points + 1] = { point.time, point.value } end
+      end
+      out[#out + 1] = {
+        name = (device.display_name ~= "" and device.display_name or device.name) .. " " .. parameter.name,
+        playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = array(points),
+      }
+    end
+  end
+  if #out == 0 then return nil end
+  return array(out)
 end
 
 local function pattern_body(job, params, epoch)
@@ -241,7 +266,8 @@ local function pattern_body(job, params, epoch)
       aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
     entries[t].mutedColumns = rows.column_state(track)
-    bytes = bytes + 200 + #entries[t].name
+    entries[t].automation = M.lanes(pattern_track, from, to)
+    bytes = bytes + 200 + #entries[t].name + (entries[t].automation and #json.encode(entries[t].automation) or 0)
   end
   local hidden = params.hidden == true
   local cut = false
@@ -293,11 +319,15 @@ local function matrix_body(job, params, epoch)
     local sequencer = live.sequencer
     local pattern_at = sequencer:pattern(s)
     local pattern = live:pattern(pattern_at)
-    local aliases, muted = {}, {}
+    local aliases, muted, colors = {}, {}, {}
     for t = 1, tracks do
-      local alias = pattern:track(t).alias_pattern_index
+      local pattern_track = pattern:track(t)
+      local alias = pattern_track.alias_pattern_index
       if alias > 0 then aliases[tostring(t)] = alias end
       if sequencer:track_sequence_slot_is_muted(t, s) then muted[#muted + 1] = t end
+      -- M4 (n-song): the slot's colours (its pattern's tracks')
+      local color = pattern_track.color
+      if color then colors[tostring(t)] = hex(color) end
     end
     list[s] = {
       ref = refs.make(epoch, "seq", s),
@@ -307,6 +337,7 @@ local function matrix_body(job, params, epoch)
       aliases = next(aliases) and aliases or json.object(),
       mutedTracks = array(muted),
     }
+    if next(colors) then list[s].colors = colors end
   end
   local live = the_song()
   local transport = live.transport
@@ -373,12 +404,14 @@ local function phrase_body(job, params, epoch)
   return fit(result, entries, from, to, false)
 end
 
+-- An instrument's samples and their keyzones (the keyzone map: each zone's notes and velocities), its macros and its phrases with
+-- their keys (n-instruments: what plays the zones and the phrases, and how the zones overlap).
 local function instrument_body(job, params, epoch)
   local at = refs.expect(params.ref, "instrument", 1, epoch)[1]
   local song = the_song()
   if at > #song.instruments then fail("bad-params", "no instrument " .. at) end
   local instrument = song:instrument(at)
-  local keyzones, phrases = {}, {}
+  local keyzones, phrases, ranges = {}, {}, {}
   local sample_count, phrase_count = #instrument.samples, #instrument.phrases
   for s = 1, math.min(sample_count, M.MAX_BODY_ROWS) do
     job.slice()
@@ -387,10 +420,16 @@ local function instrument_body(job, params, epoch)
       sample = row.name, sampleRef = row.ref, noteRange = row.noteRange, velocityRange = row.velocityRange,
       baseNote = row.baseNote,
     }
+    if row.layer ~= "note-on" then keyzones[s].layer = row.layer end
+    if row.slice then keyzones[s].slice = true end
+    if row.muteGroup and row.muteGroup > 0 then keyzones[s].muteGroup = row.muteGroup end
   end
   for p = 1, math.min(phrase_count, M.MAX_BODY_ROWS) do
     job.slice()
-    phrases[p] = the_song():instrument(at):phrase(p).name
+    local phrase = the_song():instrument(at):phrase(p)
+    phrases[p] = phrase.name
+    local mapping = phrase.mapping
+    ranges[p] = mapping and array({ mapping.note_range[1], mapping.note_range[2] }) or json.null
   end
   local row = instrument_row(the_song(), epoch, at)
   local result = {
@@ -401,9 +440,17 @@ local function instrument_body(job, params, epoch)
     keyzones = array(keyzones),
     macros = row.macros,
     phrases = array(phrases),
+    -- n-instruments
+    kind = row.kind,
+    overlap = row.overlap,
+    phrasePlayback = row.phrasePlayback,
+    phraseRanges = array(ranges),
+    modsets = row.modsetCount,
+    chains = row.chainCount,
   }
+  if row.phraseProgramRef then result.phraseProgramRef, result.phraseProgram = row.phraseProgramRef, the_song():instrument(at).phrase_program end
   if sample_count > M.MAX_BODY_ROWS or phrase_count > M.MAX_BODY_ROWS then result.truncated = true end
-  return reads.bound(result, { "keyzones", "phrases" })
+  return reads.bound(result, { "keyzones", "phrases", "phraseRanges" })
 end
 
 -- The chain of a track. Flat until M4 reads the Doofers' and Splitters' XML: they are marked as containers.

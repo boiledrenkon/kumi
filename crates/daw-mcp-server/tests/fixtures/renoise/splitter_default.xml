@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FilterDevicePreset doc_version="14">
+  <DeviceSlot type="SplitterDevice">
+    <IsMaximized>true</IsMaximized>
+    <Macro0>
+      <Value>50</Value>
+      <Name>Macro 1</Name>
+    </Macro0>
+    <Macro1>
+      <Value>50</Value>
+      <Name>Macro 2</Name>
+    </Macro1>
+    <Macro2>
+      <Value>50</Value>
+      <Name>Macro 3</Name>
+    </Macro2>
+    <Macro3>
+      <Value>50</Value>
+      <Name>Macro 4</Name>
+    </Macro3>
+    <Macro4>
+      <Value>50</Value>
+      <Name>Macro 5</Name>
+    </Macro4>
+    <Macro5>
+      <Value>50</Value>
+      <Name>Macro 6</Name>
+    </Macro5>
+    <Macro6>
+      <Value>50</Value>
+      <Name>Macro 7</Name>
+    </Macro6>
+    <Macro7>
+      <Value>50</Value>
+      <Name>Macro 8</Name>
+    </Macro7>
+    <Macro8>
+      <Value>50</Value>
+      <Name>Macro 9</Name>
+    </Macro8>
+    <Macro9>
+      <Value>50</Value>
+      <Name>Macro 10</Name>
+    </Macro9>
+    <Macro10>
+      <Value>50</Value>
+      <Name>Macro 11</Name>
+    </Macro10>
+    <Macro11>
+      <Value>50</Value>
+      <Name>Macro 12</Name>
+    </Macro11>
+    <Macro12>
+      <Value>50</Value>
+      <Name>Macro 13</Name>
+    </Macro12>
+    <Macro13>
+      <Value>50</Value>
+      <Name>Macro 14</Name>
+    </Macro13>
+    <Macro14>
+      <Value>50</Value>
+      <Name>Macro 15</Name>
+    </Macro14>
+    <Macro15>
+      <Value>50</Value>
+      <Name>Macro 16</Name>
+    </Macro15>
+    <NumActiveMacros>4</NumActiveMacros>
+    <ShowDevices>true</ShowDevices>
+    <CurrentlyVisibleChain>0</CurrentlyVisibleChain>
+    <MonitorVisibleChain>false</MonitorVisibleChain>
+    <Type>Parallel</Type>
+    <VolumeChain1>
+      <Value>1.0</Value>
+    </VolumeChain1>
+    <VolumeChain2>
+      <Value>1.0</Value>
+    </VolumeChain2>
+    <SplitFrequency>
+      <Value>0.330993116</Value>
+    </SplitFrequency>
+    <DeviceChain0>
+      <SelectedPresetName>Init</SelectedPresetName>
+      <SelectedPresetLibrary>Bundled Content</SelectedPresetLibrary>
+      <SelectedPresetIsModified>false</SelectedPresetIsModified>
+    </DeviceChain0>
+    <DeviceChain1>
+      <SelectedPresetName>Init</SelectedPresetName>
+      <SelectedPresetLibrary>Bundled Content</SelectedPresetLibrary>
+      <SelectedPresetIsModified>false</SelectedPresetIsModified>
+    </DeviceChain1>
+  </DeviceSlot>
+</FilterDevicePreset>

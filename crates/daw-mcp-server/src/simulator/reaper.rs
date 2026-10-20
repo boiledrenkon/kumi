@@ -30,6 +30,12 @@ struct State {
     open_step: Option<String>,
     /// A dialog shows for the next change preview only (it closes right after).
     busy_once: bool,
+    /// The next apply is made and then answered `uncertain` (a job the extension took and didn't finish in time).
+    uncertain_once: bool,
+    /// The next restore is made and then answered `uncertain`.
+    uncertain_restore_once: bool,
+    /// The next restore is made in part: its answer says what it left out.
+    left_out_once: Option<String>,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -90,6 +96,9 @@ impl ReaperScript {
                 undo: vec![],
                 open_step: None,
                 busy_once: false,
+                uncertain_once: false,
+                uncertain_restore_once: false,
+                left_out_once: None,
             })),
         }
     }
@@ -162,6 +171,9 @@ impl ReaperScript {
         if kind == "track-add" {
             return Self::add_track(state, epoch, method, params);
         }
+        if kind == "run-action" {
+            return Self::run_action(state, epoch, method, params);
+        }
         let field = match kind {
             "track-volume" => "volumeDb",
             "track-mute" => "mute",
@@ -202,6 +214,9 @@ impl ReaperScript {
                 state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 Self::step(state, &desc);
+                if std::mem::take(&mut state.uncertain_once) {
+                    return Err(("uncertain".into(), "REAPER didn't finish the change in time; it may have been made".into()));
+                }
                 Ok(
                     json!({"epoch": epoch, "applied": {field: wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
                 )
@@ -217,7 +232,14 @@ impl ReaperScript {
                 state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 state.undo.push(desc);
-                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}}))
+                if std::mem::take(&mut state.uncertain_restore_once) {
+                    return Err(("uncertain".into(), "REAPER didn't finish putting it back in time; it may have been".into()));
+                }
+                let mut display = json!({"title": format!("{title} (put back)")});
+                if let Some(note) = state.left_out_once.take() {
+                    display["note"] = note.into();
+                }
+                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": display}))
             }
         }
     }
@@ -258,6 +280,41 @@ impl ReaperScript {
         }
     }
 
+    /// (r-tracks) `run-action {action}`: 40001 inserts a track, a change REAPER makes a point of; 40297 unselects every track,
+    /// which it makes none of (the answer says so, and Kumi makes no row). Only REAPER's undo takes either back.
+    fn run_action(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let action = params["input"]["action"].as_i64().unwrap_or_default();
+        let name = match action {
+            40001 => "Track: Insert new track",
+            40297 => "Track: Unselect (clear selection of) all tracks",
+            _ => return Err(("bad-params".into(), format!("REAPER has no action {action}"))),
+        };
+        let title = format!("Ran action “{name}”");
+        let note = "Only REAPER's own undo can take this back (Edit > Undo).";
+        match method {
+            "change_preview" => Ok(
+                json!({"epoch": epoch, "target": {"kind": "action", "command": action}, "prior": {}, "fence": {"command": action}, "display": {"title": title, "note": note}}),
+            ),
+            "change_apply" => {
+                let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                if action == 40297 {
+                    let note = "REAPER made no undo point of it: it changed nothing the project keeps (a view, selection or transport action), so it has no row in HISTORY.";
+                    return Ok(
+                        json!({"epoch": epoch, "applied": {"command": action, "changed": false}, "display": {"title": title, "note": note, "unchanged": true}, "undo": {"desc": desc, "entry": false}}),
+                    );
+                }
+                let index = state.tracks.len();
+                state.tracks.push(track_row(index + 950, ""));
+                state.changed += 1;
+                Self::step(state, &desc);
+                Ok(
+                    json!({"epoch": epoch, "applied": {"command": action}, "display": {"title": title, "note": note}, "undo": {"desc": desc, "entry": true}}),
+                )
+            }
+            _ => Err(("daw-only".into(), "Kumi can't take back what an action did: REAPER's own undo can (Edit > Undo)".into())),
+        }
+    }
+
     /// A change's step in REAPER's undo: its own, or none inside a plan's (whose label names them all when it closes).
     fn step(state: &mut State, desc: &str) {
         if state.open_step.is_none() {
@@ -277,6 +334,21 @@ impl ReaperScript {
         let desc = label.unwrap_or(begun);
         state.undo.push(desc.clone());
         Ok(json!({"desc": desc, "entry": true}))
+    }
+
+    /// The next apply is made, then answered `uncertain`, as the extension answers a job it took and didn't finish in time.
+    pub fn uncertain_once(&self) {
+        self.state.lock().unwrap().uncertain_once = true;
+    }
+
+    /// The next restore is made, then answered `uncertain`.
+    pub fn uncertain_restore_once(&self) {
+        self.state.lock().unwrap().uncertain_restore_once = true;
+    }
+
+    /// The next restore is made in part, and its answer says what it left out (`display.note`).
+    pub fn left_out_once(&self, note: &str) {
+        self.state.lock().unwrap().left_out_once = Some(note.into());
     }
 
     /// A dialog shows for the next change's preview, and closes right after.
@@ -319,6 +391,15 @@ impl ReaperScript {
         Some(match method {
             "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
             "undo_step_begin" | "undo_step_end" => Self::plan_step(&mut state, method, params),
+            // (r-tracks) Saving: a file written, nothing in the project changed.
+            // (as the extension: a save names the epoch its refs and project were read in)
+            "project_save" | "track_template_save" if params.get("epoch").and_then(Value::as_str).is_none() => {
+                Err(("bad-params".to_string(), "epoch: the epoch the refs were read in".to_string()))
+            }
+            "project_save" => Ok(json!({"epoch": epoch, "saved": "/lab/Projects/Sim.rpp", "dirty": false})),
+            "track_template_save" => Ok(
+                json!({"epoch": epoch, "saved": format!("/lab/REAPER/TrackTemplates/{}.RTrackTemplate", params["name"].as_str().unwrap_or("Template"))}),
+            ),
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();

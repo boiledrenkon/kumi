@@ -187,23 +187,37 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     // Columns by width: a wide name takes the cells it needs, and the next column stays in place.
     h.has("Kic ベ  Bas");
 
-    // An instrument's keyzones: each sample's notes, in Renoise's names (MIDI 60 is C-5's octave).
+    // An instrument's keyzones: a map of them, keys across and velocities up, then each sample's notes, in Renoise's names
+    // (MIDI 60 is C-5's octave); its phrases with their keys.
     *c.own.borrow_mut() = Some(FocusBody::Keyzones(KeyzoneMap {
         item_ref: "3:instrument:1".into(),
         name: "Drumkit".into(),
         zones: vec![
-            Keyzone { sample: "Kick".into(), notes: (60, 60), velocities: (0, 127), base: 60 },
-            Keyzone { sample: "Snare".into(), notes: (62, 63), velocities: (64, 127), base: 62 },
+            Keyzone { sample: "Kick".into(), notes: (60, 60), velocities: (0, 127), base: 60, ..Default::default() },
+            Keyzone { sample: "Snare".into(), notes: (62, 63), velocities: (64, 127), base: 62, ..Default::default() },
+            Keyzone { sample: "Ghost".into(), notes: (63, 63), velocities: (0, 127), base: 63, note_off: true },
         ],
         macros: vec![("Drive".into(), 0.4)],
-        phrases: vec![],
+        phrases: vec!["Fill".into(), "Roll".into()],
+        overlap: Some("cycle".into()),
+        phrase_playback: Some("keymap".into()),
+        phrase_keys: vec![Some((48, 59)), None],
+        ..Default::default()
     }));
     let instrument = json!({"track":track,"trackRef":"3:track:2","mainView":{"kind":"instrument","label":"Instrument"},"item":{"kind":"sample","itemRef":"3:instrument:1","name":"Drumkit"}});
     h.emit(json!({"type":"focus","focus":instrument}));
     shows(&h, "FOCUS · Keyzones").await;
-    h.has("C5        Kick");
-    h.has("D5–D#5    Snare · vel 64–127");
-    h.has("2 zones · 1 macros");
+    h.has("Drumkit · overlapping zones: cycle");
+    // (an octave of keys from G#4: the Kick at C5 and the Ghost at D#5 at every velocity; loud, the Snare's D5, and D#5 where
+    // the Snare and the Ghost overlap)
+    h.has("····A·B▒····");
+    h.has("····A··C····");
+    h.has("G#4       G5");
+    h.has("A C5        Kick");
+    h.has("B D5–D#5    Snare · vel 64–127");
+    h.has("C D#5       Ghost · note-off");
+    h.has("3 zones · 1 macros · 2 phrases");
+    h.has("phrases by keymap: Fill C4–B4 · Roll");
     h.close().await;
 });
 

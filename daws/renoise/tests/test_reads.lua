@@ -1050,6 +1050,9 @@ test("reads: the answers are the vectors the host's simulator replays", function
   ask("read", { kind = "instrument" })
   ask("read", { kind = "sample", parent = E .. ":instrument:1" })
   ask("read", { kind = "phrase", parent = E .. ":instrument:1" })
+  -- (n-instruments: an instrument's modulation sets and sample FX chains)
+  ask("read", { kind = "modset", parent = E .. ":instrument:1" })
+  ask("read", { kind = "chain", parent = E .. ":instrument:1" })
   ask("read", { kind = "device", parent = E .. ":track:1" })
   ask("read", { kind = "param", parent = E .. ":device:1.1" })
   ask("read", { ref = E .. ":track:3" })
@@ -1096,7 +1099,7 @@ test("reads: a change to what refs index into moves the epoch at once, before an
     { "a sample made", function() mock.ops.insert_sample(1) end, "sample:1.1" },
     { "a device deleted", function() mock.ops.remove_device(1, 1) end, "device:1.1" },
     { "a device made", function() mock.ops.insert_device(1, { name = "Gate", params = {} }) end, "device:1.1" },
-    { "two tracks swapped", function() mock.ops.swap_tracks(1, 2) end, "track:1" },
+    { "two tracks swapped", function() mock.ops.swap_tracks(1, 2) end, "track:1", 1 },
   }
   for _, change in ipairs(changes) do
     local env, peer = setup()
@@ -1106,7 +1109,7 @@ test("reads: a change to what refs index into moves the epoch at once, before an
     -- (no tick)
     local now = call(peer, "focus").result
     ok(now.epoch ~= E, change[1] .. ": focus is in the new epoch at once")
-    eq(now.layout, 0, change[1] .. ": the layout starts over")
+    eq(now.layout, change[4] or 0, change[1] .. ": the layout moves only for the tracks (a swap is one shift)")
     local response = call(peer, "read", { ref = E .. ":" .. change[3] })
     failure(response, "stale")
     -- and what is read now is named in the new epoch
@@ -1200,8 +1203,23 @@ test("reads: a track removed answers gone for its refs, and the tracks after it 
   H.no_dialogs()
 end)
 
+-- (the tool keeps 1024 shifts; this test keeps 64 of them, to make more than it keeps)
+local function shift_history(n)
+  return function(env)
+    local path = env.bundle .. "payload/bridge.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local lowered, count = text:gsub("M%.SHIFT_HISTORY = %d+", "M.SHIFT_HISTORY = " .. n, 1)
+    assert(count == 1, "SHIFT_HISTORY was not found to set")
+    f = assert(io.open(path, "wb"))
+    f:write(lowered)
+    f:close()
+  end
+end
+
 test("reads: shifts are carried one after another, up to the last 64", function()
-  local env, peer = setup()
+  local env, peer = setup({ patch = shift_history(64) })
   local E = epoch_of(peer)
   mock.ops.insert_track(1, { name = "A" })
   mock.ops.insert_track(1, { name = "B" })
@@ -1276,7 +1294,9 @@ test("reads: tracks that change in a way the tool can't follow move the epoch an
   eq(#told, 1)
   eq(#told[1].data.made + #told[1].data.gone, 0, "no shift to carry")
   ok(told[1].data.epoch ~= E, "the epoch moved")
-  eq(told[1].data.layout, 0)
+  -- (and the layout moved past what the shifts cover: a request in the layout before has no track it can be carried to)
+  eq(told[1].data.layout, 1)
+  failure(call(peer, "read", { ref = told[1].data.epoch .. ":track:1", layout = 0 }), "stale")
   mock.ops.swap_tracks(1, 2)
   told = H.events(peer, "tracks")
   eq(#told, 1)
