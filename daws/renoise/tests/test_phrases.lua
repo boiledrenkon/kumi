@@ -336,6 +336,14 @@ test("plugins: a plug-in's parameter by name or by its ref, its program, its set
   ok(undone.result, json.encode(undone.error or {}))
   eq(instrument(3).plugin.preset, 0)
   eq(instrument(3).plugin.preset_data, "<dls before/>")
+  -- A plug-in that keeps its program: nothing changed, no step and no record.
+  instrument(3).plugin.keeps_program = true
+  local steps_before = #mock.data.undo.stack
+  local kept = apply(peer, "plugin-preset", { ref = iref(place(peer), 3), preset = "Bass" }, "Kumi: program (k640)",
+    preview(peer, "plugin-preset", { ref = iref(place(peer), 3), preset = "Bass" }).fence, place(peer))
+  ok(kept.result and kept.result.display.unchanged and kept.result.undo.entry == false, json.encode(kept.result or kept.error))
+  eq(#mock.data.undo.stack, steps_before)
+  instrument(3).plugin.keeps_program = nil
   local settings = change(peer, "plugin-set", { ref = iref(place(peer), 3), channel = 2, transpose = -12, volumeDb = -6 })
   eq(instrument(3).plugin_props.channel, 2)
   ok(restore(peer, "plugin-set", settings).result)

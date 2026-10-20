@@ -1078,6 +1078,8 @@ local function plugin_device_object(instrument)
   }, {
     active_preset = function(value)
       check_range("active_preset", value, 0, #(plugin.presets or {}), true)
+      -- (a plug-in that keeps its program reads none chosen, its state as it was: Apple's DLSMusicDevice, lab)
+      if plugin.keeps_program then return end
       write(plugin, "preset", value, plugin.preset_not_a_step)
       -- (a program sets the plug-in's parameters: the mock moves the first to the program's number)
       if plugin.params[1] and value > 0 then plugin.params[1].value = math.min(plugin.params[1].max or 1, value / 10) end
