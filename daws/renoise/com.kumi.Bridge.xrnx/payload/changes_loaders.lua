@@ -286,7 +286,7 @@ base.register({
       applied = { index = plan.index, print = phrases_.phrase_print(phrase) }, created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase" },
       material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
       display = {
-        title = string.format("Loaded the phrase %s into %s (%s)", q(phrase.name), q(plan.label), places_.phrase_label(plan.index, phrase)),
+        title = string.format("Loaded the phrase %s into %s", q(places_.phrase_label(plan.index, phrase)), q(plan.label)),
         before = { phrases = plan.count }, after = { phrases = plan.count + 1 },
       },
       undo = { desc = desc, entry = true }, prior = { phrases = plan.count }, place = places_.journal_place("phrase", m), shape = "made",
