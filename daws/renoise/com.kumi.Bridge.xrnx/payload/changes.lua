@@ -17,6 +17,8 @@ import("changes_samples")
 import("changes_modfx")
 import("changes_phrases")
 import("changes_plugins")
+-- M6 (m6-library): an instrument made from sample files
+import("changes_kit")
 -- M4 (n-song)
 import("changes_patterns")
 local sequence_ = import("changes_sequence")

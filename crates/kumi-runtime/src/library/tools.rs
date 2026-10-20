@@ -408,10 +408,14 @@ impl LibraryTool {
         }
         // The library's notes call 60 C4 and Live's call it C3: said, so the two aren't mixed.
         if rows.iter().any(|row| row.get("note").is_some()) {
-            response["octaves"] = json!(if self.profile.vocab.middle_c_octave == 3 {
-                format!("a sound's note calls MIDI 60 C4, where {}, listen and the notation call it C3", self.profile.words.app)
-            } else {
-                format!("a sound's note calls MIDI 60 C4, as {} and listen do; the notation calls it C3", self.profile.words.app)
+            response["octaves"] = json!(match self.profile.vocab.middle_c_octave {
+                3 => format!("a sound's note calls MIDI 60 C4, where {}, listen and the notation call it C3", self.profile.words.app),
+                4 => format!("a sound's note calls MIDI 60 C4, as {} and listen do; the notation calls it C3", self.profile.words.app),
+                _ => format!(
+                    "a sound's note calls MIDI 60 C4, where {} calls it {} (its note value 60); listen calls it C4 and the notation C3",
+                    self.profile.words.app,
+                    self.profile.note_name(60)
+                ),
             });
         }
         if !uncovered.is_empty() {
