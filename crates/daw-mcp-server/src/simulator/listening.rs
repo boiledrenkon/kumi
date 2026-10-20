@@ -61,6 +61,8 @@ struct State {
     playing_now: bool,
     audition_works: bool,
     next_copy: u32,
+    /// Copies kept as the producer's tracks (`scratch-keep`): their name, by ref.
+    kept: HashMap<String, String>,
     /// Refs whose audio is MIDI (REAPER) or that have no sample data (Renoise).
     silent_refs: Vec<String>,
     /// What the next job notes, whatever its end.
@@ -134,6 +136,7 @@ impl SimListening {
                 playing_now: false,
                 audition_works: true,
                 next_copy: 0,
+                kept: HashMap::new(),
                 silent_refs: vec![],
                 next_notes: vec![],
                 capture_marks: None,
@@ -262,6 +265,62 @@ impl SimListening {
             "scratch": true,
             "version": 1,
         })
+    }
+
+    /// The copies kept as tracks (`scratch-keep`), by ref, with their names.
+    pub fn kept(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+        let mut kept: Vec<(String, String)> = state.kept.iter().map(|(reference, name)| (reference.clone(), name.clone())).collect();
+        kept.sort();
+        kept
+    }
+
+    /// `scratch-keep {ref, name}`, as both bridges make it: a copy kept as a track of the producer's, out of its set (no
+    /// drop takes it then), renamed; its restore deletes it while it is as Kumi left it.
+    pub fn keep(&self, method: &str, params: &Value, epoch: &str) -> Answer {
+        let mut state = self.state.lock().unwrap();
+        let renoise = state.daw == Daw::Renoise;
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        if method == "change_restore" {
+            let reference = params["created"]["ref"].as_str().unwrap_or_default().to_string();
+            let Some(name) = state.kept.get(&reference) else { return Err(("gone".into(), "the kept track isn't there any more".into())) };
+            if params["applied"]["name"].as_str() != Some(name.as_str()) && params["discard"] != true {
+                return Err(("changed".into(), format!("“{name}” changed since Kumi kept it")));
+            }
+            state.kept.remove(&reference);
+            return Ok(json!({"epoch": epoch, "restored": {"deletedRef": reference}, "display": {"title": "Kept track deleted"}}));
+        }
+        let reference = params["input"]["ref"].as_str().unwrap_or_default().to_string();
+        let name = params["input"]["name"].as_str().unwrap_or_default().to_string();
+        if name.is_empty() || name.starts_with("Kumi · try ") {
+            return Err(bad("name: the kept track's own name, not a scratch copy's"));
+        }
+        let Some((set, at)) = state
+            .scratch
+            .iter()
+            .find_map(|(set, copies)| copies.iter().position(|(copy, ..)| *copy == reference).map(|at| (set.clone(), at)))
+        else {
+            return Err(("gone".into(), format!("{reference} isn't one of Kumi's scratch copies")));
+        };
+        let was = state.scratch[&set][at].1.clone();
+        let title = format!("Kept “{name}”");
+        let mut display = json!({"title": title});
+        if renoise {
+            display["note"] = "Renoise's own undo takes back only its name.".into();
+        }
+        match method {
+            "change_preview" => Ok(json!({"epoch": epoch, "target": {"ref": reference, "kind": "track"}, "prior": {"name": was},
+                "fence": {"name": was, "scratchId": set}, "display": display})),
+            _ => {
+                if params["fence"]["name"].as_str() != Some(was.as_str()) {
+                    return Err(("changed".into(), format!("“{was}” changed since the preview")));
+                }
+                state.scratch.get_mut(&set).unwrap().remove(at);
+                state.kept.insert(reference.clone(), name.clone());
+                Ok(json!({"epoch": epoch, "applied": {"name": name}, "created": {"ref": reference, "kind": "track"}, "display": display,
+                    "undo": {"desc": desc, "entry": true}}))
+            }
+        }
     }
 
     /// Whether a ref is one of the scratch copies.

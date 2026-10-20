@@ -572,6 +572,11 @@ impl RenoiseScript {
         if state.empty {
             return Self::empty_song(&state, method, params);
         }
+        // (M5) A scratch copy kept as a track: the listening side knows the copies.
+        if method.starts_with("change_") && params["kind"] == "scratch-keep" {
+            let epoch = state.epoch.to_string();
+            return Some(self.listening.keep(method, params, &epoch));
+        }
         if method.starts_with("change_") {
             return Some(Self::change(&mut state, method, params));
         }

@@ -390,7 +390,7 @@ impl ReaperScript {
         if kind == "notes-change" {
             return Self::notes_change(state, epoch, method, params);
         }
-        if matches!(kind, "fx-add" | "fx-param" | "fx-delete") {
+        if matches!(kind, "fx-add" | "fx-param" | "fx-params" | "fx-delete") {
             return Self::fx_change(state, epoch, method, params);
         }
         if kind == "run-action" {
@@ -670,7 +670,112 @@ impl ReaperScript {
                     }
                 }
             }
+            "fx-params" => Self::fx_params(state, epoch, method, params),
             _ => Err(bad("the sim deletes no FX".into())),
+        }
+    }
+
+    /// `fx-params {ref: fx, values: [{param: index | name, normalized? | value?}]}`: several parameters of one FX in one step,
+    /// fenced and put back as the extension does (m4-r-fxenv): `{guid, chain, params: {"<index>": normalized}}`.
+    fn fx_params(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: String| ("bad-params".to_string(), message);
+        let near = |a: Option<f64>, b: Option<f64>| matches!((a, b), (Some(a), Some(b)) if (a - b).abs() <= 1e-9);
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        let guid = match method {
+            "change_restore" => params["prior"]["guid"].as_str(),
+            _ => params["input"]["ref"].as_str().and_then(|reference| reference.strip_prefix("r:fx:")),
+        }
+        .ok_or_else(|| bad("ref is an FX".into()))?
+        .to_string();
+        let (track, at) = Self::find_fx(state, &format!("r:fx:{guid}")).ok_or(("gone".to_string(), "that FX isn't there".to_string()))?;
+        let fx = state.fx[&track][at].clone();
+        let short = fx.name.split_once(": ").map_or(fx.name.as_str(), |(_, rest)| rest).split(" (").next().unwrap_or_default().to_string();
+        let record = |values: serde_json::Map<String, Value>| json!({"guid": guid, "chain": {"trackRef": track, "input": fx.input}, "params": values});
+        let now = |state: &State, indexes: &[usize]| -> serde_json::Map<String, Value> {
+            indexes.iter().map(|&index| (index.to_string(), json!(state.fx[&track][at].params[index].1))).collect()
+        };
+        let line = |index: usize, normalized: f64| format!("{} → {}", fx.params[index].0, fx.params[index].2.text(normalized));
+        if method == "change_restore" {
+            let prior = params["prior"]["params"].as_object().ok_or_else(|| bad("prior.params".into()))?;
+            let indexes: Vec<usize> = prior.keys().filter_map(|key| key.parse().ok()).filter(|&index| index < fx.params.len()).collect();
+            if indexes.len() != prior.len() {
+                return Err(("changed".into(), format!("{short} has fewer parameters than when Kumi set them")));
+            }
+            let title = format!("{short} {} parameters", indexes.len());
+            let here = now(state, &indexes);
+            if here.iter().all(|(key, value)| near(value.as_f64(), prior[key].as_f64())) {
+                return Ok(json!({"epoch": epoch, "restored": record(here), "display": {"title": format!("{title} (as they were)")}}));
+            }
+            let moved: Vec<&str> = here
+                .iter()
+                .filter(|(key, value)| !near(value.as_f64(), params["applied"]["params"][key.as_str()].as_f64()))
+                .filter_map(|(key, _)| key.parse::<usize>().ok().map(|index| fx.params[index].0.as_str()))
+                .collect();
+            if !moved.is_empty() && params["discard"] != true {
+                return Err(("changed".into(), format!("{} changed in REAPER since Kumi set it", moved.join(", "))));
+            }
+            for (key, value) in prior {
+                state.fx.get_mut(&track).unwrap()[at].params[key.parse::<usize>().unwrap()].1 = value.as_f64().unwrap_or_default();
+            }
+            state.changed += 1;
+            state.undo.push(desc);
+            let after = now(state, &indexes);
+            let lines: Vec<String> =
+                indexes.iter().map(|&index| line(index, after[&index.to_string()].as_f64().unwrap_or_default())).collect();
+            return Ok(
+                json!({"epoch": epoch, "restored": record(after), "display": {"title": format!("{title} put back"), "lines": lines}}),
+            );
+        }
+        // What was asked: each parameter by index or exact name, at a normalized value or the text it shows.
+        let mut asks: Vec<(usize, f64)> = vec![];
+        for value in params["input"]["values"].as_array().into_iter().flatten() {
+            let index = match &value["param"] {
+                Value::Number(index) => index.as_u64().map(|index| index as usize),
+                Value::String(name) => fx.params.iter().position(|(param, ..)| param == name),
+                _ => None,
+            }
+            .filter(|&index| index < fx.params.len())
+            .ok_or_else(|| bad(format!("{short} has no parameter {}", value["param"])))?;
+            if asks.iter().any(|(seen, _)| *seen == index) {
+                return Err(bad(format!("{} is given twice", fx.params[index].0)));
+            }
+            let wanted = value["normalized"]
+                .as_f64()
+                .or_else(|| value["value"].as_str().and_then(|text| fx.params[index].2.normalized(text)))
+                .ok_or_else(|| bad("normalized or value".into()))?;
+            asks.push((index, wanted));
+        }
+        if asks.is_empty() || asks.len() > 256 {
+            return Err(bad("values: 1 to 256".into()));
+        }
+        let indexes: Vec<usize> = asks.iter().map(|(index, _)| *index).collect();
+        let title = format!("{short} {} parameters", asks.len());
+        let here = now(state, &indexes);
+        match method {
+            "change_preview" => {
+                let unchanged = asks.iter().all(|(index, wanted)| near(here[&index.to_string()].as_f64(), Some(*wanted)));
+                let lines: Vec<String> = asks.iter().map(|&(index, wanted)| line(index, wanted)).collect();
+                Ok(json!({"epoch": epoch, "target": {"ref": format!("r:fx:{guid}"), "kind": "fx", "trackRef": track},
+                    "prior": record(here.clone()), "fence": record(here), "display": {"title": title, "lines": lines, "unchanged": unchanged}}))
+            }
+            _ => {
+                let fenced = &params["fence"];
+                if fenced["chain"] != json!({"trackRef": track, "input": fx.input})
+                    || !here.iter().all(|(key, value)| near(value.as_f64(), fenced["params"][key.as_str()].as_f64()))
+                {
+                    return Err(("changed".into(), "the FX's parameters, or the chain it is in, changed since the preview".into()));
+                }
+                for &(index, wanted) in &asks {
+                    state.fx.get_mut(&track).unwrap()[at].params[index].1 = wanted;
+                }
+                state.changed += 1;
+                Self::step(state, &desc);
+                let after = now(state, &indexes);
+                let lines: Vec<String> = asks.iter().map(|&(index, wanted)| line(index, wanted)).collect();
+                Ok(
+                    json!({"epoch": epoch, "applied": record(after), "display": {"title": title, "lines": lines}, "undo": {"desc": desc, "entry": true}}),
+                )
+            }
         }
     }
 
@@ -792,6 +897,20 @@ impl ReaperScript {
                     format!("those refs are from an earlier epoch ({sent}; now {epoch}): the project in the tab changed, read again");
                 return Some(Err(("stale".into(), message)));
             }
+        }
+        // (M5) A scratch copy kept as a track: the listening side knows the copies.
+        if method.starts_with("change_") && params["kind"] == "scratch-keep" {
+            let answer = self.listening.keep(method, params, &epoch);
+            if answer.is_ok() && method != "change_preview" {
+                let desc = params["desc"].as_str().unwrap_or_default();
+                state.changed += 1;
+                if method == "change_apply" {
+                    Self::step(&mut state, desc);
+                } else {
+                    state.undo.push(desc.to_string());
+                }
+            }
+            return Some(answer);
         }
         Some(match method {
             "change_preview" | "change_apply" | "change_restore" => {

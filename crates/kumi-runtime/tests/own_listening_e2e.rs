@@ -373,14 +373,30 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
             // The same values again come from what was heard.
             let again = rig.generation(&[trial], Signal::new(), None).await.unwrap();
             assert_eq!(again.cached, 1);
-            // Keeping the best needs the bridge to keep a copy as a track; until then it says so.
-            let kept = rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap();
-            assert!(kept.contains("update Kumi's bridge"), "{kept}");
-            // The winner settles on the track itself, as one change.
+            // Keeping the best: a fresh copy at these values kept as a track of the project (scratch-keep); keeping again
+            // takes the last one away first (Kumi's undo of keeping it).
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let first = script.listening().kept();
+            assert_eq!(first.len(), 1, "{first:?}");
+            assert_eq!(first[0].1, "Kumi · Goal best");
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let second = script.listening().kept();
+            assert_eq!(second.len(), 1, "the last best went: {second:?}");
+            assert_ne!(second[0].0, first[0].0, "a fresh copy is kept");
+            // The winner settles on the track itself, as one change (REAPER's fx-params).
             assert_eq!(rig.settle(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), None);
             assert_eq!(script.fx_param("r:track:{T0002}", "ReaEQ", "Gain-Band 2"), Some(0.7));
+            let applied: Vec<Value> = script
+                .asked()
+                .into_iter()
+                .filter(|(method, params)| method == "change_apply" && params["input"]["values"][0]["normalized"] == 0.7)
+                .map(|(_, params)| params)
+                .collect();
+            assert_eq!(applied.len(), 1, "{applied:?}");
+            assert_eq!(applied[0]["kind"], "fx-params");
             rig.close().await.unwrap();
             assert_eq!(script.listening().scratch_copies(), 0, "the copies are gone");
+            assert_eq!(script.listening().kept().len(), 1, "the best stays a track of the project's");
             assert_ours(&told.borrow());
             reaper.close().await.unwrap();
             simulator.stop();
