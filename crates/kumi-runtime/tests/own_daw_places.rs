@@ -761,3 +761,75 @@ async fn reaper_techniques_are_offered_and_kept_and_reactions_are_kept_with_the_
         })
         .await;
 }
+
+/// Renoise's places: an unsaved song (which Renoise's tool names by an id of its own until its first save) keeps its
+/// conversation in `renoise-unsaved`, not in a place of its own; a saved song keeps its conversation, notes, a background
+/// job's unheard report and a technique built there, which all come back with it next time.
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_unsaved_song_is_renoise_unsaved_and_a_saved_songs_notes_jobs_and_techniques_come_back_with_it() {
+    use kumi_runtime::{create_technique_store, TechniqueStore};
+    const DEMO: &str = "b9e741f2bc26a406294ae3e2318dbafc";
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let techniques = create_technique_store(dir.path().join("techniques.json"));
+            let script = RenoiseScript::new();
+            script.start_again_on_the_empty_song();
+            let kept = techniques.clone();
+            let own = Own::open_with(dir.path(), Daw::Renoise, DawProfile::RENOISE, renoise(&script), create_renoise_integration, |o| {
+                o.techniques = Some(kept)
+            })
+            .await;
+            own.session.submit("Start a song.", None).await.unwrap();
+            assert_eq!(kept_once(dir.path(), "renoise-unsaved", 1).await.len(), 1, "the unsaved song's conversation");
+            let places: Vec<String> =
+                std::fs::read_dir(dir.path().join("projects")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            assert!(!places.iter().any(|place| place.starts_with("renoise-") && place != "renoise-unsaved"), "no place of its own: {places:?}");
+            // The saved song opens: its own place.
+            script.load_the_file();
+            own.worker.script.borrow_mut().push_back(step(|| answer("Three swung hat patterns: Delta, Echo and Foxtrot.")));
+            own.main.script.borrow_mut().extend([
+                step(|| call("remember", json!({"note": "The hats swing at 58 percent", "about": "set"}))),
+                step(|| call("start_job", json!({"title": "Hat grooves", "task": "Find three swung hi-hat patterns."}))),
+                step(|| {
+                    call(
+                        "make_changes",
+                        json!({
+                            "steps": [{"tool": "track_volume", "input": {"ref": "track:2", "volumeDb": -6}}],
+                            "technique": {"name": "Swung hats", "fits": "hats that sound stiff", "idea": "Delay column nudges on the off-beats, then a Compressor to glue them"},
+                        }),
+                    )
+                }),
+                step(|| answer("The hats swing now.")),
+            ]);
+            own.session.submit("Make the hats swing.", None).await.unwrap();
+            assert!(own.session.answer_technique(true).await.unwrap());
+            for _ in 0..500 {
+                if own.session.jobs().iter().any(|job| job.state == JobState::Done) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(kept_once(dir.path(), &format!("renoise-{DEMO}"), 1).await.len(), 1, "the song's own conversation");
+            assert!(dir.path().join(format!("projects/renoise-{DEMO}/memory.json")).is_file());
+            assert_eq!(techniques.list().await.unwrap().iter().map(|t| t.body.name.clone()).collect::<Vec<_>>(), ["Swung hats"]);
+            let said = own.close().await;
+            assert_no_live_words(&said);
+
+            // Next time, the same song: its note, the job's report and the technique come back.
+            let script = RenoiseScript::new();
+            let kept = techniques.clone();
+            let own = Own::open_with(dir.path(), Daw::Renoise, DawProfile::RENOISE, renoise(&script), create_renoise_integration, |o| {
+                o.techniques = Some(kept)
+            })
+            .await;
+            own.session.submit("Anything new?", None).await.unwrap();
+            let last = own.main.requests.borrow().last().unwrap().clone();
+            assert!(last.contains("Delta, Echo and Foxtrot"), "the report came back");
+            let system = latest_system(&own);
+            assert!(system.contains("The hats swing at 58 percent") && system.contains("Swung hats"), "{system}");
+            let said = own.close().await;
+            assert_no_live_words(&said);
+        })
+        .await;
+}
