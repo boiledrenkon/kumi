@@ -1462,6 +1462,18 @@ unsafe extern "C" fn get_proj_ext_state(
         None => 0,
     })
 }
+/// (m6-places) The value a project carries for an extension; an empty one takes it away.
+unsafe extern "C" fn set_proj_ext_state(_proj: *mut ReaProject, section: *const c_char, key: *const c_char, value: *const c_char) -> c_int {
+    let (section, key, value) = (name_of(section), name_of(key), name_of(value));
+    counted(|s| {
+        if value.is_empty() {
+            s.project_ext.remove(&(section, key));
+        } else {
+            s.project_ext.insert((section, key), value.clone());
+        }
+        value.len() as c_int
+    })
+}
 /// A track's FX chain as REAPER writes it into the track's chunk: an entry per FX, the plug-in's own block inside.
 fn fx_chain_text(chain: &[FakeFx]) -> String {
     if chain.is_empty() {
@@ -3070,6 +3082,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
+        b"SetProjExtState" => set_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *const c_char) -> c_int,
         b"TrackFX_AddByName" => track_fx_add_by_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool, c_int) -> c_int,
         b"TrackFX_Delete" => track_fx_delete as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
         b"TrackFX_CopyToTrack" => track_fx_copy_to_track as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut MediaTrack, c_int, bool),

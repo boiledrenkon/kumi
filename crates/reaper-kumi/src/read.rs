@@ -323,6 +323,23 @@ impl Reads {
         }
     }
 
+    /// (m6-places) A saved project with no id of its own (none, or the template's it came with) gets the id Kumi names it
+    /// by, its path's, written into it: REAPER keeps it with the project and saves it with the producer's next save, so a
+    /// Save As or a moved file stays the same place. It marks nothing changed (7.82 lab). An unsaved project gets none.
+    pub fn keep_project_id(&self, reaper: &Reaper, proj: Project, info: &crate::reaper::ProjectInfo) {
+        if info.path.is_empty() {
+            return;
+        }
+        let stored = reaper.project_ext_state(proj, "kumi", "project").filter(|id| !id.is_empty());
+        let inherited = self.inherited.borrow().get(&proj.addr()).cloned();
+        if stored.is_some() && stored != inherited {
+            return;
+        }
+        if reaper.set_project_ext_state(proj, "kumi", "project", &path_id(&info.path)) {
+            self.inherited.borrow_mut().remove(&proj.addr());
+        }
+    }
+
     /// The tabs open now: the serial of a tab that closed is forgotten, so a pointer REAPER hands out again starts afresh.
     pub fn keep_tabs(&self, open: &[usize]) {
         self.serials.borrow_mut().by_tab.retain(|tab, _| open.contains(tab));
