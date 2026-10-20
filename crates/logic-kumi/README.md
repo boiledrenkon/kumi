@@ -158,7 +158,7 @@ untouched.
 The bridge saves the project and makes the rest of the changes REAPER's
 extension makes, over the same wire: `project_save` (in place with Cmd-S, or
 as a `.logicx` that isn't there yet through macOS's save panel, never over a
-file) and the kinds `key-command` (`run_action`'s shape: a Logic key command
+file) and the kinds `key-command` (`key_command`, REAPER's `run_action`'s shape: a Logic key command
 by name or id, its chord resolved from the producer's own key set with the
 factory U.S. set behind it, `src/keys.rs`), `region-move`, `region-resize`,
 `region-split`, `region-loop`, `region-rename`, `region-delete`, `loop-range`

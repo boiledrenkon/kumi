@@ -135,7 +135,7 @@ SysEx may come in several); `{"event": "app", "state": "launched" | "terminated"
 ## Changes (`change_preview`, `change_apply`, `change_restore`)
 
 M3 lets Kumi change the project and undo, and M4 adds the kinds below it from `key-command` down,
-with `project_save` and `run_action`'s shape. The wire is the REAPER extension's: the host's journal
+with `project_save` and `key_command`, REAPER's `run_action`'s shape. The wire is the REAPER extension's: the host's journal
 (`crates/daw-mcp-server/src/changes.rs`) previews a change, keeps it, applies it in one named step
 (`desc`, `Kumi: … (k<nonce>)`) and undoes it as another; the bridge answers `change_preview`,
 `change_apply` and `change_restore` with the same fields REAPER's does. Each kind writes through
@@ -166,7 +166,7 @@ Logic Pro 12.3.1; the host's simulated Logic (`simulator/logic.rs`) answers the 
 | `notes-change` | `notes_change` | the note's row cells (pitch, velocity, length, channel, position) | the list | "Value Change" |
 | `notes-delete` | `notes_delete` | the row's Delete action | the list | "Delete" |
 | `fx-bypass` | `fx_bypass` | the Mixer strip slot's bypass checkbox | the slot | none |
-| `key-command` | `run_action` | the key command's chord, by name or id from `com.apple.logic10.plist` (else the factory U.S. set), posted with Logic in front | the Edit menu's Undo title, moved or not | the command's own, or none |
+| `key-command` | `key_command` | the key command's chord, by name or id from `com.apple.logic10.plist` (else the factory U.S. set), posted with Logic in front | the Edit menu's Undo title, moved or not | the command's own, or none |
 | `region-move` | `region_move` | the Event List at its region level (Leave Folder), the region's Position scrubber | the Tracks area's items | "Value Change" |
 | `region-resize` | `region_resize` | the playhead at the new edge, Set Region Start/End to Playhead (Cmd-[ / Cmd-]) | the Tracks area | "Value Change" |
 | `region-split` | `region_split` | the region clicked, the playhead at the split, Split at Playhead (Cmd-T) | the Tracks area: the right part is `created` | "Split Regions" |
@@ -216,7 +216,7 @@ step of Logic's undo. `{saved, dirty}` answers.
   `{on, startBeats, endBeats}`; `notes-quantize` the notes' count and hash; `midi-import` and
   `track-stack` `{tracks, names, regions}`; a tempo event or a signature its row (`exists`, `bpm` or
   `timeSignature`) and the list's count; `key-command` the command's id and name.
-- `key-command` answers like REAPER's `run_action`: `applied: {command, name, changed}`, with
+- `key-command` answers like REAPER's `run_action` (the tool is `key_command`): `applied: {command, name, changed}`, with
   `display.unchanged` and `undo.entry: false` when the Undo title didn't move (Logic made no step
   of it); when it did, the step is kept under Logic's own name and its restore is `daw-only`
   (Cmd-Z in Logic). Save, Save As, Undo, Redo, Quit, the project commands and every command whose
@@ -329,7 +329,7 @@ titles.
   (Open Track Stack) to be read; flattening a summing stack, and undoing its creation, leaves its
   subtracks' output on the stack's bus (Logic's own doing). Which tracks are under a stack isn't
   readable, so a flattened stack comes back only through Logic's undo.
-- A **key command** runs only with Logic in front; `run_action` takes a name or an id, resolved from
+- A **key command** runs only with Logic in front; `key_command` takes a name or an id, resolved from
   the producer's key set (`com.apple.logic10.plist`, their chosen preset) with the factory U.S. set
   behind it, and refuses an unbound command.
 - `track-add` places a track **below the selected one** (Logic's New Tracks behaviour), so `index`
