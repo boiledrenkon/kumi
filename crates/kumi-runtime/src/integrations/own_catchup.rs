@@ -46,6 +46,9 @@ pub struct CatchUpWords {
     pub watch_description: &'static str,
 }
 
+/// A step of a draft: the kind and its input.
+pub type DraftStep = (&'static str, JsonObject);
+
 /// The change kinds a draft recipe is made of.
 pub struct RecipeKinds {
     /// The kind that adds a track (`{name}`).
@@ -53,10 +56,10 @@ pub struct RecipeKinds {
     /// The kind of record an effect is ("FX", "device"), and the step that adds one to a track (without its `ref`), from
     /// what it's made of and its name.
     pub effect: &'static str,
-    pub effect_add: fn(&JsonObject, &str) -> Option<(&'static str, JsonObject)>,
+    pub effect_add: fn(&JsonObject, &str) -> Option<DraftStep>,
     /// The step that sets an effect's parameters by name (without its `ref`), from (name, value) pairs as watch_me read
     /// them.
-    pub effect_values: fn(&[(String, Value)]) -> (&'static str, JsonObject),
+    pub effect_values: fn(&[(String, Value)]) -> DraftStep,
     /// A track's mixer values by what the host calls them, with the kind that sets each.
     pub mixer: &'static [Mixer],
 }
@@ -710,8 +713,9 @@ mod tests {
         assert_eq!(reply["watched"], "40 s");
         assert!(reply["changes"].as_array().unwrap().iter().any(|c| c["added"] == "FX" && c["on"] == "Lead Vox"), "{reply:?}");
         // The draft's blanks are the recipe's own names: what save_recipe takes.
+        let blank = regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap();
         for param in draft["params"].as_array().unwrap() {
-            assert!(regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap().is_match(param["name"].as_str().unwrap()), "{param}");
+            assert!(blank.is_match(param["name"].as_str().unwrap()), "{param}");
         }
     }
 

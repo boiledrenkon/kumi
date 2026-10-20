@@ -819,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn pages_from_another_epoch_are_read_again_and_bounds_are_kept() {
-        let pages = vec![
+        let pages = [
             json!({"epoch": "1", "project": {"name": "A", "path": "/a.rpp", "id": null, "identity": "9:1"}, "facts": {"tempo": 120}, "records": [{"k": "track", "id": "{A}", "o": 1}], "nextCursor": "c"}),
             json!({"epoch": "2", "records": [{"k": "track", "id": "{B}", "o": 2}]}),
             json!({"epoch": "2", "project": {"name": "B", "path": "/b.rpp", "id": null, "identity": "9:2"}, "facts": {"tempo": 90}, "summaries": {"item": "items"}, "records": [{"k": "track", "id": "{C}", "o": 1}, {"k": 3}], "nextCursor": "c"}),
@@ -842,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_after_the_producer_changed_something_reads_the_digest_again_and_shared_keys_stay_apart() {
-        let pages = vec![
+        let pages = [
             json!({"epoch": "1", "changed": 5, "project": {"identity": "9:1"}, "records": [{"k": "track", "id": "{A}", "o": 1}], "nextCursor": "c"}),
             json!({"epoch": "1", "changed": 6, "records": [{"k": "track", "id": "{B}", "o": 2}]}),
             json!({"epoch": "1", "changed": 6, "project": {"identity": "9:1"}, "records": [{"k": "track", "id": "{A}", "o": 1}, {"k": "track", "id": "{A}", "o": 2}], "nextCursor": "c"}),
