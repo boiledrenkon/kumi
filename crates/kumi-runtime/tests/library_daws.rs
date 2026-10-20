@@ -379,7 +379,16 @@ fn find_presets_names_only_steps_the_daw_has_and_lives_text_stays() {
         (
             &DawProfile::RENOISE,
             &renoise_changes::CHANGES,
-            &["instrument_load", "device_add", "device_preset_data", "device_chain_load", "phrase_load", "modset_load"][..],
+            &[
+                "instrument_load",
+                "device_add",
+                "device_preset_data",
+                "device_chain_load",
+                "phrase_load",
+                "modset_load",
+                "phrase_add",
+                "phrase_script",
+            ][..],
         ),
     ] {
         let text = description(profile);
