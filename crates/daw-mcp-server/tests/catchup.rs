@@ -239,3 +239,16 @@ async fn renoise_watching_tells_the_device_the_producer_added_on_its_track() {
     assert_eq!(said(&watched), ["+device EQ 10"], "{watched}");
     assert_eq!(watched["changes"][0]["item"]["on"], "Kick");
 }
+
+#[tokio::test]
+async fn a_watch_stopped_while_the_daw_is_busy_goes_on_until_it_answers() {
+    let mut lab = Lab::start(true).await;
+    lab.ok("watch_start").await;
+    lab.script.add_fx(1, "ReaComp", &[("Threshold", 0.5)]);
+    lab.simulator.set_busy(Some("modal"));
+    let (busy, is_error) = lab.tool("watch_stop", json!({})).await;
+    assert!(is_error, "{busy}");
+    lab.simulator.set_busy(None);
+    let watched = lab.ok("watch_stop").await;
+    assert_eq!(said(&watched), ["+FX ReaComp"], "{watched}");
+}

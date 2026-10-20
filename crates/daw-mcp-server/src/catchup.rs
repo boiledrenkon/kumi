@@ -615,11 +615,20 @@ impl Host {
         let Some(watching) = self.catchup().watching.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return (json!({"error": "not watching: start first, before the producer works", "code": "not-watching"}), true);
         };
-        let _ = watching.stop.send(true);
         let now = match self.digest(&pick, true, true).await {
             Ok(now) => now,
-            Err(error) => return (self.digest_error(&error), true),
+            Err(error) => {
+                // (busy, say: the watch goes on, to stop once the DAW answers, unless another started meanwhile)
+                let mut slot = self.catchup().watching.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() {
+                    *slot = Some(watching);
+                } else {
+                    let _ = watching.stop.send(true);
+                }
+                return (self.digest_error(&error), true);
+            }
         };
+        let _ = watching.stop.send(true);
         if now.identity != watching.start.identity {
             return (
                 json!({"error": "another project is open now, so there's nothing to compare: start again", "code": "other-project"}),

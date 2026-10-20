@@ -584,10 +584,18 @@ impl KernelTool for WatchTool {
         let answer = match answer {
             Ok(answer) => answer,
             Err(refused) => {
+                let place = self.words.words.project;
+                // (busy at stop: the host goes on watching, to stop once the DAW answers)
+                if refused.busy && !start {
+                    let app = self.app;
+                    return Ok(ToolResult::error(format!(
+                        "{app} is busy just now ({}): Kumi is still watching; stop again once {app} answers.",
+                        refused.why
+                    )));
+                }
                 if !start {
                     self.watching_now(false);
                 }
-                let place = self.words.words.project;
                 let text = match refused.code.as_deref() {
                     Some("not-watching") => "Kumi isn't watching yet: start first, before the producer does it.".to_string(),
                     Some("other-project") => format!("A different {place} is open now, so there's nothing to compare; start again."),
