@@ -124,6 +124,13 @@ local function chain_apply(song, env, input, fence, desc)
   for k = 1, #mixer.parameters do levels[k] = mixer:parameter(k).value end
   local selected, selected_device = song.selected_track_index, song.selected_track_device_index
   song:describe_undo(desc)
+  -- Kumi takes the devices off itself, the last first, each with the mark just after it went: when its undo puts them back,
+  -- the places kept of them before follow them there (places.back), as a delete's undo does. The chain then loads onto the
+  -- empty track (Renoise would remove them the same way, in this same step).
+  for d = #track.devices, 2, -1 do
+    track:delete_device_at(d)
+    replaced[d - 1].removed = env.device_mark and env.device_mark(index) or nil
+  end
   song.selected_track_index = index
   local loaded, result = pcall(function() return renoise.app():load_track_device_chain(plan.file) end)
   -- (another track was selected: it is again, with its device; on this one Renoise selects the chain's last device)
@@ -134,6 +141,11 @@ local function chain_apply(song, env, input, fence, desc)
     end)
   end
   if not loaded or result == false then
+    -- (the devices it took off go back, so nothing half-done stays)
+    local pattern_now = material_.pool_now(song, env, material.pool) or function(p) return p end
+    for k, kept in ipairs(replaced) do
+      pcall(devices_.put_back, song, env, index, track, math.min(k + 1, #track.devices + 1), kept, pattern_now, function(n) return n end, material_.new_tally())
+    end
     fail("failed", string.format("Renoise couldn't load the device chain %s: %s", q(plan.name), loaded and "it said no" or tostring(result)))
   end
   -- (the track's volume, pan and width as they were: a chain is its devices)
@@ -210,8 +222,11 @@ local function chain_restore(song, env, restore, desc)
   local tally, lost = material_.new_tally(), 0
   local moved = devices_.carried_from(env, restore.layout)
   for k, kept in ipairs(replaced) do
-    local _, not_back = devices_.put_back(song, env, index, track, math.min(k + 1, #track.devices + 1), kept, pattern_now, moved, tally)
+    local at = math.min(k + 1, #track.devices + 1)
+    local _, not_back = devices_.put_back(song, env, index, track, at, kept, pattern_now, moved, tally)
     lost = lost + not_back
+    -- (the device put back is the one the load took off: the places kept of it before follow it)
+    if env.device_back and type(kept.removed) == "string" then env.device_back(index, kept.removed, at) end
   end
   local note = material_.tally_note(tally)
   if lost > 0 then

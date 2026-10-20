@@ -1626,3 +1626,24 @@ test("devices m4: a phrase script Kumi's host read from a library file is titled
   ok(record.display.title:find("(1 line)", 1, true), record.display.title)
   failure(call(peer, "change_preview", { kind = "phrase-script", input = { ref = epoch .. ":phrase:1.1" }, epoch = epoch, layout = layout }), "bad-params", "or path")
 end)
+
+test("devices m4: changes made to devices before a chain replaced them are still undone after Kumi's undo of the chain puts them back", function()
+  local env, peer = setup()
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = gainer().params, ["Audio/Effects/Native/EQ 5"] = eq5().params }
+  mock.device_slots = { ["Audio/Effects/Native/Gainer"] = { slot = "GainerDevice" }, ["Audio/Effects/Native/EQ 5"] = { slot = "Eq5Device" } }
+  local param = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  local bypass = change(peer, "device-bypass", { ref = place(peer) .. ":device:2.2", bypass = true })
+  local chain = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  ok(restore(peer, "device-chain-load", chain).result)
+  eq(names_on(2), "EQ 5,Gainer")
+  -- A device made before them since: the earlier changes' undos still find each.
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2)
+  H.tick(2)
+  local back = restore(peer, "device-param", param)
+  ok(back.result, json.encode(back.error or {}))
+  eq(device_data(2, 4).params[1].value, 1, "the Gainer's gain as before the change")
+  local back2 = restore(peer, "device-bypass", bypass)
+  ok(back2.result, json.encode(back2.error or {}))
+  eq(device_data(2, 3).active ~= false, true, "the EQ switched on again")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
