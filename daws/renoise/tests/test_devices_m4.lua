@@ -64,13 +64,13 @@ local function doofer()
   return { name = "Doofer", path = "Audio/Effects/Native/Doofer", slot = "DooferDevice", params = params, xml_body = DOOFER_BODY, presets = { "Init" }, preset = 1 }
 end
 
-local function setup(tracks)
+local function setup(tracks, sends)
   local env = H.setup({ song = {
     name = "Lab", file_name = "/s/lab.xrns", bpm = 120, lpb = 4, mixer_device = true,
     tracks = tracks or {
       { name = "Kick" }, { name = "Bass", devices = { eq5(), gainer() } }, { name = "Pad", devices = { doofer() } },
     },
-    send_tracks = 1, patterns = 2, pattern_lines = 16, instruments = 1,
+    send_tracks = sends or 1, patterns = 2, pattern_lines = 16, instruments = 1,
   } })
   local peer = H.connect(env)
   H.frames(peer)
@@ -1001,4 +1001,252 @@ test("devices m4: a native device's settings are saved as a preset in the user l
   end)
   os.getenv = real_getenv
   if not done then error(err, 0) end
+end)
+
+-- device-params (M5's listening sets several of one device's parameters at once)
+
+local Q1, Q2 = "\226\128\156", "\226\128\157"
+
+-- Renoise's own undo and redo told since the last look (`undone_in_daw`).
+local function told_in_daw(peer)
+  call(peer, "ping")
+  local out = {}
+  for _, event in ipairs(peer.events or {}) do
+    if event.name == "undone_in_daw" then out[#out + 1] = event.data end
+  end
+  peer.events = {}
+  return out
+end
+
+local function eq_knobs(epoch) return { ref = epoch .. ":device:2.2", values = { { param = 1, value = -6 }, { param = "Gain 2", valueString = "3" } } } end
+
+test("devices m4: several parameters of one device are set in one step, read back in Renoise's words, and Kumi's undo puts each back", function()
+  local _, peer = setup()
+  local epoch = place(peer)
+  local previewed = preview(peer, "device-params", eq_knobs(epoch))
+  eq(previewed.display.title, "EQ 5 2 parameters on " .. Q1 .. "Bass" .. Q2)
+  eq(previewed.display.lines[2], "Gain 2 (1.00 kHz) → 3")
+  eq(previewed.prior.params["1"].value, 0)
+  eq(steps(), 0, "a preview writes nothing")
+  local record = change(peer, "device-params", eq_knobs(epoch), "Kumi: knobs (k1)")
+  eq(steps(), 1, "one step")
+  eq(newest(), "Kumi: knobs (k1)")
+  eq(value(2, 2, 1), -6)
+  eq(value(2, 2, 2), 3)
+  eq(record.applied.params["2"].valueString, "3.00", "read back in Renoise's words")
+  eq(record.display.lines[1], "Gain 1 (100 Hz) → -6.00")
+  eq(record.material.track, 2)
+  local back = restore(peer, "device-params", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(value(2, 2, 1), 0)
+  eq(value(2, 2, 2), 0)
+  eq(steps(), 2)
+  eq(back.result.display.title, "EQ 5 2 parameters on " .. Q1 .. "Bass" .. Q2 .. " put back")
+  local again = restore(peer, "device-params", record)
+  ok(again.result and again.result.undo.entry == false, "back already: " .. json.encode(again))
+  eq(steps(), 2)
+  -- Values that are as asked already: unchanged, no step.
+  local same = change(peer, "device-params", { ref = place(peer) .. ":device:2.2", values = { { param = 1, value = 0 } } })
+  ok(same.display.unchanged and same.undo.entry == false, json.encode(same.display))
+  eq(steps(), 2)
+end)
+
+test("devices m4: device-params refuses what device-param refuses, and a parameter given twice, before anything is written", function()
+  local _, peer = setup()
+  local epoch, layout = place(peer)
+  local function asked(values, ref)
+    return call(peer, "change_preview", { kind = "device-params", input = { ref = ref or (epoch .. ":device:2.2"), values = values }, epoch = epoch, layout = layout })
+  end
+  failure(asked({ { param = 1, value = 1 }, { param = "Gain 1", value = 2 } }), "bad-params", "given twice")
+  failure(asked({}), "bad-params", "values")
+  local many = {}
+  for k = 1, 257 do many[k] = { param = 1 + k % 2, value = 0 } end
+  failure(asked(many), "bad-params", "at most 256")
+  failure(asked({ { param = 1, value = 99 } }), "bad-params", "value must be from")
+  failure(asked({ { param = "Nope", value = 1 } }), "bad-params", "no parameter")
+  failure(asked({ { param = 1 } }), "bad-params", "value")
+  failure(asked({ { param = 1, value = 0 } }, epoch .. ":device:2.1"), "bad-params", "mixer device")
+  eq(steps(), 0)
+end)
+
+test("devices m4: device-params refuses a parameter the producer moved between the preview and the apply (its fence), writing nothing", function()
+  local _, peer = setup()
+  local previewed, epoch, layout = preview(peer, "device-params", eq_knobs(place(peer)))
+  mock.song:track(2):device(2):parameter(2).value = 5
+  local before = steps()
+  failure(apply(peer, "device-params", eq_knobs(epoch), previewed, "Kumi: knobs (k1)", epoch, layout), "changed", "Gain 2")
+  eq(steps(), before, "nothing written")
+  eq(value(2, 2, 1), 0)
+  eq(value(2, 2, 2), 5)
+end)
+
+test("devices m4: device-params' undo refuses a parameter changed since, puts back with discard, and writes only those still as Kumi set them", function()
+  local _, peer = setup()
+  local record = change(peer, "device-params", eq_knobs(place(peer)))
+  mock.song:track(2):device(2):parameter(2).value = 5
+  local before = steps()
+  failure(restore(peer, "device-params", record), "changed", "Gain 2 %(1.00 kHz%) of " .. Q1 .. "EQ 5 on Bass" .. Q2)
+  eq(steps(), before)
+  eq(value(2, 2, 1), -6, "nothing written")
+  local back = restore(peer, "device-params", record, nil, { discard = true })
+  ok(back.result, json.encode(back.error or {}))
+  eq(value(2, 2, 1), 0)
+  eq(value(2, 2, 2), 0)
+  -- One back already (the producer set Gain 1 as it was), the other still as Kumi set it: only that one is written.
+  local record2 = change(peer, "device-params", eq_knobs(place(peer)))
+  mock.song:track(2):device(2):parameter(1).value = 0
+  local back2 = restore(peer, "device-params", record2)
+  ok(back2.result, json.encode(back2.error or {}))
+  eq(#back2.result.display.lines, 1)
+  eq(back2.result.display.lines[1], "Gain 2 (1.00 kHz) → 0.00")
+  eq(value(2, 2, 2), 0)
+end)
+
+test("devices m4: device-params' undo finds the device by its place through every move since, and refuses one deleted or replaced", function()
+  local disruptions = {
+    { "a device made before it", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2) end, 2, 3 },
+    { "a track made before its track", function() mock.api.insert_track_at(1) end, 3, 2 },
+    { "a swap with the device after it", function(song) song:track(2):swap_devices_at(2, 3) end, 2, 3 },
+    { "the track before its track deleted", function() mock.api.delete_track_at(1) end, 1, 2 },
+    { "its track swapped with the next", function() mock.api.swap_tracks_at(2, 3) end, 3, 2 },
+  }
+  for _, case in ipairs(disruptions) do
+    local _, peer = setup()
+    local record = change(peer, "device-params", eq_knobs(place(peer)))
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, "device-params", record)
+    ok(back.result, case[1] .. ": " .. json.encode(back.error or {}))
+    eq(device_data(case[3], case[4]).name, "EQ 5", case[1])
+    eq(device_data(case[3], case[4]).params[1].value, 0, case[1])
+    eq(device_data(case[3], case[4]).params[2].value, 0, case[1])
+  end
+  -- Deleted: gone; its track deleted: gone; another device made where it was after it went: gone (the log saw it go).
+  local _, peer = setup()
+  local record = change(peer, "device-params", eq_knobs(place(peer)))
+  mock.song:track(2):delete_device_at(2)
+  H.tick(2)
+  failure(restore(peer, "device-params", record), "gone", "deleted")
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/EQ 5", 2)
+  H.tick(2)
+  failure(restore(peer, "device-params", record), "gone", "deleted")
+  local _, peer2 = setup()
+  local record2 = change(peer2, "device-params", eq_knobs(place(peer2)))
+  mock.api.delete_track_at(2)
+  H.tick(2)
+  failure(restore(peer2, "device-params", record2), "gone")
+end)
+
+test("devices m4: device-params aims a meta device as a place, and Kumi's undo aims it back through the tracks and devices made since", function()
+  local _, peer = meta_song()
+  local epoch = place(peer)
+  -- The LFO (aimed nowhere) to Bass's Gainer's Gain, and its amplitude, in one step.
+  local input = { ref = epoch .. ":device:1.2", values = {
+    { param = "Dest. Track", valueString = "2" }, { param = "Dest. Effect", value = 1 }, { param = "Dest. Parameter", valueString = "1" }, { param = "Amplitude", value = 0.8 },
+  } }
+  local record = change(peer, "device-params", input)
+  eq(values(1, 2, 1, 4), "1/1/1/0.8")
+  eq(steps(), 1)
+  eq(record.display.title, "*LFO 4 parameters on " .. Q1 .. "Kick" .. Q2)
+  eq(record.display.lines[5], "Dest. → " .. Q1 .. "Gain" .. Q2 .. " of " .. Q1 .. "Gainer" .. Q2 .. " on " .. Q1 .. "Bass" .. Q2)
+  ok(record.material.prior.destinations["Dest. "].none, json.encode(record.material.prior))
+  -- Renoise follows a device made before the Gainer and a track made before Bass (2/2/1, then 3/2/1).
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  mock.api.insert_track_at(2)
+  H.tick(2)
+  eq(values(1, 2, 1, 3), "2/2/1")
+  local back = restore(peer, "device-params", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 4), "-1/-1/-1/0.5", "aimed nowhere and its amplitude, as before")
+  -- Aimed nowhere by Track -1 alone: Effect and Parameter go with it (as meta-destination does); a device can't drive itself.
+  -- (Bass is track 3 now, its new Gainer device 2)
+  local l = device_data(1, 2)
+  l.params[1].value, l.params[2].value, l.params[3].value = 2, 1, 1
+  local e2, layout2 = place(peer)
+  local off = change(peer, "device-params", { ref = e2 .. ":device:1.2", values = { { param = "Dest. Track", value = -1 } } })
+  eq(values(1, 2, 1, 3), "-1/-1/-1")
+  local back2 = restore(peer, "device-params", off)
+  ok(back2.result, json.encode(back2.error or {}))
+  eq(values(1, 2, 1, 3), "2/1/1")
+  local own = call(peer, "change_preview", { kind = "device-params", input = { ref = place(peer) .. ":device:1.2", values = { { param = "Dest. Track", value = 0 }, { param = "Dest. Effect", value = 1 } } }, epoch = e2, layout = layout2 })
+  failure(own, "bad-params", "drive itself")
+end)
+
+test("devices m4: device-params' undo of a destination aimed elsewhere before aims it back where that device is now, and refuses it gone", function()
+  local _, peer = meta_song()
+  -- Before Kumi: the LFO drives Pad's EQ (device 3) Gain 2.
+  local l = device_data(1, 2)
+  l.params[1].value, l.params[2].value, l.params[3].value = 2, 2, 2
+  local epoch = place(peer)
+  local input = { ref = epoch .. ":device:1.2", values = { { param = "Dest. Track", value = 1 }, { param = "Dest. Effect", value = 1 }, { param = "Dest. Parameter", value = 1 } } }
+  local record = change(peer, "device-params", input)
+  eq(values(1, 2, 1, 3), "1/1/1")
+  -- The producer deletes the Gainer before Pad's EQ: the EQ is device 2 now.
+  mock.song:track(3):delete_device_at(2)
+  H.tick(2)
+  local back = restore(peer, "device-params", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 3), "2/1/2", "the EQ where it is now")
+  -- Gone: the EQ deleted after Kumi aimed the LFO elsewhere.
+  local record2 = change(peer, "device-params", { ref = place(peer) .. ":device:1.2", values = { { param = "Dest. Track", value = 1 } } })
+  mock.song:track(3):delete_device_at(2)
+  H.tick(2)
+  failure(restore(peer, "device-params", record2), "gone", "drove before")
+end)
+
+test("devices m4: device-params checks every Receiver against the send tracks, text too, and keeps it as the send track it names", function()
+  local _, peer = setup({ { name = "Kick", devices = { multiband() } }, { name = "Bass" } }, 2)
+  local epoch, layout = place(peer)
+  local bad_text = call(peer, "change_preview", { kind = "device-params", input = { ref = epoch .. ":device:1.2", values = { { param = "Receiver 1", valueString = "5" } } }, epoch = epoch, layout = layout })
+  failure(bad_text, "bad-params", "Receiver 1 is a send track's number from 0 to 1")
+  local record = change(peer, "device-params", { ref = epoch .. ":device:1.2", values = { { param = "Receiver 1", valueString = "1" }, { param = "Amount 1", value = 0.5 } } })
+  eq(values(1, 2, 1, 2), "0.5/1")
+  ok(record.applied.params["2"].to, json.encode(record.applied))
+  -- A track made before the sends: the send keeps its number among them, and the record its place.
+  mock.api.insert_track_at(1)
+  H.tick(2)
+  local back = restore(peer, "device-params", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(2, 2, 1, 2), "1/0")
+end)
+
+test("devices m4: Renoise's own undo of device-params is told, Kumi's undo then finds it back already, and the producer's undo of Kumi's undo is a redo", function()
+  local _, peer = setup()
+  local record = change(peer, "device-params", eq_knobs(place(peer)), "Kumi: knobs (kab1)")
+  told_in_daw(peer)
+  mock.api.undo()
+  H.tick(4)
+  local told = told_in_daw(peer)
+  eq(#told, 1)
+  eq(told[1].how, "undo")
+  eq(told[1].descs[1], "Kumi: knobs (kab1)")
+  local back = restore(peer, "device-params", record)
+  ok(back.result and back.result.undo.entry == false, json.encode(back))
+  -- Again, Kumi's undo this time; then the producer takes Kumi's undo back: the change is there again, told as a redo.
+  local other = { ref = place(peer) .. ":device:2.2", values = { { param = 1, value = -3 }, { param = 2, value = 2 } } }
+  local record2 = change(peer, "device-params", other, "Kumi: knobs (kab2)")
+  told_in_daw(peer)
+  local back2 = restore(peer, "device-params", record2)
+  ok(back2.result, json.encode(back2.error or {}))
+  H.tick(2)
+  eq(#told_in_daw(peer), 0, "Kumi's own undo isn't told")
+  mock.api.undo()
+  H.tick(4)
+  local redone = told_in_daw(peer)
+  eq(#redone, 1)
+  eq(redone[1].how, "redo")
+  eq(redone[1].descs[1], "Kumi: knobs (kab2)")
+end)
+
+test("devices m4: device-params refuses a destination the producer re-aimed between the preview and the apply, though only its Parameter was asked", function()
+  local _, peer = meta_song()
+  local l = device_data(1, 2)
+  l.params[1].value, l.params[2].value, l.params[3].value = 1, 1, 1
+  local input = { ref = place(peer) .. ":device:1.2", values = { { param = "Dest. Parameter", value = 2 } } }
+  local previewed, epoch, layout = preview(peer, "device-params", input)
+  mock.song:track(1):device(2):parameter(1).value = 2
+  local before = steps()
+  failure(apply(peer, "device-params", input, previewed, "Kumi: aim (k1)", epoch, layout), "changed", "Dest. Track")
+  eq(steps(), before, "nothing written")
+  eq(values(1, 2, 1, 3), "2/1/1")
 end)

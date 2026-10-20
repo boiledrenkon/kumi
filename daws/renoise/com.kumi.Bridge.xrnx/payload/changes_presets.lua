@@ -247,7 +247,7 @@ local function settings_restore(kind, song, env, restore, desc, what)
   watch_all(env, t, d, device)
   local ok, err = pcall(function() device.active_preset_data = material.presetData end)
   if not ok then fail("failed", "Renoise wouldn't take the settings back: " .. tostring(err)) end
-  base.note_restored(env.journal, kind, { track = t, device = d })
+  base.note_restored_at(env.journal, kind, { track = t, device = d })
   return {
     restored = { preset = device.active_preset }, display = { title = label .. ": settings put back" }, undo = { desc = desc, entry = true },
   }
@@ -420,7 +420,7 @@ local function set_restore(song, env, restore, desc)
   end
   song:describe_undo(desc)
   set_write(device, prior)
-  base.note_restored(env.journal, "device-set", { track = t, device = d })
+  base.note_restored_at(env.journal, "device-set", { track = t, device = d })
   return {
     restored = set_read(device, prior), display = { title = set_title(label, track_name, now, prior) .. " (put back)" },
     undo = { desc = desc, entry = true },
@@ -501,7 +501,7 @@ for _, spec in ipairs(XML_KINDS) do
       if type(material) ~= "table" or type(material.write) ~= "table" then bad("material.write: the preset data Kumi's host put back") end
       local t, d, track, device = device_by_place(song, env, material, "Kumi changed it")
       local back = write_checked(song, env, t, d, track, device, material.write.presetData, material.write.shape, desc)
-      base.note_restored(env.journal, kind, { track = t, device = d })
+      base.note_restored_at(env.journal, kind, { track = t, device = d })
       return {
         restored = { shape = M.shape_of(back) }, display = display_from(material.write.display, q(label_of(t, track, device)) .. " put back"),
         undo = { desc = desc, entry = true },
@@ -632,6 +632,13 @@ local function meta_locate(song, env, input, what)
   return t, d, track, device, label, destination
 end
 
+-- (device-params sets a destination's numbers as a place too: changes_params.lua)
+M.destination = {
+  numbers_of = numbers_of, same_numbers = same_numbers, place_of_numbers = place_of_numbers, numbers_of_place = numbers_of_place,
+  write_numbers = write_numbers, target_words = target_words,
+}
+M.identity, M.label_of, M.target_of, M.reread = identity, label_of, target_of, reread
+
 base.register({
   kind = "meta-destination", custom = true, places = true,
   preview = function(song, env, input)
@@ -709,7 +716,7 @@ base.register({
     end
     song:describe_undo(desc)
     write_numbers(destination, was)
-    base.note_restored(env.journal, "meta-destination", { track = t, device = d })
+    base.note_restored_at(env.journal, "meta-destination", { track = t, device = d })
     local all = material_.destinations(device)
     return { restored = { target = target_words(song, was) }, display = { title = meta_title(label, destination, all, song, was) .. " (put back)" }, undo = { desc = desc, entry = true } }
   end,

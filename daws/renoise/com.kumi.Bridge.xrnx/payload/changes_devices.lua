@@ -243,6 +243,10 @@ end
 param_spec.watch = function(env, loc) env.watch_param(loc.place.track, loc.place.device, loc.place.param) end
 base.register(param_spec)
 
+-- (M4 n-devices: device-params, several parameters of one device, asks and checks them as device-param does)
+M.param_spec, M.parameter_number, M.points_at, M.receiver_check = param_spec, parameter_number, points_at, receiver_check
+M.track_of_value, M.value_of_track = track_of_value, value_of_track
+
 
 -- Putting a device in, taking it out, moving it. These change the track's list of devices, so the epoch moves (the answer is in
 -- the new one, and says where the device is: `created` for a device made, `material.track` for the track to find it on).

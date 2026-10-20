@@ -379,7 +379,7 @@ base.register({
         too_big(i, instrument)
         song:describe_undo(desc)
         load_file(song, env, i, file, instrument.name)
-        base.note_restored(env.journal, "instrument-macro-map", { instrument = i })
+        base.note_restored_at(env.journal, "instrument-macro-map", { instrument = i })
         local display = type(material.write.display) == "table" and material.write.display or { title = name .. " macro mappings put back" }
         return { restored = { print = mappings_print(song:instrument(i)) }, display = display, undo = { desc = desc, entry = true } }
       end)
@@ -400,7 +400,7 @@ base.register({
     end
     song:describe_undo(desc)
     write_ranges(macro, prior.ranges)
-    base.note_restored(env.journal, "instrument-macro-map", { instrument = i })
+    base.note_restored_at(env.journal, "instrument-macro-map", { instrument = i })
     return { restored = { ranges = ranges_of(macro, prior.ranges) }, display = { title = string.format("%s macro %d's mappings put back", name, m) }, undo = { desc = desc, entry = true } }
   end,
   reread = function(song, place)

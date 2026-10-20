@@ -23,6 +23,7 @@ local sequence_ = import("changes_sequence")
 -- (M4 n-devices: presets, names, and the Doofer, Splitter and Notepad edits Kumi's host composes)
 local presets = import("changes_presets")
 local macros = import("changes_macros")
+import("changes_params")
 
 local M = {}
 
