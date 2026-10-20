@@ -705,7 +705,9 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 link.undo_unanswered.borrow_mut().remove(&transaction);
             };
             match state {
-                ChangeState::Applied | ChangeState::Unsure if undone.contains(&transaction) && !only_kumi => {
+                // (Kept: Kumi's undo was refused, as for Lua the DAW's own undo takes back, or the producer changed it since;
+                // the DAW's undo of the change's own step still takes it back)
+                ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept if undone.contains(&transaction) && !only_kumi => {
                     settle(self.link());
                     self.history.update(&entry, ChangeState::Undone, Some(format!("Undone with {}.", profile.vocab.own_undo)));
                 }
@@ -998,6 +1000,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         match self.link().call(action.method, args, signal).await {
             Ok(Ok(answer)) => {
                 follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &answer);
+                // The file a save wrote is the project's from now on: a delete later in this answer copies that one first
+                // (accept-reaper lab: a delete right after the project's first save kept no copy).
+                if let Some(saved) = answer.get("saved").and_then(Value::as_str).filter(|_| action.method == "project_save") {
+                    *self.link().file.borrow_mut() = Some(saved.to_owned());
+                }
                 let playing = action.playing.or_else(|| answer.get("playing").and_then(Value::as_bool));
                 let recording = (action.playing == Some(false)).then_some(false);
                 // What the DAW says it did, in its words, when it says (Renoise's actions: the notes, what was selected, the file).
@@ -1557,6 +1564,23 @@ mod tests {
         assert_eq!(state(), ChangeState::Applied);
     }
 
+    #[test]
+    fn a_change_kumi_kept_is_undone_by_the_daws_undo_of_its_step_and_put_back_by_its_redo() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        let lua = plan.change_kind("run_lua").unwrap();
+        // Kumi's undo of a Lua chunk is refused (only REAPER's undo knows what it did): the row is kept.
+        let id = plan.remember(lua, ChangeSummary::title("Ran Lua"), "t-lua", ChangeState::Applied, None);
+        let entry = plan.history.entries.borrow().get(&id).cloned().unwrap();
+        plan.history.update(&entry, ChangeState::Kept, Some("Only REAPER's own undo can take back what it does".into()));
+        let state = || plan.history.entries.borrow().get(&id).map(|entry| entry.borrow().record.state).unwrap();
+        // The producer's Cmd-Z takes the chunk's own step back (accept-reaper lab: HISTORY still said Kept)…
+        plan.undone_in_daw(&json!({"undone": ["t-lua"], "redone": []}));
+        assert_eq!(state(), ChangeState::Undone);
+        // …and their redo puts it back.
+        plan.undone_in_daw(&json!({"undone": [], "redone": ["t-lua"]}));
+        assert_eq!(state(), ChangeState::Applied);
+    }
+
     #[tokio::test]
     async fn renoise_adds_a_few_tracks_an_answer_and_says_so() {
         let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
@@ -1644,6 +1668,49 @@ mod tests {
         async fn close(&self) -> Result<(), RuntimeError> {
             Ok(())
         }
+    }
+
+    /// A host whose project_save writes the file it's asked for.
+    struct Saves;
+    #[async_trait(?Send)]
+    impl McpEndpoint for Saves {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Err(RuntimeError::plain("no list"))
+        }
+        async fn call(&self, tool: &str, args: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            assert_eq!(tool, "project_save");
+            let text = json!({"saved": args["path"], "dirty": false}).to_string();
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": text}]})).unwrap())
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_saved_by_kumi_is_the_one_a_later_delete_copies() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        *plan.link().endpoint.borrow_mut() = Some(Rc::new(Saves));
+        let save = plan.action_kind("save_project").unwrap();
+        let input = json!({"path": "/Projects/Night Drive.rpp"}).as_object().unwrap().clone();
+        let saved = plan.one_action(save, input, Signal::new()).await;
+        assert!(!saved.is_error, "{}", saved.text);
+        assert_eq!(plan.link().file.borrow().as_deref(), Some("/Projects/Night Drive.rpp"));
     }
 
     #[tokio::test]
