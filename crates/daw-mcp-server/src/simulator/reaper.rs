@@ -14,7 +14,7 @@ const MAX_LIMIT: usize = 200;
 /// The arrange body's page, in tracks.
 const MAX_ARRANGE: usize = 500;
 const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
-const BODIES: [&str; 4] = ["arrange", "midi", "fx", "routing"];
+const BODIES: [&str; 5] = ["arrange", "midi", "fx", "routing", "mixer"];
 
 struct State {
     epoch: u32,

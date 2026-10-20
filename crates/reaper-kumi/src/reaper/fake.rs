@@ -1347,6 +1347,11 @@ unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, maste
 unsafe extern "C" fn get_last_touched_track() -> *mut MediaTrack {
     counted(|s| s.tracks.iter().position(|t| t.selected).map_or(ptr::null_mut(), track_ptr))
 }
+/// A track's meter: the fake keeps it in `extra` as `peak:<channel>` (amplitude), which REAPER has no attribute for.
+unsafe extern "C" fn track_get_peak_info(track: *mut MediaTrack, channel: c_int) -> f64 {
+    counted(|s| track_of(s, track as u64).and_then(|t| t.extra.get(&format!("peak:{channel}")).copied()).unwrap_or(0.0))
+}
+
 unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *const c_char) -> f64 {
     let parm = name_of(parm);
     counted(|s| {
@@ -2956,6 +2961,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
         b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
         b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"Track_GetPeakInfo" => track_get_peak_info as unsafe extern "C" fn(*mut MediaTrack, c_int) -> f64,
         b"SetMediaTrackInfo_Value" => set_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char, f64) -> bool,
         b"InsertTrackAtIndex" => insert_track_at_index as unsafe extern "C" fn(c_int, bool),
         b"DeleteTrack" => delete_track as unsafe extern "C" fn(*mut MediaTrack),

@@ -31,7 +31,7 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
                 "autoitem",
             ],
-            bodies: &["arrange", "midi", "fx", "routing"],
+            bodies: &["arrange", "midi", "fx", "routing", "mixer"],
             // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
             outside_undo: &[
                 "loop-repeat",
@@ -60,7 +60,7 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "modset",
                 "chain",
             ],
-            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp", "mixer"],
             outside_undo: &[
                 "track-mute",
                 "track-solo",

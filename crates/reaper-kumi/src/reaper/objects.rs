@@ -307,6 +307,12 @@ impl Reaper<'_> {
         self.api.ValidatePtr2().is_some_and(|f| unsafe { f(proj.0, pointer, class.as_ptr()) })
     }
 
+    /// A track's peak level now on a channel (0 left, 1 right), as an amplitude: REAPER's meter. None where REAPER doesn't
+    /// give it.
+    pub fn track_peak(&self, track: Track, channel: i32) -> Option<f64> {
+        self.api.Track_GetPeakInfo().map(|f| unsafe { f(track.0, channel) }).filter(|peak| peak.is_finite())
+    }
+
     pub fn track_value(&self, track: Track, parm: &str) -> f64 {
         let parm = cstring(parm);
         self.api.GetMediaTrackInfo_Value().map(|f| unsafe { f(track.0, parm.as_ptr()) }).unwrap_or(0.0)
