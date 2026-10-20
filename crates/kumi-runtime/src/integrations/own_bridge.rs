@@ -129,7 +129,13 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     listening: Rc<OwnListening<S>>,
     /// When the bridge last said what listening it can do (its status's `listening`).
     flags_at: Cell<Option<std::time::Instant>>,
+    /// Each change of the DAW's playing the focus watch saw (when, playing), oldest first: whether the producer heard
+    /// one of Kumi's changes.
+    heard: Rc<RefCell<std::collections::VecDeque<(i64, bool)>>>,
 }
+
+/// How many changes of the DAW's playing an integration keeps.
+const HEARD_KEPT: usize = 512;
 
 /// How long what the bridge said it can do for listening is taken as standing (REAPER's audio may start or stop).
 const FLAGS_FRESH: std::time::Duration = std::time::Duration::from_secs(20);
@@ -179,6 +185,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         hosts: Cell::new(0),
         listening,
         flags_at: Cell::new(None),
+        heard: Rc::default(),
     })
 }
 
@@ -431,6 +438,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let back_at = self.back_at.clone();
         let (book, layout, book_epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let (look_when_free, look_again) = (self.look_when_free.clone(), self.options.context.on_look_again.clone());
+        let heard = self.heard.clone();
         let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
         let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
@@ -507,6 +515,15 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 }
                 let transport = focus.get("transport").cloned();
                 let playing = transport.as_ref().and_then(|t| t.get("playing")) == Some(&Value::Bool(true));
+                {
+                    let mut heard = heard.borrow_mut();
+                    if heard.back().is_none_or(|(_, was)| *was != playing) {
+                        heard.push_back((chrono::Utc::now().timestamp_millis(), playing));
+                        if heard.len() > HEARD_KEPT {
+                            heard.pop_front();
+                        }
+                    }
+                }
                 if playing || transport != last_transport {
                     if let Some(on_transport) = &on_transport {
                         on_transport(crate::integrations::own_views::transport(&focus, perf_now()));
@@ -831,6 +848,29 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         let outcome = self.changes.history.undo(id.unwrap_or("last"), signal, false).await?;
         outcome.record.ok_or_else(|| KumiError::new(FailureKind::Request, outcome.text).into())
+    }
+    fn first_heard(&self, since: i64) -> Option<i64> {
+        // The DAW playing (the producer's playing, as the focus watch saw it): at once when it was playing then.
+        let heard = self.heard.borrow();
+        let by_playing = if heard.iter().rev().find(|(at, _)| *at <= since).is_some_and(|(_, playing)| *playing) {
+            Some(since)
+        } else {
+            heard.iter().find(|(at, playing)| *at > since && *playing).map(|(at, _)| *at)
+        };
+        // Kumi's own listens played out loud.
+        let by_kumi = self
+            .listening
+            .renderer
+            .played
+            .borrow()
+            .iter()
+            .filter_map(|(from, to)| match () {
+                _ if *from <= since && since <= *to => Some(since),
+                _ if *from > since => Some(*from),
+                _ => None,
+            })
+            .min();
+        by_playing.into_iter().chain(by_kumi).min()
     }
     fn has_stop_live(&self) -> bool {
         true

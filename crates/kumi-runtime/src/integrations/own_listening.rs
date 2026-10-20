@@ -251,6 +251,8 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     tracks: RefCell<Option<(Instant, Vec<TrackRow>)>>,
     /// The parts groove read, by the name the model gave each.
     pub(super) parts: RefCell<HashMap<String, Part>>,
+    /// Kumi's listens played out loud (from, to, in ms): what the producer heard of Kumi's work.
+    pub(super) played: RefCell<std::collections::VecDeque<(i64, i64)>>,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -357,6 +359,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             copies: RefCell::default(),
             tracks: RefCell::default(),
             parts: RefCell::default(),
+            played: RefCell::default(),
         }
     }
 
@@ -722,7 +725,18 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let seconds = render.seconds.unwrap_or(PLAYED_SECONDS).min(PLAYED_SECONDS);
         let args = json!({"file": render.file, "fromSeconds": render.start, "seconds": seconds});
         match self.link.call("audition", args, self.cleanup_signal()).await {
-            Ok(Ok(answer)) => (answer.get("playing") == Some(&Value::Bool(true)), text(&answer, "note")),
+            Ok(Ok(answer)) => {
+                let playing = answer.get("playing") == Some(&Value::Bool(true));
+                if playing {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let mut played = self.played.borrow_mut();
+                    played.push_back((now, now + (seconds * 1000.) as i64));
+                    if played.len() > 128 {
+                        played.pop_front();
+                    }
+                }
+                (playing, text(&answer, "note"))
+            }
             Ok(Err(refused)) => (false, Some(refused.why)),
             Err(_) => (false, None),
         }

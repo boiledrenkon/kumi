@@ -112,6 +112,8 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             let mut said = described(&observed);
 
             // An audition: both candidates rendered offline in one job, before their faders, the first played out loud.
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            assert_eq!(reaper.first_heard(since), None, "nothing played yet");
             let audition = tool(&observed, "audition")
                 .execute(
                     object(json!({"candidates": [{"track": track(2), "label": "warm"}, {"track": track(3), "label": "bright"}], "from_beat": 16, "beats": 8})),
@@ -132,6 +134,7 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             let played = script.listening().previews();
             assert_eq!(played.len(), 1, "the first candidate, out loud");
             assert_eq!(played[0]["fromSeconds"], 2.0, "from where the part starts, past the pre-roll");
+            assert!(reaper.first_heard(since).is_some_and(|at| at >= since), "the producer heard Kumi's listen");
             said.push(audition.text);
 
             // A judged run's first listen: the mix, rendered and played out loud.
