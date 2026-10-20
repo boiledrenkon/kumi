@@ -94,24 +94,8 @@ local function device_by_ref(song, env, reference, what)
 end
 M.device_by_ref = device_by_ref
 
--- The device a record keeps, where it is now: on the track its `track` number was carried to, at its place followed through
--- that track's device log. A gap in the log refuses `stale`, a device deleted `gone`, another one at its place `changed`;
--- nothing is written then.
-local function device_by_place(song, env, kept, what)
-  if type(kept) ~= "table" or type(kept.track) ~= "number" or type(kept.dev) ~= "table" then bad("material: where the device was") end
-  local label = type(kept.label) == "string" and kept.label or "the device"
-  local t = kept.track
-  if t < 1 or t > rows.track_count(song) then fail("gone", string.format("the track %s was on isn't in the song any more", q(label))) end
-  local track = song:track(t)
-  local d, why = material_.device_now(song, env, t, kept.dev)
-  if not d then
-    if why == "gone" then fail("gone", string.format("%s was deleted from %s since", q(label), q(base.named(t, track)))) end
-    if why == "changed" then fail("changed", string.format("the device at %s's place on %s is another one now", q(label), q(base.named(t, track)))) end
-    fail("stale", string.format("the devices on %s changed in a way Kumi couldn't follow since %s, so it can't tell where %s is: nothing was written",
-      q(base.named(t, track)), what or "then", q(label)))
-  end
-  return t, d, track, track:device(d)
-end
+-- The device a record keeps, where it is now (changes_material.lua).
+local device_by_place = material_.device_by_place
 M.device_by_place = device_by_place
 
 local function label_of(t, track, device)

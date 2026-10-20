@@ -1268,3 +1268,144 @@ test("devices m4: a container's shape leaves out its inner devices' SelectedPres
   data.preset_data = flipped.presetData:gsub("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)
   ok(read().shape ~= flipped.shape, "a name still moves it")
 end)
+
+-- Device identity (kumi-51 follow-up): the M3 device kinds' undos find their device by its place, so no device made,
+-- deleted or moved since on any track makes them stale.
+
+local COMPRESSOR = "Audio/Effects/Native/Compressor"
+
+local function names_on(t)
+  local out = {}
+  for d = 2, #mock.data.tracks[t].devices do out[#out + 1] = mock.data.tracks[t].devices[d].name end
+  return table.concat(out, ",")
+end
+
+-- What the producer does between Kumi's change and its undo; `t`, `d` say where Bass's devices are then.
+local DISRUPTIONS = {
+  { "a device made before it", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2) end },
+  { "the device before it deleted", function(song) song:track(2):delete_device_at(2) end },
+  { "a swap of it with its neighbour", function(song) song:track(2):swap_devices_at(2, 3) end },
+  { "a device made on another track", function(song) song:track(1):insert_device_at("Audio/Effects/Native/Delay", 2) end },
+  { "a track made before its track", function() mock.api.insert_track_at(1) end },
+  { "a device made after it", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Delay", #song:track(2).devices + 1) end },
+}
+
+-- Each disruption in a fresh song: `make(peer, epoch)` makes the change (on Bass's Gainer, 2.3), `check(where)` says it was
+-- undone, where `where(name)` finds a device on Bass by name now.
+local function through_disruptions(kind, make, check, skip)
+  for _, case in ipairs(DISRUPTIONS) do
+   if case[1] ~= skip then
+    local _, peer = setup()
+    mock.device_catalog = { [COMPRESSOR] = { { name = "Ratio", value = 4, min = 1, max = 20 } } }
+    local record = make(peer, place(peer))
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, kind, record)
+    ok(back.result, kind .. ", " .. case[1] .. ": " .. json.encode(back.error or {}))
+    local bass = mock.data.tracks[2].name == "Bass" and 2 or 3
+    check(function(name)
+      for d, data in ipairs(mock.data.tracks[bass].devices) do
+        if data.name == name then return data, d, bass end
+      end
+    end, case[1])
+    mock.device_catalog = nil
+   end
+  end
+end
+
+test("devices m4: Kumi's undo of a device bypass and a device parameter finds the device through every device change since", function()
+  through_disruptions("device-bypass", function(peer, epoch)
+    return change(peer, "device-bypass", { ref = epoch .. ":device:2.3", bypass = true })
+  end, function(where, case)
+    eq(where("Gainer").active ~= false, true, "bypass undone: " .. case)
+  end)
+  through_disruptions("device-param", function(peer, epoch)
+    return change(peer, "device-param", { ref = epoch .. ":param:2.3.1", value = 2 })
+  end, function(where, case)
+    eq(where("Gainer").params[1].value, 1, "gain back: " .. case)
+  end)
+  -- Found by its place, it is still fenced by its value: the producer's gain since refuses the undo.
+  local _, peer = setup()
+  local record = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2)
+  mock.song:track(2):device(4):parameter(1).value = 3
+  H.tick(2)
+  failure(restore(peer, "device-param", record), "changed")
+  eq(device_data(2, 4).params[1].value, 3)
+end)
+
+test("devices m4: Kumi's undo of a device added finds it through every device change since, and refuses it changed", function()
+  through_disruptions("device-add", function(peer, epoch)
+    return change(peer, "device-add", { ref = epoch .. ":track:2", path = COMPRESSOR, index = 3 })
+  end, function(where, case)
+    ok(where("Compressor") == nil, "the Compressor went: " .. case)
+    ok(where("Gainer") ~= nil, "the Gainer stays: " .. case)
+  end)
+  -- Its settings changed since: refused, unless discard.
+  local _, peer = setup()
+  mock.device_catalog = { [COMPRESSOR] = { { name = "Ratio", value = 4, min = 1, max = 20 } } }
+  local record = change(peer, "device-add", { ref = place(peer) .. ":track:2", path = COMPRESSOR, index = 3 })
+  mock.song:track(2):device(3):parameter(1).value = 8
+  H.tick(2)
+  failure(restore(peer, "device-add", record), "changed", "changed in Renoise")
+  eq(names_on(2), "EQ 5,Compressor,Gainer")
+  ok(restore(peer, "device-add", record, nil, { discard = true }).result)
+  eq(names_on(2), "EQ 5,Gainer")
+  mock.device_catalog = nil
+end)
+
+test("devices m4: Kumi's undo of a device deleted puts it back through every device change since, and the changes made to it before follow it", function()
+  through_disruptions("device-delete", function(peer, epoch)
+    return change(peer, "device-delete", { ref = epoch .. ":device:2.3" })
+  end, function(where, case)
+    ok(where("Gainer") ~= nil, "the Gainer is back: " .. case)
+  end, "a swap of it with its neighbour")
+  -- A parameter change before the delete: after Kumi puts the device back, that change's undo still finds it.
+  local _, peer = setup()
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = gainer().params }
+  local param = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  local deleted = change(peer, "device-delete", { ref = place(peer) .. ":device:2.3" })
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/EQ 5", 2)
+  H.tick(2)
+  ok(restore(peer, "device-delete", deleted).result)
+  local back = restore(peer, "device-param", param)
+  ok(back.result, json.encode(back.error or {}))
+  eq(device_data(2, 4).name, "Gainer")
+  eq(device_data(2, 4).params[1].value, 1)
+  mock.device_catalog = nil
+end)
+
+test("devices m4: Kumi's undo of a device moved puts it back after the device it followed, through every change since, and refuses it moved again", function()
+  local cases = {
+    { "a device made before both", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2) end, "EQ 5,Gainer,Gainer" },
+    { "a device made on another track", function(song) song:track(1):insert_device_at("Audio/Effects/Native/Gainer", 2) end, "EQ 5,Gainer" },
+    { "a track made before its track", function() mock.api.insert_track_at(1) end, "EQ 5,Gainer" },
+    { "a device made after both", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 4) end, "EQ 5,Gainer,Gainer" },
+  }
+  for _, case in ipairs(cases) do
+    local _, peer = setup()
+    local record = change(peer, "device-move", { ref = place(peer) .. ":device:2.2", index = 3 })
+    eq(names_on(2), "Gainer,EQ 5")
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, "device-move", record)
+    ok(back.result, case[1] .. ": " .. json.encode(back.error or {}))
+    local bass = mock.data.tracks[2].name == "Bass" and 2 or 3
+    eq(names_on(bass), case[3], case[1])
+  end
+  -- Moved back by the producer: back already. Moved elsewhere: refused, unless discard.
+  local _, peer = setup()
+  local record = change(peer, "device-move", { ref = place(peer) .. ":device:2.2", index = 3 })
+  mock.song:track(2):swap_devices_at(2, 3)
+  H.tick(2)
+  local again = restore(peer, "device-move", record)
+  ok(again.result and again.result.undo.entry == false, json.encode(again))
+  local _, peer2 = setup({ { name = "Kick" }, { name = "Bass", devices = { eq5(), gainer(), plain_gainer() } } })
+  local record2 = change(peer2, "device-move", { ref = place(peer2) .. ":device:2.2", index = 3 })
+  eq(names_on(2), "Gainer,EQ 5,Gainer")
+  mock.song:track(2):swap_devices_at(3, 4)
+  H.tick(2)
+  failure(restore(peer2, "device-move", record2), "changed", "moved")
+  ok(restore(peer2, "device-move", record2, nil, { discard = true }).result)
+  eq(names_on(2), "EQ 5,Gainer,Gainer")
+end)
