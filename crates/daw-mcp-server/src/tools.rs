@@ -75,9 +75,9 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Logic => Kinds {
             read: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo"],
             bodies: &["tree", "notes", "timeline", "routing"],
-            // Logic keeps no step of its history for a mixer move, the tempo or a bypass (the M3 lab): those are put
-            // back by value, never by Logic's own undo.
-            outside_undo: &["track-volume", "track-pan", "track-mute", "track-solo", "track-arm", "tempo-set", "fx-bypass"],
+            // Logic keeps no step of its history for a mixer move, the tempo or a bypass (the M3 lab), nor for the cycle
+            // range (M4): those are put back by value, never by Logic's own undo.
+            outside_undo: &["track-volume", "track-pan", "track-mute", "track-solo", "track-arm", "tempo-set", "fx-bypass", "loop-range"],
         },
     }
 }
