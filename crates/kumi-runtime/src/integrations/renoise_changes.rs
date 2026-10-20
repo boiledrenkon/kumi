@@ -69,7 +69,7 @@ static ACTIONS: [OwnAction; 6] = [
     OwnAction {
         tool: "save_instrument",
         method: "instrument_save",
-        description: "Save an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless overwrite: true. Changes nothing in the song.",
+        description: "Save an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless path names that file exactly (with .xrni) and overwrite: true. Changes nothing in the song.",
         schema: r#"{"type":"object","additionalProperties":false,"required":["instrumentRef","path"],"properties":{"instrumentRef":{"type":"string","description":"The instrument"},"path":{"type":"string","minLength":1},"overwrite":{"type":"boolean"}}}"#,
         core: false,
         playing: None,

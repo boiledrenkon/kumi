@@ -230,6 +230,20 @@ function M.instrument_print(instrument)
   }
 end
 
+-- Where Kumi keeps what it saves to put back (a deleted instrument's .xrni, a sample's audio): a folder of its own in Renoise's
+-- temporary folder, which Renoise empties as it quits (Kumi's undo can't outlive the song anyway). Renoise's own name when that
+-- folder can't be made.
+function M.temp_file(extension)
+  local name = os.tmpname(extension)
+  local dir, sep, file = name:match("^(.*)([/\\])([^/\\]+)$")
+  if not dir then return name end
+  local own = dir .. sep .. "kumi"
+  if not io.exists(own) then pcall(os.mkdir, own) end
+  if not io.exists(own) then return name end
+  if io.exists(name) then pcall(os.remove, name) end
+  return own .. sep .. file
+end
+
 -- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains or plug-in, and at most its one
 -- modulation set, with no devices in it.
 function M.is_empty(instrument)
