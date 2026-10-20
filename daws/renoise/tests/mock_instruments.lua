@@ -1578,13 +1578,28 @@ function M.app_load_instrument(path, how)
   local instruments = d.instruments
   local old = instruments[i]
   local made = M.instrument_copy(value.instrument)
+  -- (into the last instrument, Renoise first adds an empty one after it, and leaves it: lab, 2026-10-20)
+  local extra = i == #instruments and M.instrument_data({}) or nil
   local function swap_in()
+    if extra then
+      table.insert(instruments, i + 1, extra)
+      M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
+    end
     table.insert(instruments, i + 1, made)
     M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
     table.remove(instruments, i)
     M.fire(song.instruments_observable, { type = "remove", index = i })
   end
   local function swap_out()
+    if extra then
+      table.insert(instruments, i, old)
+      M.fire(song.instruments_observable, { type = "insert", index = i })
+      for _ = 1, 2 do
+        table.remove(instruments, i + 1)
+        M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
+      end
+      return
+    end
     table.insert(instruments, i + 1, old)
     M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
     table.remove(instruments, i)

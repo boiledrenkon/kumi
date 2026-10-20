@@ -252,6 +252,18 @@ function M.is_empty(instrument)
   return print.sets == 0 or #instrument:sample_modulation_set(1).devices == 0
 end
 
+-- Loads an .xrni into the selected instrument `i`: true when Renoise did. Renoise 3.5.4 (lab, 2026-10-20) first adds an empty
+-- instrument after the last one when that is the one it loads into (told as insert@i+1 before its own insert@i+1 and remove@i)
+-- and leaves it there; in the middle it adds none. Kumi takes that empty one out again, in the same step.
+function M.load_xrni(song, i, path)
+  local count = #song.instruments
+  local loaded = renoise.app():load_instrument(path)
+  if loaded and i == count and #song.instruments == count + 1 and M.is_empty(song:instrument(count + 1)) then
+    song:delete_instrument_at(count + 1)
+  end
+  return loaded
+end
+
 -- The notes of the song that play instrument value `v` (counting from 0), within `budget` reads: a list of {pattern, track,
 -- line, col, cell}, or nil when the song is too big to look through in one go. Every note column of every line with
 -- something in it, hidden columns too. An alias's lines are its source pattern's: looked at there.

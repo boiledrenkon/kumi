@@ -625,7 +625,7 @@ local function delete_restore(song, env, restore, desc)
   local before = song.selected_instrument_index
   song:describe_undo(desc)
   song:insert_instrument_at(at)
-  local loaded = with_selected(song, at, function() return renoise.app():load_instrument(material.file) end)
+  local loaded = with_selected(song, at, function() return places_.load_xrni(song, at, material.file) end)
   keep_selection(song, at, before)
   if not loaded then
     pcall(function() song:delete_instrument_at(at) end)
@@ -745,7 +745,7 @@ local function file_title(path) return path:match("([^/\\]+)%.[^.]+$") or path e
 -- Loads the file into the instrument at `i` (selected for the call): Renoise's load for its kind. True when it took.
 local function load_into(song, i, path, extension)
   return with_selected(song, i, function()
-    if extension == "xrni" then return renoise.app():load_instrument(path) end
+    if extension == "xrni" then return places_.load_xrni(song, i, path) end
     if extension == "sfz" then return renoise.app():load_instrument_multi_sample(path) end
     -- (a sample file: one sample, named by the file, in the empty instrument)
     local instrument = song:instrument(i)
