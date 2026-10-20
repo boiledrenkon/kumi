@@ -92,6 +92,7 @@ impl TuiApp {
                 FocusBody::Tracker(_) => BodyKind::Tracker,
                 FocusBody::Matrix(_) => BodyKind::Matrix,
                 FocusBody::Keyzones(_) => BodyKind::Keyzones,
+                FocusBody::Mixer(_) => BodyKind::Mixer,
                 _ => BodyKind::Routing,
             })
         } else if grid.is_some() {
@@ -121,6 +122,7 @@ impl TuiApp {
                 FocusBody::Matrix(matrix) => (BodyKind::Matrix, self.draw_matrix(screen, x, area.y + 2, width, matrix, most)),
                 FocusBody::Keyzones(map) => (BodyKind::Keyzones, self.draw_keyzones(screen, x, area.y + 2, width, map, most)),
                 FocusBody::Routing(routing) => (BodyKind::Routing, self.draw_routing(screen, x, area.y + 2, width, routing, most)),
+                FocusBody::Mixer(mixer) => (BodyKind::Mixer, self.draw_mixer(screen, x, area.y + 2, width, mixer, most)),
                 _ => (BodyKind::Routing, 0),
             };
             // (a tracker grid that isn't a pattern, Renoise's phrase, says its own word)
@@ -690,6 +692,75 @@ impl TuiApp {
         };
         if !parent.is_empty() {
             screen.put(x, row, &truncate(parent, width), &st::FAINT);
+            row += 1;
+        }
+        row - y
+    }
+    /// The mixer: a row per track's strip around the selected one (raised): its chip and name, its peak level now where
+    /// the DAW meters it, its fader in dB, its pan, and whether it's muted, soloed or armed. A DAW without meters says so.
+    fn draw_mixer(&self, screen: &mut Screen, x: i32, y: i32, width: i32, mixer: &MixerView, most: i32) -> i32 {
+        const LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+        let note = !mixer.levels;
+        let rows = (most - note as i32).max(1) as usize;
+        let selected = mixer.strips.iter().position(|strip| strip.selected).unwrap_or(0);
+        let first = selected.saturating_sub(rows / 2).min(mixer.strips.len().saturating_sub(rows));
+        let db_text = |db: f64| {
+            if db <= -100. {
+                "−∞".to_string()
+            } else {
+                let text = number::to_fixed(db, 1);
+                text.strip_prefix('-').map_or(text.clone(), |rest| format!("−{rest}"))
+            }
+        };
+        let pan_text = |pan: f64| {
+            let percent = (pan.abs() * 100.).round() as i64;
+            match percent {
+                0 => "C".to_string(),
+                n if pan < 0. => format!("{n}L"),
+                n => format!("{n}R"),
+            }
+        };
+        let mut row = y;
+        for strip in mixer.strips.iter().skip(first).take(rows) {
+            if strip.selected {
+                screen.fill(Rect::new(x - 1, row, width + 2, 1), &st::RAISED);
+            }
+            let kind = strip.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string());
+            let mark = icon(track_kind(kind.as_deref()), self.0.icons, Some(chip_color(strip.color.as_deref())));
+            screen.put(x, row, &mark.text, &mark.style);
+            // What's on the right: the level, the fader, the pan and the flags, in fixed columns.
+            let flags = [strip.mute.as_ref().map(|_| "M"), strip.solo.then_some("S"), strip.armed.then_some("●")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("");
+            let right = format!(
+                "{:>6} {:>4} {:<3}",
+                strip.volume_db.map(db_text).unwrap_or_default(),
+                strip.pan.map(pan_text).unwrap_or_default(),
+                flags
+            );
+            let meter = if mixer.levels { 2 } else { 0 };
+            let at = x + width - text_width(&right);
+            let name_room = (at - meter - (x + 3) - 1).max(1);
+            screen.put(x + 3, row, &truncate(&strip.name, name_room), &if strip.mute.is_some() { st::FAINT } else { st::TEXT });
+            if let Some([left, right_db]) = strip.peak_db.filter(|_| mixer.levels) {
+                let loudest = left.max(right_db);
+                let level = (((loudest + 60.) / 60.).clamp(0., 1.) * 7.).round() as usize;
+                let style = if loudest > -1. {
+                    st::WARN
+                } else if loudest > -60. {
+                    st::ACCENT
+                } else {
+                    st::FAINT
+                };
+                screen.put(at - 2, row, if loudest <= -60. { "·" } else { LEVELS[level] }, &style);
+            }
+            screen.put(at, row, &right, &st::DIM);
+            row += 1;
+        }
+        if note {
+            screen.put(x, row, &truncate(&format!("{} gives no meters", crate::daw::words().app), width), &st::FAINT);
             row += 1;
         }
         row - y

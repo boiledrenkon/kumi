@@ -409,6 +409,35 @@ pub fn routing(track_ref: &str, body: &Value) -> RoutingView {
     RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool), midi_out }
 }
 
+/// The mixer's strips (REAPER's with their meters; Renoise's without).
+pub fn mixer(body: &Value) -> MixerView {
+    let strip = |row: &Value| MixerStrip {
+        name: text(row, "name"),
+        track_ref: row.get("ref").and_then(Value::as_str).map(str::to_owned),
+        color: color(row),
+        kind: if flag(row, "master") { Some(TrackKind::Main) } else { row.get("type").and_then(Value::as_str).and_then(track_kind) },
+        volume_db: number(row, "volumeDb"),
+        pan: number(row, "pan"),
+        // (REAPER's mute is on or off; Renoise's is a state: active, off or muted)
+        mute: match row.get("mute") {
+            Some(Value::Bool(true)) => Some("muted".into()),
+            Some(Value::String(state)) if state != "active" => Some(state.clone()),
+            _ => None,
+        },
+        solo: flag(row, "solo"),
+        armed: flag(row, "arm"),
+        selected: flag(row, "selected"),
+        peak_db: row.get("peakDb").and_then(Value::as_array).and_then(|both| Some([both.first()?.as_f64()?, both.get(1)?.as_f64()?])),
+    };
+    let strips: Vec<MixerStrip> = list(body, "strips").take(80).map(strip).collect();
+    MixerView {
+        levels: body.get("levels") != Some(&Value::Bool(false)) && strips.iter().any(|strip| strip.peak_db.is_some()),
+        strips,
+        from: number(body, "from").map_or(0, |n| n.max(0.) as usize),
+        track_count: number(body, "trackCount").map(|n| n.max(0.) as usize),
+    }
+}
+
 /// The track kind FOCUS's chip shows, from a focus's `track.type`.
 pub fn track_kind(kind: &str) -> Option<TrackKind> {
     Some(match kind {
@@ -542,6 +571,27 @@ mod tests {
         let gainer = &lanes[0].devices.as_ref().unwrap()[0];
         assert_eq!((gainer.r#ref.as_str(), gainer.note.as_deref()), ("3:device:2.4#1.1", None));
         assert_eq!(lanes[0].devices.as_ref().unwrap()[1].note.as_deref(), Some("bypassed"));
+    }
+
+    #[test]
+    fn a_mixers_strips_say_their_levels_where_the_daw_meters_them() {
+        let reaper = json!({"strips": [
+            {"ref": "r:track:master", "name": "MASTER", "master": true, "volumeDb": 0.0, "pan": 0.0, "mute": false, "solo": false, "peakDb": [-3.0, -4.5]},
+            {"ref": "r:track:{K}", "name": "Kick", "volumeDb": -6.02, "pan": -0.25, "mute": true, "solo": false, "arm": true, "selected": true, "peakDb": [-150.0, -150.0]},
+        ], "trackCount": 1, "from": 0});
+        let view = mixer(&reaper);
+        assert!(view.levels);
+        assert_eq!(
+            (view.strips[0].kind, view.strips[1].mute.as_deref(), view.strips[1].armed),
+            (Some(TrackKind::Main), Some("muted"), true)
+        );
+        let renoise = json!({"strips": [
+            {"ref": "e1:track:1", "name": "Kick", "type": "sequencer", "volumeDb": 0.0, "pan": 0.0, "mute": "off", "solo": true},
+            {"ref": "e1:track:2", "name": "Bass", "type": "sequencer", "volumeDb": -3.0, "pan": 0.5, "mute": "active", "solo": false},
+        ], "trackCount": 2, "from": 0, "levels": false});
+        let view = mixer(&renoise);
+        assert!(!view.levels, "Renoise has no meters");
+        assert_eq!((view.strips[0].mute.as_deref(), view.strips[0].solo, view.strips[1].mute.as_deref()), (Some("off"), true, None));
     }
 
     #[test]

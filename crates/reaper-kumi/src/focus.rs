@@ -134,6 +134,12 @@ fn routing_window(reaper: &Reaper, proj: Project) -> Option<Option<String>> {
     Some(track.map(|track| refs::track_ref(&rows::track_id(reaper, track))))
 }
 
+/// Whether REAPER's mixer window has the keyboard focus: undocked, REAPER titles it "Mixer". A mixer docked in the main
+/// window has no window of its own to tell by, and the view stays `arrange` then.
+fn mixer_window() -> bool {
+    crate::window::front_title().is_some_and(|title| title == "Mixer" || title.starts_with("Mixer "))
+}
+
 /// The parameter touched last, named for the header: `{name, value, formatted, fxRef}`.
 fn touched_param(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<Value> {
     let hit = reads.touched_fx(reaper, 0)?;
@@ -209,6 +215,8 @@ impl Focus {
             "fx"
         } else if routing.is_some() {
             "routing"
+        } else if mixer_window() {
+            "mixer"
         } else {
             "arrange"
         };
@@ -308,6 +316,19 @@ mod tests {
     }
 
     #[test]
+    fn reapers_undocked_mixer_with_the_focus_is_the_view() {
+        let (reads, proj) = project();
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        fake::with(|s| s.front_title = Some("Mixer".into()));
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["view"], "mixer");
+        fake::with(|s| s.front_title = Some("Mixer (no focus)".into()));
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["view"], "mixer");
+        fake::with(|s| s.front_title = Some("Mixers of the world".into()));
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["view"], "arrange");
+    }
+
+    #[test]
     fn a_takes_focused_fx_names_the_takes_chain_for_focus_to_draw() {
         let (reads, proj) = project();
         let api = fake::api();
@@ -358,7 +379,8 @@ mod tests {
         let value = Focus::default().poll(&reads, &reaper, proj, true);
         assert_eq!((&value["view"], &value["selection"]["routingTrackRef"]), (&json!("routing"), &Value::Null));
         // The main window in front, another window, or a platform that can't say: the arrange view.
-        for title in [Some("[unsaved project] - REAPER v7.82"), Some("Routing Matrix"), Some("Mixer"), None] {
+        // (the mixer's own window is its own view: see reapers_undocked_mixer_with_the_focus_is_the_view)
+        for title in [Some("[unsaved project] - REAPER v7.82"), Some("Routing Matrix"), Some("Track Manager"), None] {
             fake::with(|s| s.front_title = title.map(String::from));
             let value = Focus::default().poll(&reads, &reaper, proj, true);
             assert_eq!((&value["view"], &value["selection"]["routingTrackRef"]), (&json!("arrange"), &Value::Null), "{title:?}");

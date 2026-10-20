@@ -551,6 +551,7 @@ fn own_kind(body: &FocusBody) -> BodyKind {
         FocusBody::Matrix(_) => BodyKind::Matrix,
         FocusBody::Keyzones(_) => BodyKind::Keyzones,
         FocusBody::Routing(_) => BodyKind::Routing,
+        FocusBody::Mixer(_) => BodyKind::Mixer,
         FocusBody::Tree(_) => BodyKind::Tree,
         FocusBody::Notes(_) => BodyKind::Notes,
         FocusBody::Grid(_) => BodyKind::Grid,

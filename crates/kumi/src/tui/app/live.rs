@@ -269,6 +269,9 @@ impl TuiApp {
             Touched::Routing if editor_kind(focus) == Some(ViewKind::Routing) => {
                 BodyRequest::Routing { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty())? }
             }
+            Touched::Mixer if main_kind(focus) == Some(ViewKind::Mixer) || editor_kind(focus) == Some(ViewKind::Mixer) => {
+                BodyRequest::Mixer { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty()) }
+            }
             _ => return None,
         };
         drop(state);

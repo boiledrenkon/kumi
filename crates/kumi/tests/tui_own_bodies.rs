@@ -557,6 +557,43 @@ scene!(reaper_routing, DawId::Reaper, BODY_SHOTS, |h| {
     shows(&h, "FOCUS · Routing").await;
 });
 
+scene!(reaper_mixer, DawId::Reaper, BODY_SHOTS, |h| {
+    let strip = |name: &str, volume: f64, pan: f64, more: Value| {
+        let mut row = json!({"ref": format!("r:track:{{{name}}}"), "name": name, "volumeDb": volume, "pan": pan, "mute": false, "solo": false,
+            "selected": false, "peakDb": [volume - 9.0, volume - 11.0]});
+        for (key, value) in more.as_object().unwrap() {
+            row[key] = value.clone();
+        }
+        row
+    };
+    let body = json!({"strips": [
+        strip("MASTER", 0.0, 0.0, json!({"master": true, "peakDb": [-0.5, -0.8]})),
+        strip("Drums", -3.0, 0.0, json!({"color": "#ff5c5c", "depth": 0})),
+        strip("Kick", -6.02, -0.25, json!({"selected": true, "arm": true, "depth": 1})),
+        strip("Snare", -150.0, 0.3, json!({"mute": true, "depth": 1, "peakDb": [-150.0, -150.0]})),
+        strip("Vocals with a long name", 1.5, 1.0, json!({"solo": true}))], "trackCount": 4, "from": 0});
+    let request = BodyRequest::Mixer { track_ref: Some("r:track:{Kick}".into()) };
+    *h.control.own.borrow_mut() = (reaper::DAW.to_body)(&request, &body);
+    let focus = json!({"view": "mixer", "selection": {"track": {"name": "Kick", "type": "audio"}, "trackRef": "r:track:{Kick}"}});
+    h.emit(focus_of(reaper::DAW.fill_focus, focus));
+    shows(&h, "FOCUS · Mixer").await;
+});
+
+scene!(renoise_mixer, DawId::Renoise, BODY_SHOTS, |h| {
+    let strip = |n: u32, name: &str, kind: &str, volume: f64, pan: f64, mute: &str, solo: bool| json!({"ref": format!("e1:track:{n}"), "name": name, "type": kind, "volumeDb": volume, "pan": pan, "mute": mute, "solo": solo, "selected": n == 2});
+    let body = json!({"strips": [
+        strip(1, "Kick", "sequencer", 0.0, 0.0, "active", false),
+        strip(2, "Bass", "sequencer", -6.0206, -0.5, "active", true),
+        strip(3, "Pad", "sequencer", -12.0, 0.25, "off", false),
+        strip(4, "Drums", "group", -1.5, 0.0, "muted", false),
+        {"ref": "e1:track:5", "name": "Master", "type": "master", "volumeDb": 0.0, "pan": 0.0, "selected": false},
+    ], "trackCount": 5, "from": 0, "levels": false});
+    *h.control.own.borrow_mut() = (renoise::DAW.to_body)(&BodyRequest::Mixer { track_ref: None }, &body);
+    let focus = json!({"view": "mixer", "selection": {"track": {"name": "Bass", "type": "sequencer"}, "trackRef": "e1:track:2"}});
+    h.emit(focus_of(renoise::DAW.fill_focus, focus));
+    shows(&h, "FOCUS · Mixer").await;
+});
+
 // NOW and HISTORY: one picture per family
 
 /// The preview's and the apply's answers, as Kumi's pictures read them.

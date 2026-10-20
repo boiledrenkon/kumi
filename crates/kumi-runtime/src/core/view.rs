@@ -227,6 +227,8 @@ pub enum FocusBody {
     Keyzones(KeyzoneMap),
     /// A track's sends and receives.
     Routing(RoutingView),
+    /// The mixer: each track's strip.
+    Mixer(MixerView),
 }
 
 /// The kind of a body FOCUS draws.
@@ -241,6 +243,7 @@ pub enum BodyKind {
     Matrix,
     Keyzones,
     Routing,
+    Mixer,
 }
 
 /// A body to read: a track's tree, an item's notes, a track's grid around a section, the timeline.
@@ -269,6 +272,10 @@ pub enum BodyRequest {
     Routing {
         track_ref: String,
     },
+    /// The mixer's strips around a track (the selected one when None).
+    Mixer {
+        track_ref: Option<String>,
+    },
 }
 
 impl BodyRequest {
@@ -282,6 +289,7 @@ impl BodyRequest {
             BodyRequest::Matrix => BodyKind::Matrix,
             BodyRequest::Keyzones { .. } => BodyKind::Keyzones,
             BodyRequest::Routing { .. } => BodyKind::Routing,
+            BodyRequest::Mixer { .. } => BodyKind::Mixer,
         }
     }
 }
@@ -318,6 +326,7 @@ impl ViewPresentation {
             BodyKind::Matrix => "Sequence",
             BodyKind::Keyzones => "Keyzones",
             BodyKind::Routing => "Routing",
+            BodyKind::Mixer => "Mixer",
         },
         timeline_notes: false,
         open_containers: false,
@@ -582,6 +591,46 @@ pub struct RoutingView {
     /// Where it sends its MIDI out of the DAW, in the DAW's words ("Launchpad · channel 2").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_out: Option<String>,
+}
+
+/// The mixer as FOCUS draws it: a page of the tracks' strips (from `from`, 0 the first track, of `track_count`), and
+/// whether the DAW gives their levels (REAPER's meters; Renoise has none).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixerView {
+    pub strips: Vec<MixerStrip>,
+    #[serde(default)]
+    pub from: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_count: Option<usize>,
+    #[serde(default)]
+    pub levels: bool,
+}
+
+/// One track's strip: its fader (dB), pan (-1 left to 1 right), mute (in the DAW's word when it has kinds of mute:
+/// Renoise's "off" and "muted"), solo and arm, and its peak level now (dB, left and right) where the DAW meters it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixerStrip {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TrackKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute: Option<String>,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub armed: bool,
+    #[serde(default)]
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_db: Option<[f64; 2]>,
 }
 
 /// One route: to or from which track (or hardware output), how loud, and where it taps the track.

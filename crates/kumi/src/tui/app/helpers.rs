@@ -106,6 +106,9 @@ pub enum Touched {
     /// A track's routing.
     #[serde(rename = "routing")]
     Routing,
+    /// The mixer's strips.
+    #[serde(rename = "mixer")]
+    Mixer,
 }
 pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Option<Touched>) -> Option<Touched> {
     let view = crate::daw::view();
@@ -121,6 +124,7 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
     // under its DSP frame).
     let own_of = |focus: &DawFocus| match (main(focus), editor(focus)) {
         (_, Some(ViewKind::Routing)) => Some(Touched::Routing),
+        (Some(ViewKind::Mixer), _) | (_, Some(ViewKind::Mixer)) => Some(Touched::Mixer),
         (Some(ViewKind::PatternEditor), _) => Some(Touched::Tracker),
         (Some(ViewKind::Sequencer), _) => Some(Touched::Matrix),
         (Some(ViewKind::Instrument), _) => Some(Touched::Keyzones),

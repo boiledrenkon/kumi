@@ -27,7 +27,7 @@ pub const DAW: OwnDaw = OwnDaw {
     read_kinds: &["song", "track", "sequence", "pattern", "line", "automation", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
     project_kind: "song",
     fill_focus,
-    bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
+    bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones, BodyKind::Mixer],
     body_request,
     to_body,
     changes: &super::renoise_changes::CHANGES,
@@ -96,6 +96,8 @@ fn body_request(request: &BodyRequest) -> Option<JsonObject> {
         }
         BodyRequest::Matrix => body_args("matrix", None),
         BodyRequest::Keyzones { item_ref } => body_args("instrument", Some(item_ref)),
+        // (Renoise's mixer pages around the selected track)
+        BodyRequest::Mixer { .. } => body_args("mixer", None),
         _ => return None,
     })
 }
@@ -124,6 +126,7 @@ fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
         }
         BodyRequest::Matrix => FocusBody::Matrix(own_views::matrix(body)),
         BodyRequest::Keyzones { item_ref } => FocusBody::Keyzones(own_views::keyzones(item_ref, body)),
+        BodyRequest::Mixer { .. } => FocusBody::Mixer(own_views::mixer(body)),
         _ => return None,
     })
 }
@@ -234,6 +237,7 @@ pub const VIEW: ViewPresentation = ViewPresentation {
         BodyKind::Tracker => "Pattern",
         BodyKind::Matrix => "Pattern Matrix",
         BodyKind::Keyzones => "Keyzones",
+        BodyKind::Mixer => "Mixer",
         other => (ViewPresentation::NONE.heading)(other),
     },
     open_containers: true,
