@@ -299,6 +299,16 @@ python3 scripts/release.py --go     # the release
   `remote-script`, `protocol`, `apps/live-extension` or `vendor/willington`
   (tests and Markdown aside). When the host's dependencies in `Cargo.lock`
   change, the dry run says so; `--bridge` gives the bridge a new version then.
+- **REAPER's extension and Renoise's tool** get new versions the same way, each
+  when a pull request changes what its DAW loads: `crates/reaper-kumi` and
+  `crates/daw-bridge`, or `daws/renoise/com.kumi.Bridge.xrnx`. `--reaper` and
+  `--renoise` give one a new version anyway, `--no-reaper` and `--no-renoise`
+  keep it; `--no-bridge` is only Live's. A line written `Changelog (reaper):`
+  or `Changelog (renoise):` goes under its heading. With `--go` they move in
+  `crates/reaper-kumi/Cargo.toml` and `Cargo.lock`, and in the tool's
+  `payload/version.lua` and `manifest.xml`, and each one's ships-with line moves
+  on in the three `KUMI_GUIDE.md`. One the last release didn't have ships at its
+  version, and its line names this release already.
 - **The version** is the next patch; `--minor` or `--version X.Y.Z` choose
   another.
 - **With `--go`** it commits "Kumi X.Y.Z: the changelog, READMEs and versions"

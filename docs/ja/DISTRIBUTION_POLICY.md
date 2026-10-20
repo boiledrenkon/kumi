@@ -10,6 +10,7 @@ Kumi とそのブリッジがどのように人の手に届くか、それによ
 | --- | --- | --- |
 | Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`、インストーラーの `install.sh` と `install.ps1`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
 | ブリッジ（`@ableton-mcp/mcp-server`） | 各 Kumi バンドルの中に、ネイティブのブリッジ tarball と展開済みのパッケージが入っています | `kumi bridge`。ブリッジのライフサイクルを通じてインストールします（[ブリッジのインストール](DELIVERY.md)） |
+| REAPER の拡張機能と Renoise のツール | 各 Kumi バンドルの `daws/` の中に、`daw-mcp-server` と一緒に入っています | `kumi --daw reaper bridge`、`kumi --daw renoise bridge`、`kumi update`（[ブリッジのインストール](DELIVERY.md#reaper-の拡張機能と-renoise-のツール)） |
 | ブリッジ単体 | 独自のリリースはありません。`python3 scripts/build-native-release.py --bridge-only` でビルドします（[ビルドオプション](DEVELOPER_GUIDE.md#リリース)） | ライフサイクル CLI（[ブリッジのインストール](DELIVERY.md#スタンドアロンのブリッジ)） |
 
 ワンライナーはインストーラーを最新の公開リリースから取得し、そのインストーラーはそのリリースのバンドル（または `KUMI_VERSION` で指定したリリースのもの）をインストールします。インストーラーへの変更がプロデューサーに届くのは、タグのインストールがパスしたリリースと一緒のときだけです。`main` も両方のインストーラーを元の raw URL に残しており、古いリンクはそちらを使います。リリースは、そのタグの Installer の実行がパスして公開するまでは下書きです（手でプッシュしたタグは、メンテナーがノートを書いて公開するまで待ちます）。公開されたリリースだけが「latest」になります。npm には何も公開しません。すべてのパッケージが `private: true` なので、`npm publish` は拒否されます。
