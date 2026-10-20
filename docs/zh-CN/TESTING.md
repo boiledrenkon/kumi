@@ -97,7 +97,7 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 python3 -m unittest discover -s scripts/tests -p test_native_release.py
 ```
 
-它们检查桥接随附的指南中的每个链接：桥接的 README，以及 `scripts/build-native-release.py` 的 `DOCUMENTS` 中列出的十四篇 `docs/en` 页面。没有任何检查会核对三种语言是否一致，请手动保持同步。
+它们检查桥接随附的指南中的每个链接：桥接的 README，以及 `scripts/build-native-release.py` 的 `DOCUMENTS` 中列出的十四篇 `docs/en` 页面。没有任何检查会核对三种语言是否一致，请手动保持同步。发布脚本的测试（`test_release.py`）会检查 REAPER 扩展和 Renoise 工具在每种语言的文档（`KUMI_GUIDE.md`）中各有一行 ships-with 说明，并且写的是这个检出所带的版本。
 
 ## CI
 
@@ -111,8 +111,11 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script 的测试；编译该包 |
 | | `Live extension`（Ubuntu，Node 24） | 针对已提交的构建运行扩展的测试 |
 | | `Release scripts`（Ubuntu） | 检查本次修改的空白字符，然后运行打包测试、发布脚本的测试和 `scripts/check-installers.sh`（install.sh 是 POSIX sh；install.ps1 能被解析且只含 ASCII）。推送到 `main` 时，还会检查 `main` 的 raw 安装程序和最新版本中的安装程序 |
+| | `REAPER extension loads / macos-15`、`ubuntu-22.04`、`windows-2025` | 按发布时的样子检查 REAPER 扩展：发布构建和平台自己的 strip，发布脚本对发行包可携带内容的检查（REAPER 的入口点；macOS 上的签名和自身名称；Windows 上静态链接的 C 运行库；Linux 上不需要比 Kumi 更新的 glibc），用系统的加载器加载，以及 REAPER 经由 C++ 垫片（shim）的调用 |
+| | `Renoise tool`（Ubuntu） | 在固定版本的 LuaJIT 上针对 Renoise API 的模拟运行工具的 Lua 测试，以及对照 Renoise API 6.2 定义的 `lua-language-server --check` |
 | | `Required CI` | 只有以上全部通过时才通过 |
 | **Extended** | `Extended / Linux (1/3)` 至 `(3/3)`、`Extended / macOS (1/2)`、`(2/2)`、`Extended / Windows (1/3)` 至 `(3/3)`、`Extended / documentation tests` | 在装好官方 SDK 的情况下运行全部测试（`extended` 集合）：`ci` 省去的内容（录制源的预言测试，长时间的聆听、曲式和渲染模拟，使用 ffmpeg 的视频测试，基准测试，与官方 MCP 和模型 SDK 并排运行的互操作测试，从 Kumi 1.7.5 的迁移，计时构件的长时间扫描）以及每个平台的全部测试；然后是文档测试。每周、手动以及在带有 `full-tests` 标签的拉取请求上运行，不阻塞任何合并 |
+| | `Extended / REAPER SDK, newest header` | 用 Cockos 发布的最新 SDK 头文件构建 REAPER 扩展，检查生成的函数表，并列出改用它们会新增的函数 |
 | **Willington files** | `Willington files`（Ubuntu） | 只有仓库所有者从本仓库 `willington/` 分支发出的拉取请求才能修改 `vendor/willington/`，而这样的拉取请求不修改其他任何内容。运行的是 `main` 上的这项检查，它读取拉取请求的文件列表，从不读取其代码 |
 | **Installer** | `Native bundle / <target>`、`Aggregate native and existing-installer releases`，然后是 `Install / <system>` 和 `Existing installer transition / <system>`；`Installer edges / <system>`（三个）不需要发行包 | 每次推送到 `main`，以及修改安装的拉取请求，会为 x64 的 Linux 和 Windows、Apple Silicon 的 macOS 构建发行包，并在每个系统上按下文安装、检查和卸载。标签、手动运行和带有 `full-tests` 标签的拉取请求运行全部内容：为 macOS、Linux 和 Windows 的 Intel 与 ARM 构建原生发行包（Mac 发行包带有 Kumi 在 Mac 上使用 Live 菜单的辅助程序，通用、临时签名；Intel 的发行包在 Apple Silicon 上交叉构建），再构建现有安装用来更新的兼容版本，并连同安装程序一起，按 GitHub 提供发布文件的方式在本地提供它们。在每个系统上：像制作人那样用一行安装命令从这里安装（在 Windows 上使用 Windows PowerShell 5.1，`KUMI_HOME` 位于名称含非 ASCII 字符的文件夹中），检查版本、`doctor`、桥接及其分析工作进程，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，运行 `kumi update`、`kumi update --rollback` 和 `kumi uninstall`。随后每个系统上的一个安装（macOS arm64、Linux x64、Windows x64）在含空格和非 ASCII 字符的主目录中：用本次构建的安装程序安装 GitHub 的最新版本，再用 `KUMI_VERSION` 安装本次构建之前的那个版本；装入该版本的桥接；更新到本次构建并回滚两次，每次都检查 Kumi 和桥接；最后卸载。PATH 那一行在 macOS 上写入 zsh 的 `ZDOTDIR`，在 Linux 上写入 fish 的 `conf.d`，由该 shell 找到 `kumi`，卸载时被移除；Windows 在 PowerShell 7 中运行这些：本次构建的安装、桥接、回滚和卸载在名称含非 ASCII 字符的文件夹中的 `KUMI_HOME` 下进行，从之前那个版本的更新则在只含空格的主目录中进行（由该版本自己的更新程序解包）。过渡作业用 Kumi 1.7.5 和新的发行包运行迁移测试。edges 作业针对替代版本运行 install.sh 和 install.ps1：版本不存在、无应答、返回登录页面、校验和不匹配、Kumi 无法启动、Ctrl-C。推送 `v*` 标签时，在这些都通过之后，`publish` 把发行包和安装程序附加到发布版本上，并在说明由 `scripts/release.py` 撰写时发布该版本。 |
 

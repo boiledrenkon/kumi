@@ -16,9 +16,13 @@
 | `apps/live-extension` | Live 12.4 以降向けの Kumi の Live 拡張機能。Live の Extensions SDK の上に作られています（TypeScript で、独自の `package.json` を持ちます） |
 | `protocol` | `ableton-live-v1.operations.json`。ブリッジと Remote Script が共有する操作のレジストリ |
 | `scripts` | リリースのビルダー、移行用のパッケージング、Mac のヘルパーのビルド、分離テストランナー、そして `npm run kumi` と `npm run setup` が使う `native-kumi.mjs` |
+| `crates/daw-mcp-server` | REAPER と Renoise のための Kumi のホスト（`daw-mcp-server --daw reaper\|renoise`）：stdio 上の MCP、変更のジャーナルと取り消し、聴くジョブ、離れていた間の変化。ほかの MCP クライアントからも使えます |
+| `crates/reaper-kumi` | Kumi の REAPER 拡張機能（`reaper_kumi`）。`sdk/` に同梱した REAPER の SDK ヘッダーでビルドします |
+| `crates/daw-bridge` | REAPER と Renoise のブリッジが共有するもの：ループバックの通信（`kumi-daw/1`）、そのハンドシェイクと認証、ディスカバリー、DAW の検出、doctor のチェック、ブリッジのファイルのライフサイクル |
+| `daws/renoise` | Kumi の Renoise ツール（`com.kumi.Bridge.xrnx`、Lua）と、Renoise の API のモックに対するそのテスト |
 | `install.sh`、`install.ps1` | インストーラー |
 
-4 つのクレートはルートの Cargo ワークスペースを共有します。npm のワークスペースはありません。ブリッジは Kumi なしでも動きます。クレートの移植元である TypeScript 実装は、git タグ `v1.7.6` に残っています。
+クレートはルートの Cargo ワークスペースを共有します。npm のワークスペースはありません。ブリッジは Kumi なしでも動きます。クレートの移植元である TypeScript 実装は、git タグ `v1.7.6` に残っています。
 
 ## 各部分のやりとり
 
@@ -31,6 +35,14 @@ bridge (crates/ableton-mcp-server)
   ├──► Remote Script inside Live (remote-script/)
   │  local channel to the Extension Host
   └──► Kumi's Live extension (apps/live-extension), Live 12.4+
+
+kumi (crates/kumi, crates/kumi-runtime)
+  │  MCP over stdio: Kumi starts its host for REAPER or Renoise
+  ▼
+host (crates/daw-mcp-server --daw reaper|renoise)
+  │  kumi-daw/1: authenticated TCP on 127.0.0.1 (crates/daw-bridge)
+  ├──► Kumi's REAPER extension (crates/reaper-kumi), in REAPER's UserPlugins
+  └──► Kumi's Renoise tool (daws/renoise), in Renoise's Scripts/Tools
 ```
 
 - Kumi は、`full` デプロイメントポリシーと、使うツールだけをちょうど並べた許可リスト（`ABLETON_MCP_TOOL_ALLOW`）を指定してブリッジを起動します。モデルはいくつかのブリッジの読み取りを直接呼び出し（`crates/kumi-runtime/src/mcp/allowed_tools.rs` の `MODEL_TOOLS`）、残りは Kumi 自身のツールが呼び出します。

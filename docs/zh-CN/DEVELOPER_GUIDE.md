@@ -16,9 +16,13 @@
 | `apps/live-extension` | Kumi 的 Live 扩展，适用于 Live 12.4 及更高版本，基于 Live 的 Extensions SDK（TypeScript，有自己的 `package.json`） |
 | `protocol` | `ableton-live-v1.operations.json`，桥接与 Remote Script 共用的操作注册表 |
 | `scripts` | 发布构建器、迁移打包、Mac 辅助程序的构建、隔离测试运行器，以及 `npm run kumi` 和 `npm run setup` 背后的 `native-kumi.mjs` |
+| `crates/daw-mcp-server` | Kumi 为 REAPER 和 Renoise 准备的宿主程序（`daw-mcp-server --daw reaper\|renoise`）：基于 stdio 的 MCP、修改的日志与撤销、聆听任务、离开期间的变化；其他 MCP 客户端也能使用 |
+| `crates/reaper-kumi` | Kumi 的 REAPER 扩展（`reaper_kumi`），用 `sdk/` 中附带的 REAPER SDK 头文件构建 |
+| `crates/daw-bridge` | REAPER 与 Renoise 桥接共用的部分：回环通信（`kumi-daw/1`）、它的握手与认证、发现、查找 DAW、doctor 的检查，以及桥接文件的生命周期 |
+| `daws/renoise` | Kumi 的 Renoise 工具（`com.kumi.Bridge.xrnx`，Lua）及其针对 Renoise API 模拟的测试 |
 | `install.sh`、`install.ps1` | 安装程序 |
 
-四个 crate 共用根目录的 Cargo 工作区；没有 npm 工作区。桥接没有 Kumi 也能工作。这些 crate 移植自的 TypeScript 实现保留在 git 标签 `v1.7.6` 上。
+这些 crate 共用根目录的 Cargo 工作区；没有 npm 工作区。桥接没有 Kumi 也能工作。这些 crate 移植自的 TypeScript 实现保留在 git 标签 `v1.7.6` 上。
 
 ## 各部分如何通信
 
@@ -31,6 +35,14 @@ bridge (crates/ableton-mcp-server)
   ├──► Remote Script inside Live (remote-script/)
   │  local channel to the Extension Host
   └──► Kumi's Live extension (apps/live-extension), Live 12.4+
+
+kumi (crates/kumi, crates/kumi-runtime)
+  │  MCP over stdio: Kumi starts its host for REAPER or Renoise
+  ▼
+host (crates/daw-mcp-server --daw reaper|renoise)
+  │  kumi-daw/1: authenticated TCP on 127.0.0.1 (crates/daw-bridge)
+  ├──► Kumi's REAPER extension (crates/reaper-kumi), in REAPER's UserPlugins
+  └──► Kumi's Renoise tool (daws/renoise), in Renoise's Scripts/Tools
 ```
 
 - Kumi 以 `full` 部署策略启动桥接，并附带一个只包含它所用工具的允许列表（`ABLETON_MCP_TOOL_ALLOW`）。模型直接调用少数几个桥接读取工具（`crates/kumi-runtime/src/mcp/allowed_tools.rs` 中的 `MODEL_TOOLS`）；其余的由 Kumi 自己的工具调用。

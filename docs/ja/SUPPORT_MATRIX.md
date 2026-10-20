@@ -2,7 +2,7 @@
 
 [English](../en/SUPPORT_MATRIX.md) · [简体中文](../zh-CN/SUPPORT_MATRIX.md) · 日本語
 
-Kumi とそのブリッジが動作する環境、対応する Live のバージョン、どこで何をテストしたかをまとめます。それぞれの「テスト済み」の根拠は[実装状況](IMPLEMENTATION_STATUS.md)に記載しています。
+Kumi とそのブリッジが動作する環境、対応する Live、REAPER、Renoise のバージョン、どこで何をテストしたかをまとめます。それぞれの「テスト済み」の根拠は[実装状況](IMPLEMENTATION_STATUS.md)に記載しています。
 
 ## Kumi
 
@@ -10,7 +10,7 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 | --- | --- | --- | --- |
 | macOS | 13（Ventura）以降 | Apple silicon、Intel | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Apple silicon 上の Live でテスト済み |
 | Windows | 10 または 11 | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Windows 10 上の Live でテスト済み。[Windows](#windows) を参照 |
-| Linux | glibc 2.35 以降（Ubuntu 22.04、Debian 12 以降。Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しません |
+| Linux | glibc 2.35 以降（Ubuntu 22.04、Debian 12 以降。Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しませんが、REAPER と Renoise は動きます |
 
 - Kumi と単体のブリッジはネイティブ Rust プログラムです。新規インストールは Node をダウンロードせず、必要としません。
 - Node 24 を使う既存の Kumi 1.7.4 と 1.7.5 は、`kumi update` で設定、サインイン、データを保ったまま移行します。残された Node はロールバックと任意の YouTube チャレンジ処理に使えます。Windows では、ネイティブ版の初回起動で古いランチャーが置き換わり、以降の起動は Node を経由しません。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[更新方法](KUMI_GUIDE.md)を参照してください。
@@ -29,6 +29,17 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 エディション：ブリッジは接続先の Live が提供するものを検出するので、エディションにないデバイスやコンテンツ（Standard と Intro は少なめです）は推測で扱われず、使えないままになります。Max for Live デバイスを作るには Max for Live（Suite、またはアドオンを追加した Standard）が必要です。Willington（そのファイルを収めたリリースからは Kumi のブリッジに入っていて、それまでは自分でインストールします。`/willington` でオンにするまではオフ）には、macOS ARM64 の Live 12.4.15b4 と b5 用（ラックのチェーンのゾーンは b5 のみ）と、Windows x64 の Live 12.4.15b5 用のバインディングがあります。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
 
 ネイティブ編集（グループ、Arrangement オートメーション、シーン/全体の Follow Actions、ノートごとの MPE）には、インストール済みの検証済み `WillingtonEditing`、実際のライブラリに一致するセルフテストの合格、明示的な有効化が必要です。Live 12.4.15b5 macOS ARM64 のみで、b4、Intel macOS、Windows は対象外です。[セルフテスト手順](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。
+
+## REAPER と Renoise
+
+| DAW | バージョン | システム | 状況 |
+| --- | --- | --- | --- |
+| REAPER | 7 以降 | macOS（Apple silicon と Intel に一つの拡張機能）、Windows x64（x64 を読み込む Windows on Arm の REAPER にも同じ拡張機能）、Linux x64 と ARM64（glibc 2.35 以降） | macOS の REAPER 7.82（評価版、ポータブル）でテスト済み。CI は各システムで拡張機能をビルドし、確認し、システム自身のローダーで読み込みます。Windows と Linux の REAPER ではまだ試していません。Windows on Arm は未テスト |
+| Renoise | 3.5 以降 | macOS、Windows、Linux | macOS の Renoise 3.5.4 でテスト済み。CI は Renoise の API のモックに対してツールのテストを実行し、Renoise 自身の API 定義と照らし合わせます。Windows と Linux の Renoise ではまだ試していません |
+
+- Linux はどちらにとっても DAW のプラットフォームです。セットアップは macOS や Windows と同じく、そこでも REAPER と Renoise につなぎます。
+- CI はどのシステムでも、Kumi 自身のコマンドで、両方のブリッジをスクラッチの DAW フォルダーに入れ、更新し、2 回ロールバックし、アンインストールします。
+- Renoise のデモ版はレンダリングできないので、Kumi はそこでソングを聴けません。
 
 ## Windows
 
@@ -60,4 +71,4 @@ Windows でまだ確認できていないこと：
 
 ## CI がカバーする範囲
 
-CI は GitHub がホストする macOS、Ubuntu、Windows のランナー上で、Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、6 ターゲットのバンドル、インストールと移行のテストを実行します。どのランナーにも Live はありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。
+CI は GitHub がホストする macOS、Ubuntu、Windows のランナー上で、Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、6 ターゲットのバンドル、インストールと移行のテスト、各システムでの REAPER の拡張機能の読み込み、Renoise のツールのテストを実行します。どのランナーにも Live、REAPER、Renoise はありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。

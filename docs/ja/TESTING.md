@@ -97,7 +97,7 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 python3 -m unittest discover -s scripts/tests -p test_native_release.py
 ```
 
-このテストは、ブリッジと一緒に配布されるガイドのすべてのリンクを確認します。対象は、ブリッジの README と、`scripts/build-native-release.py` の `DOCUMENTS` に並んでいる `docs/en` の 14 ページです。3 言語の内容が一致しているかを確認するものはないので、手作業でそろえてください。
+このテストは、ブリッジと一緒に配布されるガイドのすべてのリンクを確認します。対象は、ブリッジの README と、`scripts/build-native-release.py` の `DOCUMENTS` に並んでいる `docs/en` の 14 ページです。3 言語の内容が一致しているかを確認するものはないので、手作業でそろえてください。リリーススクリプトのテスト（`test_release.py`）は、REAPER の拡張機能と Renoise のツールの ships-with の行が、各言語のドキュメント（`KUMI_GUIDE.md`）に一つずつあり、このチェックアウトのバージョンを指していることを確認します。
 
 ## CI
 
@@ -111,8 +111,11 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script のテストを実行し、パッケージをコンパイルします |
 | | `Live extension`（Ubuntu、Node 24） | コミットされたビルドに対する、拡張機能のテスト |
 | | `Release scripts`（Ubuntu） | この変更の空白のチェック、続いてパッケージングのテスト、リリーススクリプトのテスト、`scripts/check-installers.sh`（install.sh が POSIX sh であること、install.ps1 が構文解析でき ASCII であること）。`main` へのプッシュでは、`main` の raw のインストーラーと最新リリースのものも確認します |
+| | `REAPER extension loads / macos-15`、`ubuntu-22.04`、`windows-2025` | 配布するとおりの REAPER の拡張機能：リリースビルドとプラットフォーム自身の strip、バンドルに入れてよいものかのリリーススクリプトによる確認（REAPER のエントリーポイント。macOS では署名と自身の名前、Windows では C ランタイムの組み込み、Linux では Kumi より新しい glibc を要しないこと）、システムのローダーでの読み込み、C++ シムを通じた REAPER からの呼び出し |
+| | `Renoise tool`（Ubuntu） | 固定した LuaJIT でのツールの Lua テスト（Renoise の API のモックに対して）と、Renoise の API 6.2 の定義に対する `lua-language-server --check` |
 | | `Required CI` | 上記がすべてパスした場合にだけパスします |
 | **Extended** | `Extended / Linux (1/3)` から `(3/3)`、`Extended / macOS (1/2)`、`(2/2)`、`Extended / Windows (1/3)` から `(3/3)`、`Extended / documentation tests` | 公式 SDK をインストールした状態での全テスト（`extended` セット）：`ci` が省くもの（記録されたソースのオラクル、長いリスニング・フォーム・レンダリングのシミュレーション、ffmpeg を使うビデオ、ベンチマーク、公式の MCP とモデルの SDK と並べて実行する相互運用テスト、Kumi 1.7.5 からの移行、タイミングのビルディングブロックの長いスイープ）と、各プラットフォームの全テスト。続いてドキュメントテスト。毎週、手動で、また `full-tests` ラベルの付いたプルリクエストで実行され、何もブロックしません |
+| | `Extended / REAPER SDK, newest header` | Cockos が公開している最新の SDK ヘッダーで REAPER の拡張機能をビルドし、生成した関数テーブルを確認し、それに移ると増える関数を一覧します |
 | **Willington files** | `Willington files`（Ubuntu） | `vendor/willington/` を変えられるのは、このリポジトリの `willington/` ブランチから出たリポジトリ所有者のプルリクエストだけで、そのプルリクエストはほかに何も変えません。`main` にあるこのチェックが、プルリクエストのコードではなくファイルの一覧を読んで実行されます |
 | **Installer** | `Native bundle / <target>`、`Aggregate native and existing-installer releases`、続いて `Install / <system>` と `Existing installer transition / <system>`。`Installer edges / <system>`（3 つ）はバンドルを必要としません | `main` へのプッシュと、インストールを変えるプルリクエストでは、x64 の Linux と Windows、Apple Silicon の macOS のバンドルをビルドし、それぞれで以下のとおりインストール、確認、アンインストールします。タグ、手動の実行、`full-tests` ラベルの付いたプルリクエストではすべてを行います：macOS、Linux、Windows の Intel と ARM 向けのネイティブバンドル（Mac のバンドルには、Kumi が Live のメニューを使うためのヘルパー（ユニバーサル、アドホック署名）が入り、Intel 向けは Apple Silicon でクロスビルドします）、続いて既存のインストールが更新に使う互換リリースをビルドし、インストーラーと一緒に、GitHub がリリースのファイルを配信するのと同じ形でローカルで配信します。各システムで：そこからワンライナーでプロデューサーと同じ方法でインストールし（Windows では、非 ASCII 文字の名前のフォルダーにある `KUMI_HOME` で、Windows PowerShell 5.1 を使います）、バージョン、`doctor`、ブリッジとその解析ワーカーを確認し、修復として再インストールし、使い捨ての Remote Scripts フォルダーに `kumi bridge --yes` を実行し、`kumi update`、`kumi update --rollback`、`kumi uninstall` を実行します。続いて各システムの 1 つのインストール（macOS arm64、Linux x64、Windows x64）が、空白と非 ASCII 文字を含むホームで次を行います：このビルドのインストーラーで GitHub の最新リリースを、続いて `KUMI_VERSION` でこのビルドの 1 つ前のリリースをインストールし、そのリリースのブリッジを入れ、このビルドへの更新と 2 回のロールバックのたびに Kumi とブリッジを確認し、アンインストールします。PATH の行は macOS では zsh の `ZDOTDIR` に、Linux では fish の `conf.d` に入り、そのシェルが `kumi` を見つけ、アンインストールで取り除かれます。Windows ではこれを PowerShell 7 で実行します。このビルドのインストール、ブリッジ、ロールバック、アンインストールは非 ASCII 文字の名前のフォルダーにある `KUMI_HOME` で、1 つ前のリリースからの更新は空白だけを含むホームで行います（そのリリース自身の更新機能が展開するため）。移行のジョブは、Kumi 1.7.5 と新しいバンドルで移行テストを実行します。edges のジョブは、install.sh と install.ps1 を代わりのリリースに対して実行します：リリースがない、応答がない、サインインページが返る、チェックサムが合わない、Kumi が起動しない、Ctrl-C。`v*` タグのプッシュでは、これらがすべてパスした後に `publish` がバンドルとインストーラーをリリースに添付し、`scripts/release.py` がノートを書いていればリリースを公開します。 |
 

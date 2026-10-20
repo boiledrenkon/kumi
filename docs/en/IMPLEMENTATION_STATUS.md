@@ -13,11 +13,15 @@ Each release in the [changelog](../../CHANGELOG.md) names the bridge it ships
 with; [bridge versions](KUMI_CHANGES.md#bridge-versions) lists them all. The
 version numbers themselves live in the crates' `Cargo.toml` files (Kumi, the
 bridge), the root `package.json` (Kumi) and `apps/live-extension/manifest.json`
-(the extension).
+(the extension); REAPER's extension's in `crates/reaper-kumi/Cargo.toml`, and
+Renoise's tool's in `daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua` and
+its `manifest.xml`. [Connect to REAPER or Renoise](KUMI_GUIDE.md#connect-to-reaper-or-renoise)
+says which Kumi ships with which.
 
 | Part | Version |
 | --- | --- |
 | Live protocol | `ableton-live/v1`; each release's `release-manifest.json` records the registry's hash |
+| REAPER and Renoise protocol | `kumi-daw/1`, between Kumi's host and the bridge inside the DAW, on 127.0.0.1 |
 | MCP protocol eras | `2025-11-25` and `2026-07-28` |
 | Runtime | Native Rust app and standalone bridge; fresh installs require no Node |
 | Older installs (Kumi 1.7.5 and earlier) | Node 22/24; retained Node also supports rollback and optional YouTube challenges ([details](SUPPORT_MATRIX.md)) |
@@ -38,6 +42,14 @@ and migration checks do not replace a new real-Live acceptance run.
 - **Real Live on Windows** (Windows 10, Live 12.4.15 beta, Kumi 1.6.0 with
   bridge 1.0.71): installing the bridge into a moved User Library, the Remote
   Script loading, and Kumi connecting. There's no record file for this yet.
+- **REAPER and Renoise on macOS** (REAPER 7.82 evaluation, portable; Renoise
+  3.5.4; October 2026): each change applied through Kumi, undone through Kumi,
+  then undone and redone with the DAW's own undo (REAPER: 140 of 141 kinds, one
+  known limit; Renoise: 121 of 132 cases, 11 known limits), big projects
+  (REAPER 200 tracks and 2,000 items, Renoise 64 tracks and 100 patterns), and
+  listening. The limits are in [known limits](KUMI_CHANGES.md#known-limits).
+  There's no record file for these yet. REAPER and Renoise on Windows and Linux
+  are untested.
 
 ## Evidence
 
@@ -75,7 +87,8 @@ bridge, the version given is the one in the commit that added it.
 
 ## Open work
 
-- Support for Renoise and Reaper.
+- REAPER and Renoise on Windows and Linux, and REAPER for Windows on Arm, with
+  the real DAWs.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

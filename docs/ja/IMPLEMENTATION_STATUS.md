@@ -6,11 +6,12 @@
 
 ## バージョン
 
-[変更履歴](../../CHANGELOG.md)の各リリースには、同梱されるブリッジのバージョンが記載されています。すべてのブリッジのバージョンは[ブリッジのバージョン](KUMI_CHANGES.md#ブリッジのバージョン)に一覧があります。バージョン番号そのものは、クレートの `Cargo.toml` ファイル（Kumi、ブリッジ）、ルートの `package.json`（Kumi）、`apps/live-extension/manifest.json`（拡張機能）にあります。
+[変更履歴](../../CHANGELOG.md)の各リリースには、同梱されるブリッジのバージョンが記載されています。すべてのブリッジのバージョンは[ブリッジのバージョン](KUMI_CHANGES.md#ブリッジのバージョン)に一覧があります。バージョン番号そのものは、クレートの `Cargo.toml` ファイル（Kumi、ブリッジ）、ルートの `package.json`（Kumi）、`apps/live-extension/manifest.json`（拡張機能）にあります。REAPER の拡張機能のものは `crates/reaper-kumi/Cargo.toml` に、Renoise のツールのものは `daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua` とその `manifest.xml` にあります。どの Kumi にどれが付属するかは [REAPER や Renoise につなぐ](KUMI_GUIDE.md#reaper-や-renoise-につなぐ)にあります。
 
 | 部分 | バージョン |
 | --- | --- |
 | Live プロトコル | `ableton-live/v1`。レジストリのハッシュは各リリースの `release-manifest.json` に記録されます |
+| REAPER と Renoise のプロトコル | `kumi-daw/1`。Kumi のホストと DAW の中のブリッジの間で、127.0.0.1 上 |
 | MCP プロトコルの世代 | `2025-11-25` と `2026-07-28` |
 | ランタイム | アプリと単体のブリッジはネイティブ Rust。新規インストールに Node は不要 |
 | 以前のインストール（Kumi 1.7.5 以前） | Node 22/24。残された Node はロールバックと任意の YouTube チャレンジ処理にも使用（[詳細](SUPPORT_MATRIX.md)） |
@@ -22,6 +23,7 @@
 - **すべてのプルリクエスト：** ネイティブ Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、6 ターゲットのバンドル、インストールと移行のテスト。[CI](TESTING.md#ci) を参照してください。
 - **macOS 上の本物の Live**（Apple silicon、Live 12.4.15 beta）：Kumi が行うあらゆる種類の変更と、そのそれぞれを Kumi で取り消すこと（ブリッジ 1.0.62 と 1.0.63 で 65 件中 65 件、19 トラックと 200 トラックの Set で）、再生、バウンス、聴き取り、監視、Kumi の拡張機能によるオフラインレンダリングと右クリックメニュー、そして Willington による編集。
 - **Windows 上の本物の Live**（Windows 10、Live 12.4.15 beta、Kumi 1.6.0 とブリッジ 1.0.71）：移動した User Library へのブリッジのインストール、Remote Script の読み込み、Kumi の接続。これについての記録ファイルはまだありません。
+- **macOS 上の REAPER と Renoise**（REAPER 7.82 評価版・ポータブル、Renoise 3.5.4、2026 年 10 月）：各変更を Kumi で適用し、Kumi で取り消し、DAW 自身の取り消しとやり直しにかけること（REAPER は 141 種類中 140、既知の制限が一つ。Renoise は 132 ケース中 121、既知の制限が 11）、大きなプロジェクト（REAPER は 200 トラックと 2,000 アイテム、Renoise は 64 トラックと 100 パターン）、聴くこと。制限は[既知の制限](KUMI_CHANGES.md#既知の制限)にあります。これらの記録ファイルはまだありません。Windows と Linux の REAPER と Renoise は未テストです。
 
 ## エビデンス
 
@@ -50,7 +52,7 @@
 
 ## 残っている作業
 
-- Renoise と Reaper への対応。
+- Windows と Linux の REAPER と Renoise、Windows on Arm の REAPER を、本物の DAW で試すこと。
 - Windows 版の Live が Extensions フォルダーを置く場所の確認。
 - 生成される機能マニフェストは、Live の Browser がプレビューできるときにはブリッジが提供しているにもかかわらず、Browser のプレビューをまだ予約済みとしています。
 - [未決のオーナー判断](DISTRIBUTION_POLICY.md#未決のオーナー判断)に挙げた判断。
