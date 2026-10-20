@@ -2135,14 +2135,15 @@ impl crate::host::Host {
         }
     }
 
-    /// `device_editor` / `preset_save`: Renoise's actions on a device (no step of its undo), sent on to the tool.
+    /// `device_editor` / `preset_save` / `show_status`: Renoise's actions on a device and its status bar line (no step of its
+    /// undo), sent on to the tool.
     pub(crate) async fn renoise_action(&self, method: &str, arguments: &Value) -> (Value, bool) {
         let pick = match crate::host::Pick::from_arguments(arguments) {
             Ok(pick) => pick,
             Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
         };
         let mut params = json!({});
-        for field in ["ref", "show", "name", "replace", "epoch", "layout"] {
+        for field in ["ref", "show", "name", "replace", "epoch", "layout", "text"] {
             if let Some(value) = arguments.get(field) {
                 params[field] = value.clone();
             }

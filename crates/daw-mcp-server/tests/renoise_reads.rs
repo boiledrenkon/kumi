@@ -24,7 +24,7 @@ async fn the_read_methods_on_the_wire() {
     let script = RenoiseScript::new();
     let simulator = Simulator::start(script.config(secret.clone(), "/lab/Renoise")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
-    assert_eq!(client.welcome().methods, ["ping", "status", "read", "snapshot", "focus", "focus_body"]);
+    assert_eq!(client.welcome().methods, ["ping", "status", "read", "snapshot", "focus", "focus_body", "show_status"]);
     assert_eq!(client.welcome().credit_bytes, Some(64 * 1024), "the tool starts with a floor of credit");
 
     let song = client.request("read", json!({"kind": "song"}), WAIT).await.unwrap();

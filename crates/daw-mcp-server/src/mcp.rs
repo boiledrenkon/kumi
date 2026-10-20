@@ -243,6 +243,13 @@ pub fn tools(host: &Host) -> Value {
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
             }));
             tools.push(json!({
+                "name": "show_status",
+                "title": "A line in Renoise's status bar",
+                "description": "Shows one line of text in Renoise's status bar (never a dialog), for a producer working in Renoise: what Kumi finished, or that it needs them. Not a change.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({"text": {"type": "string", "minLength": 1, "maxLength": 512}})), "required": ["text"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            }));
+            tools.push(json!({
                 "name": "preset_save",
                 "title": "Save a device's preset",
                 "description": "Saves a native device's settings as a preset file named name in Renoise's user library (Effect Presets, in the device's folder): {file, listed}. Renoise lists it in the device's presets from its next start. A preset of that name is replaced only with replace; plug-ins are refused (Renoise lists only the presets it saves for them).",
@@ -419,7 +426,7 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     result(id, tool_result(answer, is_error))
                 }
                 // (M4 n-devices) Renoise's actions on a device.
-                "device_editor" | "preset_save" if host.daw() == Daw::Renoise => {
+                "device_editor" | "preset_save" | "show_status" if host.daw() == Daw::Renoise => {
                     let (answer, is_error) = host.renoise_action(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }

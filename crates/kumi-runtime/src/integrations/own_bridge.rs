@@ -761,6 +761,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         let outcome = self.changes.history.undo(id.unwrap_or("last"), signal, false).await?;
         outcome.record.ok_or_else(|| KumiError::new(FailureKind::Request, outcome.text).into())
     }
+    /// A line in the DAW's status bar (Renoise's, through the tool's show_status), where its profile says it has one.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        if !self.daw.profile.caps.status_line || self.closed.get() || !self.connected.get() {
+            return Ok(false);
+        }
+        Ok(self.call("show_status", json!({"text": text}), signal).await?.is_ok())
+    }
     fn has_stop_live(&self) -> bool {
         true
     }

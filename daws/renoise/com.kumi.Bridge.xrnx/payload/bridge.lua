@@ -1228,6 +1228,15 @@ function handlers.project_save(params)
   return actions.project_save(params, change_env())
 end
 
+-- A line in Renoise's status bar (never a dialog), for a producer working there while Kumi finishes or needs them: one
+-- line of text, control characters as spaces. Not a change.
+function handlers.show_status(params)
+  local text = type(params) == "table" and params.text or nil
+  if type(text) ~= "string" or text == "" or #text > 512 then error({ code = "bad-params", message = "text: one line to show, at most 512 bytes" }, 0) end
+  renoise.app():show_status((text:gsub("%c", " ")))
+  return { shown = true }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }

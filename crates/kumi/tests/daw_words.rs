@@ -190,6 +190,8 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         "REAPER connected",
         "REAPER isn't connected",
         "Kumi closed. Each project's conversation continues next time.",
+        // (/status: REAPER has no status bar Kumi can write to)
+        "no status bar",
     ];
     tui_states(DawId::Reaper, "REAPER — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("REAPER");
 });
@@ -219,7 +221,13 @@ case!(a_renoise_session_never_speaks_lives_words, async {
             Some(FocusBody::Keyzones(KeyzoneMap { item_ref: "3:instrument:1".into(), name: "Kit".into(), ..Default::default() })),
         ),
     ];
-    let seen = ["Ask Kumi about your song", "paused while Renoise plays", "Kumi closed. Each song's conversation continues next time."];
+    // (/status: Renoise's status bar shows Kumi's lines)
+    let seen = [
+        "Ask Kumi about your song",
+        "paused while Renoise plays",
+        "Kumi closed. Each song's conversation continues next time.",
+        "status bar too",
+    ];
     tui_states(DawId::Renoise, "Renoise — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("Renoise");
 });
 
