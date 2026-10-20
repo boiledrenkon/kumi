@@ -465,7 +465,7 @@ async fn a_failed_look_keeps_the_songs_key_and_project() {
         .run_until(async {
             let snapshot = json!({
                 "epoch": "3",
-                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "bpm": 140},
+                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140},
                 "tracks": [{"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"}],
                 "selection": {"trackRef": "3:track:1"},
             });

@@ -180,7 +180,7 @@ pub fn instant_steps(vocab: &dyn InstantVocab, intent: &Intent, tracks: &[Phrase
 }
 
 /// The track a phrase means: by name among every track but the master, or by place among the project's own tracks.
-fn phrase_track(track: &TrackPick, tracks: &[PhraseTrack]) -> Option<String> {
+pub fn phrase_track(track: &TrackPick, tracks: &[PhraseTrack]) -> Option<String> {
     let tracks: Vec<_> = tracks
         .iter()
         .filter(|node| match track {

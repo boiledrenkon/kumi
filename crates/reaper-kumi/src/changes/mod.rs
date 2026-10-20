@@ -171,6 +171,8 @@ enum Kind {
     TempoMarkerDelete,
     LoopRange,
     LoopRepeat,
+    /// (m6-places) The metronome, switched on or off.
+    Metronome,
     SendProp(&'static sends::Prop),
     MarkProp(&'static marks::Prop),
     MarkerAdd,
@@ -227,6 +229,7 @@ fn kind(name: &str) -> Option<Kind> {
         "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
         "loop-range" => Some(Kind::LoopRange),
         "loop-repeat" => Some(Kind::LoopRepeat),
+        "metronome-switch" => Some(Kind::Metronome),
         "marker-add" => Some(Kind::MarkerAdd),
         "region-add" => Some(Kind::RegionAdd),
         "marker-delete" => Some(Kind::MarkerDelete),
@@ -263,7 +266,7 @@ impl Kind {
     /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
     fn leaves_point(self) -> bool {
         match self {
-            Kind::LoopRepeat => false,
+            Kind::LoopRepeat | Kind::Metronome => false,
             // m4-r-fxenv
             Kind::FxEnv(kind) => kind.leaves_point(),
             _ => true,
@@ -315,6 +318,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
             Kind::LoopRange => project::loop_preview(ctx, input),
             Kind::LoopRepeat => project::repeat_preview(ctx, input),
+            Kind::Metronome => project::metronome_preview(ctx, input),
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
@@ -362,6 +366,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
             Kind::LoopRange => project::loop_apply(ctx, input, fence),
             Kind::LoopRepeat => project::repeat_apply(ctx, input, fence),
+            Kind::Metronome => project::metronome_apply(ctx, input, fence),
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
@@ -408,6 +413,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),
             Kind::LoopRange => project::loop_restore(ctx, restore),
             Kind::LoopRepeat => project::repeat_restore(ctx, restore),
+            Kind::Metronome => project::metronome_restore(ctx, restore),
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),

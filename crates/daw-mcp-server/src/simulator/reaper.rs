@@ -36,6 +36,11 @@ struct State {
     uncertain_restore_once: bool,
     /// The next restore is made in part: its answer says what it left out.
     left_out_once: Option<String>,
+    /// (m6-places) The project's own settings the fixed phrases change: `bpm`, `loop` {start, end} in beats, `repeat`,
+    /// `metronome`.
+    settings: Value,
+    /// (m6-places) The project row's id, file and identity, when a test set them (else the default unsaved-id project).
+    project: Option<Value>,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -45,7 +50,7 @@ pub struct ReaperScript {
 }
 
 fn track_row(index: usize, name: &str) -> Value {
-    json!({
+    let mut row = json!({
         "ref": format!("r:track:{{T{index:04}}}"),
         "index": index,
         "name": name,
@@ -62,7 +67,12 @@ fn track_row(index: usize, name: &str) -> Value {
         "sends": 0,
         "receives": 0,
         "selected": index == 1,
-    })
+    });
+    // (as the extension marks it)
+    if index == 0 {
+        row["master"] = true.into();
+    }
+    row
 }
 
 /// Two of a field's values are the same: numbers by their value (-3 and -3.0), anything else exactly.
@@ -99,6 +109,8 @@ impl ReaperScript {
                 uncertain_once: false,
                 uncertain_restore_once: false,
                 left_out_once: None,
+                settings: json!({"bpm": 120.0, "loop": {"start": 0.0, "end": 0.0}, "repeat": false, "metronome": false}),
+                project: None,
             })),
         }
     }
@@ -174,11 +186,18 @@ impl ReaperScript {
         if kind == "run-action" {
             return Self::run_action(state, epoch, method, params);
         }
+        if matches!(kind, "tempo-set" | "loop-range" | "loop-repeat" | "metronome-switch") {
+            return Self::setting(state, epoch, method, params);
+        }
         let field = match kind {
             "track-volume" => "volumeDb",
             "track-mute" => "mute",
+            "track-solo" => "solo",
+            "track-arm" => "arm",
             "track-rename" => "name",
-            _ => return Err(bad("the simulator makes only track-volume, track-mute, track-rename and track-add")),
+            _ => {
+                return Err(bad("the simulator makes only track-volume, -mute, -solo, -arm, -rename and -add, and the project's settings"))
+            }
         };
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
@@ -196,6 +215,10 @@ impl ReaperScript {
             "volumeDb" => format!("{name} volume {} dB", wanted.as_f64().unwrap_or_default()),
             "mute" if wanted == true => format!("{name} muted"),
             "mute" => format!("{name} unmuted"),
+            "solo" if wanted == true => format!("{name} soloed"),
+            "solo" => format!("{name} unsoloed"),
+            "arm" if wanted == true => format!("{name} armed"),
+            "arm" => format!("{name} disarmed"),
             _ => format!("Renamed track “{name}” → “{}”", wanted.as_str().unwrap_or_default()),
         };
         match method {
@@ -242,6 +265,91 @@ impl ReaperScript {
                 Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": display}))
             }
         }
+    }
+
+    /// (m6-places) The project's settings, each fenced by its value as the preview saw it: the tempo (`tempo-set {bpm}`)
+    /// and the loop (`loop-range {startBeats, endBeats}`), steps of REAPER's undo; repeat and the metronome (`loop-repeat`,
+    /// `metronome-switch {on}`), which REAPER keeps no history of.
+    fn setting(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        let kind = params["kind"].as_str().unwrap_or_default();
+        let field = match kind {
+            "tempo-set" => "bpm",
+            "loop-range" => "loop",
+            "loop-repeat" => "repeat",
+            _ => "metronome",
+        };
+        let wanted = match method {
+            "change_restore" => params["prior"][field].clone(),
+            _ => match kind {
+                "tempo-set" => params["input"]["bpm"].clone(),
+                "loop-range" => json!({"start": params["input"]["startBeats"], "end": params["input"]["endBeats"]}),
+                _ => params["input"]["on"].clone(),
+            },
+        };
+        if wanted.is_null() || (kind == "loop-range" && (wanted["start"].is_null() || wanted["end"].is_null())) {
+            return Err(bad(&format!("{kind}: its input is missing")));
+        }
+        let on_off = |value: &Value| if value == &Value::Bool(true) { "on" } else { "off" };
+        let title = match kind {
+            "tempo-set" => format!("Tempo {} BPM", wanted.as_f64().unwrap_or_default()),
+            "loop-range" => format!("Loop {} to {} beats", wanted["start"], wanted["end"]),
+            "loop-repeat" => format!("Repeat {}", on_off(&wanted)),
+            _ => format!("Metronome {}", on_off(&wanted)),
+        };
+        let now = state.settings[field].clone();
+        let same = |a: &Value, b: &Value| a == b || (a.as_f64().is_some() && a.as_f64() == b.as_f64());
+        // REAPER keeps no history of repeat or the metronome: their changes make no step.
+        let entry = matches!(kind, "tempo-set" | "loop-range");
+        match method {
+            "change_preview" => Ok(json!({
+                "epoch": epoch,
+                "target": {"ref": null, "kind": "project"},
+                "prior": {field: now},
+                "fence": {field: now},
+                "display": {"title": title, "unchanged": same(&now, &wanted)},
+            })),
+            "change_apply" => {
+                if !same(&params["fence"][field], &now) {
+                    return Err(("changed".into(), format!("the project's {field} changed since the preview")));
+                }
+                let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                state.settings[field] = wanted.clone();
+                state.changed += 1;
+                if entry {
+                    Self::step(state, &desc);
+                }
+                Ok(json!({"epoch": epoch, "applied": {field: wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": entry}}))
+            }
+            _ => {
+                if same(&now, &wanted) {
+                    return Ok(
+                        json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{title} (put back)"), "note": "It was back already: nothing was written."}}),
+                    );
+                }
+                if !same(&params["applied"][field], &now) && params["discard"] != true {
+                    return Err(("changed".into(), format!("the project's {field} changed in REAPER since Kumi set it")));
+                }
+                state.settings[field] = wanted.clone();
+                state.changed += 1;
+                if entry {
+                    state.undo.push(params["desc"].as_str().unwrap_or_default().to_string());
+                }
+                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}}))
+            }
+        }
+    }
+
+    /// (m6-places) The project's settings as Kumi's changes left them: `bpm`, `loop`, `repeat`, `metronome`.
+    pub fn settings(&self) -> Value {
+        self.state.lock().unwrap().settings.clone()
+    }
+
+    /// The producer changes one of the project's settings in REAPER.
+    pub fn set_setting(&self, field: &str, value: Value) {
+        let mut state = self.state.lock().unwrap();
+        state.settings[field] = value;
+        state.changed += 1;
     }
 
     /// `track-add {name?}`: a track at the end, its ref in `created`; its restore deletes it, unless it's gone.
@@ -491,7 +599,22 @@ impl ReaperScript {
 
     /// The project row: another project in the tab (`switch_tab`) is another identity.
     fn project(state: &State) -> Value {
+        if let Some(project) = &state.project {
+            return project.clone();
+        }
         json!({"id": null, "identity": format!("sim:{}", state.epoch), "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": 120.0})
+    }
+
+    /// (m6-places) The project in the tab is `name` with this id and file (an unsaved one: no id and an empty path) and this
+    /// identity; another identity is another project, whose refs are another epoch's.
+    pub fn set_project(&self, id: Option<&str>, path: &str, identity: &str, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        if state.project.as_ref().is_some_and(|project| project["identity"] != identity) {
+            state.epoch += 1;
+        }
+        state.project =
+            Some(json!({"id": id, "identity": identity, "name": name, "path": path, "saved": !path.is_empty(), "tempo": 120.0}));
+        state.changed += 1;
     }
 
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {

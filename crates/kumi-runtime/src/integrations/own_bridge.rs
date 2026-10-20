@@ -8,13 +8,16 @@ use crate::{
         daw::DawProfile,
         errors::{FailureKind, KumiError, RuntimeError},
         fold::fold_tracks_with,
+        phrases::{Intent, PhraseTrack},
         place::{is_project_id, unsaved, Place},
+        plan::make_changes,
         refs::{Book, RefScheme, Shift},
         view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
     integrations::{
         none::no_access,
         own_changes::{Ending, Link, OwnPlan},
+        own_phrases::{PhraseLook, Phrased},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
@@ -68,6 +71,8 @@ pub struct OwnDaw {
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
     /// What Kumi can change in it, and how.
     pub changes: &'static super::own_changes::OwnChangeSet,
+    /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call.
+    pub phrases: &'static super::own_phrases::OwnPhrases,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -115,6 +120,11 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// The last look that read the project: its key and project, kept by a look that can't (as Live's are), so the
     /// conversation stays with the project while the DAW is busy or away.
     previous: RefCell<Option<(String, Option<ProjectRef>)>>,
+    /// A project first seen unsaved: its identity and the key it was looked at under, which it keeps through its first
+    /// save while it stays open in this run of the DAW (the conversation moves from the unsaved place to its own).
+    first_unsaved: RefCell<Option<(String, String)>>,
+    /// The last snapshot a look read: what a fixed phrase is made from, right after the look before it.
+    looked: RefCell<Option<Value>>,
     /// Kumi's changes in the DAW: HISTORY, plans and undo through the host's journal.
     changes: Rc<OwnPlan<S>>,
     /// Cancelled when the integration closes: a change under way is let go.
@@ -164,6 +174,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         look_when_free: Rc::default(),
         unlisten: RefCell::default(),
         previous: RefCell::default(),
+        first_unsaved: RefCell::default(),
+        looked: RefCell::default(),
         changes,
         lifetime: link.lifetime.clone(),
         tempo: link.tempo.clone(),
@@ -184,6 +196,9 @@ const LOOK_GAP_MS: u64 = 250;
 const LOOKS_AGAIN: u32 = 20;
 /// The most a read's page can hold for the model: the kernel cuts a tool's result at 64 KB.
 const PAGE_TEXT_BYTES: usize = 60 * 1024;
+/// The most pages a fixed phrase reads of a list (tracks, the sequence, patterns) before it leaves the request to the
+/// model.
+const PHRASE_PAGES: usize = 40;
 /// A turn's short ref (`track:3`): the shape of a name this turn gave.
 pub(super) static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
 
@@ -594,6 +609,61 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         Ok(snapshot)
     }
 
+    /// Every track of the project the look read: its rows, or every page of the read when it didn't list them all. None
+    /// when they can't all be read now (the project changed since, or it's too big to page through for a phrase).
+    async fn every_track(&self, snapshot: &Value, signal: &Signal) -> Result<Option<Vec<Value>>, RuntimeError> {
+        let more = snapshot.get("truncated").is_some_and(|truncated| !truncated.is_null())
+            || snapshot.get("moreTracks") == Some(&Value::Bool(true));
+        if !more {
+            return Ok(Some(snapshot.get("tracks").and_then(Value::as_array).cloned().unwrap_or_default()));
+        }
+        self.every_row(json!({"kind": "track", "limit": MOST_ROWS}), snapshot, signal).await
+    }
+
+    /// The sequence's slots, each its first beat and length in beats (its pattern's lines over the song's lines per beat).
+    async fn slots(&self, snapshot: &Value, signal: &Signal) -> Result<Option<Vec<(f64, f64)>>, RuntimeError> {
+        let lpb =
+            ["/transport/lpb", "/project/lpb"].iter().find_map(|at| snapshot.pointer(at).and_then(Value::as_f64)).filter(|lpb| *lpb > 0.0);
+        let Some(lpb) = lpb else { return Ok(None) };
+        let Some(sequence) = self.every_row(json!({"kind": "sequence"}), snapshot, signal).await? else { return Ok(None) };
+        let Some(patterns) = self.every_row(json!({"kind": "pattern"}), snapshot, signal).await? else { return Ok(None) };
+        let lines: HashMap<&str, f64> =
+            patterns.iter().filter_map(|row| Some((row.get("ref")?.as_str()?, row.get("lines")?.as_f64()?))).collect();
+        let mut at = 0.0;
+        let mut slots = Vec::with_capacity(sequence.len());
+        for slot in &sequence {
+            let Some(lines) = slot.get("patternRef").and_then(Value::as_str).and_then(|pattern| lines.get(pattern)) else {
+                return Ok(None);
+            };
+            slots.push((at, lines / lpb));
+            at += lines / lpb;
+        }
+        Ok(Some(slots))
+    }
+
+    /// Every row of a read, page by page, from the project the look read; None when the project changed since, a page is
+    /// refused, or there are more than a phrase pages through.
+    async fn every_row(&self, args: Value, snapshot: &Value, signal: &Signal) -> Result<Option<Vec<Value>>, RuntimeError> {
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..PHRASE_PAGES {
+            let mut ask = args.clone();
+            if let Some(cursor) = &cursor {
+                ask["cursor"] = cursor.clone().into();
+            }
+            let Ok(page) = self.call("read", ask, signal.clone()).await? else { return Ok(None) };
+            if page.get("epoch") != snapshot.get("epoch") {
+                return Ok(None);
+            }
+            rows.extend(page.get("items").and_then(Value::as_array).into_iter().flatten().cloned());
+            match page.get("nextCursor").and_then(Value::as_str) {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return Ok(Some(rows)),
+            }
+        }
+        Ok(None)
+    }
+
     fn no_access(&self, why: Option<&str>) -> Observation {
         // The last project read keeps its key: a busy or quit DAW isn't another project.
         let (key, project) = self.previous.borrow().clone().unwrap_or_else(|| (unsaved(self.id()).into(), None));
@@ -618,7 +688,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let profile = self.daw.profile;
         let project = snapshot.get("project").cloned().unwrap_or(Value::Null);
         let name = project.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("untitled").to_owned();
-        let saved = project.get("id").and_then(Value::as_str).filter(|id| is_project_id(id));
+        let path = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty());
+        // Saved: a file and an id (Renoise names an unsaved song by an id of its own until its first save keeps it), as
+        // the host's snapshots are kept. Every unsaved project of the DAW shares its unsaved place, as Live's Sets do.
+        let saved = project.get("id").and_then(Value::as_str).filter(|id| is_project_id(id) && path.is_some());
         let place = match saved {
             Some(id) => Place::Saved { daw: self.id(), id: id.into() }.text(),
             None => unsaved(self.id()).into(),
@@ -696,17 +769,35 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             .find_map(|at| snapshot.pointer(at).and_then(Value::as_f64));
         self.tempo.set(tempo);
         *self.file.borrow_mut() = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).map(str::to_owned);
-        // A saved project is its id, through a restart of the DAW; an unsaved one is this run's identity for it.
-        let key = saved
-            .map(|id| format!("{}:{id}", self.daw.host_flag))
-            .or_else(|| identity.clone().map(|identity| format!("{}:{identity}", self.daw.host_flag)))
-            .unwrap_or_else(|| place.clone());
+        // A saved project is its id, through a restart of the DAW; an unsaved one is this run's identity for it, and keeps
+        // that key once saved while it stays open: the session then carries its conversation on into the saved place.
+        let key = {
+            let mut first_unsaved = self.first_unsaved.borrow_mut();
+            match (&identity, first_unsaved.as_ref()) {
+                (Some(now), Some((was, key))) if now == was => key.clone(),
+                _ => {
+                    *first_unsaved = None;
+                    match saved {
+                        Some(id) => format!("{}:{id}", self.daw.host_flag),
+                        None => {
+                            let key = identity
+                                .as_ref()
+                                .map(|identity| format!("{}:{identity}", self.daw.host_flag))
+                                .unwrap_or_else(|| place.clone());
+                            *first_unsaved = identity.clone().map(|identity| (identity, key.clone()));
+                            key
+                        }
+                    }
+                }
+            }
+        };
         *self.previous.borrow_mut() = Some((key.clone(), saved.map(|_| ProjectRef { id: place.clone(), name: name.clone() })));
         // KUMI_TRACE=1: which project each look took the DAW to be, so a restart's key can be checked without a turn.
         if let Some(trace) = &self.options.context.on_dispatch {
             trace(format!("look: {key}"));
         }
         self.looks_again.set(0);
+        *self.looked.borrow_mut() = Some(snapshot.clone());
         Observation {
             key: key.clone(),
             revision: None,
@@ -766,6 +857,56 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     }
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         Ok(self.changes.history.stop_everything(signal).await)
+    }
+    /// A fixed phrase as the DAW's change, in the project the session's look just read: one plan, so it lands in HISTORY
+    /// with Kumi's undo and Kumi says what changed. A phrase the DAW has no such thing for is refused in its words; one
+    /// that can't run as asked here goes to the model.
+    async fn instant(&self, intent: &Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        if self.closed.get() || !self.connected.get() {
+            return Ok(None);
+        }
+        let Some(snapshot) = self.looked.borrow().clone() else { return Ok(None) };
+        let Some(rows) = self.every_track(&snapshot, &signal).await? else { return Ok(None) };
+        let slots = match intent {
+            Intent::Loop { .. } if self.daw.phrases.loops_by_slot => match self.slots(&snapshot, &signal).await? {
+                Some(slots) => Some(slots),
+                None => return Ok(None),
+            },
+            _ => None,
+        };
+        // Each track by this turn's short ref, as the look named them; the master never counts, nor a send track by place.
+        let named: Vec<(String, String, bool, bool)> = {
+            let mut book = self.book.borrow_mut();
+            rows.iter()
+                .filter_map(|row| {
+                    let kind = row.get("type").and_then(Value::as_str);
+                    let master = row.get("master") == Some(&Value::Bool(true)) || kind == Some("master");
+                    let name = row.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    Some((book.short_ref(row.get("ref")?.as_str()?), name, !master && kind != Some("send"), master))
+                })
+                .collect()
+        };
+        let tracks: Vec<PhraseTrack> =
+            named.iter().map(|(reference, name, own, master)| PhraseTrack { reference, name, own: *own, master: *master }).collect();
+        let none = Value::Null;
+        let look = PhraseLook {
+            tracks: &tracks,
+            project: snapshot.get("project").unwrap_or(&none),
+            transport: snapshot.get("transport").unwrap_or(&none),
+            slots: slots.as_deref(),
+        };
+        match (self.daw.phrases.plan)(intent, &look) {
+            Phrased::Model => Ok(None),
+            Phrased::Refused(text) => Ok(Some(InstantOutcome { text, is_error: true })),
+            Phrased::Steps(steps) => {
+                let plan = json!({"steps": steps, "final": true}).as_object().cloned().unwrap_or_default();
+                let result = make_changes(&self.changes, plan, signal).await?;
+                Ok(Some(InstantOutcome {
+                    text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text),
+                    is_error: result.is_error,
+                }))
+            }
+        }
     }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         let Some(mut args) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {

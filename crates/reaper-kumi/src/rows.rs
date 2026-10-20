@@ -185,6 +185,15 @@ fn add_project_settings(reaper: &Reaper, proj: Project, row: &mut Value) {
     if let (Some(items), Some(tempo)) = (timebase("itemtimelock"), timebase("tempoenvtimelock")) {
         row["timebase"] = json!({"items": words(items), "tempoEnvelopes": words(tempo)});
     }
+    // (m6-places) Whether the metronome is on, and how many tempo and time signature markers there are (a tempo map makes
+    // a bar's length and "the tempo" depend on where).
+    if let Some(flags) = timebase("projmetroen") {
+        row["metronome"] = (flags & 1 != 0).into();
+    }
+    let markers = reaper.tempo_marker_count(proj);
+    if markers > 0 {
+        row["tempoMarkers"] = markers.into();
+    }
     for (key, field) in [("PROJECT_TITLE", "title"), ("PROJECT_AUTHOR", "author")] {
         if let Some(text) = reaper.project_text(proj, key).filter(|text| !text.is_empty()) {
             row[field] = clip(&text).into();
