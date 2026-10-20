@@ -262,6 +262,32 @@ test("phrases: a script rendered to lines; Kumi's undo puts the lines it had bac
   failure(call(peer, "change_preview", { kind = "phrase-render", input = { ref = pref(place(peer), 1, 1) }, epoch = place(peer) }), "gone")
 end)
 
+test("phrases: Renoise's own undo and redo of a render are told (real Renoise: the row said applied after its undo)", function()
+  local env, peer = setup()
+  local p = mock.song:instrument(2):phrase(1)
+  p.playback_mode = 2
+  p.script.paragraphs = { "return cycle(\"c4 e4\")" }
+  p.script:commit()
+  mock.compile_scripts()
+  mock.data.undo.stack = {}
+  local previewed, epoch, layout = preview(peer, "phrase-render", { ref = pref(place(peer), 2, 1), lpb = 4 })
+  local id = I.send(peer, "change_apply", { kind = "phrase-render", input = { ref = pref(epoch, 2, 1), lpb = 4 }, fence = previewed.fence, desc = "Kumi: render (k621)", epoch = epoch, layout = layout })
+  mock.advance(30)
+  mock.finish_renders()
+  ok(I.wait(peer, id).result)
+  I.told(peer)
+  mock.song:undo()
+  eq(phrase(2, 1).playback_mode, 2, "Renoise's undo: it plays its script again")
+  local events = I.told(peer)
+  eq(#events, 1)
+  eq(events[1].data.how, "undo")
+  eq(events[1].data.descs[1], "Kumi: render (k621)")
+  mock.song:redo()
+  events = I.told(peer)
+  eq(#events, 1)
+  eq(events[1].data.how, "redo")
+end)
+
 -- Plug-in and MIDI instruments
 
 local function plugin_catalog()

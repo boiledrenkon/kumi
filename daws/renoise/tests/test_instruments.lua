@@ -140,7 +140,7 @@ local function note_value(l, col) return mock.song:pattern(1):track(3):line(l):n
 T.instruments = {
   setup = setup, place = place, preview = preview, apply = apply, change = change, restore = restore, failure = failure, call = call,
   steps = steps, newest = newest, instrument = instrument, names = names, iref = iref, sref = sref, note_at = note_at, note_value = note_value,
-  send = send, wait = wait,
+  send = send, wait = wait, told = told,
 }
 
 -- instrument-rename

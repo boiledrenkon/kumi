@@ -668,7 +668,7 @@ local function script_object(phrase)
     render_to_pattern = function(_, options, done)
       if type(options) == "function" then done, options = options, {} end
       M.pending_renders = M.pending_renders or {}
-      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done }
+      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done, lines = phrase.lines }
       -- (Renoise rewrites the phrase's length by itself before the tool's next callback, well before it answers: lab 2026-10-19)
       M.idle_work = M.idle_work or {}
       M.idle_work[#M.idle_work + 1] = function()
@@ -711,7 +711,8 @@ function M.compile_scripts()
   M.pending_compiles = {}
 end
 
--- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does).
+-- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does), which
+-- also takes back the length Renoise rewrote and the switch to playing the lines (one undo reverts the whole render: lab).
 function M.finish_renders(fail)
   for _, render in ipairs(M.pending_renders or {}) do
     if fail then
@@ -725,8 +726,10 @@ function M.finish_renders(fail)
         l:note_column(1).note_string = "C-4"
         count = count + 1
       end
-      phrase.playback_mode = 1
-      M.fire(obs(phrase, "playback_mode"))
+      local before, after = render.lines, phrase.lines
+      M.record(function() phrase.lines = before; M.fire(obs(phrase, "number_of_lines")) end,
+        function() phrase.lines = after; M.fire(obs(phrase, "number_of_lines")) end)
+      write(phrase, "playback_mode", 1)
       M.callback_end()
       render.done(nil, count, 0)
     end
