@@ -1027,6 +1027,11 @@ unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
     });
 }
 unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
+    // "Track: Set first selected track as last touched track"
+    if command == 40914 {
+        let first = with(|s| s.tracks.iter().find(|t| t.selected).map(|t| t.guid.clone()));
+        extra(|e| e.last_touched = first);
+    }
     let (hook, script, on_script) = with(|s| {
         s.actions.push(command);
         (s.on_action, s.scripts.iter().find(|(id, _)| *id == command).map(|(_, path)| path.clone()), s.on_script)
@@ -1345,7 +1350,13 @@ unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, maste
     })
 }
 unsafe extern "C" fn get_last_touched_track() -> *mut MediaTrack {
-    counted(|s| s.tracks.iter().position(|t| t.selected).map_or(ptr::null_mut(), track_ptr))
+    let touched = extra(|e| e.last_touched.clone());
+    counted(|s| {
+        touched
+            .and_then(|guid| s.tracks.iter().position(|t| t.guid == guid))
+            .or_else(|| s.tracks.iter().position(|t| t.selected))
+            .map_or(ptr::null_mut(), track_ptr)
+    })
 }
 /// A track's meter: the fake keeps it in `extra` as `peak:<channel>` (amplitude), which REAPER has no attribute for.
 unsafe extern "C" fn track_get_peak_info(track: *mut MediaTrack, channel: c_int) -> f64 {
@@ -1644,7 +1655,7 @@ unsafe extern "C" fn track_fx_set_pin_mappings(
     counted(|s| {
         let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) else { return false };
         f.pins.insert((output != 0, pin), (low as u32 as u64) | ((hi as u32 as u64) << 32));
-        s.undo_dirty = true;
+        s.state_changed = true;
         true
     })
 }

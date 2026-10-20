@@ -352,7 +352,8 @@ fn new_events(spec: &Value, pos: i64) -> Done<Vec<Ev>> {
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| bad("every event needs a type: cc, pitchbend, program, pressure, poly-pressure, text or sysex"))?;
-    let channel = || -> Done<u8> { Ok(need(spec, "channel", 1, 16)? as u8 - 1) };
+    // (channel 1 when not given, as Kumi's schema has it optional)
+    let channel = || -> Done<u8> { Ok(whole(spec, "channel", 1, 16)?.unwrap_or(1) as u8 - 1) };
     let muted = muted_flag(spec)?;
     let shaped = |msg: Vec<u8>| -> Done<Ev> {
         let (shape, tension) = shape_flag(spec)?;

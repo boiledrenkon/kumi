@@ -48,11 +48,19 @@ impl Reaper<'_> {
         self.api.SetMediaItemInfo_Value().is_some_and(|f| unsafe { f(item.0, parm.as_ptr(), value) })
     }
 
-    /// An empty MIDI item on `track` from `start` to `end` (seconds).
+    /// An empty MIDI item on `track` from `start` to `end` (seconds). REAPER's undo doesn't notice an item this call makes
+    /// (lab 7.82: a block with only it makes no point, and REAPER's undo then takes the step before): the track's items are
+    /// marked dirty, and REAPER keeps a point of it.
     pub fn create_midi_item(&self, track: Track, start: f64, end: f64) -> Option<Item> {
         let in_beats = false;
         let item = unsafe { self.api.CreateNewMIDIItemInProj()?(track.0, start, end, &in_beats) };
-        (!item.is_null()).then_some(Item(item))
+        if item.is_null() {
+            return None;
+        }
+        if let Some(mark) = self.api.MarkTrackItemsDirty() {
+            unsafe { mark(track.0, item) };
+        }
+        Some(Item(item))
     }
 
     /// A new empty item (no take) at the end of the track's list.

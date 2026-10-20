@@ -937,7 +937,9 @@ impl Reads {
             }
             other => return Err(bad(format!("parent: a take ref, not r:{}", other.kind()))),
         };
-        reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
+        if !reaper.take_is_midi(take) {
+            return Err(bad("that take isn't MIDI"));
+        }
         // The notes as the changes see and write them, from the one buffer REAPER gives the take's MIDI in: `MIDI_GetNote`
         // ends two overlapping notes of one pitch at the first note-off, where the buffer pairs them in order, and a model
         // that reads a length and changes the note must see the length Kumi writes.
@@ -1112,7 +1114,7 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["index"] = index.into();
         row["active"] = active.into();
     }
-    if let Some((notes, ccs, _)) = reaper.midi_counts(take) {
+    if let Some((notes, ccs, _)) = reaper.midi_counts(take).filter(|_| reaper.take_is_midi(take)) {
         row["noteCount"] = notes.into();
         row["ccCount"] = ccs.into();
     }
@@ -1854,15 +1856,20 @@ mod tests {
         let markers = lab.rows(json!({"kind": "marker"}));
         assert_eq!(
             markers,
-            [json!({"ref": "r:marker:{MARK-1}", "number": 1, "name": "Drop", "position": 4.0, "positionBeats": 8.0, "color": Value::Null})]
+            [
+                json!({"ref": "r:marker:{MARK-1}", "number": 1, "name": "Drop", "position": 4.0, "positionBeats": 8.0, "color": Value::Null, "lane": 0})
+            ]
         );
         let regions = lab.rows(json!({"kind": "region"}));
         assert_eq!(
             regions,
             [
-                json!({"ref": "r:region:{REG-1}", "number": 1, "name": "Verse", "position": 8.0, "positionBeats": 16.0, "end": 16.0, "endBeats": 32.0, "color": "#00ff00"})
+                json!({"ref": "r:region:{REG-1}", "number": 1, "name": "Verse", "position": 8.0, "positionBeats": 16.0, "end": 16.0, "endBeats": 32.0, "color": "#00ff00", "lane": 0})
             ]
         );
+        // The ruler lane a marker sits in is read (accept-reaper lab: marker-lane's change couldn't be read back).
+        fake::with(|s| s.marker_lanes.insert("{MARK-1}".into(), 1));
+        assert_eq!(lab.rows(json!({"kind": "marker"}))[0]["lane"], 1);
     }
 
     #[test]
