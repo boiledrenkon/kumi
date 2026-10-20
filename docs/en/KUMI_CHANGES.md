@@ -5,7 +5,8 @@ English · [简体中文](../zh-CN/KUMI_CHANGES.md) · [日本語](../ja/KUMI_CH
 Kumi reads the open Set and makes the changes you ask for. Each change appears
 in HISTORY in plain words, and most have their own undo. There is no approval
 step: undo is the safety net, so it has to be dependable. This page explains how
-that works and lists every change Kumi can make.
+that works and lists every change Kumi can make. For REAPER and Renoise, see
+[REAPER and Renoise](#reaper-and-renoise).
 
 ## How a change works
 
@@ -374,3 +375,129 @@ bindings on (`/willington`) and a Live build they cover.
 Each Kumi release ships with a bridge: Kumi 1.19.2 to 1.19.3 with bridge 1.0.93, 1.13.0 to 1.19.1 with 1.0.92, 1.11.3 to 1.12.1 with 1.0.91, 1.11.0 to 1.11.2 with 1.0.90, 1.10.0 to 1.10.1 with 1.0.89, 1.9.7 with 1.0.88, 1.9.6 with 1.0.87, 1.9.4 to 1.9.5 with 1.0.86, 1.9.0 to 1.9.3 with 1.0.85, 1.8.11 with 1.0.84, 1.8.10 with 1.0.83, 1.8.9 with 1.0.82, 1.8.7 to 1.8.8 with 1.0.81, 1.8.6 with 1.0.80, 1.8.5 with 1.0.79, 1.8.4 with 1.0.78, 1.8.3 with 1.0.77, 1.8.2 with 1.0.76, 1.7.5 to 1.8.1 with 1.0.74, 1.7.0 to 1.7.4 with 1.0.73, 1.6.1 with 1.0.72, 1.6.0 with 1.0.71, 1.5 with
 1.0.70, 1.4 with 1.0.69, 1.3 with 1.0.68, 1.2 with 1.0.66, 1.1 with 1.0.53 and
 1.0 with 1.0.52.
+
+## REAPER and Renoise
+
+In REAPER and Renoise, Kumi changes the project or song through its own bridge
+([connecting](KUMI_GUIDE.md#connect-to-reaper-or-renoise)). A change works as in
+Live: previewed, applied, checked, then in HISTORY with a title in the DAW's
+words ("Moved “vox.wav” to bar 6", "Wrote 4 lines in “Drop” on “Bass”") and a
+picture. What differs:
+
+- **References name things, not places.** REAPER's are its own ids (GUIDs; a
+  send gets one Kumi keeps on it), so they hold when tracks move and across
+  reloads. Renoise's follow each track, device, instrument and slot through
+  inserts, deletes and moves; where Kumi can't be sure, the change is refused
+  with nothing touched, and the model reads again.
+- **Nothing half done.** Applying reads again what the preview saw and refuses,
+  writing nothing, when you changed it in between. While the DAW is busy (a
+  dialog, a render), a change is refused at once.
+- **The DAW's own undo history** gets each change as a named step ("Kumi: Bass
+  volume −6 dB"). In REAPER a whole plan is one step; in Renoise each change is
+  its own step.
+
+### Undo in REAPER and Renoise
+
+- **Kumi's undo** puts back exactly what the change set, as a new step in the
+  DAW's undo ("Kumi: undo …"). It never presses the DAW's own undo, so what you
+  did since stays. It's refused (**kept**, with the reason) when you changed the
+  same thing since or it's gone, and does nothing when it's back already. Unlike
+  in Live, it takes back deletes too: a deleted track, item, take, FX, send,
+  hardware output, marker, slot, device, instrument, sample or phrase comes back
+  from what Kumi kept of it.
+- **The DAW's own undo** (Cmd-Z, or Ctrl-Z on Windows and Linux) takes back a
+  plan in REAPER, or one change in Renoise. HISTORY follows it: "Undone with
+  REAPER's own undo", "Put back with REAPER", or "REAPER may have redone it;
+  Kumi can't tell".
+- **What the DAW's undo skips**, only Kumi's undo takes back, and its row says
+  so. REAPER: repeat, the metronome switch, a ReaEQ band's type or switch, the
+  automation override, the project's notes, title, author, grid and timebase,
+  and parameter modulation with nothing on. Renoise: mute, solo, the loop, the
+  pattern loop, the metronome switch, editing settings and a plug-in's
+  auto-suspend.
+- **What only the DAW's undo takes back:** Lua (`run_lua`), REAPER's API
+  (`api_call`) and REAPER's actions (`run_action`, when REAPER makes an undo
+  point of it). Saving a project, song, template, chain, instrument or preset
+  writes a file and has no HISTORY row.
+- **How long:** Kumi keeps its newest 400 changes for undo, while its link to
+  the DAW lasts ([when the DAW goes away](KUMI_GUIDE.md#when-live-goes-away)).
+- **A copy before a delete.** Before a change that deletes or overwrites
+  something, Kumi copies the project or song as last saved into a `Kumi copies`
+  folder beside it (`Song saved 2026-10-20 14.05.31.rpp`), once for each saved
+  version, and keeps its five newest copies. A saved file over 512 MB isn't
+  copied, and the change says so; an unsaved project or song gets none.
+
+### What Kumi can change in REAPER
+
+| Tools | What they change |
+| --- | --- |
+| `track_add`, `track_move`, `track_delete`, `track_rename`, `track_color`, `track_visible`, `track_folder_state`, `track_lock` | Tracks added (also as the folder of tracks next to each other), moved, deleted, renamed and coloured; shown or hidden in the arrange view and mixer; folders opened or collapsed; controls locked |
+| `track_volume`, `track_pan`, `track_width`, `track_pan_mode`, `track_dual_pan`, `track_pan_law`, `track_mute`, `track_solo`, `track_solo_defeat`, `track_phase`, `track_channels`, `track_main_send`, `track_fx_enabled` | The mixer: volume, pan (its mode, width, dual pan, pan law), mute, solo and solo defeat, polarity, channels, the send to the parent folder or master, the whole FX chain on or off; the master too, where REAPER allows it |
+| `track_arm`, `track_record_input`, `track_monitoring`, `track_record_mode` | Arming, record input, monitoring and record mode |
+| `track_group`, `track_group_name`, `track_template_insert`, `track_lanes`, `lane_plays`, `lane_name`, `lane_comp`, `razor_set` | Track groups and their names; track templates inserted; fixed lanes, which lane plays, lane names and comping; razor areas |
+| `send_add`, `receive_add`, `send_remove`, `send_volume`, `send_pan`, `send_mute`, `send_mode`, `send_channels`, `send_phase`, `send_mono`, `send_automation_mode` | Sends and receives: added (a sidechain on 3/4, a MIDI-only send), removed, level, pan, mute, where they tap the track, channels and MIDI, polarity, mono, automation mode |
+| `hw_out_add`, `hw_out_remove`, `hw_out_volume`, `hw_out_pan`, `hw_out_mute`, `hw_out_mode`, `hw_out_channels`, `hw_out_phase`, `hw_out_mono`, `track_midi_out` | Hardware outputs, and a track's MIDI to a hardware MIDI output |
+| `fx_add`, `fx_delete`, `fx_move`, `fx_copy`, `fx_bypass`, `fx_offline`, `fx_wet`, `fx_pins`, `fx_preset`, `fx_state`, `fx_chain_load` | FX (by the name REAPER's FX browser shows) in a track's chain, its input FX, a take's chain or a container: added, deleted, moved, copied, bypassed, taken offline, wet and delta, pin mapping, presets, a whole plug-in state, FX chain files |
+| `fx_container_add`, `fx_container_move`, `fx_parallel`, `fx_container_map`, `fx_container_unmap` | FX containers: added, FX moved in or out, an FX run in parallel with the one before it, container macros mapped and unmapped |
+| `fx_param`, `fx_params`, `fx_eq_band` | One parameter, or up to 256 of one FX in one step; a ReaEQ band's type or switch |
+| `fx_param_mod`, `fx_param_lfo`, `fx_param_acs`, `fx_param_link`, `fx_param_learn` | Parameter modulation: its switch and baseline, an LFO, an audio control signal, a link to another parameter, MIDI or OSC learn |
+| `envelope_show`, `envelope_points_add`, `envelope_points_change`, `envelope_points_delete`, `envelope_range_clear`, `automation_item_add`, `automation_item_set`, `automation_item_delete`, `track_automation_mode`, `automation_override` | Envelopes shown and armed; points added, changed or deleted, a stretch cleared; automation items; a track's automation mode; the global automation override |
+| `item_add`, `item_import`, `item_move`, `item_split`, `item_trim`, `item_fade`, `item_props`, `item_group`, `item_delete`, `item_duplicate`, `items_glue`, `items_render` | Items: an empty MIDI item, a media file imported, moved (to another track too), split, trimmed, faded, their properties, grouped, deleted, duplicated; glued or rendered to new takes only when you ask |
+| `take_add`, `take_delete`, `take_active`, `take_props`, `stretch_markers_add`, `stretch_markers_change`, `stretch_markers_delete`, `take_markers_add`, `take_markers_change`, `take_markers_delete` | Takes added, deleted, made active, their properties; stretch markers; take markers |
+| `notes_add`, `notes_change`, `notes_delete`, `notes_quantize`, `notes_humanize`, `midi_events_add`, `midi_events_change`, `midi_events_delete` | A take's MIDI notes added, changed, deleted, quantized, humanized; its other MIDI events (CC, pitch bend, program, pressure, text, SysEx) |
+| `marker_add`, `region_add`, `marker_move`, `marker_rename`, `marker_color`, `marker_delete`, `marker_lane`, `ruler_lane`, `ruler_lane_add`, `region_render`, `time_selection`, `loop_range`, `loop_repeat` | Markers and regions; ruler lanes; the region render matrix; the time selection; the loop and repeat |
+| `tempo_set`, `tempo_marker_set`, `tempo_marker_delete`, `metronome_switch`, `project_grid`, `project_timebase`, `project_notes`, `project_info` | The tempo, tempo markers (time signatures, ramps), the metronome; the grid and timebase; the project's notes, title and author |
+| `drum_kit`, `scratch_keep` | A ReaSamplOmatic5000 drum kit from sound files, as a folder of pad tracks or one container, its hi-hats choking; a goal's best scratch copy kept |
+| `run_action`, `api_call`, `run_lua` | One of REAPER's actions (never one that opens a dialog, quits, opens, closes or saves projects, or renders); an API function that changes the project; Lua (ReaScript). Only REAPER's undo takes these back |
+
+Without a HISTORY row: `play`, `stop`, `set_cursor`, `save_project` (where it
+is, or as REAPER's next version), `save_track_template` and `fx_chain_save`.
+`reaper_read` reads the project: tracks, items, takes, FX, parameters, sends,
+markers, regions, notes, MIDI events, envelopes and automation items, and
+REAPER's API functions that only read.
+
+### What Kumi can change in Renoise
+
+| Tools | What they change |
+| --- | --- |
+| `song_bpm`, `song_lpb`, `song_tpl`, `song_groove`, `song_metronome`, `metronome_switch`, `edit_settings`, `song_info`, `song_headroom` | Tempo, lines per beat, ticks per line, the groove, the metronome (beats per bar, precount) and its switch, editing settings (follow player, edit step, octave, record quantize and more), the song's name, artist and comments, track headroom |
+| `track_add`, `track_move`, `track_group`, `track_delete`, `track_rename`, `track_color`, `track_collapse`, `track_columns`, `track_column` | Sequencer, send and group tracks added, moved, grouped, deleted, renamed, coloured and collapsed; their note and effect columns shown or hidden, and note columns named |
+| `track_volume`, `track_pan`, `track_width`, `track_mute`, `track_solo`, `track_output`, `track_delay` | The mixer: volume, panning, width, mute, solo, output routing, output delay |
+| `slot_insert`, `slot_delete`, `slot_move`, `slot_clone`, `slot_unique`, `slot_pattern`, `slot_section`, `slot_mute`, `slot_color`, `loop_range`, `loop_pattern` | The pattern sequence and matrix: slots inserted, deleted, moved, cloned, made unique or given another pattern; sections; a track muted in one slot; matrix colours; the sequence loop and the pattern loop |
+| `notes_write`, `notes_clear`, `notes_transpose`, `notes_humanize`, `lines_copy`, `pattern_name`, `pattern_length`, `pattern_alias`, `automation_write` | A pattern track's lines in Renoise's notation (notes, instrument, volume, panning, delay and effect columns) written, cleared, transposed, humanized or copied; patterns named, resized or aliased; a device parameter's automation |
+| `device_add`, `device_delete`, `device_move`, `device_bypass`, `device_set`, `device_param`, `device_params`, `device_preset`, `device_preset_data`, `device_chain_load` | Track DSP devices (native or plug-in) added, deleted, moved, bypassed, renamed; one parameter, or up to 256 of one device in one step; presets and preset data; device chain files (.xrnt) |
+| `doofer_make`, `doofer_macro`, `doofer_device_add`, `doofer_device_delete`, `doofer_device_move`, `doofer_device_set`, `splitter_set`, `notepad_write`, `meta_destination` | Doofers and Splitters made from devices, their macros and the devices inside; how a Splitter splits; a Notepad's text; where a meta device (*LFO, *Key Tracker and others) points |
+| `instrument_add`, `instrument_delete`, `instrument_duplicate`, `instrument_move`, `instrument_load`, `instrument_kit`, `instrument_rename`, `instrument_set`, `instrument_macro`, `instrument_macro_map` | Instruments added, deleted, duplicated, moved, loaded (.xrni, .sfz or a sample), made from sample files (a drum kit with mute groups, or keys with velocity layers); renamed, their settings, macros and macro mappings |
+| `sample_load`, `sample_delete`, `sample_set`, `sample_slices`, `keyzone_set`, `keyzone_overlap`, `keyzone_drumkit` | Samples loaded, deleted, their settings and slices; keyzones, what plays where they overlap, a drum-kit layout |
+| `modset_add`, `modset_delete`, `modset_set`, `modset_load`, `moddevice_add`, `moddevice_delete`, `moddevice_move`, `moddevice_set`, `moddevice_param`, `chain_add`, `chain_delete`, `chain_set`, `chaindevice_add`, `chaindevice_delete`, `chaindevice_move`, `chaindevice_bypass`, `chaindevice_param` | Modulation sets and their devices (also loaded from .xrno files); sample FX chains and their devices |
+| `phrase_add`, `phrase_delete`, `phrase_set`, `phrase_map`, `phrase_playback`, `phrase_write`, `phrase_clear`, `phrase_script`, `phrase_render`, `phrase_load` | Phrases added, deleted, set, mapped to keys, how the instrument plays them; their lines written or cleared; phrase scripts written and rendered; phrase files (.xrnz) loaded |
+| `plugin_load`, `plugin_param`, `plugin_preset`, `plugin_set`, `plugin_suspend`, `midi_set` | Plug-in instruments loaded, their parameters, programs, settings and auto-suspend; a MIDI instrument's output |
+| `scratch_keep`, `run_lua` | A goal's best scratch copy kept; Lua with the whole renoise API (only Renoise's undo takes it back) |
+
+Without a HISTORY row: `play`, `stop`, `audition_note` (plays a note out loud),
+`select` (shows something in Renoise), `plugin_editor`, `save_song`,
+`save_instrument` and `save_device_preset`. `renoise_read` reads the song:
+tracks, the pattern sequence, patterns and their lines, automation,
+instruments, samples, phrases, devices and parameters, modulation sets and
+sample FX chains.
+
+### Known limits
+
+HISTORY stays honest in each case: Kumi refuses, or says what it can't do.
+
+- **Renoise:** after Renoise's own undo and redo of line edits (`notes_write`,
+  `notes_clear`, `notes_transpose`, `notes_humanize`, `lines_copy`,
+  `phrase_write`, `phrase_clear`), Kumi's undo of them is refused: Kumi can't
+  tell Renoise's redo from your own identical lines. The row says "Renoise may
+  have redone it"; Renoise's undo can take it back.
+- **Renoise:** in long sessions its undo history has sometimes emptied after
+  AU plug-in instruments were loaded and unloaded (the cause isn't known); then
+  Renoise's undo can't take back `plugin_load`, `plugin_param` or `plugin_set`.
+  `plugin_preset` is untested with plug-ins that have more than one program.
+- **REAPER:** a project whose tracks are all replaced at once (an action that
+  removes every track and inserts others) reads as another project, so Kumi's
+  references to it go stale and the model reads again.
+- **REAPER:** Kumi's undo of parameter modulation turns its switches off but
+  leaves the modulation settings, which REAPER keeps once made; the row says so.
+- **REAPER:** `track_midi_out` needs a MIDI output device in REAPER's
+  preferences.
