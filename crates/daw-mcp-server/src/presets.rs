@@ -1376,8 +1376,14 @@ fn splitter_set(mut document: xml::Document, input: &Value, device: &Device) -> 
 
 // notepad-write
 
+/// A Notepad's lines; one empty paragraph is an empty Notepad (how Kumi clears one: see `write_paragraphs`).
 fn paragraphs_of(element: &Element) -> Vec<String> {
-    element.child("Paragraphs").map(|list| list.elements().filter_map(Element::text).collect()).unwrap_or_default()
+    let lines: Vec<String> =
+        element.child("Paragraphs").map(|list| list.elements().filter_map(Element::text).collect()).unwrap_or_default();
+    if lines.len() == 1 && lines[0].is_empty() {
+        return vec![];
+    }
+    lines
 }
 
 fn notepad_write(mut document: xml::Document, top: &str, input: &Value, device: &Device) -> Result<Edited, Refusal> {
@@ -1418,14 +1424,16 @@ fn notepad_write(mut document: xml::Document, top: &str, input: &Value, device: 
     })
 }
 
+/// The Notepad's lines written. No lines are one empty paragraph: Renoise 3.5.4 keeps the text it had when the preset data
+/// has no Paragraphs, or an empty one (lab, 2026-10-20), so leaving them out never cleared a Notepad.
 fn write_paragraphs(element: &mut Element, lines: &[String]) {
     if let Some(at) = position_of(element, "Paragraphs") {
         element.remove_element(at);
     }
-    if lines.is_empty() {
-        return;
-    }
     let mut list = Element::new("Paragraphs");
+    if lines.is_empty() {
+        list = list.with_child(Element::new("Paragraph"));
+    }
     for line in lines {
         list = list.with_child(Element::new("Paragraph").with_text(line));
     }

@@ -317,6 +317,21 @@ fn a_splitter_splits_another_way_and_a_notepad_says_something_else() {
     assert!(text.contains("<Paragraph>keep the sub &amp; kick apart</Paragraph>"), "{text}");
     assert_eq!(note.title, "Wrote the Notepad on Bass");
     assert_eq!(written(undone("notepad-write", &note, &text, "Notepad", false)), NOTEPAD);
+    // A Notepad that said nothing (no Paragraphs, as Renoise writes a new one): its undo writes one empty paragraph, which
+    // clears it in Renoise (it keeps its text when the element is left out), and reads as saying nothing again.
+    let start = NOTEPAD.find("    <Paragraphs>").unwrap();
+    let end = NOTEPAD.find("</Paragraphs>\n").unwrap() + "</Paragraphs>\n".len();
+    let empty = format!("{}{}", &NOTEPAD[..start], &NOTEPAD[end..]);
+    let first = ok("notepad-write", json!({"text": "one"}), &empty, "Notepad");
+    assert_eq!(first.prior["paragraphs"], json!([]));
+    let cleared = written(undone("notepad-write", &first, &first.document.to_xml(), "Notepad", false));
+    assert!(cleared.contains("<Paragraphs>") && !cleared.contains("one"), "{cleared}");
+    assert!(matches!(undone("notepad-write", &first, &cleared, "Notepad", false), Ok(Undo::Back(_))));
+    // An empty text clears it the same way; a blank line in a text is kept.
+    let blank = ok("notepad-write", json!({"text": ""}), NOTEPAD, "Notepad").document.to_xml();
+    assert!(blank.contains("<Paragraphs>") && !blank.contains("mono"), "{blank}");
+    let spaced = ok("notepad-write", json!({"text": "a\n\nb"}), NOTEPAD, "Notepad");
+    assert_eq!(written(undone("notepad-write", &spaced, &spaced.document.to_xml(), "Notepad", false)), NOTEPAD);
     // One inside a Doofer.
     let with_pad = ok("doofer-device-add", json!({"path": "Notepad", "at": [1]}), FRESH, "Doofer").document.to_xml();
     let inner = ok("notepad-write", json!({"at": [1], "text": "macro 1: drive"}), &with_pad, "Doofer");
