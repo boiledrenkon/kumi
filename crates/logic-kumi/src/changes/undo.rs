@@ -370,6 +370,7 @@ mod tests {
             volume_db: Some(volume),
             pan: 0,
             selected: false,
+            stack: false,
         }
     }
 

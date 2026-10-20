@@ -166,6 +166,16 @@ pub fn go_to(ax: &mut Ax, panel: &Panel, path: &str) -> Done<()> {
     }
 }
 
+/// Where the panel stands: the folder its "where" pop-up names (the folder's own name, as the Finder shows it).
+pub fn location(ax: &mut Ax, panel: &Panel) -> Done<String> {
+    let panel_tree = tree(ax, panel, 3)?;
+    let popup = control(&panel_tree, "where popup")
+        .or_else(|| panel_tree.find(&|n| n.role == "AXPopUpButton" && n.id.contains("where")))
+        .ok_or_else(|| failed("the save panel shows no folder pop-up"))?;
+    let reply = call(ax, "get", json!({"pid": panel.pid, "root": "focused", "path": popup.path, "attrs": ["AXValue"]}))?;
+    Ok(reply["attrs"]["AXValue"].as_str().unwrap_or_default().to_string())
+}
+
 /// Presses a button by its identifier: `OKButton` (Save, Open, Import) or `CancelButton`.
 pub fn press(ax: &mut Ax, panel: &Panel, id: &str) -> Done<()> {
     let panel_tree = tree(ax, panel, 2)?;

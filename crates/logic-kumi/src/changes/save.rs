@@ -66,7 +66,7 @@ fn plain_path(text: &str) -> Done<PathBuf> {
 
 /// `project_save {epoch, path?, version?}`.
 pub fn project_save(ctx: &mut Ctx, keys: &KeyCommands, params: &Value) -> Answer {
-    if params.get("version").is_some_and(|v| v == &Value::Bool(true)) {
+    if params.get("version").is_some_and(|v| !v.is_null() && v != &Value::Bool(false)) {
         return Err(bad(
             "Logic Pro keeps no versions: give path (a .logicx that isn't there yet) to save a copy, or nothing to save in place",
         ));
@@ -132,8 +132,8 @@ fn modal_title(ctx: &mut Ctx) -> Done<Option<String>> {
     Ok(windows.iter().find(|window| window.dialog() || window.sheet()).map(|window| window.title.clone()))
 }
 
-/// File > Save As…, the panel taken to the folder (which must be there: the panel's own sheet says when it isn't),
-/// named, and its Save pressed; the window's document and edited flag read back.
+/// File > Save As…, the panel taken to the folder (which must be there: the panel's "where" pop-up says where it
+/// stands after the go-to), named, and its Save pressed; the window's document and edited flag read back.
 fn save_as(ctx: &mut Ctx, path: &Path) -> Done<String> {
     let folder = path.parent().ok_or_else(|| bad("path must be inside a folder"))?;
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -142,6 +142,16 @@ fn save_as(ctx: &mut Ctx, path: &Path) -> Done<String> {
     let panel = panel::find(ctx.ax)?;
     let result = (|| {
         panel::go_to(ctx.ax, &panel, &folder.to_string_lossy())?;
+        // A folder that isn't there leaves the panel where it was (the sheet closes anyway): the panel's own
+        // "where" pop-up must name the folder asked before anything is saved into it.
+        let wanted = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let landed = panel::location(ctx.ax, &panel)?;
+        if landed != wanted {
+            return Err(bad(format!(
+                "the folder {} isn't there (Logic Pro's panel stands in {landed:?}); Kumi makes no folders",
+                folder.display()
+            )));
+        }
         panel::set_name(ctx.ax, &panel, &name)?;
         panel::press(ctx.ax, &panel, "OKButton")?;
         Ok(())

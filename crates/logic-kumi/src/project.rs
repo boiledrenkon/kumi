@@ -608,6 +608,23 @@ impl Project {
         Ok(())
     }
 
+    /// Adds the track at `place` to the selection: a Shift-click on its header's name field.
+    pub fn extend_track_selection(&mut self, ax: &mut Ax, place: usize) -> Result<(), AxError> {
+        if self.layout.headers.is_none() {
+            self.find_layout(ax)?;
+        }
+        let headers = self.headers(ax)?;
+        let item = headers
+            .children
+            .iter()
+            .filter(|c| c.role == "AXLayoutItem")
+            .nth(place.checked_sub(1).ok_or_else(|| AxError::Missing("that track".into()))?)
+            .ok_or_else(|| AxError::Missing("that track".into()))?;
+        let name = item.child_where(|c| c.role == "AXTextField").ok_or_else(|| AxError::Missing("the track's name field".into()))?;
+        let (x, y, w, h) = ax.frame(&self.root, &name.path)?;
+        ax.click_with(x + (w / 2.0).min(60.0), y + h / 2.0, &["shift"])
+    }
+
     /// Selects a region (by its place through the project, from 1) through its item's `AXSelected`, which Logic
     /// takes as a toggle whatever value is set: so only when the region isn't selected. The track selection stays as
     /// it is.
@@ -874,6 +891,7 @@ mod tests {
             volume_db: None,
             pan: 0,
             selected: false,
+            stack: false,
         };
         let region = |track: usize, name: &str, bar: u32| {
             (

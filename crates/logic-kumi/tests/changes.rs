@@ -24,7 +24,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 32] = [
+const SCENES: [&str; 36] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -57,6 +57,10 @@ const SCENES: [&str; 32] = [
     "change-tempo-marker-set",
     "change-tempo-marker-delete",
     "change-signature-set",
+    "change-track-stack",
+    "change-track-stack-flatten",
+    "change-project-save",
+    "change-plan-m4",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -672,4 +676,83 @@ fn a_time_signature_is_made_in_the_signature_list_and_taken_away_again_through_t
     let restored = of(&replayed, "change_restore")[0].result().clone();
     assert_eq!(restored["restored"], json!({"exists": false}));
     assert_eq!(reads[1].result()["items"][0]["signatures"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn tracks_are_stacked_by_logics_own_key_commands_and_a_stack_comes_apart_by_undo_or_by_flattening() {
+    let replayed = replay("change-track-stack");
+    let applies = of(&replayed, "change_apply");
+    // A summing stack of two tracks: its header first, the subtracks after it, all in the new epoch.
+    let summing = applies[0].result();
+    assert_eq!(summing["applied"], json!({"index": 1, "name": "Sum 1", "kind": "summing", "tracks": ["2:track:2", "2:track:3"]}));
+    assert_eq!(summing["created"], json!({"ref": "2:track:1", "kind": "track", "stack": "summing"}));
+    assert_eq!(summing["undo"]["title"], "Undo Create Track Stack");
+    let reads = of(&replayed, "read");
+    let rows = reads[0].result()["items"].as_array().unwrap().clone();
+    assert_eq!((rows[0]["stack"].as_bool(), rows[0]["kind"].as_str(), rows[1].get("stack")), (Some(true), Some("aux"), None));
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"], json!({"tracks": 2, "pressed": "Undo Create Track Stack"}));
+    assert_eq!(reads[1].result()["total"], 2);
+    // A folder stack of one track, named: Logic shows it closed, so it is opened to be read; the rename on top of
+    // the creation means Logic's undo can't take it back, and it is flattened by value instead.
+    let folder = applies[1].result();
+    assert_eq!(folder["applied"], json!({"index": 2, "name": "Keys Folder", "kind": "folder", "tracks": ["4:track:3"]}));
+    assert_eq!(folder["created"]["stack"], "folder");
+    assert_eq!(restores[1].result()["restored"], json!({"tracks": 2}));
+    assert_eq!(restores[1].result()["display"]["title"], "Stack “Keys Folder” flattened again");
+}
+
+#[test]
+fn a_flattened_stack_comes_back_only_through_logics_own_undo() {
+    let replayed = replay("change-track-stack-flatten");
+    let applies = of(&replayed, "change_apply");
+    let flattened = applies[1].result();
+    assert_eq!(flattened["applied"], json!({"name": "Sum 1", "tracks": 2}));
+    assert_eq!(flattened["material"], json!({"name": "Sum 1", "index": 1, "tracks": 3}));
+    assert_eq!(flattened["undo"]["title"], "Undo Flatten Stack");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"tracks": 3, "pressed": "Undo Flatten Stack", "ref": "4:track:1"}));
+    assert_eq!(restored["undo"]["how"], "undo");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[2].result()["items"][0]["stack"], true);
+    assert_eq!(reads[3].result()["total"], 2);
+}
+
+#[test]
+fn the_project_is_saved_as_a_copy_through_the_save_panel_and_in_place_with_cmd_s_and_never_over_a_file_or_into_no_folder() {
+    let replayed = replay("change-project-save");
+    let saves = of(&replayed, "project_save");
+    // Save As to a .logicx that isn't there: the window's document is that file from then on, and clean.
+    assert_eq!(
+        saves[0].result(),
+        &json!({"epoch": "1", "saved": "/Users/me/programs/kumi-lanes/m4-files/Scratch copy.logicx", "dirty": false})
+    );
+    // A plain save after a change (Cmd-S), then one with nothing to save: no key posted, answered at once.
+    assert_eq!(saves[1].result()["dirty"], false);
+    assert_eq!(saves[2].result()["dirty"], false);
+    // Refused: the project's own file as a path, REAPER's version, a folder that isn't there (the panel's own
+    // "where" pop-up says where it stands; nothing is saved).
+    let error = |step: &Step| step.replayed["error"].clone();
+    assert!(error(saves[3])["message"].as_str().unwrap().contains("the project's own file"));
+    assert!(error(saves[4])["message"].as_str().unwrap().contains("keeps no versions"));
+    assert!(error(saves[5])["message"].as_str().unwrap().contains("isn't there"));
+    assert_eq!(error(saves[5])["code"], "bad-params");
+}
+
+#[test]
+fn a_plan_of_a_split_a_cycle_a_tempo_event_an_import_and_a_save_as_runs_as_one_step_each_of_logics_own_undo() {
+    let replayed = replay("change-plan-m4");
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies[0].result()["created"], json!({"ref": "2:region:2", "kind": "region"}));
+    assert_eq!(applies[1].result()["applied"], json!({"on": true, "startBeats": 16.0, "endBeats": 32.0}));
+    assert_eq!(applies[2].result()["applied"], json!({"exists": true, "bpm": 128.0, "made": true}));
+    let import = applies[3].result();
+    assert_eq!(
+        (import["applied"]["notes"].as_u64(), import["applied"]["startBeats"].as_f64(), import["applied"]["endBeats"].as_f64()),
+        (Some(64), Some(32.0), Some(48.0))
+    );
+    assert_eq!(import["created"]["trackAdded"], true);
+    let saved = of(&replayed, "project_save")[0].result().clone();
+    assert_eq!(saved["dirty"], false);
+    assert_eq!(of(&replayed, "read")[0].result()["total"], 3);
 }

@@ -153,6 +153,37 @@ compares every answer to what Logic gave and checks the `uncertain`, `busy`,
 carried-ref and undo-stack paths; the M2 scenes and `tests/reads.rs` are
 untouched.
 
+## What it does (M4)
+
+The bridge saves the project and makes the rest of the changes REAPER's
+extension makes, over the same wire: `project_save` (in place with Cmd-S, or
+as a `.logicx` that isn't there yet through macOS's save panel, never over a
+file) and the kinds `key-command` (`run_action`'s shape: a Logic key command
+by name or id, its chord resolved from the producer's own key set with the
+factory U.S. set behind it, `src/keys.rs`), `region-move`, `region-resize`,
+`region-split`, `region-loop`, `region-rename`, `region-delete`, `loop-range`
+(the cycle through the LCD's locators), `notes-quantize` (Logic's quantize
+parameter, set through the Event List's pop-up for the region's events),
+`midi-import` (a Standard MIDI File the bridge writes, `src/changes/smf.rs`,
+taken through File > Import > MIDI File… and its panel), `tempo-marker-set`,
+`tempo-marker-delete`, `signature-set` (the Tempo and Signature lists) and
+`track-stack`, `track-stack-flatten` (Logic's own Create Summing/Folder Stack
+and Flatten Stack key commands on the selected headers). `src/changes/panel.rs`
+drives the save and open panels through their service process; `undo.rs`
+notices a key command's step by the Undo title moving. `track-color` and
+`track-move` are refused with why: the Color palette's swatches are bare
+positions to Accessibility and no key command or action reorders tracks.
+
+Each kind is one channel, the fence at preview and apply, a readback before
+the answer, a restore by value where the value can be set, else Logic's own
+undo while the step is on top; the channels, the shapes and where Logic forces
+a difference from REAPER (a tempo event is two undo steps, the quantize is a
+parameter, an import makes a track, a stack's bus routing stays) are
+`docs/en/LOGIC_CONTRACT.md`, "Changes". The scenes `change-<kind>` under
+`tests/fixtures`, `change-project-save` and `change-plan-m4` (a split, a
+cycle, a tempo event, an import of 64 notes and a save as, in one run) are
+recorded from the real Logic and replayed by `tests/changes.rs`.
+
 ## Arguments
 
 ```sh

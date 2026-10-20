@@ -23,9 +23,10 @@ use crate::rows::Position;
 pub const FOLDER: &str = "/tmp/kumi-logic";
 /// The most notes one import takes.
 const MOST_NOTES: usize = 10000;
-/// How long Logic gets to show its question after the import (it comes at once when it comes), and to settle
-/// after it.
-const QUESTION_WAIT: Duration = Duration::from_secs(2);
+/// How often Logic's windows are looked at for a question after the import (it comes at once when it comes), and
+/// the pause between looks: a fixed count, so a replay asks exactly what the recording did.
+const QUESTION_POLLS: usize = 8;
+const QUESTION_POLL: Duration = Duration::from_millis(250);
 const AFTER_IMPORT: Duration = Duration::from_millis(1200);
 
 /// What a request asks: the notes as the file takes them, and where.
@@ -135,9 +136,8 @@ fn question(ctx: &mut Ctx) -> Done<Option<Node>> {
 /// and the import refused with its words. What was pressed, if anything.
 fn answer_questions(ctx: &mut Ctx) -> Done<Vec<String>> {
     let mut pressed = Vec::new();
-    let until = std::time::Instant::now() + QUESTION_WAIT;
-    loop {
-        super::pause(Duration::from_millis(250));
+    for _ in 0..QUESTION_POLLS {
+        super::pause(QUESTION_POLL);
         if let Some(dialog) = question(ctx)? {
             let texts: Vec<String> = dialog.find_all_texts();
             let strings = &ctx.project.strings;
@@ -156,10 +156,11 @@ fn answer_questions(ctx: &mut Ctx) -> Done<Vec<String>> {
             }
             return Err(super::uncertain(format!("Logic Pro asked something Kumi didn't expect after the import ({})", texts.join(" "))));
         }
-        if std::time::Instant::now() >= until || !pressed.is_empty() {
-            return Ok(pressed);
+        if !pressed.is_empty() {
+            break;
         }
     }
+    Ok(pressed)
 }
 
 impl Node {
@@ -228,19 +229,33 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(super::uncertain(format!("Logic Pro shows {} regions after the import, none new", regions.len())));
     };
     let (track, region) = &regions[place - 1];
-    let notes = ctx.project.notes_rows(ctx.ax, place, beats_per_bar).map(|rows| rows.len()).unwrap_or(0);
+    // The Event List lists the rows on its screen: a long file reads as its first rows, and the region's length
+    // (the file's span, as Logic rounds it up to the bar) says the rest came in.
+    let rows = ctx.project.notes_rows(ctx.ax, place, beats_per_bar).map(|rows| rows.len()).unwrap_or(0);
+    let (start, end) = (region.start.beats(beats_per_bar), region.end.beats(beats_per_bar));
+    let span = plan.notes.iter().map(|n| n.start + n.length).fold(0.0, f64::max);
+    if end - start + 1e-6 < span {
+        return Err(super::uncertain(format!(
+            "Logic Pro's new region runs {} beats, shorter than the file's {span} beats: the import didn't all come in",
+            end - start
+        )));
+    }
     let track_label = headers.get(track - 1).map(tracks::Found::label).unwrap_or_else(|| format!("Track {track}"));
     let mut created = json!({"ref": ref_text(ctx, "region", &[place]), "kind": "region", "track": ref_text(ctx, "track", &[*track])});
     if headers.len() > before_tracks {
         created["trackAdded"] = true.into();
     }
-    Ok(Applied {
-        applied: json!({"notes": notes, "startBeats": region.start.beats(beats_per_bar), "endBeats": region.end.beats(beats_per_bar), "track": track, "trackName": track_label, "file": file.to_string_lossy(), "answered": answered}),
-        created: Some(created),
-        display: json!({"title": title(plan.notes.len(), &track_label, &region.start), "notes": notes}),
-        step: Some("Import"),
-        ..Applied::default()
-    })
+    let mut display = json!({"title": title(plan.notes.len(), &track_label, &region.start), "notes": plan.notes.len()});
+    if rows < plan.notes.len() {
+        display["note"] =
+            format!("Logic Pro's Event List lists its first {rows} rows; the region's {} beats hold the file's {span}.", end - start)
+                .into();
+    }
+    let mut applied = json!({"notes": plan.notes.len(), "startBeats": start, "endBeats": end, "track": track, "trackName": track_label, "file": file.to_string_lossy(), "answered": answered});
+    if rows < plan.notes.len() {
+        applied["rows"] = rows.into();
+    }
+    Ok(Applied { applied, created: Some(created), display, step: Some("Import"), ..Applied::default() })
 }
 
 pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Restored> {

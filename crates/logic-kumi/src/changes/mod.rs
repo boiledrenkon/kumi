@@ -23,6 +23,7 @@ mod quantize;
 mod regions;
 mod save;
 pub mod smf;
+mod stack;
 mod structure;
 mod timeline;
 mod tracks;
@@ -139,6 +140,8 @@ pub enum Kind {
     RegionLoop,
     RegionRename,
     RegionDelete,
+    TrackStack,
+    TrackStackFlatten,
     LoopRange,
     NotesQuantize,
     MidiImport,
@@ -148,7 +151,7 @@ pub enum Kind {
 }
 
 /// The kinds Logic's bridge can't make yet, and why, so the refusal says so.
-const NOT_YET: [(&str, &str); 8] = [
+const NOT_YET: [(&str, &str); 9] = [
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
     ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
     ("fx-delete", "the insert slot's pop-up menu can't be driven from outside"),
@@ -156,7 +159,8 @@ const NOT_YET: [(&str, &str); 8] = [
     ("fx-move", "the insert slots can't be rearranged from outside"),
     ("send-add", "the send slot's pop-up menu can't be driven from outside"),
     ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
-    ("track-move", "the track headers can't be dragged from outside"),
+    ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
+    ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
 ];
 
 impl std::fmt::Debug for Kind {
@@ -179,6 +183,8 @@ impl std::fmt::Debug for Kind {
             Kind::RegionLoop => f.write_str("RegionLoop"),
             Kind::RegionRename => f.write_str("RegionRename"),
             Kind::RegionDelete => f.write_str("RegionDelete"),
+            Kind::TrackStack => f.write_str("TrackStack"),
+            Kind::TrackStackFlatten => f.write_str("TrackStackFlatten"),
             Kind::LoopRange => f.write_str("LoopRange"),
             Kind::NotesQuantize => f.write_str("NotesQuantize"),
             Kind::MidiImport => f.write_str("MidiImport"),
@@ -212,6 +218,8 @@ pub fn kind(name: &str) -> Option<Kind> {
         "region-loop" => Some(Kind::RegionLoop),
         "region-rename" => Some(Kind::RegionRename),
         "region-delete" => Some(Kind::RegionDelete),
+        "track-stack" => Some(Kind::TrackStack),
+        "track-stack-flatten" => Some(Kind::TrackStackFlatten),
         "loop-range" => Some(Kind::LoopRange),
         "notes-quantize" => Some(Kind::NotesQuantize),
         "midi-import" => Some(Kind::MidiImport),
@@ -223,7 +231,7 @@ pub fn kind(name: &str) -> Option<Kind> {
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 29] = [
+pub const KINDS: [&str; 31] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -253,6 +261,8 @@ pub const KINDS: [&str; 29] = [
     "tempo-marker-set",
     "tempo-marker-delete",
     "signature-set",
+    "track-stack",
+    "track-stack-flatten",
 ];
 
 impl Kind {
@@ -275,6 +285,8 @@ impl Kind {
             Kind::RegionLoop => regions::loop_preview(ctx, input),
             Kind::RegionRename => regions::rename_preview(ctx, input),
             Kind::RegionDelete => regions::delete_preview(ctx, input),
+            Kind::TrackStack => stack::stack_preview(ctx, input),
+            Kind::TrackStackFlatten => stack::flatten_preview(ctx, input),
             Kind::LoopRange => cycle::preview(ctx, input),
             Kind::NotesQuantize => quantize::preview(ctx, input),
             Kind::MidiImport => import::preview(ctx, input),
@@ -303,6 +315,8 @@ impl Kind {
             Kind::RegionLoop => regions::loop_apply(ctx, input, fence),
             Kind::RegionRename => regions::rename_apply(ctx, input, fence),
             Kind::RegionDelete => regions::delete_apply(ctx, input, fence, desc),
+            Kind::TrackStack => stack::stack_apply(ctx, keys, input, fence),
+            Kind::TrackStackFlatten => stack::flatten_apply(ctx, keys, input, fence),
             Kind::LoopRange => cycle::apply(ctx, input, fence),
             Kind::NotesQuantize => quantize::apply(ctx, input, fence),
             Kind::MidiImport => import::apply(ctx, input, fence),
@@ -334,6 +348,8 @@ impl Kind {
             Kind::RegionLoop => regions::loop_restore(ctx, restore),
             Kind::RegionRename => regions::rename_restore(ctx, restore),
             Kind::RegionDelete => regions::delete_restore(ctx, watch, restore),
+            Kind::TrackStack => stack::stack_restore(ctx, keys, watch, restore),
+            Kind::TrackStackFlatten => stack::flatten_restore(ctx, keys, watch, restore),
             Kind::LoopRange => cycle::restore(ctx, restore),
             Kind::NotesQuantize => quantize::restore(ctx, watch, restore),
             Kind::MidiImport => import::restore(ctx, watch, restore),

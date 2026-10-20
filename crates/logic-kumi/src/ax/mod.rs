@@ -398,6 +398,12 @@ impl<'a> Ax<'a> {
         Ok(())
     }
 
+    /// A click with modifier keys held (`shift` extends a track selection).
+    pub fn click_with(&mut self, x: f64, y: f64, mods: &[&str]) -> Result<(), AxError> {
+        self.call("click", json!({"pid": self.pid, "x": x, "y": y, "mods": mods}))?;
+        Ok(())
+    }
+
     /// An element's frame on the screen: its position and size.
     pub fn frame(&mut self, root: &Root, path: &str) -> Result<(f64, f64, f64, f64), AxError> {
         let attrs = self.get(root, path, &["AXPosition", "AXSize"])?;
