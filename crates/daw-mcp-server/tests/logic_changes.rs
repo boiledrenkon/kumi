@@ -1002,3 +1002,27 @@ async fn an_undo_logic_doesnt_answer_after_with_the_restore_switch_is_never_sent
     assert!(!is_error && undone["state"] == "undone", "{undone}");
     lab.simulator.stop();
 }
+
+/// (M4) The producer's Cmd-Z on a step one of the new kinds made (a split) is named back by the bridge through the
+/// desc it kept, as a rename's is: the host names the change, and Kumi's HISTORY follows.
+#[tokio::test]
+async fn a_cmd_z_on_a_split_is_named_back_to_the_host() {
+    let mut lab = Lab::start().await;
+    let (_, split) = lab.make("region-split", json!({"ref": "1:region:1", "positionBeats": 8}), "a1").await;
+    let (_, moved) = lab.make("marker-move", json!({"ref": "2:marker:1", "positionBeats": 40}), "a2").await;
+    assert_eq!(lab.script.undo_titles(), ["Undo Split", "Undo Value Change"]);
+    // Two presses of Cmd-Z: the marker's move, then the split, each named by its desc.
+    for (expected_title, change) in [("Undo Value Change", &moved), ("Undo Split", &split)] {
+        let (title, desc) = lab.script.undo_last().expect("a step");
+        assert_eq!(title, expected_title);
+        lab.simulator
+            .emit("undone_in_daw", json!({"descs": [desc.clone().unwrap()], "how": "undo", "epoch": lab.script.epoch().to_string()}));
+        let named = lab.undone_in_daw().await;
+        assert_eq!(
+            (named["transactionIds"].clone(), named["undone"].clone()),
+            (json!([change["transactionId"]]), json!([change["transactionId"]]))
+        );
+    }
+    // (no tool is asked after an event: the session's line reader would take the event's notification for the answer)
+    lab.simulator.stop();
+}
