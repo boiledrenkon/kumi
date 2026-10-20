@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 use crate::ax::strings::{self, Strings};
 use crate::ax::{Ax, AxError};
 use crate::changes::Changes;
+
+/// The methods that write to Logic: the focus is refreshed before their answer leaves.
+const WRITES: [&str; 6] = ["change_apply", "change_restore", "transport_stop", "transport_play", "cursor_set", "project_save"];
 use crate::focus::{self, Focus};
 use crate::helper::Helper;
 use crate::log;
@@ -380,9 +383,14 @@ impl Attached {
         }
     }
 
-    /// Answers one queued request through the project reader.
-    fn serve(&mut self, job: Job, helper: &mut dyn Helper) {
+    /// Answers one queued request through the project reader. A write (a change applied or put back, the transport,
+    /// the playhead, a save) refreshes the focus before its answer leaves, so the host's next `focus` reads what the
+    /// write left and not what the tick before it saw: the M4 gate read the cycle one write behind otherwise.
+    fn serve(&mut self, job: Job, helper: &mut dyn Helper, notes: &mut Notes) {
         let answer = self.answer(&job.method, &job.params, helper);
+        if WRITES.contains(&job.method.as_str()) {
+            self.refresh(helper, notes);
+        }
         job.answer(answer);
     }
 
@@ -525,7 +533,7 @@ pub fn run(config: Config, mut helper: Box<dyn Helper>, stop: Arc<AtomicBool>) -
                     job.answer(Err((wire::code::FAILED.into(), server::UNTRUSTED.into())));
                     continue;
                 }
-                attached.serve(job, helper.as_mut());
+                attached.serve(job, helper.as_mut(), &mut notes);
             }
         }
         if heartbeat_at.elapsed() >= heartbeat {

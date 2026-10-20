@@ -19,7 +19,10 @@ use crate::refs::bad;
 const NOTE: &str = "Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro).";
 const NO_STEP: &str = "Logic Pro made no undo step of it: it changed nothing its history keeps (a view, selection or transport command), so it has no row in HISTORY.";
 /// How long a command gets before the Edit menu's titles are read back.
-const COMMAND_SETTLE: Duration = Duration::from_millis(500);
+/// Logic names the step a moment after the command lands, later for a marker made than for a selection: the Undo
+/// title is read this often, this many times at most, until it moves.
+const COMMAND_SETTLE: Duration = Duration::from_millis(250);
+const COMMAND_READS: usize = 6;
 
 /// Commands never run as a change, by id: Save and Save As (`project_save`), Undo and Redo.
 const REFUSED_IDS: [(u32, &str); 4] = [
@@ -114,9 +117,21 @@ pub fn apply(changes: &mut Changes, ctx: &mut Ctx, params: &Value) -> Answer {
         return Err(super::busy("Logic Pro went behind before the command could be posted; nothing changed"));
     }
     front::post(ctx.ax, &chord)?;
-    super::pause(COMMAND_SETTLE);
+    // The M4 gate read the title once, 500 ms after the chord, and took a marker's step for none: read until it moves
+    // (once over a recorded scene, whose reads come in the order the real run made them).
+    let mut after = None;
+    for _ in 0..COMMAND_READS {
+        super::pause(COMMAND_SETTLE);
+        let (titles, verified) = changes.watch.fresh_titles(ctx).unwrap_or_default();
+        let moved = verified && titles.undo != before.undo;
+        after = Some((titles, verified));
+        if moved || !super::settling() {
+            break;
+        }
+    }
+    let (titles, verified) = after.unwrap_or_default();
     let key = super::change_key("key-command", &Value::Null);
-    let (undo, step) = changes.watch.applied_if_title_moved(ctx, desc, &key, &before);
+    let (undo, step) = changes.watch.applied_with_titles(ctx, desc, &key, &before, titles, verified);
     let mut applied = json!({"command": command.id, "name": command.name, "key": chord.text()});
     let mut display = json!({"title": title(&command), "note": NOTE});
     if let Some(step) = step {

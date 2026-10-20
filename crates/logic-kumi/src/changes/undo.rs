@@ -219,6 +219,19 @@ impl Watch {
     /// field of the apply's answer, and the step's name when there is one.
     pub fn applied_if_title_moved(&mut self, ctx: &mut Ctx, desc: &str, key: &str, before: &Titles) -> (Value, Option<String>) {
         let (titles, verified) = self.fresh_titles(ctx).unwrap_or_default();
+        self.applied_with_titles(ctx, desc, key, before, titles, verified)
+    }
+
+    /// As `applied_if_title_moved`, over titles the caller read (a key command reads them until they move).
+    pub fn applied_with_titles(
+        &mut self,
+        ctx: &mut Ctx,
+        desc: &str,
+        key: &str,
+        before: &Titles,
+        titles: Titles,
+        verified: bool,
+    ) -> (Value, Option<String>) {
         let moved = verified && titles.undo != before.undo;
         let step = if moved { titles.undo_action(&ctx.project.strings) } else { None };
         let mut undo = json!({"desc": desc, "entry": step.is_some()});

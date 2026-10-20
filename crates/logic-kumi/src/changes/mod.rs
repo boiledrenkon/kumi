@@ -51,6 +51,11 @@ pub fn set_settling(on: bool) {
     SETTLING.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether the changes wait for Logic (false over a recorded scene, where a read repeated would eat the next step's).
+pub(crate) fn settling() -> bool {
+    SETTLING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Waits for Logic to settle, unless the waits are off.
 pub(crate) fn pause(duration: std::time::Duration) {
     if SETTLING.load(std::sync::atomic::Ordering::Relaxed) {
