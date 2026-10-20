@@ -667,6 +667,8 @@ end
 
 -- After a producer's undo or redo: the journalled properties are read again and compared with what Kumi wrote and what it
 -- replaced.
+local check_read
+
 function M.journal_check(journal)
   local song = renoise.song()
   if not song then return end
@@ -710,37 +712,62 @@ function M.journal_check(journal)
         queue(journal, entry.desc, "redo")
       end
     elseif spec and spec.reread and not entry.shape then
-      local ok, now = pcall(function()
-        local object = spec.reread(song, entry.place)
-        if object == nil then return nil end
-        return spec.read(object, entry.applied)
-      end)
-      if ok and now ~= nil then
-        if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
-          entry.state = "undone"
-          stamp(journal, entry)
-          entry.redone = nil
-          queue(journal, entry.desc, "undo")
-        elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
-          -- (what Kumi wrote is there again, from Renoise's redo: the lines' count of edits since Kumi's step starts again here,
-          -- so Kumi's undo isn't refused for the redo's own writes; an edit after it still is. Not where the redo is unsure:
-          -- lines the producer had and Renoise's undo brought back read the same as Kumi's, review MUST 10)
-          if journal.retouched and not spec.unsure_redo and type(entry.applied) == "table" then journal.retouched(entry.applied) end
-          if spec.unsure_redo then
-            -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
-            -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
-            entry.state = "unsure"
-            queue(journal, entry.desc, "unsure")
-          else
-            entry.state = "applied"
-            entry.redone = true
-            queue(journal, entry.desc, "redo")
-          end
-        end
-      end
+      check_read(journal, song, entry)
     end
   end
   check_slots(journal, song)
+end
+
+-- An entry the journal reads again (its spec's `reread`, `read`, `same`): undone when it reads as before the change and not as
+-- the change left it, redone when it reads as the change left it again.
+check_read = function(journal, song, entry)
+  local spec = entry.spec
+  local ok, now = pcall(function()
+    local object = spec.reread(song, entry.place)
+    if object == nil then return nil end
+    return spec.read(object, entry.applied)
+  end)
+  if ok and now ~= nil then
+    if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
+      entry.state = "undone"
+      stamp(journal, entry)
+      entry.redone = nil
+      queue(journal, entry.desc, "undo")
+    elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
+      -- (what Kumi wrote is there again, from Renoise's redo: the lines' count of edits since Kumi's step starts again here,
+      -- so Kumi's undo isn't refused for the redo's own writes; an edit after it still is. Not where the redo is unsure:
+      -- lines the producer had and Renoise's undo brought back read the same as Kumi's, review MUST 10)
+      if journal.retouched and not spec.unsure_redo and type(entry.applied) == "table" then journal.retouched(entry.applied) end
+      if spec.unsure_redo then
+        -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
+        -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
+        entry.state = "unsure"
+        queue(journal, entry.desc, "unsure")
+      else
+        entry.state = "applied"
+        entry.redone = true
+        queue(journal, entry.desc, "redo")
+      end
+    end
+  end
+end
+
+-- (accept round 2) What Renoise tells no notifier of when its undo or redo changes it (what a Doofer, Splitter or Notepad holds:
+-- `spec.polled`) is read again now and then instead (the tool's timer, about once a second): at most `most` of the newest such
+-- entries, each one read of the device's preset data.
+function M.journal_poll(journal, most)
+  local song = renoise.song()
+  if not song then return 0 end
+  local read = 0
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if read >= (most or 8) then break end
+    if entry.spec and entry.spec.polled and entry.spec.reread and not entry.shape and (entry.state == "applied" or entry.state == "undone") then
+      check_read(journal, song, entry)
+      read = read + 1
+    end
+  end
+  return read
 end
 
 -- n-instruments: an operation on a list of instruments, or of what is in one (its samples, phrases, sets, chains, a set's or a

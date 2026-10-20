@@ -240,6 +240,6 @@ M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
 M.journal_pattern_event, M.journal_sequence_event = base.journal_pattern_event, base.journal_sequence_event
 M.journal_list_event = base.journal_list_event -- (n-instruments)
-M.redone_entry = base.redone_entry
+M.redone_entry, M.journal_poll = base.redone_entry, base.journal_poll
 
 return M

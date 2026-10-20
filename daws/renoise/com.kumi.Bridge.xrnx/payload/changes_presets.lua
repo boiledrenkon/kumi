@@ -49,6 +49,15 @@ function M.shape_of(xml)
   return M.print_of(shape)
 end
 
+-- Preset data as it reads, values and all, with the inner devices' SelectedPresetIsModified and IsSelected left out (they move
+-- by themselves, as for the shape): what the journal compares to tell Renoise's undo and redo of a Doofer's, a Splitter's or a
+-- Notepad's contents.
+function M.content_of(xml)
+  local content = xml:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
+  content = content:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
+  return M.print_of(content)
+end
+
 -- What preset data says it is: its slot's device type, its document version, and a plug-in's identifier.
 local function preset_kind(xml)
   if type(xml) ~= "string" then xml = "" end
@@ -495,12 +504,14 @@ for _, spec in ipairs(XML_KINDS) do
       if not ok then base.gone_is_changed(t) end
       local label = label_of(t, track, device)
       if fence.id ~= nil and fence.id ~= identity(track, device) then fail("changed", base.moved_text(label)) end
-      local before = M.shape_of(device.active_preset_data)
+      local was = device.active_preset_data
+      local before = M.shape_of(was)
       local back = write_checked(song, env, t, d, track, device, input.presetData, input.shape, desc)
       return {
         applied = { shape = M.shape_of(back), edit = input.edit }, material = keep(env, t, d, track, device), target = target_of(t, d),
         display = display_from(input.display, "Changed " .. q(label)), undo = { desc = desc, entry = true },
-        prior = { shape = before }, journal_applied = { shape = M.shape_of(back) }, place = { track = t, device = d },
+        prior = { shape = before, content = M.content_of(was) }, journal_applied = { shape = M.shape_of(back), content = M.content_of(back) },
+        place = { track = t, device = d },
       }
     end,
     restore = function(song, env, restore, desc)
@@ -515,8 +526,16 @@ for _, spec in ipairs(XML_KINDS) do
       }
     end,
     reread = reread,
-    read = function(device) return { shape = M.shape_of(device.active_preset_data) } end,
-    same = function(a, b) return a.shape == b.shape end,
+    read = function(device)
+      local xml = device.active_preset_data
+      return { shape = M.shape_of(xml), content = M.content_of(xml) }
+    end,
+    -- (by content where both say it: a value inside changes it, which no shape tells)
+    same = function(a, b)
+      if a.content and b.content then return a.content == b.content end
+      return a.shape == b.shape
+    end,
+    polled = true,
   })
 end
 

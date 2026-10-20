@@ -128,6 +128,9 @@ local function layout_now()
   return b.layout
 end
 
+-- How often the journal reads again what no notifier tells (a container's contents), and how many of those at most each time.
+M.POLL_MS, M.POLL_MOST = 1000, 8
+
 -- How many shifts of the track list the tool keeps to carry refs through.
 -- (a restore that puts a track back into a big group makes two swaps per member itself: 1024 covers groups of 500)
 M.SHIFT_HISTORY = 1024
@@ -818,6 +821,12 @@ local function flush_events()
   if b.undone then
     b.undone = false
     changes.journal_check(b.journal)
+  end
+  -- (what Renoise's undo changes inside a Doofer, a Splitter or a Notepad no notifier tells: read again about once a second)
+  local now_ms = M.now_ms()
+  if changes.journal_active(b.journal) and now_ms - (b.polled_ms or 0) >= M.POLL_MS then
+    b.polled_ms = now_ms
+    changes.journal_poll(b.journal, M.POLL_MOST)
   end
   for _, event in ipairs(changes.journal_take(b.journal)) do
     conns:event("undone_in_daw", { descs = json.array(event.descs), how = event.how, epoch = epoch() })

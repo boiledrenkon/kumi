@@ -385,6 +385,35 @@ test("devices m4: a host-made Doofer edit is written whole if its shape holds, a
   ok(device_data(3, 2).preset_data:find("<Name>Macro 1</Name>", 1, true))
 end)
 
+test("devices m4: Renoise's own undo and redo of a value inside a Doofer (no notifier tells them) are told within a second or so", function()
+  local _, peer = setup()
+  local epoch, layout = place(peer)
+  local read = call(peer, "preset_read", { ref = epoch .. ":device:3.2", epoch = epoch, layout = layout }).result
+  -- (the Gainer's gain inside it: no parameter of the Doofer's own moves)
+  local edited, n = read.presetData:gsub("<Value>1.0</Value>", "<Value>0.5</Value>", 1)
+  eq(n, 1)
+  local input = { ref = epoch .. ":device:3.2", presetData = edited, shape = read.shape, display = { title = "Gain inside" } }
+  local done = call(peer, "change_apply", { kind = "doofer-device-set", input = input, fence = { id = read.id }, desc = "Kumi: inside (k9)", epoch = epoch, layout = layout })
+  ok(done.result, json.encode(done.error or {}))
+  local function told()
+    mock.advance(1100)
+    call(peer, "ping")
+    local out = {}
+    for _, event in ipairs(peer.events or {}) do
+      if event.name == "undone_in_daw" then out[#out + 1] = event.data.how .. ":" .. event.data.descs[1] end
+    end
+    peer.events = {}
+    return table.concat(out, ",")
+  end
+  told()
+  mock.song:undo()
+  ok(mock.song:track(3):device(2).active_preset_data:find("<Value>1.0</Value>", 1, true), "Renoise's undo")
+  eq(told(), "undo:Kumi: inside (k9)")
+  mock.song:redo()
+  eq(told(), "redo:Kumi: inside (k9)")
+  eq(told(), "", "told once")
+end)
+
 test("devices m4: host-made edits go only to the devices they are for, with their own device type's data", function()
   local _, peer = setup()
   local epoch, layout = place(peer)
