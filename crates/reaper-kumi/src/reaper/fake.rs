@@ -550,6 +550,8 @@ pub struct State {
     pub fx_store: Vec<FakeFx>,
     /// How many times REAPER was asked to copy an FX into a container (it hangs real REAPER: a test checks it is never asked).
     pub copies_into_containers: u32,
+    /// (m6-library) FX chains read through a track handle REAPER no longer has: in REAPER, a crash (lab 2026-10-19).
+    pub dead_handle_reads: u32,
     /// Items, takes, lanes and razor areas as Kumi's item changes need them (m4-r-items).
     pub items: items::ItemsState,
 }
@@ -622,6 +624,7 @@ impl Default for State {
             automation_override: -1,
             fx_store: vec![],
             copies_into_containers: 0,
+            dead_handle_reads: 0,
             items: items::ItemsState::default(),
         }
     }
@@ -1902,7 +1905,13 @@ unsafe extern "C" fn get_touched_or_focused_fx(
 // ----- FX (the same for a track's chain and a take's) -----
 
 fn fx_count(owner: u64) -> c_int {
-    counted(|s| chain_of(s, owner, 0).map_or(0, |c| c.len() as c_int))
+    counted(|s| {
+        let (kind, a, _, _) = unpack(owner);
+        if kind == TRACK && a != MASTER && a as usize >= s.tracks.len() {
+            s.dead_handle_reads += 1;
+        }
+        chain_of(s, owner, 0).map_or(0, |c| c.len() as c_int)
+    })
 }
 fn fx_guid(owner: u64, index: c_int) -> *mut api::GUID {
     let guid = counted(|s| fx_of(s, owner, index).map(|f| f.guid.clone()));
