@@ -39,6 +39,18 @@ fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+/// A value as the DAW wrote it ("-6.021 dB", "-INF dB"), with the true minus before its numbers, as Kumi's titles write them.
+fn minus_text(text: String) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 2);
+    for (k, c) in chars.iter().enumerate() {
+        let starts = k == 0 || chars[k - 1].is_whitespace() || chars[k - 1] == '(';
+        let number = chars.get(k + 1).is_some_and(|next| next.is_ascii_digit() || *next == '.' || next.eq_ignore_ascii_case(&'i'));
+        out.push(if *c == '-' && starts && number { '−' } else { *c });
+    }
+    out
+}
+
 fn number(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64).filter(|n| n.is_finite())
 }
@@ -55,8 +67,8 @@ fn drawn_value(value: &Value) -> Option<PictureValue> {
         to: number(value, "to"),
         min: number(value, "min"),
         max: number(value, "max"),
-        from_text: text(value, "fromText"),
-        to_text: text(value, "toText"),
+        from_text: text(value, "fromText").map(minus_text),
+        to_text: text(value, "toText").map(minus_text),
         asked: None,
     })
 }
@@ -178,8 +190,8 @@ pub fn params(answers: &Answers) -> Option<ChangePicture> {
             to: number(after, "value"),
             min: answers.shown("min").as_f64(),
             max: answers.shown("max").as_f64(),
-            from_text: text(before, "valueString"),
-            to_text: text(after, "valueString"),
+            from_text: text(before, "valueString").map(minus_text),
+            to_text: text(after, "valueString").map(minus_text),
             asked: None,
         };
         return Some(ChangePicture::Values { values: vec![value] });
@@ -190,8 +202,10 @@ pub fn params(answers: &Answers) -> Option<ChangePicture> {
         .filter_map(Value::as_str)
         .filter_map(moved_line)
         .map(|(name, shown)| PictureValue {
-            from_text: before.get(&name).and_then(|was| was.as_str().map(str::to_owned).or_else(|| was.as_f64().map(plain_number))),
-            to_text: Some(shown),
+            from_text: before
+                .get(&name)
+                .and_then(|was| was.as_str().map(|t| minus_text(t.to_owned())).or_else(|| was.as_f64().map(plain_number))),
+            to_text: Some(minus_text(shown)),
             name,
             ..Default::default()
         })
@@ -518,7 +532,7 @@ mod tests {
         assert_eq!(
             said,
             [
-                ("Gain", Some("0.000 dB"), Some("-6.000 dB")),
+                ("Gain", Some("0.000 dB"), Some("−6.000 dB")),
                 ("Q", Some("1.000"), Some("2.000")),
                 ("Dest.", None, Some("“Gain” of “Gainer” on “Pad”"))
             ]
@@ -531,6 +545,14 @@ mod tests {
         let Some(ChangePicture::Values { values }) = params(&Answers { preview: &preview, applied: &applied }) else { panic!() };
         assert_eq!((values[0].name.as_str(), values[0].from, values[0].to, values[0].max), ("Gain", Some(0.5), Some(1.0), Some(1.4125)));
         assert_eq!((values[0].from_text.as_deref(), values[0].to_text.as_deref()), (Some("0.000 dB"), Some("6.021 dB")));
+        // Renoise's own text below zero, and silence: the true minus (as titles write it).
+        let (preview, applied) = answers(
+            json!({}),
+            json!({"display": {"parameter": "Gain", "before": {"value": 0.5, "valueString": "-6.021 dB"}, "after": {"value": 0.0, "valueString": "-INF dB"}}}),
+        );
+        let Some(ChangePicture::Values { values }) = params(&Answers { preview: &preview, applied: &applied }) else { panic!() };
+        assert_eq!((values[0].from_text.as_deref(), values[0].to_text.as_deref()), (Some("−6.021 dB"), Some("−INF dB")));
+        assert_eq!(minus_text("Key -12 (C-4)".into()), "Key −12 (C-4)", "a note name's hyphen stays");
         // REAPER's: drawn by the bridge, normalized with what the plug-in shows.
         let (preview, applied) = answers(
             json!({}),

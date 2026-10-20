@@ -273,6 +273,10 @@ pub struct Link<S: RefScheme> {
     /// Kumi made may be a new object to the DAW's bridge since, so a refusal of Kumi's undo says that, not that it moved or
     /// went (`undo_transaction`).
     pub put_back_by_daw: RefCell<std::collections::HashSet<String>>,
+    /// The open project's identity as Kumi last saw it (the integration's), and the one each change was made in, by
+    /// transaction: a refusal of Kumi's undo in another project says that, not that something moved.
+    pub project: Rc<RefCell<Option<String>>>,
+    pub made_in: RefCell<HashMap<String, String>>,
 }
 
 /// How Kumi's undo of a change came to an end for good.
@@ -510,7 +514,18 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
         let why = self.link.in_short_refs(&refused.why);
         let put_back = matches!(refused.code.as_deref(), Some("changed" | "gone" | "stale" | "undone" | "daw-only" | "unknown"))
             && settled(&self.link);
+        // (made in a project that isn't the one open now: Renoise's new song, REAPER's other tab)
+        let elsewhere = self
+            .link
+            .made_in
+            .borrow()
+            .get(&snapshot.transaction_id)
+            .is_some_and(|made| self.link.project.borrow().as_ref().is_some_and(|now| now != made));
         let (state, note) = match refused.code.as_deref() {
+            Some("changed" | "gone" | "stale") if elsewhere => (
+                ChangeState::Kept,
+                format!("Another {} is open in {} now, not the one Kumi made this in, so Kumi left it.", words.place, words.app),
+            ),
             // The DAW's own undo or redo put it back since: to its bridge that may be another object, or lines another hand
             // wrote, so it refuses; it's there, and the DAW's undo is what takes it back now.
             Some("changed" | "gone" | "stale") if put_back => (
@@ -1071,6 +1086,9 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         let mut record = new_record(kind.family, summary, state, self.history.host.now_ms());
         record.note = note;
         let id = record.id.clone();
+        if let Some(project) = self.link().project.borrow().clone() {
+            self.link().made_in.borrow_mut().insert(transaction.to_owned(), project);
+        }
         self.history.remember(record, transaction.into(), None);
         self.history.made_by(&id, kind.tool);
         self.history.changes_this_turn.set(self.history.changes_this_turn.get() + 1);
@@ -1512,6 +1530,8 @@ mod tests {
             in_plan: RefCell::default(),
             maybe_redone: RefCell::default(),
             put_back_by_daw: RefCell::default(),
+            project: Rc::default(),
+            made_in: RefCell::default(),
         });
         OwnPlan::new(link, None, None, None)
     }
@@ -2103,6 +2123,38 @@ mod tests {
                 );
                 assert!(row(&plain).note.unwrap().contains("is gone from the song"), "a change nothing put back still says it went");
                 assert!(!plan.link().put_back_by_daw.borrow().contains("t-redone"), "Kumi's undo settled it");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_undo_refused_in_another_song_says_another_song_is_open() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+                *plan.link().endpoint.borrow_mut() = Some(Rc::new(Refuses("stale")));
+                plan.link().connected.set(true);
+                let rename = plan.change_kind("track_rename").unwrap();
+                let row = |id: &str| plan.history.entries.borrow().get(id).map(|entry| entry.borrow().record.clone()).unwrap();
+                *plan.link().project.borrow_mut() = Some("song-1".into());
+                let before = plan.remember(rename, ChangeSummary::title("Renamed track"), "t-1", ChangeState::Applied, None);
+                let here = plan.remember(rename, ChangeSummary::title("Renamed track"), "t-2", ChangeState::Applied, None);
+                let history = &plan.history;
+                let undo = |id: String| async move {
+                    let input = json!({"change": id});
+                    crate::integrations::shared::undo::undo_change_with(history, input.as_object().unwrap(), Signal::new(), false)
+                        .await
+                        .unwrap();
+                };
+                // Renoise opened another song: the first change's undo is refused there.
+                *plan.link().project.borrow_mut() = Some("song-2".into());
+                undo(before.clone()).await;
+                let note = row(&before).note.unwrap();
+                assert!(note.starts_with("Another song is open in Renoise now"), "{note}");
+                // In the song it was made in, a stale refusal still says it moved.
+                *plan.link().project.borrow_mut() = Some("song-1".into());
+                undo(here.clone()).await;
+                assert!(row(&here).note.unwrap().contains("moved in the song"));
             })
             .await;
     }
