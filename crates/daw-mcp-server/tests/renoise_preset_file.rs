@@ -55,4 +55,23 @@ async fn a_preset_file_in_the_user_library_is_read_by_the_host_and_one_elsewhere
     assert!(is_error, "{refused}");
     assert_eq!(refused["code"], "bad-params");
     assert_eq!(asked.lock().unwrap().len(), 1, "the tool never heard of the file outside the libraries");
+    // A loader's file: checked here, and sent on by its resolved path.
+    let chains = home.path().join("Documents").join("Renoise").join("User Library").join("Effect Chains");
+    std::fs::create_dir_all(&chains).unwrap();
+    let chain = chains.join("Bright Vox.xrnt");
+    std::fs::write(&chain, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<RenoiseDeviceChain doc_version=\"21\">\n</RenoiseDeviceChain>\n")
+        .unwrap();
+    let load = json!({"kind": "device-chain-load", "input": {"trackRef": "e1:track:1", "path": chain.to_string_lossy()}, "epoch": "e1", "layout": 0});
+    let (answer, is_error) = session.tool_full(3, "change_preview", load, false).await;
+    assert!(!is_error, "{answer}");
+    let sent = asked.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(sent["kind"], "device-chain-load");
+    assert_eq!(sent["input"]["file"], std::fs::canonicalize(&chain).unwrap().to_string_lossy().as_ref());
+    assert_eq!(sent["input"]["fileName"], "Bright Vox");
+    // One the caller names itself never reaches the tool.
+    let named =
+        json!({"kind": "device-chain-load", "input": {"trackRef": "e1:track:1", "file": "/tmp/x.xrnt"}, "epoch": "e1", "layout": 0});
+    let (refused, is_error) = session.tool_full(4, "change_preview", named, false).await;
+    assert!(is_error && refused["code"] == "bad-params", "{refused}");
+    assert_eq!(asked.lock().unwrap().len(), 2);
 }

@@ -624,7 +624,7 @@ impl crate::host::Host {
         // (M4 n-devices: a device's preset data from an .xrdp file in Renoise's library is read here; the tool writes it as
         // preset data given in full)
         let read;
-        let input = match crate::preset_files::with_file(self.daw(), &kind, input, &crate::preset_files::library_roots()) {
+        let input = match crate::library_files::with_file(self.daw(), &kind, input, &crate::library_files::library_roots()) {
             Some(Ok(with_data)) => {
                 read = with_data;
                 &read

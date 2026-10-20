@@ -45,6 +45,8 @@ local function device_kept(env, index, at, device)
   return { track = index, dev = material_.device_place(env, index, at, device), label = M.label(device) }
 end
 
+M.device_kept = device_kept
+
 local function kept_input(restore)
   local material = restore.material
   if type(material) == "table" and type(material.dev) == "table" then return { material = material } end
@@ -506,6 +508,44 @@ local function delete_apply(song, env, input, fence, desc)
   }
 end
 
+-- Where a track numbered in layout `layout` is now (as numbered then when the layout isn't known).
+function M.carried_from(env, layout)
+  return function(n)
+    if type(layout) ~= "number" then return n end
+    return (env.shifted(n, layout))
+  end
+end
+
+-- Puts a kept device (`kept`: {device (read_device), automation, routes}) back at `at` on track `index`: the device, where
+-- it sent its values, its automation in the patterns that still are (`pattern_now`), and what aimed at it. Counts into
+-- `tally`; returns the device and the patterns its automation can't go back to. When Renoise refuses, the device goes
+-- again and the error is raised.
+function M.put_back(song, env, index, track, at, kept, pattern_now, moved, tally)
+  local saved = kept.device
+  local device = material_.restore_device(track, at, saved)
+  local lost = 0
+  local ok, err = pcall(function()
+    for _, status in ipairs(material_.restore_destinations(song, device, saved, index, moved, env)) do material_.count(tally, status) end
+    local list = {}
+    for _, entry in ipairs(kept.automation or {}) do
+      local p = pattern_now(entry.pattern)
+      if p then
+        list[#list + 1] = { pattern = p, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
+      else
+        lost = lost + 1
+      end
+    end
+    material_.write_automation(song, track, index, list, nil)
+  end)
+  if ok then material_.write_routes(song, kept.routes, { on = index, device = at }, moved, tally, env) end
+  if not ok then
+    pcall(function() track:delete_device_at(at) end)
+    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
+    error(err, 0)
+  end
+  return device, lost
+end
+
 local function delete_restore(song, env, restore, desc)
   local material = restore.material
   if type(material) ~= "table" or type(material.track) ~= "number" or type(material.device) ~= "table" then
@@ -536,33 +576,8 @@ local function delete_restore(song, env, restore, desc)
     fail("stale", string.format("the song's patterns changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where its automation goes: nothing was put back", q(label)))
   end
   song:describe_undo(desc)
-  local device = material_.restore_device(track, at, saved)
   local tally = material_.new_tally()
-  -- (where a track numbered as at the delete is now)
-  local function moved(n)
-    if type(restore.layout) ~= "number" then return n end
-    return (env.shifted(n, restore.layout))
-  end
-  local lost = 0
-  local ok, err = pcall(function()
-    for _, status in ipairs(material_.restore_destinations(song, device, saved, index, moved, env)) do material_.count(tally, status) end
-    local list = {}
-    for _, entry in ipairs(material.automation or {}) do
-      local p = pattern_now(entry.pattern)
-      if p then
-        list[#list + 1] = { pattern = p, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
-      else
-        lost = lost + 1
-      end
-    end
-    material_.write_automation(song, track, index, list, nil)
-  end)
-  if ok then material_.write_routes(song, material.routes, { on = index, device = at }, moved, tally, env) end
-  if not ok then
-    pcall(function() track:delete_device_at(at) end)
-    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
-    error(err, 0)
-  end
+  local device, lost = M.put_back(song, env, index, track, at, material, pattern_now, M.carried_from(env, restore.layout), tally)
   if env.device_back and type(material.removed) == "string" then env.device_back(index, material.removed, at) end
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {

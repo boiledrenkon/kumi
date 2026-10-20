@@ -188,6 +188,9 @@ local function remove_made_in(song, env, restore, desc, kind, of, field)
   return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
 end
 
+-- (modset-load in changes_loaders.lua makes a set too)
+M.set_print, M.remove_made_in = set_print, remove_made_in
+
 local function add_in_instrument(spec)
   return function(song, env, input, fence, desc, preview_only)
     local n, objects, label = places_.locate(song, env, "instrument", input, spec.kind)
