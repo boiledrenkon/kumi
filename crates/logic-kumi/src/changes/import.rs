@@ -29,7 +29,6 @@ const AFTER_IMPORT: Duration = Duration::from_millis(1200);
 
 /// What a request asks: the notes as the file takes them, and where.
 struct Plan {
-    track: usize,
     position: f64,
     notes: Vec<super::smf::Note>,
 }
@@ -75,7 +74,7 @@ fn plan(ctx: &mut Ctx, input: &Value, epoch: Epoch) -> Done<(Plan, tracks::Found
             channel: whole(spec, "channel", 1, 16, Some(1))?,
         });
     }
-    Ok((Plan { track: found.place, position, notes }, found))
+    Ok((Plan { position, notes }, found))
 }
 
 fn fence_of(ctx: &mut Ctx) -> Done<Value> {

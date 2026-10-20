@@ -14,6 +14,7 @@ mod cycle;
 mod front;
 mod fx;
 mod import;
+mod lists;
 mod marks;
 mod notes;
 mod nudge;
@@ -141,6 +142,9 @@ pub enum Kind {
     LoopRange,
     NotesQuantize,
     MidiImport,
+    TempoMarkerSet,
+    TempoMarkerDelete,
+    SignatureSet,
 }
 
 /// The kinds Logic's bridge can't make yet, and why, so the refusal says so.
@@ -178,6 +182,9 @@ impl std::fmt::Debug for Kind {
             Kind::LoopRange => f.write_str("LoopRange"),
             Kind::NotesQuantize => f.write_str("NotesQuantize"),
             Kind::MidiImport => f.write_str("MidiImport"),
+            Kind::TempoMarkerSet => f.write_str("TempoMarkerSet"),
+            Kind::TempoMarkerDelete => f.write_str("TempoMarkerDelete"),
+            Kind::SignatureSet => f.write_str("SignatureSet"),
         }
     }
 }
@@ -208,12 +215,15 @@ pub fn kind(name: &str) -> Option<Kind> {
         "loop-range" => Some(Kind::LoopRange),
         "notes-quantize" => Some(Kind::NotesQuantize),
         "midi-import" => Some(Kind::MidiImport),
+        "tempo-marker-set" => Some(Kind::TempoMarkerSet),
+        "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
+        "signature-set" => Some(Kind::SignatureSet),
         _ => None,
     }
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 26] = [
+pub const KINDS: [&str; 29] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -240,6 +250,9 @@ pub const KINDS: [&str; 26] = [
     "loop-range",
     "notes-quantize",
     "midi-import",
+    "tempo-marker-set",
+    "tempo-marker-delete",
+    "signature-set",
 ];
 
 impl Kind {
@@ -265,6 +278,9 @@ impl Kind {
             Kind::LoopRange => cycle::preview(ctx, input),
             Kind::NotesQuantize => quantize::preview(ctx, input),
             Kind::MidiImport => import::preview(ctx, input),
+            Kind::TempoMarkerSet => lists::tempo_set_preview(ctx, input),
+            Kind::TempoMarkerDelete => lists::tempo_delete_preview(ctx, input),
+            Kind::SignatureSet => lists::signature_preview(ctx, input),
         }
     }
 
@@ -290,6 +306,9 @@ impl Kind {
             Kind::LoopRange => cycle::apply(ctx, input, fence),
             Kind::NotesQuantize => quantize::apply(ctx, input, fence),
             Kind::MidiImport => import::apply(ctx, input, fence),
+            Kind::TempoMarkerSet => lists::tempo_set_apply(ctx, input, fence),
+            Kind::TempoMarkerDelete => lists::tempo_delete_apply(ctx, input, fence),
+            Kind::SignatureSet => lists::signature_apply(ctx, input, fence),
         }
     }
 
@@ -318,6 +337,9 @@ impl Kind {
             Kind::LoopRange => cycle::restore(ctx, restore),
             Kind::NotesQuantize => quantize::restore(ctx, watch, restore),
             Kind::MidiImport => import::restore(ctx, watch, restore),
+            Kind::TempoMarkerSet => lists::tempo_set_restore(ctx, restore),
+            Kind::TempoMarkerDelete => lists::tempo_delete_restore(ctx, watch, restore),
+            Kind::SignatureSet => lists::signature_restore(ctx, watch, restore),
         }
     }
 }

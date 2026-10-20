@@ -10,7 +10,8 @@
 //!   notes stay where they are, as REAPER's trim does.
 //! - `region-split`: the region selected alone, the playhead there, Split Regions/Events at Playhead Position
 //!   (Cmd-T); the right part comes back as `created`.
-//! - `region-loop`: the Region inspector's Loop checkbox.
+//! - `region-loop`: the Region inspector's Loop checkbox, which takes a click at its frame (no press or set, as the
+//!   headers' checkboxes), with Logic in front.
 //! - `region-rename`: the Region inspector's name field, confirmed.
 //! - `region-delete`: the region selected alone, the Delete key.
 //!
@@ -194,11 +195,10 @@ fn post(ctx: &mut Ctx, chord: &Chord) -> Done<()> {
 
 // ----- the Event List at the region level -----
 
-/// The Event List shown at the region level: the pane and tab as they were, the beats to a bar, the columns.
+/// The Event List shown at the region level: the pane and tab as they were, and the columns.
 struct RegionList {
     open: ListOpen,
     was_open: bool,
-    beats_per_bar: u32,
     columns: Vec<(String, usize)>,
 }
 
@@ -206,7 +206,6 @@ struct RegionList {
 struct Row {
     track: usize,
     position: Position,
-    length_ticks: u32,
     name: String,
     node: Node,
 }
@@ -225,9 +224,6 @@ fn region_path(ctx: &mut Ctx) -> Done<String> {
 
 /// Shows the Event List and takes it to the region level with its Leave Folder button.
 fn show(ctx: &mut Ctx) -> Done<RegionList> {
-    let beats_per_bar = beats_per_bar(ctx)?;
-    let (_, bar) = timeline::control_bar(ctx)?;
-    let _ = bar;
     let was_open = {
         let (bar, _) = timeline::control_bar(ctx)?;
         paths::view_button(&bar, &ctx.project.strings, "List Editors").is_some_and(Node::is_on)
@@ -251,7 +247,7 @@ fn show(ctx: &mut Ctx) -> Done<RegionList> {
         return Err(failed("Logic Pro's Event List wouldn't leave the region for the Tracks area's regions"));
     }
     let (columns, _) = nudge::read(ctx.project.list_table(ctx.ax, "Event"))?;
-    Ok(RegionList { open, was_open, beats_per_bar, columns })
+    Ok(RegionList { open, was_open, columns })
 }
 
 /// Puts the List Editors back: the pane closed, and opened again when it was open before, so the Event List shows
@@ -278,16 +274,15 @@ fn cell_group<'a>(row: &'a Node, columns: &[(String, usize)], id: &str) -> Optio
     row.children.iter().filter(|c| c.role == "AXCell").nth(index)?.children.first()
 }
 
-fn rows(ctx: &mut Ctx, list: &RegionList) -> Done<Vec<Row>> {
+fn rows(ctx: &mut Ctx) -> Done<Vec<Row>> {
     let (columns, table) = nudge::read(ctx.project.list_table(ctx.ax, "Event"))?;
     Ok(paths::rows(&table)
         .into_iter()
         .filter_map(|row| {
             let position = cell_group(row, &columns, "Position").and_then(rows::position_of)?;
-            let length_ticks = cell_group(row, &columns, "Length").and_then(|g| rows::length_ticks_of(g, list.beats_per_bar)).unwrap_or(0);
             let track = cell_text(row, &columns, "Track").and_then(|t| t.trim().parse::<usize>().ok()).unwrap_or(0);
             let name = cell_text(row, &columns, "Name").unwrap_or_default();
-            Some(Row { track, position, length_ticks, name, node: row.clone() })
+            Some(Row { track, position, name, node: row.clone() })
         })
         .collect())
 }
@@ -322,7 +317,7 @@ fn move_row(ctx: &mut Ctx, list: &RegionList, found: &Found, to: Position) -> Do
     let columns = list.columns.clone();
     let (track, name) = (found.track, found.region.name.clone());
     super::marks::step_position(ctx, &columns, found.region.start, to, "the region", |ctx, at| {
-        let rows = rows(ctx, list)?;
+        let rows = rows(ctx)?;
         let row = row_of(&rows, track, at, &name)
             .ok_or_else(|| super::uncertain(format!("the region isn't in the Event List at {} any more", timeline::bar_text(at))))?;
         Ok(row.node.clone())
@@ -673,12 +668,15 @@ pub fn loop_preview(ctx: &mut Ctx, input: &Value) -> Done<Preview> {
     Ok(Preview { target: target(ctx, found.place), prior: now.clone(), fence: now, display })
 }
 
-/// Presses the selected region's Loop checkbox until it reads `wanted`; the region's loop as the Tracks area shows it.
+/// Clicks the selected region's Loop checkbox until it reads `wanted` (a click at its frame, as the headers' checkboxes
+/// take one); the region's loop as the Tracks area shows it.
 fn put_loop(ctx: &mut Ctx, found: &Found, wanted: bool) -> Done<bool> {
     select_only(ctx, found.place)?;
     if loop_shown(ctx)? != wanted {
         let control = inspector_control(ctx, "Loop", "AXCheckBox")?;
-        nudge::wrote(nudge::press(ctx.ax, &control, LIST_SETTLE_MS))?;
+        front::ensure(ctx.ax)?;
+        let (x, y, w, h) = nudge::read(ctx.ax.frame(&control.root, &control.path))?;
+        nudge::wrote(ctx.ax.click(x + w / 2.0, y + h / 2.0))?;
         super::pause(LIST_SETTLE);
     }
     let shown = loop_shown(ctx).map_err(|(_, why)| super::uncertain(why))?;

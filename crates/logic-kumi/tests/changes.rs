@@ -24,7 +24,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 20] = [
+const SCENES: [&str; 22] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -45,6 +45,8 @@ const SCENES: [&str; 20] = [
     "change-fx-bypass",
     "change-plan",
     "change-key-command",
+    "change-region-rename",
+    "change-region-move",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -456,4 +458,41 @@ fn a_key_command_runs_as_an_action_with_a_row_only_when_logic_made_a_step_and_is
     assert!(refusals[1].contains("1 to 4999"), "{}", refusals[1]);
     assert!(refusals[2].contains("“Split Regions/Events at Playhead Position”"), "{}", refusals[2]);
     assert!(previews[2..].iter().all(|step| step.replayed["error"]["code"] == "bad-params"));
+}
+
+#[test]
+fn a_region_is_renamed_through_the_region_inspector_and_answers_its_ref_in_the_new_epoch() {
+    let replayed = replay("change-region-rename");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!((&preview["prior"], &preview["fence"]), (&json!({"name": "Keys"}), &json!({"name": "Keys"})));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"name": "Keys (Kumi)"}));
+    // A renamed region moves the epoch (M2's rule): the apply answers where the region is now, for the restore.
+    assert_eq!((applied["epoch"].as_str(), &applied["target"]), (Some("2"), &json!({"ref": "2:region:1", "kind": "region"})));
+    assert_eq!(applied["undo"]["title"], "Undo Renaming");
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["name"], "Keys (Kumi)");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(
+        (restored["restored"]["name"].as_str(), restored["epoch"].as_str(), restored["undo"]["entry"].as_bool()),
+        (Some("Keys"), Some("3"), Some(false))
+    );
+    assert_eq!(of(&replayed, "read")[1].result()["items"][0]["name"], "Keys");
+}
+
+#[test]
+fn a_region_is_moved_through_the_event_lists_region_level_and_moved_back_by_value() {
+    let replayed = replay("change-region-move");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"startBeats": 0.0, "endBeats": 16.0, "name": "Keys", "track": 2, "looped": false}));
+    assert_eq!(preview["display"]["title"], "Moved region “Keys” to bar 5");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!((applied["applied"]["startBeats"].as_f64(), applied["applied"]["endBeats"].as_f64()), (Some(16.0), Some(32.0)));
+    // A moved region moves the epoch: the apply says where it is now; Logic's step is a Value Change.
+    assert_eq!((applied["epoch"].as_str(), applied["target"]["ref"].as_str()), (Some("2"), Some("2:region:1")));
+    assert_eq!(applied["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["startBeats"], 16.0);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["startBeats"].as_f64(), restored["undo"]["entry"].as_bool()), (Some(0.0), Some(false)));
+    assert_eq!(reads[1].result()["items"][0]["startBeats"], 0.0);
 }
