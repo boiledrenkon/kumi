@@ -1011,7 +1011,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             if kind.kind.starts_with("notes-") {
                 self.history.made_on(&id, target);
             }
-            let from = prior.as_ref().and_then(|prior| prior.get("name")).and_then(Value::as_str);
+            let from = preview.pointer("/prior/name").and_then(Value::as_str);
             if let (true, Some(from), Some(to)) = (kind.kind == "track-rename", from, input.get("name").and_then(Value::as_str)) {
                 self.renamed.borrow_mut().push((id.clone(), target.to_owned(), from.to_owned(), to.to_owned()));
             }
