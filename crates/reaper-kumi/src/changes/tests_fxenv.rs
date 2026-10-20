@@ -1777,3 +1777,32 @@ fn an_undo_is_refused_when_its_object_went() {
 // (read by the state test)
 #[allow(dead_code)]
 fn unused(_: Display, _: FakeItem, _: FakeTake, _: FakePoint, _: FakeAutoItem) {}
+
+// ----- what HISTORY draws (m4-tui) -----
+
+#[test]
+fn parameter_moves_and_a_lanes_points_are_told_to_history_in_reapers_words() {
+    let lab = chains_lab();
+    state(|s| s.tracks[1].fx.push(reaeq("{K-EQ}")));
+    let input = json!({"ref": fx_ref("{K-EQ}"), "values": [{"param": 0, "value": "120 Hz"}, {"param": 5, "normalized": 0.75}]});
+    let (_, applied) = lab.make("fx-params", input);
+    let values = applied["display"]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_eq!((values[0]["name"].as_str(), values[0]["toText"].as_str()), (Some("Freq-Band 1"), Some("120.0 Hz")));
+    assert_eq!((values[1]["from"].as_f64(), values[1]["to"].as_f64(), values[1]["max"].as_f64()), (Some(0.5), Some(0.75), Some(1.0)));
+    assert!(values[1]["fromText"].is_string(), "what it showed before, too");
+    let (_, applied) = lab.make("fx-param", json!({"ref": fx_ref("{K-IN}"), "param": "Gain", "value": "-6 dB"}));
+    let moved = &applied["display"]["values"][0];
+    assert_eq!((moved["name"].as_str(), moved["toText"].as_str()), (Some("Gain"), Some("-6.0 dB")));
+    assert_eq!(moved["from"], 0.5);
+
+    let lab = envelope_lab();
+    let input = json!({"ref": KICK_VOLUME, "points": [{"position": 0.5, "value": -12}]});
+    let (_, applied) = lab.make("envelope-points-add", input);
+    let curve = &applied["display"]["curve"];
+    assert_eq!((curve["parameter"].as_str(), curve["min"].as_f64(), curve["max"].as_f64()), (Some("Volume"), Some(-60.0), Some(12.0)));
+    let (before, after) = (curve["before"].as_array().unwrap(), curve["after"].as_array().unwrap());
+    assert_eq!(after.len(), before.len() + 1);
+    let added = after.iter().find(|point| point[0] == 0.5).expect("the new point, at its time");
+    assert!((added[1].as_f64().unwrap() + 12.0).abs() < 0.01, "in dB, as the producer asked it: {added}");
+}

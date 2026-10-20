@@ -554,6 +554,13 @@ fn a_sends_volume_pan_mute_and_mode_are_changed_and_put_back_exactly() {
         });
         let (preview, applied) = lab.make(kind, input, &format!("Kumi: {title} (ks{n}00)"));
         assert_eq!(preview["target"], json!({"ref": DRUMS_TO_REVERB, "kind": "send"}));
+        // (m4-tui) HISTORY's picture: the route, changed, with only the value that moved.
+        let route = &applied["display"]["route"];
+        assert_eq!(
+            (route["from"].as_str(), route["to"].as_str(), route["change"].as_str()),
+            (Some("Drums"), Some("Reverb"), Some("changed"))
+        );
+        assert_eq!(route["values"].as_array().map(Vec::len), Some(1), "{kind}: {route}");
         assert_eq!(preview["display"]["title"], title);
         assert_eq!(applied["undo"]["entry"], true);
         let changed = state(|s| {
@@ -623,6 +630,12 @@ fn adding_a_send_makes_it_with_its_settings_and_undo_removes_exactly_that_one() 
     let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}", "volumeDb": -9.0, "mode": "pre-fader"});
     let (preview, applied) = lab.make("send-add", input, "Kumi: Added send Kick → Reverb (ksa01)");
     assert_eq!(preview["display"]["title"], "Added send “Kick” → “Reverb”");
+    // (m4-tui) What HISTORY draws: the route's ends, made, with its volume and taps.
+    let route = &applied["display"]["route"];
+    assert_eq!((route["from"].as_str(), route["to"].as_str(), route["change"].as_str()), (Some("Kick"), Some("Reverb"), Some("made")));
+    let names: Vec<&str> = route["values"].as_array().unwrap().iter().filter_map(|value| value["name"].as_str()).collect();
+    assert_eq!(names[..3], ["Volume", "Pan", "Taps"]);
+    assert_eq!(route["values"][0]["toText"], "−9 dB");
     assert_eq!(applied["created"]["ref"], "r:send:{BBBB}:0:{DDDD}");
     assert_eq!(applied["created"]["kind"], "send");
     assert!(applied["created"]["stamp"].as_str().is_some_and(|stamp| !stamp.is_empty()), "Kumi's own send carries its mark");

@@ -28,6 +28,55 @@ fn route_text(from: &str, to: &str) -> String {
     format!("{} → {}", super::quoted(from), super::quoted(to))
 }
 
+/// A send as HISTORY draws it (for the display only: no undo reads it): its ends, whether Kumi made, removed or changed it,
+/// and each setting it moved (all of them for one made or removed), before and after, in REAPER's words.
+fn drawn_route(from: &str, to: &str, before: Option<&Value>, after: Option<&Value>) -> Value {
+    let change = match (before, after) {
+        (None, _) => "made",
+        (_, None) => "removed",
+        _ => "changed",
+    };
+    let number = |state: Option<&Value>, key: &str| state.and_then(|state| state.get(key)).and_then(Value::as_f64);
+    let flag = |state: Option<&Value>, key: &str| match state.and_then(|state| state.get(key)) {
+        Some(Value::Bool(on)) => Some(*on),
+        Some(value) => value.as_f64().map(|n| n != 0.0),
+        None => None,
+    };
+    let moved = |key: &str| change != "changed" || before.and_then(|b| b.get(key)) != after.and_then(|a| a.get(key));
+    let mut values = vec![];
+    if moved("volume") {
+        let db = |state: Option<&Value>| number(state, "volume").map(rows::db);
+        let (from, to) = (db(before), db(after));
+        if from.is_some() || to.is_some() {
+            let text = |db: Option<f64>| db.map(|db| format!("{} dB", super::tracks::db_text(db)));
+            values.push(json!({"name": "Volume", "from": from.map(|db| db.max(-60.0)), "to": to.map(|db| db.max(-60.0)), "min": -60.0, "max": 12.0, "fromText": text(from), "toText": text(to)}));
+        }
+    }
+    if moved("pan") {
+        let (from, to) = (number(before, "pan"), number(after, "pan"));
+        if from.is_some() || to.is_some() {
+            values.push(json!({"name": "Pan", "from": from, "to": to, "min": -1.0, "max": 1.0, "fromText": from.map(super::tracks::pan_text), "toText": to.map(super::tracks::pan_text)}));
+        }
+    }
+    if moved("mode") {
+        let mode = |state: Option<&Value>| number(state, "mode").map(|mode| rows::send_mode_name(mode as i64));
+        if let Some(to) = mode(after).or_else(|| mode(before)) {
+            values.push(json!({"name": "Taps", "fromText": mode(before).filter(|_| after.is_some()), "toText": to}));
+        }
+    }
+    for (key, name, on, off) in
+        [("mute", "Mute", "muted", "playing"), ("phase", "Phase", "inverted", "normal"), ("mono", "Mono", "mono", "stereo")]
+    {
+        let words = |state: Option<&Value>| flag(state, key).map(|set| if set { on } else { off });
+        if moved(key) && (change == "changed" || flag(after.or(before), key) == Some(true)) {
+            if let Some(to) = words(after).or_else(|| words(before)) {
+                values.push(json!({"name": name, "fromText": words(before).filter(|_| after.is_some()), "toText": to}));
+            }
+        }
+    }
+    json!({"from": from, "to": to, "change": change, "values": values})
+}
+
 fn name_of(reaper: &Reaper, track: Track) -> String {
     let name = rows::clip(&reaper.track_name(track));
     if name.is_empty() {
@@ -757,7 +806,12 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         applied,
         created: None,
         material: None,
-        display: json!({"title": (prop.title)(&route, &after), "before": now, "after": after}),
+        display: json!({
+            "title": (prop.title)(&route, &after),
+            "before": now,
+            "after": after,
+            "route": drawn_route(&found.from, &found.to, Some(&now), Some(&after)),
+        }),
         unwritten: (prop.same)(&now, &wanted),
     })
 }
@@ -955,12 +1009,16 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created["stamp"] = stamp.into();
     }
     let mut applied = send_state(reaper, plan.from, index);
+    let drawn = drawn_route(&found.from, &found.to, None, Some(&applied));
     applied["send"] = seal(reaper, &found);
     Ok(Applied {
         applied,
         created: Some(created),
         material: None,
-        display: json!({"title": format!("Added send {route}{}", sidechain_text(&plan))}),
+        display: json!({
+            "title": format!("Added send {route}{}", sidechain_text(&plan)),
+            "route": drawn,
+        }),
         ..Default::default()
     })
 }
@@ -1055,7 +1113,10 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"removed": true}),
         created: None,
         material: Some(material),
-        display: json!({"title": format!("Removed send {}", route_text(&found.from, &found.to))}),
+        display: json!({
+            "title": format!("Removed send {}", route_text(&found.from, &found.to)),
+            "route": drawn_route(&found.from, &found.to, Some(&now), None),
+        }),
         ..Default::default()
     })
 }

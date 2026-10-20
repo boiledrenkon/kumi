@@ -886,7 +886,18 @@ fn param_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("the plug-in kept the parameter as it was"));
     }
     let title = param_title(ctx, &at, after["display"].as_str().unwrap_or_default());
-    Ok(Applied { applied: after, created: None, material: None, display: json!({"title": title}), unwritten })
+    // (for HISTORY's picture only: the parameter's name, and where it was and is)
+    let moved = json!({
+        "name": rows::clip(&ctx.reaper.param_name(at.at.fx, at.param)),
+        "from": before,
+        "to": read,
+        "min": 0.0,
+        "max": 1.0,
+        "fromText": now["display"],
+        "toText": after["display"],
+    });
+    let display = json!({"title": title, "values": [moved]});
+    Ok(Applied { applied: after, created: None, material: None, display, unwritten })
 }
 
 fn param_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {

@@ -723,3 +723,34 @@ fn a_fake_take_is_a_media_take_with_no_buffer_unless_given_one() {
     let take = FakeTake::wave("{T}", "x.wav");
     assert!(take.more.raw.is_none() && take.more.file.is_none());
 }
+
+// ----- what HISTORY draws (m4-tui) -----
+
+#[test]
+fn each_item_kind_tells_history_the_items_it_leaves_before_and_after() {
+    let lab = Lab::new();
+    let drawn = |applied: &Value, side: &str| -> Vec<(f64, f64)> {
+        applied["display"]["items"][side]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["start"].as_f64().unwrap(), item["length"].as_f64().unwrap()))
+            .collect()
+    };
+    let (_, applied) = lab.make("item-move", json!({"ref": K1, "position": 4.0}));
+    assert_eq!((drawn(&applied, "before"), drawn(&applied, "after")), (vec![(0.0, 2.0)], vec![(4.0, 2.0)]));
+    let item = &applied["display"]["items"]["after"][0];
+    assert_eq!((item["name"].as_str(), item["at"].as_str()), (Some("kick.wav"), Some("bar 3")), "named, and where in the ruler's words");
+    let (_, applied) = lab.make("item-split", json!({"ref": K1, "position": 5.0}));
+    assert_eq!(
+        (drawn(&applied, "before"), drawn(&applied, "after")),
+        (vec![(4.0, 2.0)], vec![(4.0, 1.0), (5.0, 1.0)]),
+        "whole, then both parts"
+    );
+    let (_, applied) = lab.make("item-fade", json!({"ref": K1, "fadeOut": {"length": 0.25}}));
+    assert_eq!(applied["display"]["items"]["after"][0]["fadeOut"], 0.25);
+    let (_, applied) = lab.make("item-delete", json!({"ref": S1}));
+    assert_eq!((drawn(&applied, "before").len(), drawn(&applied, "after").len()), (1, 0));
+    let (_, applied) = lab.make("item-add", json!({"ref": KICK, "position": 8.0, "length": 2.0}));
+    assert_eq!((drawn(&applied, "before"), drawn(&applied, "after")), (vec![], vec![(8.0, 2.0)]));
+}

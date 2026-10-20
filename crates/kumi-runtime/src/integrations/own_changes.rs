@@ -71,12 +71,21 @@ pub struct OwnKind {
     pub skipped_by_daw_undo: bool,
 }
 
-/// What HISTORY draws of a change: a value moved within its span (a fader, a pan), or a colour's swatches.
-#[derive(Clone, Copy)]
+/// What HISTORY draws of a change: a value moved within its span (a fader, a pan), a colour's swatches, or one picture
+/// per family of kinds (`own_pictures`): a tracker's lines, a lane's points, the parameters that moved, a route, a
+/// keyzone, items on the timeline, the settings that moved.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Picture {
     None,
     Meter { field: &'static str, min: f64, max: f64 },
     Colors { field: &'static str },
+    Lines,
+    Curve,
+    Params,
+    Route,
+    Zone,
+    Items,
+    Settings,
 }
 
 impl OwnKind {
@@ -113,9 +122,28 @@ impl OwnKind {
         self.picture = Picture::Colors { field };
         self
     }
-    /// HISTORY's summary of the change: its title, and its picture from the values before (`prior`) and after.
-    fn summary(&self, title: &str, prior: Option<&Value>, after: Option<&Value>) -> ChangeSummary {
+    /// HISTORY draws it as one of the families' pictures (`own_pictures`).
+    pub const fn drawn(mut self, picture: Picture) -> Self {
+        self.picture = picture;
+        self
+    }
+    /// HISTORY's summary of the change: its title, and its picture from what its preview found (`prior`, `display`) and
+    /// its apply left (`applied`, `display`).
+    fn summary(&self, title: &str, preview: Option<&Value>, applied: Option<&Value>) -> ChangeSummary {
         let mut summary = ChangeSummary::title(title);
+        let (Some(preview), Some(applied)) = (preview, applied) else { return summary };
+        let answers = super::own_pictures::Answers { preview, applied };
+        summary.picture = match self.picture {
+            Picture::Lines => super::own_pictures::lines(&answers),
+            Picture::Curve => super::own_pictures::curve(&answers),
+            Picture::Params => super::own_pictures::params(&answers),
+            Picture::Route => super::own_pictures::route(&answers),
+            Picture::Zone => super::own_pictures::zone(&answers),
+            Picture::Items => super::own_pictures::items(&answers),
+            Picture::Settings => super::own_pictures::settings(&answers),
+            _ => None,
+        };
+        let (prior, after) = (preview.get("prior"), applied.get("applied"));
         let (Some(prior), Some(after)) = (prior.filter(|v| v.is_object()), after.filter(|v| v.is_object())) else { return summary };
         match self.picture {
             Picture::Meter { field, min, max } => {
@@ -131,7 +159,7 @@ impl OwnKind {
                     summary.colors = Some(ColorChange { from, to: to.to_owned() });
                 }
             }
-            Picture::None => {}
+            _ => {}
         }
         summary
     }
@@ -815,7 +843,6 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         };
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &preview);
         let title = preview.pointer("/display/title").and_then(Value::as_str).unwrap_or(kind.kind).to_owned();
-        let prior = preview.get("prior").cloned();
         // Nothing to change (already so): no step in the DAW's undo, no row in HISTORY.
         if preview.pointer("/display/unchanged") == Some(&Value::Bool(true)) {
             let id = preview.get("transactionId").and_then(Value::as_str).map(str::to_owned);
@@ -909,7 +936,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         if skipped {
             self.link().outside_daw_undo.borrow_mut().insert(transaction.clone());
         }
-        let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
+        let summary = kind.summary(&title, Some(&preview), Some(&applied));
         let id = self.remember(kind, summary, &transaction, ChangeState::Applied, note.clone());
         // No copy kept first (the saved project was too big): said with what it deleted.
         let note = match (self.not_copied.take().filter(|_| kind.deletes), note) {

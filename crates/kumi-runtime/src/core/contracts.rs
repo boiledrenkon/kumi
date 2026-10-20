@@ -12,7 +12,10 @@ use super::errors::{FailureKind, RuntimeError};
 use super::evolve::Knob;
 use super::goal::GoalStatus;
 use super::match_run::MatchStatus;
-pub use super::picture::{ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureValue};
+pub use super::picture::{
+    ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone,
+    RouteChange,
+};
 pub use super::view::*;
 use crate::audio::matching::{Closeness, Focus};
 

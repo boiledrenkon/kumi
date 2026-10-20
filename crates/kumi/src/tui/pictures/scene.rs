@@ -1,10 +1,10 @@
 //! A change's picture as shapes in a unit square (x right, y up): an equaliser's response, a compressor's curve, a
-//! clip's notes, an automation lane. The rasterizers (RGBA for terminal graphics, braille and half-blocks for cells)
+//! clip's notes, an automation lane, an instrument's keyzones, items on the timeline. The rasterizers (RGBA for terminal graphics, braille and half-blocks for cells)
 //! draw these; nothing here knows the DAW.
 
 use std::f64::consts::PI;
 
-use kumi_runtime::core::contracts::{ChangePicture, ClipNote, Dynamics, EqBand, EqShape};
+use kumi_runtime::core::contracts::{ChangePicture, ClipNote, Dynamics, EqBand, EqShape, PictureItem, PictureZone};
 
 use super::super::style::{palette, Rgb};
 
@@ -38,8 +38,73 @@ pub fn scene_of(picture: &ChangePicture) -> Option<Scene> {
         ChangePicture::Dynamics { before, after, .. } => Some(dynamics_scene(before, after)),
         ChangePicture::Notes { length, before, after, .. } => notes_scene(*length, before, after),
         ChangePicture::Automation { min, max, before, after, .. } => automation_scene(*min, *max, before, after),
-        ChangePicture::Values { .. } | ChangePicture::Mix { .. } => None,
+        ChangePicture::Zones { before, after, .. } => zones_scene(before, after),
+        ChangePicture::Items { before, after, .. } => items_scene(before, after),
+        ChangePicture::Values { .. } | ChangePicture::Mix { .. } | ChangePicture::Lines { .. } | ChangePicture::Routes { .. } => None,
     }
+}
+
+/// Keyzones as boxes, keys across (an octave at least) and velocities up: where each was, ghosted, and where it is.
+fn zones_scene(before: &[PictureZone], after: &[PictureZone]) -> Option<Scene> {
+    let all = || before.iter().chain(after);
+    let (low, high) = all().fold((u8::MAX, 0), |(low, high), zone| (low.min(zone.notes[0]), high.max(zone.notes[1])));
+    if low > high {
+        return None;
+    }
+    let (low, high) = (low as f64, high as f64 + 1.);
+    let span = (high - low).max(12.);
+    let low = (low - ((span - (high - low)) / 2.).floor()).max(0.);
+    let rect = |zone: &PictureZone, color: Rgb, alpha: f64| Shape::Rect {
+        x0: ((zone.notes[0] as f64 - low) / span).clamp(0., 1.),
+        y0: zone.velocities[0] as f64 / 128.,
+        x1: ((zone.notes[1] as f64 + 1. - low) / span).clamp(0., 1.),
+        y1: (zone.velocities[1] as f64 + 1.) / 128.,
+        color,
+        alpha,
+    };
+    let mut shapes: Vec<Shape> = before.iter().filter(|zone| !after.contains(zone)).map(|zone| rect(zone, GHOST, 0.45)).collect();
+    shapes.extend(after.iter().map(|zone| if before.contains(zone) { rect(zone, palette::DIM, 0.8) } else { rect(zone, NOW, 0.9) }));
+    Some(Scene { shapes, lines: false })
+}
+
+/// Items as bars on one timeline: before above, ghosted, after below, in colour; a fade slopes in from the bar's edge.
+fn items_scene(before: &[PictureItem], after: &[PictureItem]) -> Option<Scene> {
+    let all = || before.iter().chain(after);
+    let start = all().map(|item| item.start).fold(f64::INFINITY, f64::min);
+    let end = all().map(|item| item.start + item.length).fold(f64::NEG_INFINITY, f64::max);
+    if !(end > start) {
+        return None;
+    }
+    // A little room either side, so an item's edges show.
+    let margin = (end - start) * 0.05;
+    let (start, span) = (start - margin, end - start + 2. * margin);
+    let x = |at: f64| ((at - start) / span).clamp(0., 1.);
+    let mut shapes = Vec::new();
+    for (items, (y0, y1), color) in [(before, (0.55, 0.95), GHOST), (after, (0.05, 0.45), NOW)] {
+        for item in items {
+            let alpha = if item.muted {
+                0.35
+            } else if color == GHOST {
+                0.6
+            } else {
+                1.
+            };
+            shapes.push(Shape::Rect { x0: x(item.start), y0, x1: x(item.start + item.length), y1, color, alpha });
+            if item.fade_in > 0. {
+                shapes.push(Shape::Line {
+                    points: vec![(x(item.start), y0), (x(item.start + item.fade_in), y1)],
+                    color: GUIDE,
+                    alpha: 1.,
+                    width: 10.,
+                });
+            }
+            if item.fade_out > 0. {
+                let end = item.start + item.length;
+                shapes.push(Shape::Line { points: vec![(x(end - item.fade_out), y1), (x(end), y0)], color: GUIDE, alpha: 1., width: 10. });
+            }
+        }
+    }
+    Some(Scene { shapes, lines: false })
 }
 
 const LOW_HZ: f64 = 20.;
@@ -282,6 +347,34 @@ mod tests {
         let Shape::Rect { x0, x1, .. } = &scene.shapes[2] else { panic!() };
         assert_eq!((*x0, *x1), (0.25, 0.5));
         assert!(!scene.lines);
+    }
+
+    #[test]
+    fn keyzones_draw_keys_across_and_velocities_up() {
+        let zone = |notes: [u8; 2], velocities: [u8; 2]| PictureZone { name: String::new(), notes, velocities, base: None };
+        let scene = zones_scene(&[zone([48, 59], [0, 127])], &[zone([60, 71], [64, 127])]).unwrap();
+        let [Shape::Rect { x0, color: was, .. }, Shape::Rect { x0: now_x0, y0, y1, color: now, .. }] = scene.shapes.as_slice() else {
+            panic!("{:?}", scene.shapes)
+        };
+        assert_eq!((*was, *now), (GHOST, NOW));
+        assert_eq!((*x0, *now_x0), (0., 0.5), "two octaves across, the new zone in the upper one");
+        assert_eq!((*y0, *y1), (0.5, 1.), "the loud half");
+        assert!(zones_scene(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn items_draw_before_above_and_after_below_with_their_fades() {
+        let item = |start: f64, fade_out: f64| PictureItem { name: String::new(), start, length: 4., fade_in: 0., fade_out, muted: false };
+        let scene = items_scene(&[item(10., 0.)], &[item(14., 1.)]).unwrap();
+        let rects: Vec<(f64, f64, Rgb)> = scene
+            .shapes
+            .iter()
+            .filter_map(|shape| if let Shape::Rect { x0, y0, color, .. } = shape { Some((*x0, *y0, *color)) } else { None })
+            .collect();
+        assert_eq!(rects.len(), 2);
+        assert!(rects[0].0 < rects[1].0 && rects[0].1 > rects[1].1, "moved later, drawn below: {rects:?}");
+        assert_eq!((rects[0].2, rects[1].2), (GHOST, NOW));
+        assert!(scene.shapes.iter().any(|shape| matches!(shape, Shape::Line { color, .. } if *color == GUIDE)), "the fade out");
     }
 
     #[test]
