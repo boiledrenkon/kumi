@@ -337,9 +337,12 @@ end
 -- slot-section: a slot starts a section, with a name (a name alone starts one)
 
 local function section_spec()
+  -- (Renoise keeps a slot's section name when it stops starting a section, and shows it again when it starts one: `hidden`
+  -- keeps it to put back, outside what is compared)
   local function read(object)
     local start = object.sequencer:sequence_is_start_of_section(object.s)
-    return { start = start, name = start and object.sequencer:sequence_section_name(object.s) or "" }
+    local name = object.sequencer:sequence_section_name(object.s)
+    return { start = start, name = start and name or "", hidden = not start and name or nil }
   end
   return {
     kind = "slot-section", noun = "section", undoable = true,
@@ -371,6 +374,9 @@ local function section_spec()
         sequencer:set_sequence_section_name(object.s, state.name)
       else
         sequencer:set_sequence_is_start_of_section(object.s, false)
+        if type(state.hidden) == "string" and sequencer:sequence_section_name(object.s) ~= state.hidden then
+          sequencer:set_sequence_section_name(object.s, state.hidden)
+        end
       end
     end,
     same = function(a, b) return a.start == b.start and a.name == b.name end,

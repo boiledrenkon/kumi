@@ -2019,6 +2019,7 @@ test("changes: a slot starts a section, is named, and loses it again", function(
   local undone = restore(peer, "slot-section", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo (kn92)", epoch, layout)
   ok(undone.result, json.encode(undone.error or {}))
   eq(mock.song.sequencer:sequence_is_start_of_section(3), false)
+  eq(mock.song.sequencer:sequence_section_name(3), "", "the name it kept hidden is the one it had (real Renoise kept “Drop”)")
   -- a rename keeps the start; clearing needs no name
   local p2 = preview(peer, "slot-section", { ref = ref, start = true })
   eq(p2.display.title, "Section at slot 3")
