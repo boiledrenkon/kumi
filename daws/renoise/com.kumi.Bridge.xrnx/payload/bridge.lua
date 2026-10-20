@@ -611,6 +611,23 @@ recount = function(kind, token, owner, list, count)
   log.write("info", "the " .. kind .. " list was out of step: watched anew on its own")
 end
 
+-- Renoise's undo or redo of a load that replaced an instrument in place (an .xrni load: Kumi's, the producer's) tells an
+-- insert next to it, then the other one's remove: insert@i, remove@i+1 undone; insert@i+1, remove@i redone (lab 2026-10-20).
+-- For what keeps an instrument's place (the places log, the journal) the slot keeps its instrument, as in Kumi's own load:
+-- the pair's remove is taken as the inserted one's. (The list of watched instruments takes the operations as told.)
+local function in_place(op)
+  local held = b.held_insert
+  b.held_insert = nil
+  local song = renoise.song()
+  if not (op and type(op.index) == "number" and song and song:is_undo_redoing()) then return op end
+  if op.type == "insert" then
+    b.held_insert = op.index
+  elseif op.type == "remove" and held and math.abs(op.index - held) == 1 then
+    return { type = "remove", index = held }
+  end
+  return op
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
@@ -626,6 +643,7 @@ local function on_structural(reason, kind, op, owner, token)
     end
   end
   bump_epoch(reason, true, BREAKS[kind])
+  local placed = op
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
   if kind == "devices" and token and token.dlog then
     places.note(token.dlog, op)
@@ -644,7 +662,8 @@ local function on_structural(reason, kind, op, owner, token)
       end
       if not r.insert and not r.remove then b.replacing = nil end
     end
-    if not own then places.note(b.ilog, op) end
+    placed = in_place(op)
+    if not own then places.note(b.ilog, placed) end
   elseif token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]] then
     places.note(token[INSTRUMENT_LOGS[kind]], op) -- (n-instruments)
   end
@@ -658,7 +677,7 @@ local function on_structural(reason, kind, op, owner, token)
   -- (n-instruments: the journal's places of instruments and what is in them move with the list's operations)
   if op and INSTRUMENT_JOURNAL[kind] then
     local scope = instrument_scope(kind, token)
-    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, op.type, op.index, op.index2, song:is_undo_redoing()) end
+    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, placed.type, placed.index, placed.index2, song:is_undo_redoing()) end
   end
   if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
@@ -765,6 +784,7 @@ local function on_tracks(op)
 end
 
 local function flush_events()
+  b.held_insert = nil -- (an undo or redo is over by the next callback: its pairs with it)
   if not observers:attached() then return end
   local song = renoise.song()
   if not song then return end

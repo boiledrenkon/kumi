@@ -1603,10 +1603,11 @@ function M.app_load_instrument(path, how)
       end
       return
     end
-    table.insert(instruments, i + 1, old)
-    M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
-    table.remove(instruments, i)
-    M.fire(song.instruments_observable, { type = "remove", index = i })
+    -- (Renoise's undo tells the old one back at i, then the loaded one's remove after it: lab 2026-10-20)
+    table.insert(instruments, i, old)
+    M.fire(song.instruments_observable, { type = "insert", index = i })
+    table.remove(instruments, i + 1)
+    M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
   end
   swap_in()
   M.record(swap_out, swap_in)

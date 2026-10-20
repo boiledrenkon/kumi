@@ -812,7 +812,12 @@ local function with_instrument_files(fn)
     put(after)
     mock.fire(fields.instruments_observable, { type = "insert", index = i + 1 })
     mock.fire(fields.instruments_observable, { type = "remove", index = i })
-    mock.record(function() put(before) end, function() put(after) end)
+    -- (Renoise's undo tells the old instrument back at i and the loaded one's remove after it; its redo the other way: lab)
+    local function told(first, second)
+      mock.fire(fields.instruments_observable, { type = "insert", index = first })
+      mock.fire(fields.instruments_observable, { type = "remove", index = second })
+    end
+    mock.record(function() put(before) told(i, i + 1) end, function() put(after) told(i + 1, i) end)
     return true
   end
   local ok_, err = pcall(fn)
@@ -920,6 +925,26 @@ test("devices m4: mappings added through the instrument's file load back into th
     eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
     eq(mock.data.instruments[1].name, "Lead")
     eq(steps(), 2)
+  end)
+end)
+
+test("devices m4: Renoise's undo and redo of mappings added through the instrument's file keep the instrument's place (no delete)", function()
+  local env, peer = mapped_song()
+  with_instrument_files(function()
+    mock.data.song_fields.selected_instrument_index = 1
+    local epoch, layout = place(peer)
+    local export = call(peer, "instrument_export", { ref = epoch .. ":instrument:1", epoch = epoch, layout = layout })
+    local mappings = { { param = "Cutoff", min = 0, max = 1, scaling = 3 }, { param = "Resonance", min = 0.2, max = 0.8, scaling = 3 },
+      { param = "Drive", min = 0, max = 0.5, scaling = 1 } }
+    local input = { ref = epoch .. ":instrument:1", macro = 1, file = host_edit(export.result.file, 1, mappings), print = export.result.print, display = { title = "Lead macro 1: mapped to Drive" } }
+    local done = call(peer, "change_apply", { kind = "instrument-macro-map", input = input, fence = {}, desc = "Kumi: map (k3)", epoch = epoch, layout = layout })
+    ok(done.result, json.encode(done.error or {}))
+    for _, step in ipairs({ "undo", "redo" }) do
+      if step == "undo" then mock.song:undo() else mock.song:redo() end
+      eq(ranges(1), step == "undo" and "Cutoff 0-1 3, Resonance 0.2-0.8 3" or "Cutoff 0-1 3, Resonance 0.2-0.8 3, Drive 0-0.5 1", step)
+      local found = call(peer, "instrument_export", { at = done.result.material.at, epoch = done.result.epoch, layout = done.result.layout })
+      ok(found.result, step .. ": the instrument is where it was: " .. json.encode(found.error or {}))
+    end
   end)
 end)
 
