@@ -429,3 +429,22 @@ fn a_doofer_is_made_of_devices_with_their_settings_names_bypass_aims_and_the_mac
     assert_eq!(devices_in(slot(&document).unwrap(), "SplitterDevice", 1).len(), 1);
     assert!(matches!(make(&json!({"type": "doofer"}), &lanes, "Bass"), Err(Refusal::Bad(m)) if m.contains("second lane")));
 }
+
+#[test]
+fn a_plug_in_inside_a_doofer_reads_by_the_name_renoise_gives_it() {
+    // Renoise 3.5.4 writes a plug-in inside a Doofer with its type and identifier only (lab): the tool's preset_read names
+    // it (`plugins`).
+    let with_au = DOOFER.replacen(
+        "</Devices>",
+        "  <AudioPluginDevice type=\"AudioPluginDevice\">\n            <PluginType>AU</PluginType>\n            <PluginIdentifier>aufx:dely:appl</PluginIdentifier>\n          </AudioPluginDevice>\n        </Devices>",
+        1,
+    );
+    let names = json!({"aufx:dely:appl": "AUDelay"});
+    let (_, inside) = with_plugin_names(Some(&names), || super::inside(&with_au, false)).unwrap();
+    let devices = inside["devices"].as_array().unwrap();
+    assert_eq!(devices.last().unwrap()["name"], "AUDelay", "{inside}");
+    assert_eq!(with_plugin_names(Some(&names), || child_nodes(&with_au)).last().unwrap()["name"], "AUDelay");
+    // Without the names (and after them), its type.
+    let (_, unnamed) = super::inside(&with_au, false).unwrap();
+    assert_eq!(unnamed["devices"].as_array().unwrap().last().unwrap()["name"], "AudioPlugin");
+}

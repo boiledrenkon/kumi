@@ -12,6 +12,7 @@ local import = ...
 local refs = import("refs")
 local base = import("changes_base")
 local presets = import("changes_presets")
+local json = import("json")
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -79,10 +80,10 @@ end
 
 -- The macros and their mappings as the API reads them, and their print (what the producer's edits move).
 local function macro_rows(instrument)
-  local rows = {}
+  local rows = json.array()
   for k = 1, 8 do
     local macro = instrument:macro(k)
-    local mappings = {}
+    local mappings = json.array()
     for j = 1, #macro.mappings do
       local mapping = macro:mapping(j)
       mappings[j] = { param = mapping.parameter.name, min = mapping.parameter_min, max = mapping.parameter_max, scaling = SCALINGS[mapping.parameter_scaling] or "linear" }
@@ -107,16 +108,16 @@ end
 -- first device is its mixer device; a modulation set's list leaves out its hidden mixer).
 local function chains_of(instrument)
   local function devices(list)
-    local out = {}
+    local out = json.array()
     for d = 1, #list do
       local device = list[d]
-      local params = {}
+      local params = json.array()
       for k = 1, #device.parameters do params[k] = device.parameters[k].name end
       out[d] = { name = device.name, params = params }
     end
     return out
   end
-  local fx, modulation = {}, {}
+  local fx, modulation = json.array(), json.array()
   pcall(function()
     for c = 1, #instrument.sample_device_chains do
       local chain = instrument.sample_device_chains[c]

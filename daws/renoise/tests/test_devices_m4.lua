@@ -388,6 +388,25 @@ test("devices m4: host-made edits go only to the devices they are for, with thei
   H.no_dialogs()
 end)
 
+test("devices m4: a Doofer holding a plug-in takes the host's data without it, and its read names the plug-in as Renoise lists it", function()
+  -- (lab 3.5.4: the inner plug-in's identifier is no part of what the Doofer is; Renoise's XML gives the plug-in no name)
+  local d = doofer()
+  d.xml_body = "    <DeviceChain>\n      <Devices>\n        <GainerDevice type=\"GainerDevice\"/>\n        <AudioPluginDevice type=\"AudioPluginDevice\">\n"
+    .. "          <PluginType>AU</PluginType>\n          <PluginIdentifier>aufx:dely:appl</PluginIdentifier>\n        </AudioPluginDevice>\n      </Devices>\n    </DeviceChain>"
+  local _, peer = setup({ { name = "Pad", devices = { d } } })
+  mock.device_catalog = { ["Audio/Effects/AU/aufx:dely:appl"] = {} }
+  local epoch, layout = place(peer)
+  local read = call(peer, "preset_read", { ref = epoch .. ":device:1.2", epoch = epoch, layout = layout }).result
+  eq(read.plugins and read.plugins["aufx:dely:appl"], "aufx:dely:appl", "named by Renoise's list (the mock's short name is the path's last part)")
+  local without = read.presetData:gsub("%s*<AudioPluginDevice.-</AudioPluginDevice>", "", 1)
+  ok(not without:find("PluginIdentifier", 1, true))
+  local done = call(peer, "change_apply", { kind = "doofer-device-delete", input = { ref = epoch .. ":device:1.2", presetData = without, shape = read.shape },
+    fence = { id = read.id }, desc = "Kumi: delete (k1)", epoch = epoch, layout = layout })
+  ok(done.result, json.encode(done.error or {}))
+  ok(not device_data(1, 2).preset_data:find("PluginIdentifier", 1, true), "written")
+  mock.device_catalog = nil
+end)
+
 -- Routing (M4 n-devices): every Receiver checked, #Sidechain's track a place, and the routes a delete clears set again.
 
 local function params_of(list)
@@ -842,6 +861,7 @@ test("devices m4: macro_read lists each macro's mappings as Renoise's API reads 
   eq(read.macros[1].mappings[2].mapping, 2)
   eq(read.macros[1].mappings[2].scaling, "linear")
   eq(#read.macros[2].mappings, 0)
+  ok(json.is_array(read.macros[2].mappings), "an empty list goes out as [] (lab: {} broke the host's read)")
 end)
 
 test("devices m4: mappings added through the instrument's file load back into the same slot in one step, its name and the selection kept, and Kumi's undo loads the host's restore file", function()
@@ -941,7 +961,7 @@ test("devices m4: a plug-in's editor window is shown and hidden on request, and 
   eq(steps(), 0, "no step of Renoise's undo")
 end)
 
-test("devices m4: a device's settings are saved as a preset in the user library's folder for it, and one of that name is replaced only when asked", function()
+test("devices m4: a native device's settings are saved as a preset in the user library's folder for it, one of that name is replaced only when asked, and a plug-in's is refused", function()
   local env, peer = setup({ { name = "Kick", devices = { eq5(), lfo(), { name = "AU: Apple: AUDelay", short_name = "AUDelay", path = "Audio/Effects/AU/aufx:dely:appl", preset_data = "<FilterDevicePreset/>", params = {} } } } })
   local home = env.dir .. "/home"
   os.mkdir(home)
@@ -967,7 +987,8 @@ test("devices m4: a device's settings are saved as a preset in the user library'
     ok(save(2, "Bright", true).result, "replaced when asked")
     -- A meta device's folder has no *; a plug-in's is its short name.
     eq(save(3, "Slow").result.file, home .. "/Documents/Renoise/User Library/Effect Presets/LFO/Slow.xrdp")
-    eq(save(4, "Long").result.file, home .. "/Documents/Renoise/User Library/Effect Presets/AUDelay/Long.xrdp")
+    -- A plug-in's: Renoise 3.5.4 lists only the presets it saves itself for one (lab), so Kumi doesn't write one.
+    failure(save(4, "Long"), "bad-params", "plug%-in")
     failure(save(2, "../x"), "bad-params", "name")
     failure(save(2, "a:b"), "bad-params", "name")
     eq(steps(), 0)

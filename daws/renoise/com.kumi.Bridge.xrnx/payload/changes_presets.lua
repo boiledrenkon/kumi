@@ -16,6 +16,7 @@ local material_ = import("changes_material")
 local devices_ = import("changes_devices")
 local json_null = import("json").null
 local json_encode = import("json").encode
+local json_array = import("json").array
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -47,9 +48,11 @@ end
 -- What preset data says it is: its slot's device type, its document version, and a plug-in's identifier.
 local function preset_kind(xml)
   if type(xml) ~= "string" then xml = "" end
+  local slot = xml:match('<DeviceSlot%s+type="([%w_]+)"')
   return {
-    slot = xml:match('<DeviceSlot%s+type="([%w_]+)"'), version = tonumber(xml:match('<FilterDevicePreset%s+doc_version="(%d+)"')),
-    plugin = xml:match("<PluginIdentifier>([^<]*)</PluginIdentifier>"),
+    slot = slot, version = tonumber(xml:match('<FilterDevicePreset%s+doc_version="(%d+)"')),
+    -- (a plug-in's own identifier; a Doofer's inner plug-ins are no part of what the device is)
+    plugin = slot == "AudioPluginDevice" and xml:match("<PluginIdentifier>([^<]*)</PluginIdentifier>") or nil,
   }
 end
 
@@ -925,25 +928,42 @@ function M.read(params, env)
   if #xml > M.MAX_PRESET_BYTES then
     fail("failed", string.format("%s holds %.1f MB of settings, more than Kumi edits", q(label_of(t, track, device)), #xml / 1048576))
   end
-  local parameters = {}
+  local parameters = json_array()
   for k = 1, math.min(#device.parameters, M.MOST_WATCHED) do
     local parameter = device:parameter(k)
     parameters[k] = { name = parameter.name, value = parameter.value, valueString = parameter.value_string, min = parameter.value_min, max = parameter.value_max }
   end
+  -- (the plug-ins in it by identifier, with the names Renoise gives them: a Doofer's inner plug-ins have none in the XML)
+  local plugins
+  for id in xml:gmatch("<PluginIdentifier>([^<]*)</PluginIdentifier>") do
+    plugins = plugins or {}
+    plugins[id] = false
+  end
   -- (the device paths asked about that the device's track can take: Audio Units the host would put inside a Doofer)
-  local available
+  local available, wanted = nil, {}
   if type(params.paths) == "table" then
     available = {}
-    local wanted = {}
     for i = 1, math.min(#params.paths, 16) do
       if type(params.paths[i]) == "string" then wanted[params.paths[i]] = true; available[params.paths[i]] = false end
     end
+  end
+  if plugins or available then
     for _, info in ipairs(track.available_device_infos) do
-      if wanted[info.path] then available[info.path] = true end
+      local id = info.path:match("([^/]+)$")
+      if wanted[info.path] then
+        available[info.path] = true
+        plugins = plugins or {}
+        plugins[id] = info.short_name
+      elseif plugins and plugins[id] == false then
+        plugins[id] = info.short_name
+      end
+    end
+    for id, name in pairs(plugins or {}) do
+      if name == false then plugins[id] = nil end
     end
   end
   return {
-    available = available,
+    available = available, plugins = plugins,
     epoch = env.epoch(), layout = env.layout(), ref = refs.make(env.epoch(), "device", t, d), target = target_of(t, d),
     at = keep(env, t, d, track, device), id = identity(track, device), path = device.device_path, name = device.name,
     label = devices_.label(device), trackName = base.named(t, track), active = device.is_active, presetData = xml,
@@ -972,21 +992,21 @@ function M.user_library()
   return home .. "/Documents/Renoise/User Library"
 end
 
--- The folder a device's presets go in, as Renoise's library names them: a native device's name without its * or # ("LFO",
--- "Send"), a plug-in's short name.
+-- The folder a native device's presets go in, as Renoise's library names them: its name without its * or # ("LFO", "Send").
 local function preset_folder(device)
-  if device.device_path:find("/Native/", 1, true) then
-    return (device.name:gsub("^[%*#]", ""))
-  end
-  return device.short_name
+  return (device.name:gsub("^[%*#]", ""))
 end
 
--- preset_save {ref, name, replace?}: the device's settings (its preset data) saved as a preset file in the user library,
--- Effect Presets/<device>/<name>.xrdp; one of that name is replaced only with replace.
+-- preset_save {ref, name, replace?}: a native device's settings (its preset data) saved as a preset file in the user
+-- library, Effect Presets/<device>/<name>.xrdp; one of that name is replaced only with replace. Renoise 3.5.4 lists such a
+-- file in the device's presets from its next start, and never a plug-in's (lab), so plug-ins are refused.
 function M.save(params, env)
   local song = base.context(params, env)
   local t, _, track, device = device_by_ref(song, env, params.ref, "preset_save")
   local label = label_of(t, track, device)
+  if not device.device_path:find("/Native/", 1, true) then
+    bad(string.format("Renoise lists a plug-in's presets only when it saves them itself: save %s's from its preset menu in Renoise", q(label)))
+  end
   local name = params.name
   if type(name) ~= "string" or name == "" or #name > 128 or name:find('[%c/\\:%*%?"<>|]') or name:match("^%.") or name:match("[%. ]$") then
     bad('name: a preset\'s name, one line without / \\ : * ? " < > | that doesn\'t start with a dot or end with a dot or space')

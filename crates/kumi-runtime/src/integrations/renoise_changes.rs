@@ -50,11 +50,11 @@ static ACTIONS: [OwnAction; 4] = [
     OwnAction {
         tool: "save_device_preset",
         method: "preset_save",
-        description: "Save a device's settings as a preset named name in Renoise's user library (Effect Presets, the device's folder), where its preset list finds it; replace: true replaces a preset of that name.",
+        description: "Save a native device's settings as a preset named name in Renoise's user library (Effect Presets, the device's folder); Renoise lists it in the device's presets from its next start. replace: true replaces a preset of that name. Not plug-ins (Renoise lists only the presets it saves for them).",
         schema: r#"{"type":"object","additionalProperties":false,"required":["ref","name"],"properties":{"ref":{"type":"string","description":"A device on a track"},"name":{"type":"string","minLength":1,"maxLength":128},"replace":{"type":"boolean"}}}"#,
         core: false,
         playing: None,
-        title: "Saved the device's preset",
+        title: "Saved the device's preset (Renoise lists it from its next start)",
     },
 ];
 

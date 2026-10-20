@@ -127,3 +127,12 @@ fn only_mappings_added_or_removed_are_the_hosts() {
     assert!(!is_host_change(renoise, KIND, &json!({"add": null})));
     assert!(!is_host_change(daw_bridge::Daw::Reaper, KIND, &json!({"add": []})));
 }
+
+#[test]
+fn an_empty_list_of_mappings_reads_the_same_whichever_way_the_tool_wrote_it() {
+    // (an older tool's JSON wrote an empty list as {})
+    let mut older = export();
+    older["macros"][1]["mappings"] = json!({});
+    let mapped = edit(&json!({"macro": 2, "add": [{"fx": 1, "device": 2, "param": "Gain"}]}), INSTRUMENT, &older).unwrap();
+    assert_eq!(mapped.applied.len(), 1);
+}

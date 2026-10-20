@@ -208,7 +208,7 @@ pub fn tools(host: &Host) -> Value {
             tools.push(json!({
                 "name": "preset_save",
                 "title": "Save a device's preset",
-                "description": "Saves a device's settings as a preset file named name in Renoise's user library (Effect Presets, in the device's folder), where its preset list finds it: {file, listed}. A preset of that name is replaced only with replace.",
+                "description": "Saves a native device's settings as a preset file named name in Renoise's user library (Effect Presets, in the device's folder): {file, listed}. Renoise lists it in the device's presets from its next start. A preset of that name is replaced only with replace; plug-ins are refused (Renoise lists only the presets it saves for them).",
                 "inputSchema": {"type": "object", "properties": own(json!({"name": {"type": "string", "maxLength": 128}, "replace": {"type": "boolean"}})), "required": ["ref", "name"], "additionalProperties": false},
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
             }));

@@ -13,7 +13,7 @@ use crate::xml::{self, Element};
 use serde_json::{json, Map, Value};
 
 /// The change kinds made here, as the tool registers them (`changes_presets.lua`).
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 8] = [
     "doofer-macro",
     "doofer-device-add",
     "doofer-device-delete",
@@ -21,6 +21,7 @@ pub const KINDS: [&str; 7] = [
     "doofer-device-set",
     "splitter-set",
     "notepad-write",
+    "doofer-make",
 ];
 
 /// Whether the host makes this kind from the device's preset data (Renoise only).
@@ -324,6 +325,21 @@ fn chain_print(slot: &Element, container: &[usize], lane: usize) -> Value {
     json!({"owners": owners, "lane": lane, "types": types})
 }
 
+thread_local! {
+    /// The names Renoise gives the plug-ins in the preset data being read or edited, by identifier (a preset_read's
+    /// `plugins`): a plug-in inside a Doofer has none in its XML.
+    static PLUGIN_NAMES: std::cell::RefCell<Map<String, Value>> = std::cell::RefCell::new(Map::new());
+}
+
+/// Runs `f` with these plug-in names known to the labels of the devices it reads.
+pub(crate) fn with_plugin_names<T>(names: Option<&Value>, f: impl FnOnce() -> T) -> T {
+    let names = names.and_then(Value::as_object).cloned().unwrap_or_default();
+    PLUGIN_NAMES.with(|cell| *cell.borrow_mut() = names);
+    let out = f();
+    PLUGIN_NAMES.with(|cell| cell.borrow_mut().clear());
+    out
+}
+
 /// A device inside a container as the producer sees it: its own name, or its type's.
 fn inner_label(device: &Element) -> String {
     if let Some(name) = device.child_text("CustomDeviceName").filter(|name| !name.is_empty()) {
@@ -331,6 +347,12 @@ fn inner_label(device: &Element) -> String {
     }
     if device.name() == PLUGIN {
         if let Some(name) = device.child_text("PluginShortDisplayName").or_else(|| device.child_text("PluginDisplayName")) {
+            return name;
+        }
+        let named = device
+            .child_text("PluginIdentifier")
+            .and_then(|id| PLUGIN_NAMES.with(|cell| cell.borrow().get(&id).and_then(Value::as_str).map(str::to_owned)));
+        if let Some(name) = named {
             return name;
         }
     }
@@ -2053,7 +2075,7 @@ impl crate::host::Host {
         crate::changes::place(&mut params, answer.get("epoch").and_then(Value::as_str), answer.get("layout").and_then(Value::as_u64));
         let Ok(read) = self.call("preset_read", params, pick, READ_TIMEOUT).await else { return };
         let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default().to_string();
-        let found = inside(&text, true);
+        let found = with_plugin_names(read.get("plugins"), || inside(&text, true));
         let item = &mut answer["items"][0];
         if let Some((key, value)) = &found {
             item[*key] = value.clone();
@@ -2062,7 +2084,7 @@ impl crate::host::Host {
             item["presetData"] = text.clone().into();
         }
         if too_big(answer) {
-            if let Some((key, value)) = inside(&text, false) {
+            if let Some((key, value)) = with_plugin_names(read.get("plugins"), || inside(&text, false)) {
                 answer["items"][0][key] = value;
             }
         }
@@ -2114,7 +2136,9 @@ impl crate::host::Host {
             let mut params = json!({"ref": reference});
             crate::changes::place(&mut params, epoch.as_deref(), layout);
             if let Ok(read) = self.call("preset_read", params, pick, READ_TIMEOUT).await {
-                let children = child_nodes(read.get("presetData").and_then(Value::as_str).unwrap_or_default());
+                let children = with_plugin_names(read.get("plugins"), || {
+                    child_nodes(read.get("presetData").and_then(Value::as_str).unwrap_or_default())
+                });
                 answer["nodes"][i]["childNodes"] = Value::Array(children);
             }
         }
@@ -2152,7 +2176,7 @@ impl crate::host::Host {
             Err(error) => return (self.call_error(&error), true),
         };
         let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
-        let edited = match edit(kind, input, text, &Device::from_read(&read)) {
+        let edited = match with_plugin_names(read.get("plugins"), || edit(kind, input, text, &Device::from_read(&read))) {
             Ok(edited) => edited,
             Err(refusal) => return (refusal_answer(&refusal), true),
         };
@@ -2197,7 +2221,8 @@ impl crate::host::Host {
             );
         }
         let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
-        let edited = edit(&record.kind, &record.input, text, &device).map_err(|r| refusal_answer(&r))?;
+        let edited =
+            with_plugin_names(read.get("plugins"), || edit(&record.kind, &record.input, text, &device)).map_err(|r| refusal_answer(&r))?;
         if comparable(&edited.prior) != comparable(&record.prior) {
             return Err(
                 json!({"error": format!("{} changed in Renoise since the preview: preview it again", q(&device.named())), "code": "changed"}),
@@ -2357,7 +2382,9 @@ impl crate::host::Host {
             shape: applied.get("shape").and_then(Value::as_str).unwrap_or_default(),
             discard,
         };
-        match undo(&kept, text, read.get("shape").and_then(Value::as_str).unwrap_or_default(), &device) {
+        match with_plugin_names(read.get("plugins"), || {
+            undo(&kept, text, read.get("shape").and_then(Value::as_str).unwrap_or_default(), &device)
+        }) {
             Err(refusal) => Err(refusal_answer(&refusal)),
             Ok(Undo::Back(title)) => {
                 Ok(Err(json!({"restored": {}, "display": {"title": title, "note": "It was back already: nothing was written."}})))

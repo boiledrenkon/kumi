@@ -242,7 +242,12 @@ fn agree(prior: &[(Mapping, Element)], export: &Value, m: usize) -> Result<(), R
             q(&label_of(export))
         ))
     };
-    let read = export.pointer(&format!("/macros/{}/mappings", m - 1)).and_then(Value::as_array).ok_or_else(mismatch)?;
+    let read = match export.pointer(&format!("/macros/{}/mappings", m - 1)) {
+        Some(Value::Array(items)) => items.clone(),
+        // (an empty list, as an older tool's JSON wrote it)
+        Some(Value::Object(fields)) if fields.is_empty() => vec![],
+        _ => return Err(mismatch()),
+    };
     if read.len() != prior.len() {
         return Err(mismatch());
     }
