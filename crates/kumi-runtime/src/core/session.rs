@@ -2997,10 +2997,13 @@ impl SessionController for Session {
         let Some(store) = &self.0.options.recipes else {
             return Ok(vec![]);
         };
+        // Only this DAW's recipes: another's steps are its own tools'.
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
         Ok(store
             .list()
             .await?
             .into_iter()
+            .filter(|r| r.daw() == daw)
             .map(|r| RecipeSummary {
                 name: r.name,
                 about: r.about,
@@ -3090,10 +3093,12 @@ impl SessionController for Session {
         let Some(store) = &self.0.options.recipes else {
             return Ok(false);
         };
-        let Some(recipe) = store.get(name).await? else {
+        // (this DAW's: the panel lists only its recipes)
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
+        let Some(recipe) = store.get_in(name, daw).await? else {
             return Ok(false);
         };
-        if !store.remove(&recipe.name).await? {
+        if !store.remove_in(&recipe.name, daw).await? {
             return Ok(false);
         }
         self.changed_system(true);

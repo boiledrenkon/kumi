@@ -642,13 +642,15 @@ impl DawProfile {
     pub const REAPER: DawProfile = DawProfile {
         id: Some(DawId::Reaper),
         words: DawWords { app: "REAPER", place: "project", places: "projects", master: "the master track", timeline: "arrange view" },
-        // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read.
+        // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read. What
+        // changed while Kumi wasn't running is told (M6).
         caps: Capabilities {
             device_tree: true,
             note_view: true,
             timeline_strip: true,
             focus_stream: true,
             transport_stream: true,
+            catch_up: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -695,8 +697,9 @@ impl DawProfile {
     pub const RENOISE: DawProfile = DawProfile {
         id: Some(DawId::Renoise),
         words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
-        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read.
-        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, ..Capabilities::NONE },
+        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read. What changed while Kumi wasn't
+        // running is told (M6).
+        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, catch_up: true, ..Capabilities::NONE },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",

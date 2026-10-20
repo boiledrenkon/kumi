@@ -55,6 +55,17 @@ pub trait RecipeStore {
     async fn get(&self, name: &str) -> Result<Option<Recipe>, RuntimeError>;
     async fn save(&self, recipe: &Recipe) -> Result<(), RuntimeError>;
     async fn remove(&self, name: &str) -> Result<bool, RuntimeError>;
+    /// The recipe called `name` among `daw`'s: each DAW's are its own, and a name another DAW's recipe has too is another
+    /// recipe.
+    async fn get_in(&self, name: &str, daw: DawId) -> Result<Option<Recipe>, RuntimeError> {
+        Ok(self.get(name).await?.filter(|recipe| recipe.daw() == daw))
+    }
+    async fn remove_in(&self, name: &str, daw: DawId) -> Result<bool, RuntimeError> {
+        match self.get_in(name, daw).await? {
+            Some(recipe) => self.remove(&recipe.name).await,
+            None => Ok(false),
+        }
+    }
 }
 pub const MAX_RECIPES: usize = 500;
 pub const MAX_RECIPE_STEPS: usize = 500;
@@ -125,13 +136,32 @@ fn params(value: Option<&Value>, clean: bool) -> Vec<RecipeParam> {
 fn steps(value: Option<&Value>) -> Vec<JsonObject> {
     value.and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_object().cloned()).collect()
 }
+/// The folder a DAW's recipes are kept in, under the recipes folder: Live's in it, as they always were; another DAW's in
+/// one of its own, so a recipe named like another DAW's is a recipe of its own, and a Kumi that knows only Live never
+/// takes another DAW's recipe for one of Live's.
+fn daw_folder(daw: DawId) -> Option<&'static str> {
+    match daw {
+        DawId::Ableton => None,
+        DawId::Reaper => Some("reaper"),
+        DawId::Renoise => Some("renoise"),
+    }
+}
 impl FileRecipeStore {
     fn file(&self, name: &str) -> Result<PathBuf, RuntimeError> {
+        self.file_in(name, DawId::Ableton)
+    }
+    fn folder(&self, daw: DawId) -> PathBuf {
+        match daw_folder(daw) {
+            Some(folder) => self.directory.join(folder),
+            None => self.directory.clone(),
+        }
+    }
+    fn file_in(&self, name: &str, daw: DawId) -> Result<PathBuf, RuntimeError> {
         let key = slug(name);
         if key.is_empty() {
             Err(RuntimeError::plain("A recipe needs a name."))
         } else {
-            Ok(self.directory.join(recipe_file(&key, crate::system::platform() == "win32")))
+            Ok(self.folder(daw).join(recipe_file(&key, crate::system::platform() == "win32")))
         }
     }
     async fn read(path: &Path) -> Option<Recipe> {
@@ -156,23 +186,28 @@ impl FileRecipeStore {
 #[async_trait(?Send)]
 impl RecipeStore for FileRecipeStore {
     async fn list(&self) -> Result<Vec<Recipe>, RuntimeError> {
-        let Ok(mut entries) = tokio::fs::read_dir(&self.directory).await else {
-            return Ok(vec![]);
-        };
-        let mut names = vec![];
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name();
-            if name.to_string_lossy().ends_with(".json") {
-                names.push(name);
-            }
-        }
-        // Node's readdir returns names sorted; stable sorting of equal timestamps preserves this order.
-        names.sort();
-        names.truncate(MAX_RECIPES * 2);
         let mut recipes = vec![];
-        for name in names {
-            if let Some(recipe) = Self::read(&self.directory.join(name)).await {
-                recipes.push(recipe);
+        // Live's folder first, then each other DAW's (a recipe there is that DAW's, whatever its file says).
+        for daw in [DawId::Ableton, DawId::Reaper, DawId::Renoise] {
+            let folder = self.folder(daw);
+            let Ok(mut entries) = tokio::fs::read_dir(&folder).await else { continue };
+            let mut names = vec![];
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                if name.to_string_lossy().ends_with(".json") {
+                    names.push(name);
+                }
+            }
+            // Node's readdir returns names sorted; stable sorting of equal timestamps preserves this order.
+            names.sort();
+            names.truncate(MAX_RECIPES * 2);
+            for name in names {
+                if let Some(mut recipe) = Self::read(&folder.join(name)).await {
+                    if daw != DawId::Ableton {
+                        recipe.daw = Some(daw);
+                    }
+                    recipes.push(recipe);
+                }
             }
         }
         recipes.sort_by(|a, b| {
@@ -189,12 +224,13 @@ impl RecipeStore for FileRecipeStore {
         }
     }
     async fn save(&self, recipe: &Recipe) -> Result<(), RuntimeError> {
+        let folder = self.folder(recipe.daw());
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(0o700);
-        builder.create(&self.directory).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
-        let temporary = self.directory.join(format!(".recipe-{}", uuid::Uuid::new_v4()));
+        builder.create(&folder).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
+        let temporary = folder.join(format!(".recipe-{}", uuid::Uuid::new_v4()));
         let result: Result<(), RuntimeError> = async {
             let mut options = tokio::fs::OpenOptions::new();
             options.create(true).truncate(true).write(true);
@@ -208,16 +244,44 @@ impl RecipeStore for FileRecipeStore {
             // rename instead of a cut-short file replacing the recipe.
             file.flush().await.map_err(|e| RuntimeError::plain(e.to_string()))?;
             drop(file);
-            tokio::fs::rename(&temporary, self.file(&recipe.name)?).await.map_err(|e| RuntimeError::plain(e.to_string()))
+            tokio::fs::rename(&temporary, self.file_in(&recipe.name, recipe.daw())?).await.map_err(|e| RuntimeError::plain(e.to_string()))
         }
         .await;
         if result.is_err() {
             let _ = tokio::fs::remove_file(temporary).await;
+        } else if recipe.daw() != DawId::Ableton {
+            // A Kumi before DAW folders kept this DAW's recipe beside Live's: it lives in its own folder now.
+            let older = self.file(&recipe.name)?;
+            if Self::read(&older).await.is_some_and(|kept| kept.daw() == recipe.daw()) {
+                let _ = tokio::fs::remove_file(older).await;
+            }
         }
         result
     }
     async fn remove(&self, name: &str) -> Result<bool, RuntimeError> {
         Ok(tokio::fs::remove_file(self.file(name)?).await.is_ok())
+    }
+    async fn get_in(&self, name: &str, daw: DawId) -> Result<Option<Recipe>, RuntimeError> {
+        if slug(name).is_empty() {
+            return Ok(None);
+        }
+        if daw != DawId::Ableton {
+            if let Some(mut recipe) = Self::read(&self.file_in(name, daw)?).await {
+                recipe.daw = Some(daw);
+                return Ok(Some(recipe));
+            }
+        }
+        // (Live's own; or, from a Kumi before DAW folders, this DAW's kept beside Live's)
+        Ok(Self::read(&self.file(name)?).await.filter(|recipe| recipe.daw() == daw))
+    }
+    async fn remove_in(&self, name: &str, daw: DawId) -> Result<bool, RuntimeError> {
+        if daw != DawId::Ableton && tokio::fs::remove_file(self.file_in(name, daw)?).await.is_ok() {
+            return Ok(true);
+        }
+        match Self::read(&self.file(name)?).await.filter(|recipe| recipe.daw() == daw) {
+            Some(_) => Ok(tokio::fs::remove_file(self.file(name)?).await.is_ok()),
+            None => Ok(false),
+        }
     }
 }
 pub fn recipe_instructions(recipes: &[Recipe]) -> String {
@@ -414,7 +478,8 @@ impl RecipeTool {
         if let Some((key, value)) = literal_ref(&refs, "") {
             return Ok(ToolResult::error(format!("{key} is {}, which means something only in this session: use a $blank (declared in params) for what's chosen when the recipe runs, or @name for what an earlier step makes.",json::quote(&string::head(value,64)))));
         }
-        let existing = self.options.store.get(&name).await?;
+        let daw = self.profile.id.unwrap_or(DawId::Ableton);
+        let existing = self.options.store.get_in(&name, daw).await?;
         let recipes = self.options.store.list().await?;
         if existing.is_none() && recipes.len() >= MAX_RECIPES {
             return Ok(ToolResult::error(format!("{MAX_RECIPES} recipes are kept; ask the producer which one to forget first.")));
@@ -447,9 +512,10 @@ impl RecipeTool {
         Ok(quiet(json!({"saved":name,"steps":recipe.steps.len()})))
     }
     async fn run(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let recipe = if let Some(name) = input.get("name").and_then(Value::as_str) { self.options.store.get(name).await? } else { None };
         // Only this DAW's recipes run here: another's steps are its own tools'.
-        let recipe = recipe.filter(|recipe| recipe.daw() == self.profile.id.unwrap_or(DawId::Ableton));
+        let daw = self.profile.id.unwrap_or(DawId::Ableton);
+        let recipe =
+            if let Some(name) = input.get("name").and_then(Value::as_str) { self.options.store.get_in(name, daw).await? } else { None };
         let Some(mut recipe) = recipe else {
             return Ok(ToolResult::error(format!(
                 "There's no recipe called {}.",
@@ -486,9 +552,11 @@ impl RecipeTool {
     }
     async fn forget(&self, input: JsonObject) -> Result<ToolResult, RuntimeError> {
         let name = input.get("name").and_then(Value::as_str).unwrap_or("");
-        let recipe = self.options.store.get(name).await?;
+        // (only this DAW's: another's is out of reach here, as it's out of sight)
+        let daw = self.profile.id.unwrap_or(DawId::Ableton);
+        let recipe = self.options.store.get_in(name, daw).await?;
         if let Some(recipe) = recipe {
-            if self.options.store.remove(&recipe.name).await? {
+            if self.options.store.remove_in(&recipe.name, daw).await? {
                 (self.options.on_event)(RecipeEvent {
                     action: RecipeAction::Forgotten,
                     name: recipe.name.clone(),
