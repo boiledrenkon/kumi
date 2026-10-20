@@ -766,10 +766,16 @@ end
 local function with_instrument_files(fn)
   local saved_save, saved_load = mock.app_save_instrument, mock.app_load_instrument
   local fields = mock.data.song_fields
+  -- (a mapping as the file keeps it: no observables)
+  local function plain(mappings)
+    local out = {}
+    for j, m in ipairs(mappings or {}) do out[j] = { param = m.param, name = m.name, min = m.min, max = m.max, scaling = m.scaling } end
+    return out
+  end
   mock.app_save_instrument = function(path)
     local instrument = mock.data.instruments[fields.selected_instrument_index]
     local macros = {}
-    for k = 1, 8 do macros[k] = instrument.macros[k].mappings or {} end
+    for k = 1, 8 do macros[k] = plain(instrument.macros[k].mappings) end
     local f = assert(io.open(path, "wb"))
     f:write(json.encode({ name = instrument.name, macros = macros }))
     f:close()

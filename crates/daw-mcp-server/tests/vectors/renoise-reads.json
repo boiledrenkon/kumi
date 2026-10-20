@@ -13,12 +13,40 @@
           "epoch": "1",
           "items": [
             {
+              "artist": "",
               "bpm": 128,
+              "comments": "",
               "editMode": false,
+              "editing": {
+                "editStep": 1,
+                "keyboardVelocity": false,
+                "octave": 3,
+                "quantize": false,
+                "recordTo": "pattern",
+                "singleTrack": false,
+                "wrap": false
+              },
               "followPlayer": false,
+              "groove": {
+                "amounts": [
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "on": false
+              },
+              "headroomDb": -6.000000490675719,
               "id": "b9e741f2bc26a406294ae3e2318dbafc",
               "identity": "4242:2",
               "lpb": 4,
+              "metronome": {
+                "beatsPerBar": 0,
+                "linesPerBeat": 0,
+                "on": false,
+                "precount": false,
+                "volumeDb": -3.0000002493010336
+              },
               "name": "Demo",
               "path": "/s/demo.xrns",
               "patternCount": 3,
@@ -45,6 +73,7 @@
           "epoch": "1",
           "items": [
             {
+              "collapsed": false,
               "color": "#ff0000",
               "colorBlend": 0,
               "deviceCount": 2,
@@ -54,6 +83,8 @@
               "mute": "active",
               "name": "Kick",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -62,10 +93,18 @@
               "preWidth": 0,
               "ref": "1:track:1",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -75,6 +114,8 @@
               "mute": "active",
               "name": "Hat",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 1,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -83,8 +124,15 @@
               "preWidth": 0,
               "ref": "1:track:2",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": -6.020599913279624
+              "volumeDb": -6.020599913279624,
+              "width": 0
             }
           ],
           "layout": 0,
@@ -107,15 +155,18 @@
           "epoch": "1",
           "items": [
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 1,
+              "groupCollapsed": false,
               "groupRef": "1:track:5",
               "index": 3,
               "mute": "active",
               "name": "Drums",
               "noteColumns": 1,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -125,9 +176,11 @@
               "ref": "1:track:3",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -137,6 +190,8 @@
               "mute": "active",
               "name": "Bass",
               "noteColumns": 2,
+              "outputDelay": 0,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -145,8 +200,15 @@
               "preWidth": 0,
               "ref": "1:track:4",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             }
           ],
           "layout": 0,
@@ -168,6 +230,7 @@
           "epoch": "1",
           "items": [
             {
+              "collapsed": false,
               "color": "#ff0000",
               "colorBlend": 0,
               "deviceCount": 2,
@@ -177,6 +240,8 @@
               "mute": "active",
               "name": "Kick",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -185,10 +250,18 @@
               "preWidth": 0,
               "ref": "1:track:1",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -198,6 +271,8 @@
               "mute": "active",
               "name": "Hat",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 1,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -206,19 +281,29 @@
               "preWidth": 0,
               "ref": "1:track:2",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": -6.020599913279624
+              "volumeDb": -6.020599913279624,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 1,
+              "groupCollapsed": false,
               "groupRef": "1:track:5",
               "index": 3,
               "mute": "active",
               "name": "Drums",
               "noteColumns": 1,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -228,9 +313,11 @@
               "ref": "1:track:3",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -240,6 +327,8 @@
               "mute": "active",
               "name": "Bass",
               "noteColumns": 2,
+              "outputDelay": 0,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -248,19 +337,29 @@
               "preWidth": 0,
               "ref": "1:track:4",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 2,
+              "groupCollapsed": false,
               "groupRef": null,
               "index": 5,
               "mute": "active",
               "name": "Mix",
               "noteColumns": 1,
+              "outputRouting": "Master",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -270,9 +369,11 @@
               "ref": "1:track:5",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#dcdcdc",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -281,6 +382,7 @@
               "index": 6,
               "name": "Master",
               "noteColumns": 1,
+              "outputRouting": "Built-in Output",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -289,9 +391,11 @@
               "preWidth": 0,
               "ref": "1:track:6",
               "type": "master",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -301,6 +405,7 @@
               "mute": "active",
               "name": "Send 1",
               "noteColumns": 1,
+              "outputRouting": "Master",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -310,7 +415,8 @@
               "ref": "1:track:7",
               "solo": false,
               "type": "send",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             }
           ],
           "layout": 0
@@ -557,6 +663,7 @@
           "epoch": "1",
           "items": [
             {
+              "chainCount": 0,
               "index": 1,
               "kind": "sample",
               "macros": [
@@ -566,81 +673,100 @@
                 },
                 {
                   "name": "Macro 2",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 3",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 4",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 5",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 6",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 7",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 8",
-                  "value": 0
+                  "value": 0.5
                 }
               ],
+              "modsetCount": 1,
+              "monophonic": false,
               "name": "Kit",
+              "overlap": "all",
               "phraseCount": 1,
+              "phrasePlayback": "program",
               "plugin": null,
+              "quantize": "none",
               "ref": "1:instrument:1",
-              "sampleCount": 2
+              "sampleCount": 2,
+              "transpose": 0,
+              "volumeDb": 0
             },
             {
+              "chainCount": 0,
               "index": 2,
               "kind": "plugin",
               "macros": [
                 {
                   "name": "Macro 1",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 2",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 3",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 4",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 5",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 6",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 7",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 8",
-                  "value": 0
+                  "value": 0.5
                 }
               ],
+              "modsetCount": 1,
+              "monophonic": false,
               "name": "Pad",
+              "overlap": "all",
               "phraseCount": 0,
+              "phrasePlayback": "program",
               "plugin": "Serum",
+              "pluginChannel": 1,
+              "pluginParamCount": 0,
+              "pluginPath": "Audio/Generators/VST3/Serum",
+              "pluginTranspose": 0,
+              "quantize": "none",
               "ref": "1:instrument:2",
-              "sampleCount": 1
+              "sampleCount": 1,
+              "transpose": 0,
+              "volumeDb": 0
             }
           ],
           "layout": 0
@@ -662,41 +788,59 @@
           "items": [
             {
               "baseNote": 48,
+              "fineTune": 0,
+              "frames": 0,
+              "fxChainRef": null,
               "index": 1,
+              "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
               "mapKeyToPitch": true,
               "mapVelocityToVolume": true,
+              "modulationSetRef": null,
               "muteGroup": 0,
               "name": "Sample 1",
+              "nna": "cut",
               "noteRange": [
                 0,
                 119
               ],
+              "panning": 0,
               "ref": "1:sample:1.1",
+              "transpose": 0,
               "velocityRange": [
                 0,
                 127
-              ]
+              ],
+              "volumeDb": 0
             },
             {
               "baseNote": 48,
+              "fineTune": 0,
+              "frames": 0,
+              "fxChainRef": null,
               "index": 2,
+              "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
               "mapKeyToPitch": true,
               "mapVelocityToVolume": true,
+              "modulationSetRef": null,
               "muteGroup": 0,
               "name": "Sample 2",
+              "nna": "cut",
               "noteRange": [
                 0,
                 119
               ],
+              "panning": 0,
               "ref": "1:sample:1.2",
+              "transpose": 0,
               "velocityRange": [
                 0,
                 127
-              ]
+              ],
+              "volumeDb": 0
             }
           ],
           "layout": 0
@@ -717,15 +861,76 @@
           "epoch": "1",
           "items": [
             {
+              "autoseek": false,
+              "baseNote": 48,
+              "effectColumns": 1,
               "index": 1,
+              "keyRange": null,
               "keyTracking": "none",
               "lines": 16,
+              "loopEnd": 16,
+              "loopStart": 1,
               "looping": true,
               "lpb": 4,
               "name": "Phrase 1",
-              "ref": "1:phrase:1.1"
+              "noteColumns": 1,
+              "playback": "pattern",
+              "ref": "1:phrase:1.1",
+              "shuffle": 0
             }
           ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "modset",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "devices": [],
+              "filterType": "None",
+              "filterVersion": 3,
+              "index": 1,
+              "inputs": {
+                "cutoff": 63.5,
+                "drive": 0,
+                "panning": 0,
+                "pitch": 0,
+                "resonance": 63.5,
+                "volume": 1
+              },
+              "name": "Set 01",
+              "pitchRange": 12,
+              "ref": "1:modset:1.1"
+            }
+          ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "chain",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [],
           "layout": 0
         }
       }
@@ -823,15 +1028,18 @@
           "epoch": "1",
           "items": [
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 1,
+              "groupCollapsed": false,
               "groupRef": "1:track:5",
               "index": 3,
               "mute": "active",
               "name": "Drums",
               "noteColumns": 1,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -841,7 +1049,8 @@
               "ref": "1:track:3",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             }
           ],
           "layout": 0
@@ -860,12 +1069,40 @@
           "epoch": "1",
           "layout": 0,
           "project": {
+            "artist": "",
             "bpm": 128,
+            "comments": "",
             "editMode": false,
+            "editing": {
+              "editStep": 1,
+              "keyboardVelocity": false,
+              "octave": 3,
+              "quantize": false,
+              "recordTo": "pattern",
+              "singleTrack": false,
+              "wrap": false
+            },
             "followPlayer": false,
+            "groove": {
+              "amounts": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "on": false
+            },
+            "headroomDb": -6.000000490675719,
             "id": "b9e741f2bc26a406294ae3e2318dbafc",
             "identity": "4242:2",
             "lpb": 4,
+            "metronome": {
+              "beatsPerBar": 0,
+              "linesPerBeat": 0,
+              "on": false,
+              "precount": false,
+              "volumeDb": -3.0000002493010336
+            },
             "name": "Demo",
             "path": "/s/demo.xrns",
             "patternCount": 3,
@@ -901,6 +1138,7 @@
           },
           "tracks": [
             {
+              "collapsed": false,
               "color": "#ff0000",
               "colorBlend": 0,
               "deviceCount": 2,
@@ -910,6 +1148,8 @@
               "mute": "active",
               "name": "Kick",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -918,10 +1158,18 @@
               "preWidth": 0,
               "ref": "1:track:1",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -931,6 +1179,8 @@
               "mute": "active",
               "name": "Hat",
               "noteColumns": 1,
+              "outputDelay": 0,
+              "outputRouting": "Drums",
               "pan": 1,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -939,19 +1189,29 @@
               "preWidth": 0,
               "ref": "1:track:2",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": -6.020599913279624
+              "volumeDb": -6.020599913279624,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 1,
+              "groupCollapsed": false,
               "groupRef": "1:track:5",
               "index": 3,
               "mute": "active",
               "name": "Drums",
               "noteColumns": 1,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -961,9 +1221,11 @@
               "ref": "1:track:3",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -973,6 +1235,8 @@
               "mute": "active",
               "name": "Bass",
               "noteColumns": 2,
+              "outputDelay": 0,
+              "outputRouting": "Mix",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -981,19 +1245,29 @@
               "preWidth": 0,
               "ref": "1:track:4",
               "solo": false,
+              "subColumns": {
+                "delay": false,
+                "panning": false,
+                "sampleEffects": false,
+                "volume": false
+              },
               "type": "sequencer",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
               "effectColumns": 2,
+              "groupCollapsed": false,
               "groupRef": null,
               "index": 5,
               "mute": "active",
               "name": "Mix",
               "noteColumns": 1,
+              "outputRouting": "Master",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -1003,9 +1277,11 @@
               "ref": "1:track:5",
               "solo": false,
               "type": "group",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#dcdcdc",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -1014,6 +1290,7 @@
               "index": 6,
               "name": "Master",
               "noteColumns": 1,
+              "outputRouting": "Built-in Output",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -1022,9 +1299,11 @@
               "preWidth": 0,
               "ref": "1:track:6",
               "type": "master",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             },
             {
+              "collapsed": false,
               "color": "#29a699",
               "colorBlend": 0,
               "deviceCount": 0,
@@ -1034,6 +1313,7 @@
               "mute": "active",
               "name": "Send 1",
               "noteColumns": 1,
+              "outputRouting": "Master",
               "pan": 0,
               "postPan": 0,
               "postVolumeDb": 0,
@@ -1043,7 +1323,8 @@
               "ref": "1:track:7",
               "solo": false,
               "type": "send",
-              "volumeDb": 0
+              "volumeDb": 0,
+              "width": 0
             }
           ],
           "transport": {
@@ -1645,6 +1926,7 @@
       "response": {
         "ok": true,
         "result": {
+          "chains": 0,
           "epoch": "1",
           "keyzones": [
             {
@@ -1674,6 +1956,7 @@
               ]
             }
           ],
+          "kind": "sample",
           "layout": 0,
           "macros": [
             {
@@ -1682,34 +1965,40 @@
             },
             {
               "name": "Macro 2",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 3",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 4",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 5",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 6",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 7",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 8",
-              "value": 0
+              "value": 0.5
             }
           ],
+          "modsets": 1,
           "name": "Kit",
+          "overlap": "all",
+          "phrasePlayback": "program",
+          "phraseRanges": [
+            null
+          ],
           "phrases": [
             "Phrase 1"
           ],
@@ -1764,7 +2053,7 @@
       "response": {
         "error": {
           "code": "bad-params",
-          "message": "unknown kind nonsense (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)"
+          "message": "unknown kind nonsense (song, track, sequence, pattern, line, automation, instrument, sample, phrase, device, param, modset, chain)"
         },
         "ok": false
       }

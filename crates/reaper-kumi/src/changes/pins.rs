@@ -6,19 +6,16 @@ use serde_json::{json, Value};
 
 use super::{Applied, Ctx, Done, Preview, Restore, Restored};
 use crate::read::{bad, failed};
-use crate::reaper::{Fx, FxOwner};
+use crate::reaper::Fx;
 use crate::refs::Ref;
 
-/// The FX an fx-pins change names: a track's FX by its ref.
+/// The FX an fx-pins change names, in any chain (a track's, its input chain, a take's, a container's).
 fn fx_of(ctx: &Ctx, input: &Value) -> Done<(Fx, String)> {
     let reference = input.get("ref").and_then(Value::as_str).ok_or_else(|| bad("ref: the FX"))?;
     let Ref::Fx(guid) = Ref::parse(reference).map_err(bad)? else { return Err(bad("ref must be an FX ref (r:fx:…)")) };
-    let fx = ctx.reads.fx_by_guid(ctx.reaper, ctx.proj, &guid)?;
-    let FxOwner::Track(track) = fx.owner else {
-        return Err(bad("the pins of a take's FX aren't changed this way: api_call TakeFX_SetPinMappings can"));
-    };
-    let name = format!("{} on {}", super::quoted(&super::fx::fx_label(ctx, fx)), super::quoted(&super::track_name(ctx.reaper, track)));
-    Ok((fx, name))
+    let at = super::fxchain::locate_guid(ctx, &guid)?;
+    let name = format!("{} {}", super::quoted(&super::fx::fx_label(ctx, at.fx)), super::fx::place_phrase(ctx, at.holder));
+    Ok((at.fx, name))
 }
 
 /// The pins asked for: (output, pin from 0, channels as bits), each pin once.

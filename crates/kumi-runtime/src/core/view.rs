@@ -506,7 +506,7 @@ pub struct SequenceSlot {
 
 /// An instrument's samples on the keyboard: each zone's note and velocity range, and its macros and phrases. Names
 /// are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KeyzoneMap {
     pub item_ref: String,
     pub name: String,
@@ -515,15 +515,33 @@ pub struct KeyzoneMap {
     pub macros: Vec<(String, f64)>,
     #[serde(default)]
     pub phrases: Vec<String>,
+    /// What it plays through when not its samples: "plugin" or "midi".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays_through: Option<String>,
+    /// What plays where zones overlap: "all", "cycle" or "random".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
+    /// How its phrases play: "off", "program" or "keymap".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phrase_playback: Option<String>,
+    /// Each phrase's keys in the keymap (notes, both included), as `phrases` lists them.
+    #[serde(default)]
+    pub phrase_keys: Vec<Option<(u8, u8)>>,
+    /// The phrase every note plays in program mode: its place in `phrases`, from 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<usize>,
 }
 
 /// A sample's zone: its notes (MIDI, both included), velocities (0–127) and base note.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Keyzone {
     pub sample: String,
     pub notes: (u8, u8),
     pub velocities: (u8, u8),
     pub base: u8,
+    /// It plays on note-off, not note-on.
+    #[serde(default)]
+    pub note_off: bool,
 }
 
 /// A track's sends and receives, and whether it feeds its parent.

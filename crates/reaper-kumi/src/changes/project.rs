@@ -298,10 +298,15 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let title = format!("Tempo marker at {} put back", bar_text(ctx.reaper, ctx.proj, time));
     if let Some((_, existing)) = marker_at(ctx, time) {
         let now = marker_state(Some(&existing));
-        return if same_marker(&now, saved) || restore.discard {
+        // The one Kumi deleted is back (a retry): nothing is made twice. Another one there is the producer's, which an undo
+        // never writes over, even one told to put things back anyway.
+        return if same_marker(&now, saved) {
             Ok(Restored { restored: now, display: json!({"title": title}), unwritten: true })
         } else {
-            Err(changed("there is a different tempo marker there now"))
+            Err(changed(format!(
+                "a different tempo marker is at {} now (not the one Kumi deleted): nothing was written",
+                bar_text(ctx.reaper, ctx.proj, time)
+            )))
         };
     }
     if !put_marker(ctx, -1, time, saved) {

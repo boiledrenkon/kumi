@@ -258,26 +258,37 @@ pub fn matrix(body: &Value) -> SequenceMatrix {
 
 /// An instrument's samples on the keyboard (Renoise's keyzones).
 pub fn keyzones(item_ref: &str, body: &Value) -> KeyzoneMap {
-    let pair = |value: &Value, key: &str, (lo, hi): (u8, u8)| -> (u8, u8) {
-        let range: Vec<u8> = list(value, key).filter_map(Value::as_f64).map(|n| n.clamp(0., 127.) as u8).collect();
-        match range.as_slice() {
+    // A range as [low, high], in either order; `or` when it isn't one.
+    let range = |value: Option<&Value>, or: (u8, u8)| -> (u8, u8) {
+        let ends: Vec<u8> =
+            value.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_f64).map(|n| n.clamp(0., 127.) as u8).collect();
+        match ends.as_slice() {
             [a, b] => (*a.min(b), *a.max(b)),
-            _ => (lo, hi),
+            _ => or,
         }
     };
+    let word = |key: &str| body.get(key).and_then(Value::as_str).filter(|word| !word.is_empty()).map(str::to_owned);
+    let phrases: Vec<String> = list(body, "phrases").filter_map(Value::as_str).map(str::to_owned).collect();
     KeyzoneMap {
         item_ref: item_ref.into(),
         name: text(body, "name"),
         zones: list(body, "keyzones")
             .map(|zone| Keyzone {
                 sample: text(zone, "sample"),
-                notes: pair(zone, "noteRange", (0, 119)),
-                velocities: pair(zone, "velocityRange", (0, 127)),
+                notes: range(zone.get("noteRange"), (0, 119)),
+                velocities: range(zone.get("velocityRange"), (0, 127)),
                 base: number(zone, "baseNote").unwrap_or(48.).clamp(0., 127.) as u8,
+                note_off: text(zone, "layer") == "note-off",
             })
             .collect(),
         macros: list(body, "macros").filter_map(|m| Some((text(m, "name"), number(m, "value")?))).collect(),
-        phrases: list(body, "phrases").filter_map(Value::as_str).map(str::to_owned).collect(),
+        // (a phrase with no keys has none: null)
+        phrase_keys: list(body, "phraseRanges").map(|keys| keys.is_array().then(|| range(Some(keys), (0, 119)))).collect(),
+        program: number(body, "phraseProgram").filter(|n| *n >= 1. && (*n as usize) <= phrases.len()).map(|n| n as usize - 1),
+        phrases,
+        plays_through: word("kind").filter(|kind| kind != "sample"),
+        overlap: word("overlap"),
+        phrase_playback: word("phrasePlayback"),
     }
 }
 

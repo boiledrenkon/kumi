@@ -280,8 +280,11 @@ local function parameter(data, set)
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
     value_observable = data.value_observable or M.observable(),
     value_string_observable = M.observable(),
-    is_automated = data.automated == true,
   }, {
+    -- (M4 n-song: whether a pattern has automation of it, as the song's data says now; every parameter can be automated
+    -- unless a test says otherwise)
+    is_automated = function() return data.automated == true end,
+    is_automatable = function() return data.automatable ~= false end,
     value = function() return data.value end,
     value_string = function() return data.string and data.string(data.value) or string.format("%.2f", data.value) end,
   }, set)
@@ -473,6 +476,11 @@ local function device(data)
   return proxy
 end
 
+-- (n-instruments: the instruments' mock, which builds on the helpers above)
+assert(loadfile(M.tests_dir .. "mock_instruments.lua"))()(M, object, {
+  line = line, device = device, parameter = parameter, out_of_range = out_of_range, list = list, note_data = note_data,
+})
+
 -- The observable of a note column's mute or name: one per column, kept in the track's data.
 local function column_observable(t, kind, c)
   if type(c) ~= "number" or c < 1 or c > 12 or t.kind == "master" or t.kind == "send" then out_of_range("column", c) end
@@ -511,6 +519,11 @@ function M.make_song(options)
     d.tracks[#d.tracks + 1] = { kind = "send", name = "Send " .. i, members = 0, mute_state = 1, volume = 1, panning = 0.5,
       note_columns = 1, effect_columns = 1, devices = {} }
   end
+  -- (M4 n-song: a track given as soloed is a solo's root; Renoise's other tracks follow it, see M.solo_set)
+  d.solo_roots = {}
+  for _, t in ipairs(d.tracks) do
+    if t.solo then d.solo_roots[#d.solo_roots + 1] = t end
+  end
   for _, t in ipairs(d.tracks) do
     -- (Renoise's first device on every track is its mixer device, which can't be deleted or moved)
     if options.mixer_device then table.insert(t.devices, 1, M.mixer_device_data()) end
@@ -538,23 +551,10 @@ function M.make_song(options)
   d.sections, d.muted, d.section_names = {}, {}, {}
   d.new_pattern = new_pattern
 
-  -- Instruments
+  -- Instruments (n-instruments: mock_instruments.lua builds them)
   d.instruments = {}
   local function new_instrument(spec)
-    spec = spec or {}
-    local instrument = {
-      name = spec.name or "", samples = {}, phrases = {}, macros = {}, plugin = spec.plugin, tab = spec.tab, midi = spec.midi,
-      name_observable = simple_observable(), samples_observable = simple_observable(), phrases_observable = simple_observable(),
-    }
-    for k = 1, 8 do instrument.macros[k] = { name = "Macro " .. k, value = 0, name_observable = simple_observable(), value_observable = simple_observable() } end
-    for k = 1, spec.samples or 0 do
-      instrument.samples[k] = { name = "Sample " .. k, base_note = 48, note_range = { 0, 119 }, velocity_range = { 0, 127 },
-        loop_mode = 1, mute_group = 0 }
-    end
-    for k = 1, spec.phrases or 0 do
-      instrument.phrases[k] = { name = "Phrase " .. k, lines = 16, lpb = 4, key_tracking = 1, looping = true,
-        note_columns = 1, effect_columns = 1, data = {} }
-    end
+    local instrument = M.instrument_data(spec)
     d.instruments[#d.instruments + 1] = instrument
     return instrument
   end
@@ -606,11 +606,13 @@ function M.make_song(options)
   local function level(t, key, default, max)
     return object("renoise.DeviceParameter", {
       name = key, name_observable = M.observable(), value_min = 0, value_max = max, value_default = default,
-      value_observable = M.observable(), value_string_observable = M.observable(), is_automated = false,
+      -- (M4 n-song: the value's observable is the track's, so a watcher sees writes and Renoise's undo of them)
+      value_observable = (function() t[key .. "_observable"] = t[key .. "_observable"] or M.observable() return t[key .. "_observable"] end)(),
+      value_string_observable = M.observable(), is_automated = false,
     }, {
       value = function() return t[key] or default end,
       value_string = function() return string.format("%.2f", t[key] or default) end,
-    }, { value = recorded(t, key) })
+    }, { value = recorded(t, key, key .. "_observable") })
   end
 
   local KIND = { sequencer = 1, master = 2, send = 3, group = 4 }
@@ -642,6 +644,14 @@ function M.make_song(options)
         return device(t.devices[k])
       end,
       color_blend_observable = (function() t.color_blend_observable = t.color_blend_observable or M.observable() return t.color_blend_observable end)(),
+      -- M4 (n-song): the observables of what the track kinds change
+      collapsed_observable = (function() t.collapsed_observable = t.collapsed_observable or M.observable() return t.collapsed_observable end)(),
+      output_routing_observable = (function() t.output_routing_observable = t.output_routing_observable or M.observable() return t.output_routing_observable end)(),
+      output_delay_observable = (function() t.output_delay_observable = t.output_delay_observable or M.observable() return t.output_delay_observable end)(),
+      volume_column_visible_observable = (function() t.volume_column_observable = t.volume_column_observable or M.observable() return t.volume_column_observable end)(),
+      panning_column_visible_observable = (function() t.panning_column_observable = t.panning_column_observable or M.observable() return t.panning_column_observable end)(),
+      delay_column_visible_observable = (function() t.delay_column_observable = t.delay_column_observable or M.observable() return t.delay_column_observable end)(),
+      sample_effects_column_visible_observable = (function() t.sample_effects_column_observable = t.sample_effects_column_observable or M.observable() return t.sample_effects_column_observable end)(),
       set_column_name = function(_, c, name)
         column_observable(t, "name", c)
         t.column_names = t.column_names or {}
@@ -756,16 +766,34 @@ function M.make_song(options)
       solo_state = function() return t.solo or false end,
       visible_note_columns = function() return t.note_columns end,
       visible_effect_columns = function() return t.effect_columns end,
-      max_note_columns = function() return (t.kind == "master" or t.kind == "send") and 0 or 12 end,
+      max_note_columns = function() return (t.kind == "master" or t.kind == "send" or t.kind == "group") and 0 or 12 end,
       max_effect_columns = function() return t.kind == "master" and 8 or 8 end,
       collapsed = function() return t.collapsed == true end,
-      output_routing = function() return t.output_routing or "Master" end,
+      output_routing = function()
+        if t.output_routing then return t.output_routing end
+        if t.kind == "master" then return "Built-in Output" end
+        -- (a group's track goes to its group)
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return d.tracks[g].name end
+        end
+        return "Master"
+      end,
       output_delay = function() return t.output_delay or 0 end,
       volume_column_visible = function() return t.volume_column == true end,
       panning_column_visible = function() return t.panning_column == true end,
       delay_column_visible = function() return t.delay_column == true end,
       sample_effects_column_visible = function() return t.sample_effects_column == true end,
-      available_output_routings = function() return { "Master" } end,
+      available_output_routings = function()
+        if t.kind == "master" then return { "Built-in Output" } end
+        local routings = {}
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then routings[#routings + 1] = d.tracks[g].name break end
+        end
+        routings[#routings + 1] = "Master"
+        routings[#routings + 1] = "Built-in Output"
+        return routings
+      end,
+      min_effect_columns = function() return t.kind == "sequencer" and 0 or 1 end,
       group_parent = function()
         for g = i + 1, #d.tracks do
           if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return track(g) end
@@ -786,6 +814,7 @@ function M.make_song(options)
         for k = 1, t.members do members[k] = track(i - k) end
         return members
       end
+      getters.group_collapsed = function() return t.group_collapsed == true end
     end
     -- Every track has a colour in Renoise (it assigns one), and a blend of how much of it shows.
     getters.color = function() return t.color or (t.kind == "master" and { 220, 220, 220 } or { 41, 166, 153 }) end
@@ -795,19 +824,27 @@ function M.make_song(options)
       color = recorded(t, "color", "color_observable", false, function(v) return { v[1], v[2], v[3] } end),
       color_blend = recorded(t, "color_blend", "color_blend_observable"),
       mute_state = recorded(t, "mute_state", "mute_state_observable", true),
-      solo_state = recorded(t, "solo", "solo_state_observable", true),
+      -- (M4 n-song: Renoise solos by rewriting every track's mute state, see M.solo_set)
+      solo_state = function(value) M.solo_set(t, value) end,
       visible_note_columns = recorded(t, "note_columns", "visible_note_columns_observable"),
       visible_effect_columns = recorded(t, "effect_columns", "visible_effect_columns_observable"),
-      volume_column_visible = recorded(t, "volume_column"),
-      panning_column_visible = recorded(t, "panning_column"),
-      delay_column_visible = recorded(t, "delay_column"),
-      sample_effects_column_visible = recorded(t, "sample_effects_column"),
-      collapsed = recorded(t, "collapsed"),
-      output_routing = recorded(t, "output_routing"),
+      volume_column_visible = recorded(t, "volume_column", "volume_column_observable"),
+      panning_column_visible = recorded(t, "panning_column", "panning_column_observable"),
+      delay_column_visible = recorded(t, "delay_column", "delay_column_observable"),
+      sample_effects_column_visible = recorded(t, "sample_effects_column", "sample_effects_column_observable"),
+      collapsed = recorded(t, "collapsed", "collapsed_observable"),
+      output_routing = function(value)
+        local known = false
+        for _, name in ipairs(getters.available_output_routings()) do known = known or name == value end
+        if not known then error("std::logic_error: 'unknown output routing string. pass one of 'available_output_routings''", 2) end
+        recorded(t, "output_routing", "output_routing_observable")(value)
+      end,
       output_delay = function(value)
         if t.kind ~= "sequencer" then error("std::logic_error: 'can not change the output_delay of group, master or send tracks.'", 2) end
-        recorded(t, "output_delay")(value)
+        if value < -100 or value > 100 then error("std::logic_error: 'invalid output_delay value'", 2) end
+        recorded(t, "output_delay", "output_delay_observable")(value)
       end,
+      group_collapsed = recorded(t, "group_collapsed"),
     }
     return object(class, fields, getters, setters)
   end
@@ -817,11 +854,17 @@ function M.make_song(options)
     pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
     local data = pattern.tracks[t]
     data.alias_observable = data.alias_observable or M.observable()
-    return object("renoise.PatternTrack", {
+    -- M4 (n-song): the slot colour and the list of automation have observables of their own
+    data.color_observable = data.color_observable or M.observable()
+    data.automation_observable = data.automation_observable or M.observable()
+    data.t = t
+    local made = object("renoise.PatternTrack", {
       alias_pattern_index_observable = data.alias_observable,
-      -- an alias shows (and writes to) the lines of the pattern it is an alias of
+      color_observable = data.color_observable, automation_observable = data.automation_observable,
+      -- an alias shows (and writes to) the lines of the pattern it is an alias of; lines past the pattern's end are kept
+      -- (measured, 3.5.4) and reached up to the most a pattern has
       line = function(_, k)
-        if type(k) ~= "number" or k < 1 or k > pattern.lines then out_of_range("line", k) end
+        if type(k) ~= "number" or k < 1 or k > 512 then out_of_range("line", k) end
         M.lines_read = (M.lines_read or 0) + 1
         local source_pattern = data.alias > 0 and d.patterns[data.alias] or pattern
         local source = data.alias > 0 and d.patterns[data.alias] and d.patterns[data.alias].tracks[t] or data
@@ -853,11 +896,71 @@ function M.make_song(options)
       create_automation = function(_, parameter)
         local identity = M.impl(parameter).__data
         data.automation = data.automation or {}
+        for _, automation in ipairs(data.automation) do
+          if automation.parameter == identity then error("std::logic_error: 'an automation for this parameter already exists'", 2) end
+        end
         local made = { parameter = identity, playmode = 2, points = {} }
         data.automation[#data.automation + 1] = made
+        M.refresh_automated(identity)
+        M.fire(data.automation_observable, { type = "insert", index = #data.automation })
+        M.record(function()
+          for k, automation in ipairs(data.automation) do
+            if automation == made then table.remove(data.automation, k) M.fire(data.automation_observable, { type = "remove", index = k }) break end
+          end
+          M.refresh_automated(identity)
+        end, function()
+          data.automation[#data.automation + 1] = made
+          M.refresh_automated(identity)
+          M.fire(data.automation_observable, { type = "insert", index = #data.automation })
+        end)
         return M.api.automation_object(made)
       end,
+      -- (M4 n-song) a copy of another pattern's track (through its alias), its automation too; no alias after
+      copy_from = function(_, other)
+        local source = M.impl(other).__ptrack
+        if source.alias > 0 then source = d.patterns[source.alias].tracks[source.t] or { alias = 0, lines = {} } end
+        local old = { alias = data.alias, lines = data.lines, automation = data.automation }
+        local function copy(value)
+          if type(value) ~= "table" then return value end
+          local out = {}
+          for k, v in pairs(value) do out[k] = (k == "parameter") and v or copy(v) end
+          return out
+        end
+        local new = { alias = 0, lines = copy(source.lines or {}), automation = copy(source.automation or {}) }
+        data.alias, data.lines, data.automation = new.alias, new.lines, new.automation
+        M.fire(data.alias_observable)
+        M.record(function() data.alias, data.lines, data.automation = old.alias, old.lines, old.automation; M.fire(data.alias_observable) end,
+          function() data.alias, data.lines, data.automation = new.alias, new.lines, new.automation; M.fire(data.alias_observable) end)
+      end,
+      delete_automation = function(_, parameter)
+        local identity = M.impl(parameter).__data
+        for k, automation in ipairs(data.automation or {}) do
+          if automation.parameter == identity then
+            table.remove(data.automation, k)
+            M.refresh_automated(identity)
+            M.fire(data.automation_observable, { type = "remove", index = k })
+            M.record(function()
+              table.insert(data.automation, math.min(k, #data.automation + 1), automation)
+              M.refresh_automated(identity)
+              M.fire(data.automation_observable, { type = "insert", index = k })
+            end, function()
+              for j, other in ipairs(data.automation) do
+                if other == automation then table.remove(data.automation, j) M.fire(data.automation_observable, { type = "remove", index = j }) break end
+              end
+              M.refresh_automated(identity)
+            end)
+            return
+          end
+        end
+        error("std::logic_error: 'no automation for this parameter'", 2)
+      end,
     }, {
+      color = function() return data.color and { data.color[1], data.color[2], data.color[3] } or nil end,
+      automation = function()
+        local list = {}
+        for k, automation in ipairs(data.automation or {}) do list[k] = M.api.automation_object(automation) end
+        return list
+      end,
       alias_pattern_index = function() return data.alias end,
       is_alias = function() return data.alias > 0 end,
       is_empty = function()
@@ -867,15 +970,31 @@ function M.make_song(options)
         return true
       end,
     }, {
+      color = function(value)
+        if value ~= nil and (type(value) ~= "table" or #value ~= 3) then
+          error("std::logic_error: 'expected a table with 3 numbers (rgb) as track slot color argument.'", 2)
+        end
+        local old, new = data.color, value and { value[1], value[2], value[3] } or nil
+        data.color = new
+        M.fire(data.color_observable)
+        M.record(function() data.color = old; M.fire(data.color_observable) end, function() data.color = new; M.fire(data.color_observable) end)
+      end,
+      -- (measured, 3.5.4: a track made an alias, or no alias with 0, has no lines of its own after: only the undo brings them back)
       alias_pattern_index = function(value)
-        local old = data.alias
+        local old, old_lines = data.alias, data.lines
         if old == value then return end
-        data.alias = value
+        if value > 0 and (value > #d.patterns or value == p) then error("std::logic_error: 'invalid pattern_index value'", 2) end
+        if value > 0 and d.patterns[value].tracks[t] and d.patterns[value].tracks[t].alias > 0 then
+          error("std::logic_error: 'can not assign an alias to an alias.'", 2)
+        end
+        data.alias, data.lines = value, {}
         M.fire(data.alias_observable)
-        M.record(function() data.alias = old; M.fire(data.alias_observable) end,
-          function() data.alias = value; M.fire(data.alias_observable) end)
+        M.record(function() data.alias, data.lines = old, old_lines; M.fire(data.alias_observable) end,
+          function() data.alias, data.lines = value, {}; M.fire(data.alias_observable) end)
       end,
     })
+    M.impl(made).__ptrack = data
+    return made
   end
 
   pattern_object = function(p)
@@ -893,6 +1012,22 @@ function M.make_song(options)
         end
         M.notifier_adds = (M.notifier_adds or 0) + 1
         pattern.notifiers[#pattern.notifiers + 1] = fn
+      end,
+      -- (M4 n-song) every track's lines, automation and alias go; its line notifiers fire for the lines that had something
+      clear = function()
+        local old = pattern.tracks
+        local cleared = {}
+        for t, data in pairs(old) do
+          cleared[t] = { alias = 0, lines = {}, color = data.color, alias_observable = data.alias_observable,
+            color_observable = data.color_observable, automation_observable = data.automation_observable }
+        end
+        pattern.tracks = cleared
+        for t, data in pairs(old) do
+          for k in pairs(data.lines or {}) do
+            for _, fn in ipairs(list(pattern.notifiers)) do pcall(fn, { pattern = p, track = t, line = k }) end
+          end
+        end
+        M.record(function() pattern.tracks = old end, function() pattern.tracks = cleared end)
       end,
       remove_line_notifier = function(_, fn)
         for i, existing in ipairs(pattern.notifiers) do
@@ -939,179 +1074,8 @@ function M.make_song(options)
     })
   end
 
-  -- A member kept in the song's data: read live, written with its undo step and its notifier (`watched` holds the observables).
-  local function live(t, field, default)
-    return function()
-      local value = t[field]
-      if value == nil then return default end
-      return value
-    end
-  end
-  local function kept(t, field, watched, copy)
-    return function(value)
-      if copy then value = copy(value) end
-      local old = t[field]
-      t[field] = value
-      if watched[field] then M.fire(watched[field]) end
-      M.record(function()
-        t[field] = old
-        if watched[field] then M.fire(watched[field]) end
-      end, function()
-        t[field] = value
-        if watched[field] then M.fire(watched[field]) end
-      end)
-    end
-  end
-  local function pair(v) return { v[1], v[2] } end
-
-  -- (what is watched lives in the data: the proxies are made anew on every read)
-  local SAMPLE_FIELDS = { name = "", volume = 1, panning = 0.5, transpose = 0, fine_tune = 0, beat_sync_enabled = false,
-    beat_sync_lines = 16, loop_mode = 1, new_note_action = 1, mute_group = 0, autofade = false, oneshot = false }
-  local MAPPING_FIELDS = { base_note = 48, note_range = { 0, 119 }, velocity_range = { 0, 127 }, layer = 1,
-    map_key_to_pitch = true, map_velocity_to_volume = true }
-  local function sample_object(i, s)
-    local sample = d.instruments[i].samples[s]
-    sample.observables = sample.observables or {}
-    local watched = sample.observables
-    local fields, getters, setters = {}, {}, {}
-    for key, default in pairs(SAMPLE_FIELDS) do
-      watched[key] = watched[key] or M.observable()
-      fields[key .. "_observable"] = watched[key]
-      getters[key], setters[key] = live(sample, key, default), kept(sample, key, watched)
-    end
-    local mapping_fields, mapping_getters, mapping_setters = {}, {}, {}
-    for key, default in pairs(MAPPING_FIELDS) do
-      watched[key] = watched[key] or M.observable()
-      mapping_fields[key .. "_observable"] = watched[key]
-      mapping_getters[key] = live(sample, key, default)
-      mapping_setters[key] = kept(sample, key, watched, type(default) == "table" and pair or nil)
-    end
-    fields.sample_mapping = object("renoise.SampleMapping", mapping_fields, mapping_getters, mapping_setters)
-    return object("renoise.Sample", fields, getters, setters)
-  end
-
-  local function phrase_object(i, ph)
-    local phrase = d.instruments[i].phrases[ph]
-    phrase.notifiers = phrase.notifiers or {}
-    phrase.observables = phrase.observables or {}
-    local watched = phrase.observables
-    for _, key in ipairs({ "name", "number_of_lines", "lpb", "visible_note_columns", "visible_effect_columns" }) do
-      watched[key] = watched[key] or M.observable()
-    end
-    return object("renoise.InstrumentPhrase", {
-      name = phrase.name, number_of_lines = phrase.lines, lpb = phrase.lpb, key_tracking = phrase.key_tracking,
-      looping = phrase.looping, visible_note_columns = phrase.note_columns, visible_effect_columns = phrase.effect_columns,
-      name_observable = watched.name, number_of_lines_observable = watched.number_of_lines, lpb_observable = watched.lpb,
-      visible_note_columns_observable = watched.visible_note_columns,
-      visible_effect_columns_observable = watched.visible_effect_columns,
-      line = function(_, k)
-        if type(k) ~= "number" or k < 1 or k > phrase.lines then out_of_range("phrase line", k) end
-        return line(phrase.data[k])
-      end,
-      add_line_notifier = function(_, fn)
-        for _, existing in ipairs(phrase.notifiers) do
-          if existing == fn then error("the notifier was already added", 2) end
-        end
-        phrase.notifiers[#phrase.notifiers + 1] = fn
-      end,
-      remove_line_notifier = function(_, fn)
-        for n, existing in ipairs(phrase.notifiers) do
-          if existing == fn then table.remove(phrase.notifiers, n) return end
-        end
-        error("the notifier was not added", 2)
-      end,
-      has_line_notifier = function(_, fn)
-        for _, existing in ipairs(phrase.notifiers) do
-          if existing == fn then return true end
-        end
-        return false
-      end,
-    })
-  end
-
-  instrument_object = function(i)
-    local instrument = type(i) == "number" and d.instruments[i]
-    if not instrument then out_of_range("instrument", i) end
-    return object("renoise.Instrument", {
-      name_observable = instrument.name_observable, samples_observable = instrument.samples_observable,
-      phrases_observable = instrument.phrases_observable,
-      active_tab = instrument.tab or 1,
-      midi_output_properties = object("renoise.InstrumentMidiOutputProperties", {
-        device_name = (instrument.midi or {}).device or "", instrument_type = (instrument.midi or {}).type or 1,
-        channel = (instrument.midi or {}).channel or 1, program = (instrument.midi or {}).program or 0,
-        bank = (instrument.midi or {}).bank or 0, transpose = (instrument.midi or {}).transpose or 0,
-        delay = (instrument.midi or {}).delay or 0, duration = (instrument.midi or {}).duration or 0,
-      }),
-      plugin_properties = object("renoise.InstrumentPluginProperties", {
-        plugin_loaded = instrument.plugin ~= nil,
-        plugin_device = instrument.plugin and device(instrument.plugin) or M.NIL,
-      }),
-      sample = function(_, s)
-        if not instrument.samples[s] then out_of_range("sample", s) end
-        return sample_object(i, s)
-      end,
-      phrase = function(_, ph)
-        if not instrument.phrases[ph] then out_of_range("phrase", ph) end
-        return phrase_object(i, ph)
-      end,
-      macro = function(_, k)
-        if not instrument.macros[k] then out_of_range("macro", k) end
-        local macro = instrument.macros[k]
-        local watched = { name = macro.name_observable, value = macro.value_observable }
-        -- (M4 n-devices: a macro's mappings, `macro.mappings` in the data: {param (the linked parameter's name), min, max,
-        -- scaling 1-5}; their range and scaling are written as Renoise does, each an undo step)
-        local function mapping_object(j)
-          local data = (macro.mappings or {})[j]
-          if not data then out_of_range("mapping", j) end
-          local function recorded(field)
-            return function(value)
-              local old = data[field]
-              if old == value then return end
-              data[field] = value
-              M.record(function() data[field] = old end, function() data[field] = value end)
-            end
-          end
-          return object("renoise.InstrumentMacroMapping", {
-            parameter = object("renoise.DeviceParameter", { name = data.param }),
-          }, {
-            parameter_min = function() return data.min end, parameter_max = function() return data.max end,
-            parameter_scaling = function() return data.scaling end,
-          }, { parameter_min = recorded("min"), parameter_max = recorded("max"), parameter_scaling = recorded("scaling") })
-        end
-        return object("renoise.InstrumentMacro", { name_observable = macro.name_observable, value_observable = macro.value_observable,
-          mapping = function(_, j) return mapping_object(j) end },
-          { name = live(macro, "name", ""), value = live(macro, "value", 0),
-            mappings = function()
-              local out = {}
-              for j = 1, #(macro.mappings or {}) do out[j] = mapping_object(j) end
-              return out
-            end },
-          { name = kept(macro, "name", watched), value = kept(macro, "value", watched) })
-      end,
-    }, {
-      name = function() return instrument.name end,
-      samples = function()
-        local samples = {}
-        for s in ipairs(instrument.samples) do samples[s] = sample_object(i, s) end
-        return samples
-      end,
-      phrases = function()
-        local phrases = {}
-        for ph in ipairs(instrument.phrases) do phrases[ph] = phrase_object(i, ph) end
-        return phrases
-      end,
-      macros = function()
-        local macros = {}
-        for k, macro in ipairs(instrument.macros) do
-          macros[k] = object("renoise.InstrumentMacro", { name = macro.name, value = macro.value, name_observable = macro.name_observable,
-            value_observable = macro.value_observable })
-        end
-        return macros
-      end,
-    }, {
-      name = kept(instrument, "name", { name = instrument.name_observable }),
-    })
-  end
+  -- (n-instruments: an instrument's proxy, with its samples, phrases, sets, chains, plug-in and MIDI output, is mock_instruments.lua's)
+  instrument_object = function(i) return M.instrument_proxy(i) end
 
   d.sequence_observable, d.assignments_observable, d.mutes_observable =
     simple_observable(), simple_observable(), simple_observable()
@@ -1217,6 +1181,86 @@ function M.make_song(options)
       if not d.sequence[s] or not d.tracks[t] then out_of_range("slot", t .. "," .. s) end
       return d.muted[t .. "," .. s] == true
     end,
+    -- M4 (n-song): measured in 3.5.4: clone_range puts copies of slots a..b after b, each with a new pattern (a copy named "#"
+    -- and the name, at the pool's end), the slots' mutes and section starts copied (a section's name with "#" in front);
+    -- make_range_unique gives each slot in the range whose pattern another slot plays a copy of it.
+    clone_range = function(_, a, b)
+      if type(a) ~= "number" or not d.sequence[a] then out_of_range("from_sequence_pos", a) end
+      if type(b) ~= "number" or not d.sequence[b] or b < a then out_of_range("to_sequence_pos", b) end
+      local made, slots = {}, {}
+      for i = a, b do
+        local copy = d.copy_pattern(d.sequence[i])
+        d.patterns[#d.patterns + 1] = copy
+        M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+        made[#made + 1] = copy
+        local section = d.sections[i]
+        local mutes = {}
+        for key in pairs(d.muted) do
+          local t, slot = key:match("^(%d+),(%d+)$")
+          if tonumber(slot) == i then mutes[#mutes + 1] = tonumber(t) end
+        end
+        slots[#slots + 1] = { pattern = #d.patterns, section = section and ("#" .. section) or nil, mutes = mutes }
+      end
+      local function put()
+        for k, slot in ipairs(slots) do
+          local at = b + k
+          d.insert_slot(at, slot.pattern)
+          d.sections[at], d.section_names[at] = slot.section, nil
+          for key in pairs(d.muted) do
+            local t, s_ = key:match("^(%d+),(%d+)$")
+            if tonumber(s_) == at then d.muted[key] = nil end
+          end
+          for _, t in ipairs(slot.mutes) do d.muted[t .. "," .. at] = true end
+        end
+      end
+      put()
+      M.record(function()
+        for k = #slots, 1, -1 do d.remove_slot(b + k) end
+        for _ = #made, 1, -1 do
+          table.remove(d.patterns)
+          M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = #d.patterns + 1 })
+        end
+      end, function()
+        for _, copy in ipairs(made) do
+          d.patterns[#d.patterns + 1] = copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+        end
+        put()
+      end)
+    end,
+    make_range_unique = function(_, a, b)
+      if type(a) ~= "number" or not d.sequence[a] then out_of_range("from_sequence_pos", a) end
+      if type(b) ~= "number" or not d.sequence[b] or b < a then out_of_range("to_sequence_pos", b) end
+      local played = {}
+      for _, p in ipairs(d.sequence) do played[p] = (played[p] or 0) + 1 end
+      local changes = {}
+      for i = a, b do
+        local old = d.sequence[i]
+        if played[old] > 1 then
+          local copy = d.copy_pattern(old)
+          d.patterns[#d.patterns + 1] = copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+          d.sequence[i] = #d.patterns
+          changes[#changes + 1] = { slot = i, old = old, copy = copy, p = #d.patterns }
+        end
+      end
+      if #changes > 0 then M.fire(d.assignments_observable) end
+      M.record(function()
+        for k = #changes, 1, -1 do
+          d.sequence[changes[k].slot] = changes[k].old
+          table.remove(d.patterns)
+          M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = #d.patterns + 1 })
+        end
+        M.fire(d.assignments_observable)
+      end, function()
+        for _, change in ipairs(changes) do
+          d.patterns[#d.patterns + 1] = change.copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+          d.sequence[change.slot] = change.p
+        end
+        M.fire(d.assignments_observable)
+      end)
+    end,
     set_track_sequence_slot_is_muted = function(_, t, s, muted)
       if not d.sequence[s] or not d.tracks[t] then out_of_range("slot", t .. "," .. s) end
       local key = t .. "," .. s
@@ -1285,6 +1329,24 @@ function M.make_song(options)
     M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = p })
     return data
   end
+  -- (M4 n-song) a copy of a pattern as Renoise's clone and make-unique make it: its lines, automation, aliases and slot colours
+  local function deep(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = (k == "parameter" or (type(k) == "string" and k:find("_observable$"))) and v or deep(v) end
+    return out
+  end
+  d.copy_pattern = function(p)
+    local source = d.patterns[p]
+    local copy = {
+      name = "#" .. source.name, lines = source.lines, tracks = {}, name_observable = M.observable(),
+      number_of_lines_observable = M.observable(), notifiers = {},
+    }
+    for t, data in pairs(source.tracks) do
+      copy.tracks[t] = { alias = data.alias, lines = deep(data.lines), automation = deep(data.automation), color = deep(data.color) }
+    end
+    return copy
+  end
   d.restore_pool = function(p, data)
     table.insert(d.patterns, p, data)
     for k, v in ipairs(d.sequence) do
@@ -1335,7 +1397,52 @@ function M.make_song(options)
         function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
     end
   end
+  -- M4 (n-song): the groove, the metronome, the editing settings and the track headroom. Measured in 3.5.4: the groove, the
+  -- metronome's beats per bar, lines per beat and volume and the headroom are undo steps (recorded here); the metronome's
+  -- switch and precount, edit step, octave, record quantize, wrapped and single-track editing, keyboard velocity and the
+  -- parameter record mode are not (plain fields, their observables fire on a write).
+  for key, value in pairs({
+    metronome_enabled = false, metronome_precount_enabled = false, metronome_precount_bars = 1, edit_step = 1, octave = 3,
+    record_quantize_enabled = false, record_quantize_lines = 1, wrapped_pattern_edit = false, single_track_edit_mode = false,
+    keyboard_velocity_enabled = false, keyboard_velocity = 127, record_parameter_mode = 1,
+  }) do
+    transport_fields[key], transport_fields[key .. "_observable"] = value, simple_observable()
+  end
+  local groove = { enabled = false, amounts = { 0, 0, 0, 0 } }
+  transport_fields.groove_enabled_observable, transport_fields.groove_assignment_observable = simple_observable(), simple_observable()
+  transport_fields.metronome_beats_per_bar_observable = simple_observable()
+  for key, value in pairs({ metronome_lines_per_beat = 0, metronome_volume = 0.70794576406479, track_headroom = 0.50118720531464 }) do
+    transport_fields[key], transport_fields[key .. "_observable"] = value, simple_observable()
+  end
+  for _, key in ipairs({ "metronome_beats_per_bar", "metronome_lines_per_beat", "metronome_volume", "track_headroom" }) do
+    transport_setters[key] = function(value)
+      local old = transport_fields[key]
+      if old == value then return end
+      transport_fields[key] = value
+      M.fire(transport_fields[key .. "_observable"])
+      M.record(function() transport_fields[key] = old; M.fire(transport_fields[key .. "_observable"]) end,
+        function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
+    end
+  end
+  transport_setters.groove_enabled = function(value)
+    local old = groove.enabled
+    if old == value then return end
+    groove.enabled = value
+    M.fire(transport_fields.groove_enabled_observable)
+    M.record(function() groove.enabled = old; M.fire(transport_fields.groove_enabled_observable) end,
+      function() groove.enabled = value; M.fire(transport_fields.groove_enabled_observable) end)
+  end
+  transport_setters.groove_amounts = function(value)
+    local old, new = groove.amounts, { value[1], value[2], value[3], value[4] }
+    groove.amounts = new
+    M.fire(transport_fields.groove_assignment_observable)
+    M.record(function() groove.amounts = old; M.fire(transport_fields.groove_assignment_observable) end,
+      function() groove.amounts = new; M.fire(transport_fields.groove_assignment_observable) end)
+  end
+  d.groove = groove
   local transport = object("renoise.Transport", transport_fields, {
+    groove_enabled = function() return groove.enabled end,
+    groove_amounts = function() return { groove.amounts[1], groove.amounts[2], groove.amounts[3], groove.amounts[4] } end,
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
     loop_sequence_range = function()
       local r = transport_fields.loop_range_seq
@@ -1374,6 +1481,33 @@ function M.make_song(options)
     add_track_to_group = function(_, track_index, group_index) M.api.add_track_to_group(track_index, group_index) end,
     remove_track_from_group = function(_, track_index) M.api.remove_track_from_group(track_index) end,
     insert_group_at = function(_, index) return M.api.insert_group_at(index) end,
+    -- M4 (n-song): notes played for preview, as Renoise's tests see them (measured: they play with the transport stopped, on
+    -- any track; out-of-range arguments raise)
+    trigger_instrument_note_on = function(_, i, t, notes, volume)
+      if not d.instruments[i] then error("std::logic_error: 'invalid instrument index'", 2) end
+      if not d.tracks[t] then error("std::logic_error: 'invalid track index'", 2) end
+      for _, note in ipairs(type(notes) == "table" and notes or { notes or 48 }) do
+        if note < 0 or note > 119 then error("std::logic_error: 'invalid note value'", 2) end
+      end
+      M.triggers[#M.triggers + 1] = { "on", i, t, type(notes) == "table" and table.concat(notes, ",") or tostring(notes or 48), volume }
+    end,
+    trigger_instrument_note_off = function(_, i, t, notes)
+      M.triggers[#M.triggers + 1] = { "off", i, t, type(notes) == "table" and table.concat(notes, ",") or tostring(notes or 48) }
+    end,
+    trigger_sample_note_on = function(_, i, sample, t, note, volume)
+      if not d.instruments[i] or not d.instruments[i].samples[sample] then error("std::logic_error: 'invalid sample index'", 2) end
+      M.triggers[#M.triggers + 1] = { "sample on", i, t, tostring(note), volume, sample }
+    end,
+    trigger_sample_note_off = function(_, i, sample, t, note)
+      M.triggers[#M.triggers + 1] = { "sample off", i, t, tostring(note), nil, sample }
+    end,
+    -- (n-instruments: Renoise renumbers the notes that play the instruments after the place)
+    insert_instrument_at = function(_, index)
+      M.instrument_list_op("insert", index, nil, nil, true)
+      return instrument_object(index)
+    end,
+    delete_instrument_at = function(_, index) M.instrument_list_op("remove", index, nil, nil, true) end,
+    swap_instruments_at = function(_, a, b) M.instrument_list_op("swap", a, b, nil, true) end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
     can_redo = function() return #d.undo.redo > 0 end,
@@ -1382,7 +1516,34 @@ function M.make_song(options)
     is_undo_redoing = function() return d.undo.redoing end,
   }
   d.track_proxy = track
+  -- M4 (n-song): the song's name, artist and comments are undo steps (measured, 3.5.4); its comments observable is a list's,
+  -- fired once per paragraph.
+  -- (the name stays a field of the song's, which a test may take away)
+  local info = { artist = options.artist or "", comments = options.comments or {} }
+  song_fields.artist_observable, song_fields.comments_observable = simple_observable(), simple_observable()
+  song_fields.comments_assignment_observable = simple_observable()
+  local function info_setter(key, observable, copy)
+    local store = key == "name" and song_fields or info
+    return function(value)
+      local old, new = store[key], copy and copy(value) or value
+      store[key] = new
+      for _ = 1, key == "comments" and math.max(#old, #new, 1) or 1 do M.fire(song_fields[observable]) end
+      M.record(function() store[key] = old; M.fire(song_fields[observable]) end, function() store[key] = new; M.fire(song_fields[observable]) end)
+    end
+  end
+  local function lines_copy(value)
+    local out = {}
+    for i, line in ipairs(value) do out[i] = line end
+    return out
+  end
+  local song_setters = {
+    name = info_setter("name", "name_observable"), artist = info_setter("artist", "artist_observable"),
+    comments = info_setter("comments", "comments_observable", lines_copy),
+  }
+  d.info = info
   local song_getters = {
+    artist = function() return info.artist end,
+    comments = function() return lines_copy(info.comments) end,
     patterns = function()
       local patterns = {}
       for p in ipairs(d.patterns) do patterns[p] = pattern_object(p) end
@@ -1405,7 +1566,7 @@ function M.make_song(options)
     song_fields.sequencer_track_count, song_fields.send_track_count = sequencers, sends
   end
   d.recount()
-  song = object("renoise.Song", song_fields, song_getters)
+  song = object("renoise.Song", song_fields, song_getters, song_setters)
   d.song = song
   return song
 end
@@ -1492,16 +1653,14 @@ end
 function ops.set_macro(i, k, value)
   local macro = M.data.instruments[i].macros[k]
   macro.value = value
-  fire(macro.value_observable)
+  fire(M.obs(macro, "value"))
 end
 
 -- A sample's mapping: field is note_range, velocity_range, base_note, layer, map_key_to_pitch or map_velocity_to_volume.
 function ops.set_mapping(i, s, field, value)
   local sample = M.data.instruments[i].samples[s]
-  sample.observables = sample.observables or {}
   sample[field] = value
-  sample.observables[field] = sample.observables[field] or M.observable()
-  fire(sample.observables[field])
+  fire(M.obs(sample, field))
 end
 
 function ops.set_phrase_note(i, ph, k, column, given)
@@ -1516,9 +1675,7 @@ end
 function ops.set_phrase(i, ph, field, value)
   local phrase = M.data.instruments[i].phrases[ph]
   phrase[field == "number_of_lines" and "lines" or field] = value
-  phrase.observables = phrase.observables or {}
-  phrase.observables[field] = phrase.observables[field] or M.observable()
-  fire(phrase.observables[field])
+  fire(M.obs(phrase, field))
 end
 
 local function track_spec(spec)
@@ -1634,6 +1791,8 @@ function M.follow_device_routes(track, device_index, removed)
 end
 
 local function put_track(index, data, pattern_data)
+  -- (M4 n-song: a track made during a solo is Off, measured)
+  if M.data.solo_roots and #M.data.solo_roots > 0 and data.kind ~= "master" then data.mute_state, data.solo = 2, false end
   table.insert(M.data.tracks, index, data)
   follow_routes(false, index)
   move_pattern_tracks(function(t) return t >= index and t + 1 or t end)
@@ -1657,6 +1816,14 @@ local function take_track(index)
   move_pattern_tracks(function(t) if t == index then return nil end return t > index and t - 1 or t end)
   M.data.recount()
   fire(song_fields().tracks_observable, { type = "remove", index = index })
+  -- (M4 n-song: deleting the soloed track ends the solo: every track Active, measured)
+  for _, root in ipairs(M.data.solo_roots or {}) do
+    if root == data then
+      M.data.solo_roots = {}
+      M.solo_refresh()
+      break
+    end
+  end
   return data, pattern_data
 end
 
@@ -1822,16 +1989,46 @@ function M.api.redo()
   u.stack[#u.stack + 1] = step
 end
 
+-- (M4 n-song) whether any pattern has automation of a parameter (its data): Renoise's is_automated.
+function M.refresh_automated(identity)
+  local any = false
+  for _, pattern in ipairs(M.data.patterns) do
+    for _, data in pairs(pattern.tracks) do
+      for _, automation in ipairs(data.automation or {}) do any = any or automation.parameter == identity end
+    end
+  end
+  identity.automated = any
+end
+
 -- A pattern track's automation of a parameter, as the API shows it.
 function M.api.automation_object(automation)
+  automation.points_observable = automation.points_observable or M.observable()
+  automation.playmode_observable = automation.playmode_observable or M.observable()
   local function setter(field)
     return function(value)
       local old = automation[field]
       automation[field] = value
-      M.record(function() automation[field] = old end, function() automation[field] = value end)
+      local observable = automation[field .. "_observable"]
+      if observable then M.fire(observable) end
+      M.record(function() automation[field] = old; if observable then M.fire(observable) end end,
+        function() automation[field] = value; if observable then M.fire(observable) end end)
     end
   end
-  return object("renoise.PatternTrackAutomation", { length = 64 }, {
+  -- (the device and parameter it is of: found by the parameter's data)
+  local function dest()
+    for _, t in ipairs(M.data.tracks) do
+      for _, data in ipairs(t.devices) do
+        for _, param in ipairs(data.params or {}) do
+          if param == automation.parameter then return data, param end
+        end
+      end
+    end
+  end
+  return object("renoise.PatternTrackAutomation", {
+    length = 64, points_observable = automation.points_observable, playmode_observable = automation.playmode_observable,
+  }, {
+    dest_device = function() local data = dest() return data and device(data) or nil end,
+    dest_parameter = function() local _, param = dest() return param and parameter(param) or nil end,
     playmode = function() return automation.playmode end,
     points = function()
       local copy = {}
@@ -1876,6 +2073,99 @@ function ops.mute_track(index, state)
   fire(t.mute_state_observable)
 end
 
+-- M4 (n-song): Renoise's solo, measured in 3.5.4 (n-song lab 6 and 7). The soloed track (a root) and what it plays through
+-- read soloed and are Active: its groups, a group's own tracks, the send tracks it feeds and, for a send, the tracks feeding
+-- it; every other non-master track is Off. A script's solo is exclusive, and its setter toggles the track's own solo when the
+-- value differs from what `solo_state` reads (false on a track soloed along with another solos that one on its own); an
+-- un-solo of a root (or deleting it) turns every track Active, solos cleared. A producer's solo of several tracks in the GUI
+-- (`ops.add_solo`) keeps several roots; un-soloing one of them ends them all here (not measured).
+local function send_numbers(track)
+  local out = {}
+  for _, device in ipairs(track.devices or {}) do
+    for _, parameter in ipairs(device.params or {}) do
+      if parameter.name:match("^Receiver") and parameter.value >= 0 then out[#out + 1] = parameter.value end
+    end
+  end
+  return out
+end
+
+local function solo_needs(i)
+  local tracks = M.data.tracks
+  local t = tracks[i]
+  local set = { [i] = true }
+  for g, u in ipairs(tracks) do
+    if u.kind == "group" and g > i and i >= g - u.members then set[g] = true end
+  end
+  if t.kind == "group" then
+    for k = i - t.members, i - 1 do set[k] = true end
+  end
+  local sends, n, mine = {}, 0, nil
+  for k, u in ipairs(tracks) do
+    if u.kind == "send" then
+      sends[n] = k
+      if k == i then mine = n end
+      n = n + 1
+    end
+  end
+  for _, number in ipairs(send_numbers(t)) do
+    if sends[number] then set[sends[number]] = true end
+  end
+  if mine then
+    for k, u in ipairs(tracks) do
+      for _, number in ipairs(send_numbers(u)) do
+        if number == mine then set[k] = true end
+      end
+    end
+  end
+  return set
+end
+
+function M.solo_refresh()
+  local tracks = M.data.tracks
+  local roots = M.data.solo_roots or {}
+  local soloed = {}
+  for _, root in ipairs(roots) do
+    for k, u in ipairs(tracks) do
+      if u == root then
+        for j in pairs(solo_needs(k)) do soloed[j] = true end
+      end
+    end
+  end
+  for k, u in ipairs(tracks) do
+    if u.kind ~= "master" then
+      local was_solo, was_mute = u.solo or false, u.mute_state
+      u.solo = soloed[k] or false
+      u.mute_state = (#roots == 0 or soloed[k]) and 1 or 2
+      if u.mute_state ~= was_mute then fire(u.mute_state_observable) end
+      if u.solo ~= was_solo then fire(u.solo_state_observable) end
+    end
+  end
+end
+
+function M.solo_set(t, value)
+  if t.kind == "master" then
+    -- (measured: no error, it reads false, and every track turns Active)
+    M.data.solo_roots = {}
+    M.solo_refresh()
+    return
+  end
+  if (t.solo or false) == (value == true) then return end
+  local root = false
+  for _, r in ipairs(M.data.solo_roots or {}) do root = root or r == t end
+  M.data.solo_roots = root and {} or { t }
+  M.solo_refresh()
+end
+
+-- The producer's solo button (exclusive, as a script's), and a solo added to another one (Renoise's GUI can; a script can't).
+function ops.solo(index, value) M.solo_set(M.data.tracks[index], value) end
+
+function ops.add_solo(index)
+  local roots = M.data.solo_roots or {}
+  roots[#roots + 1] = M.data.tracks[index]
+  M.data.solo_roots = roots
+  M.solo_refresh()
+end
+
 function ops.insert_device(index, spec, at)
   local t = M.data.tracks[index]
   table.insert(t.devices, at or (#t.devices + 1), spec)
@@ -1906,43 +2196,36 @@ end
 
 function ops.insert_sample(i, spec)
   local instrument = M.data.instruments[i]
-  local sample = { name = "Sample " .. (#instrument.samples + 1), base_note = 48, note_range = { 0, 119 },
-    velocity_range = { 0, 127 }, loop_mode = 1, mute_group = 0 }
-  for k, v in pairs(spec or {}) do sample[k] = v end
-  instrument.samples[#instrument.samples + 1] = sample
+  local given = { name = "Sample " .. (#instrument.samples + 1) }
+  for k, v in pairs(spec or {}) do given[k] = v end
+  instrument.samples[#instrument.samples + 1] = M.sample_data(given)
+  instrument.samples_observable = instrument.samples_observable or M.observable()
   fire(instrument.samples_observable, { type = "insert", index = #instrument.samples })
 end
 
 function ops.insert_phrase(i)
   local instrument = M.data.instruments[i]
-  instrument.phrases[#instrument.phrases + 1] = { name = "Phrase " .. (#instrument.phrases + 1), lines = 16, lpb = 4,
-    key_tracking = 1, looping = true, note_columns = 1, effect_columns = 1, data = {} }
+  instrument.phrases[#instrument.phrases + 1] = M.phrase_data({ name = "Phrase " .. (#instrument.phrases + 1) })
+  instrument.phrases_observable = instrument.phrases_observable or M.observable()
   fire(instrument.phrases_observable, { type = "insert", index = #instrument.phrases })
 end
 
+-- The producer's instrument list edits: Renoise renumbers the notes as for the API's (an undo step of their own).
 function ops.swap_instruments(a, b)
-  local instruments = M.data.instruments
-  instruments[a], instruments[b] = instruments[b], instruments[a]
-  fire(song_fields().instruments_observable, { type = "swap", index1 = a, index2 = b })
+  M.instrument_list_op("swap", a, b, nil, true)
 end
 
 function ops.insert_instrument(spec)
-  M.data.new_instrument(spec)
-  fire(song_fields().instruments_observable, { type = "insert", index = #M.data.instruments })
+  M.instrument_list_op("insert", #M.data.instruments + 1, nil, spec, true)
 end
 
 -- An instrument made at `i` (Renoise's insert_instrument_at): those after it move up one.
 function ops.insert_instrument_at(i, spec)
-  M.data.new_instrument(spec)
-  local instruments = M.data.instruments
-  table.insert(instruments, i, table.remove(instruments))
-  fire(song_fields().instruments_observable, { type = "insert", index = i })
+  M.instrument_list_op("insert", i, nil, spec, true)
 end
 
 function ops.remove_instrument(i)
-  local instruments = M.data.instruments
-  table.remove(instruments, i)
-  fire(song_fields().instruments_observable, { type = "remove", index = i })
+  M.instrument_list_op("remove", i, nil, nil, true)
 end
 
 function ops.remove_pattern(p)
@@ -1965,7 +2248,7 @@ end
 function ops.rename_instrument(i, name)
   local instrument = M.data.instruments[i]
   instrument.name = name
-  fire(instrument.name_observable)
+  fire(M.obs(instrument, "name"))
 end
 
 function ops.select(key, value)

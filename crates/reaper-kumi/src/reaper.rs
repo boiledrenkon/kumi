@@ -9,9 +9,16 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
 pub mod generic;
+mod items;
+// (r-tracks) M4's track, routing, project and action calls.
+mod io;
 mod objects;
 mod write;
+pub use items::*;
 pub use objects::*;
+// m4-r-fxenv: FX in any chain, envelopes, points and automation items.
+mod fxenv;
+pub use fxenv::{EnvPoint, EqParam};
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;

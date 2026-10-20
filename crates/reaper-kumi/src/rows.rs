@@ -116,7 +116,7 @@ pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity:
     let state = reaper.play_state(proj);
     let (loop_start, loop_end) = reaper.loop_points(proj);
     let signature = reaper.time_signature_at(proj, cursor);
-    json!({
+    let mut row = json!({
         "id": id,
         "identity": identity,
         "name": clip(&info.name),
@@ -131,7 +131,72 @@ pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity:
         "loop": {"on": reaper.repeat(proj), "start": seconds(loop_start), "end": seconds(loop_end)},
         "timeSelection": time_selection(reaper, proj),
         "tabCount": reaper.tab_count(),
-    })
+    });
+    add_project_settings(reaper, proj, &mut row);
+    row
+}
+
+/// (r-tracks) What the project's own settings hold, for the changes that set them: its ruler lanes, its named track
+/// groups, the grid and timebase, and its title, author and notes (when it has them; the notes clipped).
+fn add_project_settings(reaper: &Reaper, proj: Project, row: &mut Value) {
+    const NOTES_SHOWN: usize = 2000;
+    let lanes = reaper.project_info(proj, "RULER_LANE_COUNT").unwrap_or(0.0).max(0.0) as i64;
+    let lane_rows: Vec<Value> = (0..lanes.min(64))
+        .map(|lane| {
+            let info = |key: &str| reaper.project_info(proj, &format!("{key}:{lane}")).unwrap_or(0.0);
+            let mut lane_row =
+                json!({"lane": lane, "name": clip(&reaper.project_text(proj, &format!("RULER_LANE_NAME:{lane}")).unwrap_or_default())});
+            match info("RULER_LANE_DEFAULT") as i64 {
+                1 => lane_row["defaultFor"] = "regions".into(),
+                2 => lane_row["defaultFor"] = "markers".into(),
+                3 => lane_row["defaultFor"] = "both".into(),
+                _ => {}
+            }
+            for (key, field) in [("RULER_LANE_HIDDEN", "hidden"), ("RULER_LANE_LOCKED", "locked")] {
+                if info(key) != 0.0 {
+                    lane_row[field] = true.into();
+                }
+            }
+            lane_row
+        })
+        .collect();
+    if !lane_rows.is_empty() {
+        row["rulerLanes"] = lane_rows.into();
+    }
+    let groups: Vec<Value> = (1..=64)
+        .filter_map(|group| {
+            let name = reaper.project_text(proj, &format!("TRACK_GROUP_NAME:{group}")).unwrap_or_default();
+            (!name.is_empty()).then(|| json!({"group": group, "name": clip(&name)}))
+        })
+        .collect();
+    if !groups.is_empty() {
+        row["trackGroups"] = groups.into();
+    }
+    if let Some((division, mode, swing)) = reaper.grid(proj) {
+        row["grid"] = json!({"division": round(division, 6), "swing": if mode == 1 { round(swing, 4) } else { 0.0 }, "measure": mode == 3});
+    }
+    let timebase = |name: &str| reaper.config_text(name).and_then(|text| text.trim().parse::<i64>().ok());
+    let words = |code: i64| match code {
+        0 => "time",
+        1 => "beats",
+        2 => "beats-position",
+        _ => "other",
+    };
+    if let (Some(items), Some(tempo)) = (timebase("itemtimelock"), timebase("tempoenvtimelock")) {
+        row["timebase"] = json!({"items": words(items), "tempoEnvelopes": words(tempo)});
+    }
+    for (key, field) in [("PROJECT_TITLE", "title"), ("PROJECT_AUTHOR", "author")] {
+        if let Some(text) = reaper.project_text(proj, key).filter(|text| !text.is_empty()) {
+            row[field] = clip(&text).into();
+        }
+    }
+    if let Some(notes) = reaper.project_notes(proj).filter(|notes| !notes.is_empty()) {
+        let shown: String = notes.chars().take(NOTES_SHOWN).collect();
+        if shown.len() < notes.len() {
+            row["notesClipped"] = true.into();
+        }
+        row["notes"] = shown.into();
+    }
 }
 
 pub fn track_row(reaper: &Reaper, track: Track) -> Value {
@@ -160,6 +225,7 @@ pub fn track_row(reaper: &Reaper, track: Track) -> Value {
         row["master"] = true.into();
     }
     add_track_state(reaper, track, master, &mut row);
+    crate::read::item_rows::razor_areas(reaper, track, &mut row);
     row
 }
 
@@ -274,6 +340,32 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
     row["recordInput"] = record_input(value("I_RECINPUT") as i64);
     row["recordMode"] = record_mode_name(value("I_RECMODE") as i64).into();
     row["monitoring"] = monitoring_name(value("I_RECMON") as i64).into();
+    // (r-tracks) The send to its parent (its folder, or the master): on, the parent's first channel (from 1), how many.
+    let channels = value("C_MAINSEND_NCH") as i64;
+    row["mainSend"] = json!({
+        "on": value("B_MAINSEND") != 0.0,
+        "offset": value("C_MAINSEND_OFFS") as i64 + 1,
+        "channels": if channels == 0 { json!("all") } else { json!(channels) },
+    });
+    // What a power user set away from the defaults, only when set: an output's tap, items monitored while recording, solo
+    // defeat, the MIDI hardware output.
+    if matches!(value("I_RECMODE") as i64, 1 | 3 | 4 | 5 | 6) {
+        row["recordTap"] = ["post-fader", "pre-fx", "post-fx", "post-fx"][(value("I_RECMODE_FLAGS") as i64 & 3) as usize].into();
+    }
+    if value("I_RECMONITEMS") != 0.0 {
+        row["monitorItems"] = true.into();
+    }
+    if value("B_SOLO_DEFEAT") != 0.0 {
+        row["soloDefeat"] = true.into();
+    }
+    let midi_out = value("I_MIDIHWOUT") as i64;
+    if midi_out >= 0 {
+        row["midiOut"] = json!({"device": (midi_out >> 5) & 31, "channel": midi_out & 31});
+    }
+    let groups = track_groups(reaper, track);
+    if !groups.is_empty() {
+        row["groups"] = groups.into();
+    }
     // Fixed lanes (comping): how many, what each is called and which play.
     let free_mode = value("I_FREEMODE") as i64;
     row["itemLayout"] = match free_mode {
@@ -297,6 +389,54 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
     }
 }
 
+/// (r-tracks) A track's roles in REAPER's track groups, as Kumi names them and REAPER does (`GetSetTrackGroupMembership`).
+pub const GROUP_ROLES: [(&str, &str); 25] = [
+    ("volume-lead", "VOLUME_LEAD"),
+    ("volume-follow", "VOLUME_FOLLOW"),
+    ("vca-lead", "VOLUME_VCA_LEAD"),
+    ("vca-follow", "VOLUME_VCA_FOLLOW"),
+    ("pan-lead", "PAN_LEAD"),
+    ("pan-follow", "PAN_FOLLOW"),
+    ("width-lead", "WIDTH_LEAD"),
+    ("width-follow", "WIDTH_FOLLOW"),
+    ("mute-lead", "MUTE_LEAD"),
+    ("mute-follow", "MUTE_FOLLOW"),
+    ("solo-lead", "SOLO_LEAD"),
+    ("solo-follow", "SOLO_FOLLOW"),
+    ("record-arm-lead", "RECARM_LEAD"),
+    ("record-arm-follow", "RECARM_FOLLOW"),
+    ("polarity-lead", "POLARITY_LEAD"),
+    ("polarity-follow", "POLARITY_FOLLOW"),
+    ("automation-mode-lead", "AUTOMODE_LEAD"),
+    ("automation-mode-follow", "AUTOMODE_FOLLOW"),
+    ("media-edit-lead", "MEDIA_EDIT_LEAD"),
+    ("media-edit-follow", "MEDIA_EDIT_FOLLOW"),
+    ("volume-reverse", "VOLUME_REVERSE"),
+    ("pan-reverse", "PAN_REVERSE"),
+    ("width-reverse", "WIDTH_REVERSE"),
+    ("no-lead-when-follow", "NO_LEAD_WHEN_FOLLOW"),
+    ("vca-follow-pre-fx", "VOLUME_VCA_FOLLOW_ISPREFX"),
+];
+
+/// The groups a track is in, with its roles in each (groups 1-64): empty when it is in none.
+pub fn track_groups(reaper: &Reaper, track: Track) -> Vec<Value> {
+    let mut found: Vec<(i64, Vec<&str>)> = Vec::new();
+    for (role, name) in GROUP_ROLES {
+        for high in [false, true] {
+            let Some(mask) = reaper.group_membership(track, name, high).filter(|mask| *mask != 0) else { continue };
+            for bit in (0..32).filter(|bit| mask & (1u32 << bit) != 0) {
+                let group = bit as i64 + 1 + if high { 32 } else { 0 };
+                match found.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, roles)) => roles.push(role),
+                    None => found.push((group, vec![role])),
+                }
+            }
+        }
+    }
+    found.sort_by_key(|(group, _)| *group);
+    found.into_iter().map(|(group, roles)| json!({"group": group, "roles": roles})).collect()
+}
+
 /// What a take's source is called in a row: "wav", "mid", other types in lower case, "empty" for no take or source.
 pub fn source_word(reaper: &Reaper, take: Option<Take>) -> String {
     match take.and_then(|t| reaper.take_source_type(t)) {
@@ -315,7 +455,7 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
     let (position, length) = (reaper.item_value(item, "D_POSITION"), reaper.item_value(item, "D_LENGTH"));
     let start = reaper.quarter_notes_at(proj, position);
     let end = reaper.quarter_notes_at(proj, position + length);
-    json!({
+    let mut row = json!({
         "ref": refs::item_ref(&guid),
         "trackRef": reaper.item_track(item).map(|t| refs::track_ref(&track_id(reaper, t))),
         "position": seconds(position),
@@ -331,7 +471,9 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
         "lanePlays": lane_plays(reaper, item),
         "color": item_color(reaper, item, take),
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
-    })
+    });
+    crate::read::item_rows::item_details(reaper, item, &mut row);
+    row
 }
 
 /// The colour REAPER draws an item in: its active take's own, else the item's.
@@ -494,14 +636,25 @@ pub fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
     format!("{hash:016x}")
 }
 
-/// What a send ref carries of the sends to the same track, when there are two or more of them: their state as one short
-/// hash. None for a send alone to its track, a receive or a hardware output (Kumi changes only sends).
+/// What a send or receive ref carries of the sends between the same two tracks, when there are two or more of them: their
+/// state as one short hash. None for one alone between its tracks, or a hardware output.
 pub fn pair_seen(reaper: &Reaper, owner: Track, category: i32, index: i32, key: &SendKey) -> Option<String> {
-    if category != 0 || key.of < 2 {
+    if key.of < 2 {
         return None;
     }
-    let receiver = reaper.send_peer(owner, 0, index)?;
-    Some(pair_hash(reaper, owner, receiver)[..8].to_string())
+    match category {
+        0 => {
+            let receiver = reaper.send_peer(owner, 0, index)?;
+            Some(pair_hash(reaper, owner, receiver)[..8].to_string())
+        }
+        // (r-tracks) A receive is the send seen from the other end: its ref carries the pair's state from the sending
+        // side, as that send's ref does, and Kumi changes it through that send.
+        c if c < 0 => {
+            let sender = reaper.send_peer(owner, c, index)?;
+            Some(pair_hash(reaper, sender, owner)[..8].to_string())
+        }
+        _ => None,
+    }
 }
 
 /// A send (`category` 0), receive (-1) or hardware output (1) of `track`, with the key `send_keys` gave it.
