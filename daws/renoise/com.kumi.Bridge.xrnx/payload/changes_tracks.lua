@@ -98,17 +98,426 @@ prop {
   title = function(name, _, to) return name .. (to.mute and " muted" or " unmuted") end,
 }
 
-prop {
-  kind = "track-solo", noun = "solo", master = false, undoable = false,
-  read = function(track) return { solo = track.solo_state == true } end,
-  wanted = function(_, input)
-    if type(input.solo) ~= "boolean" then bad("solo must be true or false") end
-    return { solo = input.solo }
-  end,
-  write = function(track, state) track.solo_state = state.solo end,
-  same = function(a, b) return a.solo == b.solo end,
-  title = function(name, _, to) return name .. (to.solo and " soloed" or " unsoloed") end,
-}
+-- track-solo. Renoise solos by rewriting mute states (measured in 3.5.4, n-song lab 6 and 7): a solo turns every other
+-- non-master track Off but what the soloed track plays through (its groups, a group's own tracks, the send tracks it feeds;
+-- for a send, the tracks feeding it), which reads soloed with it; a script's solo is exclusive; an un-solo turns every track
+-- Active, so the mutes from before the solo are gone. The solo setter toggles the track's own solo when the value differs
+-- from what `solo_state` reads: `false` on a track soloed only along with another solos that track on its own, and `true` on
+-- one that reads soloed changes nothing. So the record keeps every track's mute and solo (`prior.tracks`, by place and name;
+-- the bridge carries the places to a restore), the fence is a fingerprint of them all, and the restore writes them back where
+-- each track still holds what the apply left (`changed` otherwise, unless discard). A script can solo one track at a time:
+-- `with`, the other tracks to hear alone with it, are turned Active with what each plays through (Renoise's own solo of each
+-- says what that is). Neither mute nor solo is an undo step.
+
+local SOLO_ROUNDS = 64 -- (un-solo rounds: a solo takes two at most, the first making a track soloed along with another the soloed one)
+
+local function solo_snapshot(song)
+  local out = {}
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if not is_master(track) then
+      out[#out + 1] = { t = t, id = base.track_id(track), mute = track.mute_state, solo = track.solo_state == true }
+    end
+  end
+  return out
+end
+
+-- What the fence keeps of a snapshot: a fingerprint of every track's place, name, mute and solo.
+local function solo_print(list)
+  local a, b = 5381, 0
+  for _, e in ipairs(list) do
+    local text = string.format("%d:%s:%d:%s|", e.t, e.id, e.mute, e.solo and "1" or "0")
+    for i = 1, #text do
+      local byte = text:byte(i)
+      a = (a * 33 + byte) % 4294967296
+      b = (b * 65599 + byte) % 4294967296
+    end
+  end
+  return string.format("%08x%08x", a, b)
+end
+
+-- The tracks that read soloed now, as a set and as a key ("2,6").
+local function soloed_now(song)
+  local set, key = {}, {}
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if not is_master(track) and track.solo_state then
+      set[t] = true
+      key[#key + 1] = t
+    end
+  end
+  return set, table.concat(key, ",")
+end
+
+-- Every solo taken away (Renoise turns every track Active); false when one stays.
+local function unsolo_all(song)
+  for _ = 1, SOLO_ROUNDS do
+    local first
+    for t = 1, rows.track_count(song) do
+      local track = song:track(t)
+      if not is_master(track) and track.solo_state then
+        first = track
+        break
+      end
+    end
+    if not first then return true end
+    first.solo_state = false
+  end
+  return false
+end
+
+-- Whether track `t` has the mute and solo of `state` ({mute, solo}).
+local function solo_holds(song, t, state)
+  local now = song:track(t)
+  return state ~= nil and now.mute_state == state.mute and (now.solo_state == true) == (state.solo == true)
+end
+
+-- Tracks by name for a sentence: “Hat”, “Hat” and “Bass”, “Hat”, “Bass”, “Pad” and 2 more.
+local function solo_names(song, list)
+  local names = {}
+  for i, t in ipairs(list) do
+    if i > 3 then
+      names[#names + 1] = (#list - 3) .. " more"
+      break
+    end
+    names[#names + 1] = base.q(named(t, song:track(t)))
+  end
+  if #names <= 1 then return names[1] or "" end
+  return table.concat(names, ", ", 1, #names - 1) .. " and " .. names[#names]
+end
+
+local function solo_input(song, env, input)
+  local index, track = find(song, env, input.ref, "track-solo")
+  if is_master(track) then bad("the master track has no solo") end
+  if type(input.solo) ~= "boolean" then bad("solo must be true or false") end
+  local with = {}
+  if input.with ~= nil and input.with ~= json.null then
+    if not input.solo then bad("with is for a solo: the other tracks to hear alone with it") end
+    if type(input.with) ~= "table" then bad("with: a list of track refs") end
+    -- (each one is a solo of its own while the change is made, every track's mute written each time)
+    if #input.with > 64 then bad("with: 64 tracks at most") end
+    local seen = { [index] = true }
+    for _, reference in ipairs(input.with) do
+      local w, other = find(song, env, reference, "track-solo")
+      if is_master(other) then bad("with: the master track plays anyway") end
+      if not seen[w] then
+        seen[w] = true
+        with[#with + 1] = w
+      end
+    end
+    table.sort(with)
+  end
+  return { index = index, track = track, name = named(index, track), solo = input.solo, with = with }
+end
+
+local function solo_title(song, plan)
+  if not plan.solo then return plan.name .. " unsoloed" end
+  if #plan.with == 0 then return plan.name .. " soloed" end
+  return plan.name .. " soloed, with " .. solo_names(song, plan.with)
+end
+
+local ACTIVE = function() return renoise.Track.MUTE_STATE_ACTIVE end
+local OFF = function() return renoise.Track.MUTE_STATE_OFF end
+local MUTED = function() return renoise.Track.MUTE_STATE_MUTED end
+
+local function solo_preview(song, env, input)
+  local plan = solo_input(song, env, input)
+  local tracks = solo_snapshot(song)
+  local soloed = plan.track.solo_state == true
+  local display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo } }
+  local notes = {}
+  if plan.solo then
+    local others = {}
+    for _, e in ipairs(tracks) do
+      if e.solo and e.t ~= plan.index then others[#others + 1] = e.t end
+    end
+    notes[#notes + 1] = "Renoise solos by turning every other track Off but what it plays through (its group, the send tracks it feeds); "
+      .. "the end of a solo turns every track back on, muted ones too. Kumi's undo puts each track back as it was."
+    if #others > 0 and not soloed then
+      notes[#notes + 1] = string.format("Renoise's solo is exclusive: %s stops being soloed.", solo_names(song, others))
+    end
+    if #plan.with > 0 then
+      notes[#notes + 1] = string.format("Renoise lets a script solo one track: %s %s turned on instead, with what %s through.",
+        solo_names(song, plan.with), #plan.with == 1 and "is" or "are", #plan.with == 1 and "it plays" or "they play")
+    end
+  elseif soloed then
+    local quiet = {}
+    for _, e in ipairs(tracks) do
+      if e.mute ~= ACTIVE() then quiet[#quiet + 1] = e.t end
+    end
+    notes[#notes + 1] = "Renoise ends the whole solo and turns every track back on, muted ones too"
+      .. (#quiet > 0 and string.format(" (%s now)", solo_names(song, quiet) .. (#quiet == 1 and " is Off or muted" or " are Off or muted")) or "")
+      .. ". Kumi's undo puts each track back as it was."
+  else
+    display.unchanged = true
+  end
+  notes[#notes + 1] = NOT_UNDOABLE
+  display.note = table.concat(notes, " ")
+  return {
+    target = target(env, plan.index), prior = { solo = soloed, tracks = tracks },
+    fence = { id = base.track_id(plan.track), label = plan.name, tracks = solo_print(tracks) },
+    display = display,
+  }
+end
+
+-- What Renoise did to the other tracks, from the snapshots before and after (the same tracks, in order).
+local function solo_effects(song, plan, before, after)
+  local off, on, unsoloed, muted = {}, {}, {}, {}
+  for k, b in ipairs(before) do
+    local a = after[k]
+    if a and b.t ~= plan.index then
+      if b.mute ~= a.mute and a.mute == OFF() then off[#off + 1] = b.t end
+      if b.mute ~= a.mute and a.mute == ACTIVE() then
+        on[#on + 1] = b.t
+        if b.mute == MUTED() then muted[#muted + 1] = b.t end
+      end
+      if b.solo and not a.solo then unsoloed[#unsoloed + 1] = b.t end
+    end
+  end
+  local notes = {}
+  if #off > 0 then notes[#notes + 1] = string.format("Renoise turned %s Off.", #off > 3 and (#off .. " other tracks") or solo_names(song, off)) end
+  if plan.solo and #unsoloed > 0 then
+    notes[#notes + 1] = string.format("%s %s soloed any more (a solo is exclusive).", solo_names(song, unsoloed), #unsoloed == 1 and "isn't" or "aren't")
+  end
+  if #on > 0 then
+    local muted_text = #muted > 0 and string.format(" (%s muted before)", #muted == 1 and solo_names(song, muted) or (#muted .. " of them")) or ""
+    notes[#notes + 1] = string.format("Renoise turned %s back on%s.", #on > 3 and (#on .. " tracks") or solo_names(song, on), muted_text)
+  end
+  return notes
+end
+
+-- Writes `wanted` (a snapshot by place now: t -> {mute, solo}) back over the tracks `places`: every solo taken away, the solo
+-- that makes its soloed tracks (the track whose own solo gives exactly them, tried from the last back, each from no solo), then
+-- every mute state. The other tracks (made since, or not the ones they were) keep a mute the producer gave them. Returns the
+-- tracks a script can't solo again along with the others (soloed in the snapshot by a solo of several, as Renoise's GUI can).
+local function solo_write_back(song, wanted, places, x_index, x_solo)
+  local count = rows.track_count(song)
+  local ours, kept = {}, {}
+  for _, t in ipairs(places) do ours[t] = true end
+  for t = 1, count do
+    local track = song:track(t)
+    if not ours[t] and t ~= x_index and not is_master(track) and track.mute_state == MUTED() then kept[#kept + 1] = t end
+  end
+  if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+  local soloed, set = {}, {}
+  for _, t in ipairs(places) do
+    if wanted[t].solo then
+      soloed[#soloed + 1] = t
+      set[t] = true
+    end
+  end
+  if x_solo and not set[x_index] then
+    soloed[#soloed + 1] = x_index
+    set[x_index] = true
+    table.sort(soloed)
+  end
+  local key = table.concat(soloed, ",")
+  local found, best, best_score = false, nil, nil
+  for k = #soloed, 1, -1 do
+    local candidate = soloed[k]
+    if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+    song:track(candidate).solo_state = true
+    local now, now_key = soloed_now(song)
+    if now_key == key then
+      found = true
+      break
+    end
+    local score = 0
+    for t in pairs(now) do score = score + (set[t] and 1 or -2) end
+    if best_score == nil or score > best_score then best, best_score = candidate, score end
+  end
+  if not found and best then
+    unsolo_all(song)
+    song:track(best).solo_state = true
+  end
+  for _, t in ipairs(places) do
+    local track = song:track(t)
+    if track.mute_state ~= wanted[t].mute then track.mute_state = wanted[t].mute end
+  end
+  for _, t in ipairs(kept) do
+    local track = song:track(t)
+    if track.mute_state ~= MUTED() then track.mute_state = MUTED() end
+  end
+  local unsoloed = {}
+  for _, t in ipairs(soloed) do
+    if not song:track(t).solo_state then unsoloed[#unsoloed + 1] = t end
+  end
+  return unsoloed
+end
+
+local function soloed_key(list)
+  local key = {}
+  for _, e in ipairs(list) do
+    if e.solo then key[#key + 1] = e.t end
+  end
+  return table.concat(key, ",")
+end
+
+local function solo_apply(song, env, input, fence, desc)
+  local ok, plan = pcall(solo_input, song, env, input)
+  if not ok then base.gone_is_changed(plan) end
+  if fence.id ~= nil and fence.id ~= base.track_id(plan.track) then fail("changed", base.moved_text(fence.label or plan.name)) end
+  local before = solo_snapshot(song)
+  if solo_print(before) ~= fence.tracks then
+    fail("changed", "a track's mute or solo changed since the preview, or a track was made, deleted or renamed: read again")
+  end
+  local soloed = plan.track.solo_state == true
+  local same = false
+  if plan.solo and (soloed or #plan.with > 0) then
+    -- (each other track soloed first, from no solo: what Renoise solos with it is what it plays through)
+    local needs = {}
+    for _, w in ipairs(plan.with) do
+      if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+      song:track(w).solo_state = true
+      for t in pairs((soloed_now(song))) do needs[t] = true end
+    end
+    -- (a track that reads soloed may be soloed only along with another: its own solo is made from no solo)
+    if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+    plan.track.solo_state = true
+    for t in pairs(needs) do
+      local track = song:track(t)
+      if not track.solo_state and track.mute_state ~= ACTIVE() then track.mute_state = ACTIVE() end
+    end
+    -- (it was soloed on its own already: the producer's mutes since that solo go back as they were)
+    if #plan.with == 0 and select(2, soloed_now(song)) == soloed_key(before) then
+      for _, e in ipairs(before) do
+        local track = song:track(e.t)
+        if track.mute_state ~= e.mute then track.mute_state = e.mute end
+      end
+      same = true
+    end
+  elseif plan.solo then
+    plan.track.solo_state = true
+  elseif soloed then
+    -- (a track soloed along with another becomes the soloed one at the first un-solo, and the second ends the solo)
+    for _ = 1, SOLO_ROUNDS do
+      if not plan.track.solo_state then break end
+      plan.track.solo_state = false
+    end
+  end
+  local after = solo_snapshot(song)
+  if (plan.track.solo_state == true) ~= plan.solo then
+    -- (Renoise took something else: every track goes back as it was, so nothing half-done stays)
+    local wanted, places = {}, {}
+    for _, e in ipairs(before) do
+      wanted[e.t] = e
+      places[#places + 1] = e.t
+    end
+    pcall(solo_write_back, song, wanted, places, plan.index, soloed)
+    fail("failed", "Renoise kept " .. plan.name .. "'s solo as it was")
+  end
+  local display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo } }
+  if same then
+    -- (nothing the song keeps changed: no row in HISTORY, nothing to undo)
+    display.unchanged, display.note = true, "It was soloed on its own already: nothing changed."
+  else
+    local notes = solo_effects(song, plan, before, after)
+    if #plan.with > 0 then
+      notes[#notes + 1] = string.format("A script solos one track at a time: %s %s on instead.", solo_names(song, plan.with), #plan.with == 1 and "is" or "are")
+    end
+    if #notes > 0 then notes[#notes + 1] = "Kumi's undo puts each track back as it was." end
+    notes[#notes + 1] = NOT_UNDOABLE
+    display.note = table.concat(notes, " ")
+  end
+  local applied = {}
+  for k, e in ipairs(after) do applied[k] = { t = e.t, mute = e.mute, solo = e.solo } end
+  return {
+    applied = { solo = plan.track.solo_state == true, tracks = applied }, display = display,
+    undo = { desc = desc, entry = false },
+    target = target(env, plan.index),
+  }
+end
+
+local function solo_restore(song, env, restore, desc)
+  local reference = restore.target and restore.target.ref
+  local ok, index, track = pcall(find, song, env, reference, "track-solo")
+  if not ok then
+    if type(index) == "table" and index.code == "failed" then index.code = "gone" end
+    error(index, 0)
+  end
+  local prior, applied = restore.prior, restore.applied
+  if type(prior) ~= "table" or type(applied) ~= "table" then bad("prior and applied: the solo's tracks") end
+  -- (the snapshots' places are carried to now by the bridge, which leaves out a track deleted since: `prior.lost`)
+  local wanted, left = {}, {}
+  for _, e in ipairs(type(prior.tracks) == "table" and prior.tracks or {}) do
+    if type(e) == "table" and type(e.t) == "number" then wanted[e.t] = e end
+  end
+  for _, e in ipairs(type(applied.tracks) == "table" and applied.tracks or {}) do
+    if type(e) == "table" and type(e.t) == "number" then left[e.t] = e end
+  end
+  local count = rows.track_count(song)
+  local places, strangers = {}, {}
+  for t, e in pairs(wanted) do
+    if t >= 1 and t <= count and not is_master(song:track(t)) and base.track_id(song:track(t)) == e.id then
+      places[#places + 1] = t
+    else
+      strangers[#strangers + 1] = t
+    end
+  end
+  table.sort(places)
+  table.sort(strangers)
+  local function holds(t, state) return solo_holds(song, t, state) end
+  local name = named(index, track)
+  local x_prior = prior.solo == true
+  local back = (track.solo_state == true) == x_prior
+  for _, t in ipairs(places) do back = back and holds(t, wanted[t]) end
+  -- (a track that isn't the one it was is never written, so it doesn't keep a restore that went through from being back)
+  if back then
+    return {
+      restored = { solo = x_prior }, display = { title = name .. (x_prior and " soloed" or " unsoloed") .. " (put back)" },
+      undo = { desc = desc, entry = false }, unwritten = true,
+    }
+  end
+  local moved = {}
+  for _, t in ipairs(places) do
+    if not holds(t, left[t]) then moved[#moved + 1] = t end
+  end
+  if (track.solo_state == true) ~= (applied.solo == true) and not wanted[index] then moved[#moved + 1] = index end
+  if not restore.discard then
+    if #moved > 0 then
+      fail("changed", string.format("%s mute or solo changed in Renoise since Kumi's solo", #moved > 3 and (#moved .. " tracks'") or (solo_names(song, moved) .. "'s")))
+    end
+    if #strangers > 0 then
+      fail("changed", string.format("%s at %s place%s isn't the track it was (renamed, or another track): discard puts back the rest",
+        #strangers == 1 and "the track" or (#strangers .. " tracks"), #strangers == 1 and "its" or "their", #strangers == 1 and "" or "s"))
+    end
+  end
+  local before = {}
+  for _, t in ipairs(places) do before[t] = song:track(t).mute_state end
+  local unsoloed = solo_write_back(song, wanted, places, index, x_prior)
+  local notes, again, missed = {}, {}, {}
+  for _, t in ipairs(places) do
+    if wanted[t].mute == MUTED() and before[t] ~= MUTED() then again[#again + 1] = t end
+    if not holds(t, wanted[t]) then missed[#missed + 1] = t end
+  end
+  if #missed == 0 then
+    notes[#notes + 1] = "Every track's mute and solo are as they were" .. (#again > 0 and string.format(" (%s muted again).", solo_names(song, again)) or ".")
+  end
+  if #unsoloed > 0 then
+    notes[#notes + 1] = string.format("Renoise lets a script solo one track at a time: %s %s but %s shown soloed.", solo_names(song, unsoloed),
+      #unsoloed == 1 and "plays" or "play", #unsoloed == 1 and "isn't" or "aren't")
+  end
+  local other_missed = {}
+  for _, t in ipairs(missed) do
+    local in_unsoloed = false
+    for _, u in ipairs(unsoloed) do in_unsoloed = in_unsoloed or u == t end
+    if not in_unsoloed then other_missed[#other_missed + 1] = t end
+  end
+  if #other_missed > 0 then notes[#notes + 1] = string.format("Renoise kept %s as the solo left %s.", solo_names(song, other_missed), #other_missed == 1 and "it" or "them") end
+  local lost = type(prior.lost) == "number" and prior.lost or 0
+  if lost > 0 then notes[#notes + 1] = string.format("%s deleted since %s.", lost == 1 and "A track" or (lost .. " tracks"), lost == 1 and "isn't in it" or "aren't in it") end
+  if #strangers > 0 then
+    notes[#notes + 1] = string.format("%s that %s the track%s %s left as Renoise left %s.", #strangers == 1 and "A track" or (#strangers .. " tracks"),
+      #strangers == 1 and "isn't" or "aren't", #strangers == 1 and " it was" or "s they were", #strangers == 1 and "is" or "are", #strangers == 1 and "it" or "them")
+  end
+  return {
+    restored = { solo = track.solo_state == true },
+    display = { title = name .. (x_prior and " soloed" or " unsoloed") .. " (put back)", note = #notes > 0 and table.concat(notes, " ") or nil },
+    undo = { desc = desc, entry = false },
+  }
+end
+
+base.register({ kind = "track-solo", custom = true, preview = solo_preview, apply = solo_apply, restore = solo_restore })
 
 prop {
   kind = "track-rename", noun = "name", master = false, undoable = true,
@@ -187,7 +596,121 @@ local function delete_preview(song, env, input)
   if now.devices > 0 or now.patternsWithLines > 0 then
     display.note = string.format("It holds %d devices and lines in %d patterns; Kumi keeps them to put back.", now.devices, now.patternsWithLines)
   end
+  if track.solo_state then
+    display.note = (display.note and (display.note .. " ") or "")
+      .. "It's soloed: deleting it ends the solo, and Renoise turns every track back on, muted ones too; Kumi's undo brings the solo and every mute back."
+  end
   return { target = target(env, index), prior = now, fence = now, display = display }
+end
+
+-- M4 (n-song): deleting a track that reads soloed ends its solo, and Renoise turns every track Active (the soloed track), or
+-- leaves odd states (one soloed along with another: lab 8, a send of T1's solo deleted leaves every track Off and nothing soloed).
+-- The record keeps every other track's mute and solo before the delete (`soloTracks`) and right after it (`soloLeft`), by
+-- their places after the delete, so the restore can put the solo back where nothing changed since.
+local function solo_around_delete(before, index, song)
+  local kept, left = {}, {}
+  for _, e in ipairs(before) do
+    if e.t ~= index then kept[#kept + 1] = { t = e.t > index and e.t - 1 or e.t, id = e.id, mute = e.mute, solo = e.solo } end
+  end
+  for k, e in ipairs(solo_snapshot(song)) do left[k] = { t = e.t, mute = e.mute, solo = e.solo } end
+  return kept, left
+end
+
+-- What the delete did to the other tracks, from those two snapshots (the same tracks, in order).
+local function delete_solo_note(song, kept, left)
+  local ended, off, on, muted = {}, {}, {}, {}
+  for k, b in ipairs(kept) do
+    local a = left[k]
+    if a then
+      if b.solo and not a.solo then ended[#ended + 1] = b.t end
+      if b.mute ~= a.mute and a.mute == OFF() then off[#off + 1] = b.t end
+      if b.mute ~= a.mute and a.mute == ACTIVE() then
+        on[#on + 1] = b.t
+        if b.mute == MUTED() then muted[#muted + 1] = b.t end
+      end
+    end
+  end
+  local notes = { "Its solo ended with it." }
+  if #ended > 0 then notes[#notes + 1] = string.format("%s %s soloed any more.", solo_names(song, ended), #ended == 1 and "isn't" or "aren't") end
+  if #off > 0 then notes[#notes + 1] = string.format("Renoise turned %s Off.", #off > 3 and (#off .. " tracks") or solo_names(song, off)) end
+  if #on > 0 then
+    local muted_text = #muted > 0 and string.format(" (%s muted before)", #muted == 1 and solo_names(song, muted) or (#muted .. " of them")) or ""
+    notes[#notes + 1] = string.format("Renoise turned %s back on%s.", #on > 3 and (#on .. " tracks") or solo_names(song, on), muted_text)
+  end
+  notes[#notes + 1] = "Kumi's undo brings the solo back with every track's mute as it was."
+  return table.concat(notes, " ")
+end
+
+-- The restore's half of it, once the track is made again at `index` with all its parts: every track's mute and solo from the
+-- record, where each track still holds what the delete left (`changed` otherwise: nothing is touched, unless discard). A track
+-- isn't found by its place alone: its name must be the one it had. Answers what to say.
+local function solo_after_restore(song, env, index, material, since, discard)
+  if not material.solo then return nil end
+  if type(material.soloTracks) ~= "table" or type(material.soloLeft) ~= "table" then
+    return "It was soloed: Kumi left every track's solo and mute as they are (the record has nothing of the other tracks)."
+  end
+  local count = rows.track_count(song)
+  local then_left = {}
+  for _, e in ipairs(material.soloLeft) do
+    if type(e) == "table" and type(e.t) == "number" then then_left[e.t] = e end
+  end
+  local wanted, left, places, strangers, lost, unknown = {}, {}, {}, {}, 0, 0
+  for _, e in ipairs(material.soloTracks) do
+    -- (where the track is now: through the tracks made, deleted and swapped since, and this one made again, which the layout
+    -- counts; without a layout, only this one moves them)
+    local t, why
+    if type(e) ~= "table" or type(e.t) ~= "number" then
+      why = "unknown"
+    elseif type(since) ~= "number" then
+      t = e.t >= index and e.t + 1 or e.t
+    else
+      t, why = env.shifted(e.t, since)
+    end
+    if not t then
+      if why == "gone" then lost = lost + 1 else unknown = unknown + 1 end
+    elseif t >= 1 and t <= count and t ~= index and not is_master(song:track(t)) and base.track_id(song:track(t)) == e.id then
+      wanted[t], left[t] = e, then_left[e.t]
+      places[#places + 1] = t
+    else
+      strangers[#strangers + 1] = t
+    end
+  end
+  table.sort(places)
+  if unknown > 0 then
+    return "It was soloed, but Kumi can't tell where the other tracks went since: it left every track's solo and mute as they are."
+  end
+  local changed = {}
+  for _, t in ipairs(places) do
+    if not solo_holds(song, t, left[t]) then changed[#changed + 1] = t end
+  end
+  if not discard and (#changed > 0 or #strangers > 0) then
+    local why = #changed > 0 and string.format("%s mute or solo changed since", #changed > 3 and (#changed .. " tracks'") or (solo_names(song, changed) .. "'s"))
+      or "a track at its place isn't the one it was"
+    return string.format("It was soloed when it was deleted, but %s: Kumi left every track's solo and mute as they are (discard puts them back).", why)
+  end
+  local before = {}
+  for _, t in ipairs(places) do before[t] = song:track(t).mute_state end
+  wanted[index] = { t = index, id = base.track_id(song:track(index)), mute = material.muteState, solo = true }
+  places[#places + 1] = index
+  table.sort(places)
+  local unsoloed = solo_write_back(song, wanted, places, index, true)
+  local again, missed = {}, {}
+  for _, t in ipairs(places) do
+    if t ~= index and wanted[t].mute == MUTED() and before[t] ~= MUTED() then again[#again + 1] = t end
+    if not solo_holds(song, t, wanted[t]) then missed[#missed + 1] = t end
+  end
+  local notes = {}
+  if #missed == 0 then
+    notes[#notes + 1] = "Its solo is back, and every track's mute is as it was" .. (#again > 0 and string.format(" (%s muted again).", solo_names(song, again)) or ".")
+  end
+  if #unsoloed > 0 then
+    notes[#notes + 1] = string.format("Renoise lets a script solo one track at a time: %s %s but %s shown soloed.", solo_names(song, unsoloed),
+      #unsoloed == 1 and "plays" or "play", #unsoloed == 1 and "isn't" or "aren't")
+  end
+  if #missed > #unsoloed then notes[#notes + 1] = "Renoise kept some tracks' mute or solo as it had them." end
+  if lost > 0 then notes[#notes + 1] = string.format("%s deleted since %s.", lost == 1 and "A track" or (lost .. " tracks"), lost == 1 and "isn't in it" or "aren't in it") end
+  if #strangers > 0 then notes[#notes + 1] = "A track that isn't the one it was is left as Renoise left it." end
+  return table.concat(notes, " ")
 end
 
 -- The writes that make a track again, in phases. A phase is one callback; the first makes the track, its properties, devices,
@@ -306,12 +829,26 @@ local function delete_apply(song, env, input, fence, desc)
     fail("failed", string.format("%s would take %d steps to put back, more than Kumi takes (%d): it couldn't be undone in time, so it won't delete it",
       name, steps, base.MAX_RESTORE_STEPS))
   end
+  -- (M4 n-song: a soloed track's solo ends with it; a track Off only because another is soloed is Off by the solo, not by the
+  -- producer: it comes back as Renoise makes it then, Off while a solo is on)
+  local soloing = false
+  for t = 1, rows.track_count(song) do
+    local other = song:track(t)
+    soloing = soloing or (t ~= index and not is_master(other) and other.solo_state)
+  end
+  local before = material.solo and solo_snapshot(song) or nil
+  if not material.solo and soloing and material.muteState == OFF() then material.offBySolo = true end
   song:describe_undo(desc)
   song:delete_track_at(index)
+  local note = material_.routes_note(#(material.routes or {}))
+  if before then
+    material.soloTracks, material.soloLeft = solo_around_delete(before, index, song)
+    note = (note and (note .. " ") or "") .. delete_solo_note(song, material.soloTracks, material.soloLeft)
+  end
   return {
     applied = { deleted = true },
     material = material,
-    display = { title = "Deleted track " .. base.q(name), note = material_.routes_note(#(material.routes or {})) }, target = target(env, index),
+    display = { title = "Deleted track " .. base.q(name), note = note }, target = target(env, index),
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index }, shape = "deleted",
   }
@@ -346,8 +883,11 @@ local function restore_properties(song, track, index, material)
   try(function() track.visible_effect_columns = columns.effect end)
   for c, name in pairs(columns.names or {}) do try(function() track:set_column_name(tonumber(c), name) end) end
   for _, c in ipairs(columns.muted or {}) do try(function() track:set_column_is_muted(c, true) end) end
-  if material.solo and rows.track_type(track) ~= "master" then try(function() track.solo_state = true end) end
-  if material.muteState and rows.track_type(track) ~= "master" then try(function() track.mute_state = material.muteState end) end
+  -- (a soloed track's solo and mute come back with every other track's, once it is all made: solo_after_restore; a track Off
+  -- only because another was soloed is left as Renoise makes it, Off while a solo is on)
+  if material.muteState and not material.solo and not material.offBySolo and rows.track_type(track) ~= "master" then
+    try(function() track.mute_state = material.muteState end)
+  end
 end
 
 -- Where the track goes back: its old place, moved by the tracks made and deleted since. A track made at or before the master's
@@ -429,7 +969,7 @@ local function add_note(note, more)
   return note and (note .. " " .. more) or more
 end
 
-local function restore_first_phase(song, env, material, phases, moved)
+local function restore_first_phase(song, env, material, phases, moved, discard, deleted_layout)
   local index = make_track(song, material)
   local made, since = index, env.layout()
   local note
@@ -468,6 +1008,13 @@ local function restore_first_phase(song, env, material, phases, moved)
     material_.write_routes(song, material.routes, { track = index }, moved, tally, env)
     note = add_note(note, material_.tally_note(tally))
     note = add_note(note, material.lost_note)
+    -- (the solo last, with the routes back: a send's solo solos the tracks feeding it again)
+    local solo_ok, solo_note = pcall(solo_after_restore, song, env, index, material, deleted_layout, discard)
+    if solo_ok then
+      note = add_note(note, solo_note)
+    else
+      note = add_note(note, "Kumi couldn't put its solo back: " .. (type(solo_note) == "table" and solo_note.message or tostring(solo_note)) .. ".")
+    end
   end)
   if not ok then
     local at = (env.shifted(made, since))
@@ -589,7 +1136,7 @@ local function delete_restore(song, env, restore, desc, journal)
   end
   if #phases == 1 then
     song:describe_undo(desc)
-    local index, note = restore_first_phase(song, env, material, phases, moved_by(env, restore.layout))
+    local index, note = restore_first_phase(song, env, material, phases, moved_by(env, restore.layout), restore.discard, restore.layout)
     local answer = restored_answer(env, song, index, material, note)
     answer.undo = { desc = desc, entry = true }
     base.note_restored(env.journal, "track-delete", { track = index })
@@ -602,7 +1149,7 @@ local function delete_restore(song, env, restore, desc, journal)
       local function step(k) return string.format("%s (%d/%d)", desc, k, total) end
       song = the_song()
       song:describe_undo(step(1))
-      local index, note = restore_first_phase(song, env, material, phases, moved_by(env, restore.layout))
+      local index, note = restore_first_phase(song, env, material, phases, moved_by(env, restore.layout), restore.discard, restore.layout)
       -- (from here a stop leaves a half-made track: a tool stopped or reloaded says so, see jobs.lua)
       job.wrote = string.format("Putting %s back", base.q(material.name))
       -- Phase one is one callback, so nothing else can land in it: the shape, the layout and the epoch it moved to (the devices
@@ -669,5 +1216,277 @@ base.register({
   kind = "track-delete", custom = true, shape = "deleted",
   preview = delete_preview, apply = delete_apply, restore = delete_restore,
 })
+
+-- M4 (n-song): a track's collapse, width, output routing and delay, the columns it shows, and a note column's name and mute.
+-- Each is a Renoise undo step (measured in 3.5.4, lab 2026-10-19; a column's mute is one, unlike the track's mute). A group's
+-- `group_collapsed` has no observable, so Renoise's undo of it alone isn't seen: Kumi looks again at the next undo it sees.
+
+local flag, text_of = base.flag, base.text_of
+local T = renoise.Track
+
+local function number_text(value)
+  local text = string.format("%.2f", value):gsub("0+$", ""):gsub("%.$", "")
+  return (text:gsub("^%-", base.MINUS))
+end
+
+prop(base.settings {
+  kind = "track-collapse", noun = "collapse", master = true, undoable = true, named = true,
+  fields = {
+    {
+      name = "collapsed", read = function(t) return t.collapsed end, write = function(t, v) t.collapsed = v end,
+      check = flag, text = function(v) return v and "collapsed" or "expanded" end,
+    },
+    {
+      name = "groupCollapsed",
+      read = function(t) return t.type == T.TRACK_TYPE_GROUP and t.group_collapsed or false end,
+      write = function(t, v) t.group_collapsed = v end,
+      check = function(v, name, t)
+        if t.type ~= T.TRACK_TYPE_GROUP then bad("groupCollapsed is a group track's (it folds the group's tracks)") end
+        return flag(v, name)
+      end,
+      text = function(v) return v and "with its tracks folded" or "with its tracks shown" end,
+    },
+  },
+})
+
+prop(base.settings {
+  kind = "track-width", noun = "width", master = true, undoable = true, named = true, watch = true,
+  fields = {
+    {
+      name = "width",
+      read = function(t)
+        local w = t.prefx_width
+        return w.value / w.value_max * 100
+      end,
+      write = function(t, v)
+        local w = t.prefx_width
+        w.value = v / 100 * w.value_max
+      end,
+      check = function(v)
+        if type(v) ~= "number" or v ~= v or v < 0 or v > 100 then bad("width must be a number from 0 to 100 (percent, as Renoise shows it)") end
+        return v
+      end,
+      text = function(v) return "width " .. number_text(v) .. "%" end,
+    },
+  },
+})
+
+-- The routings a track may take are names: the master, a group around it, the audio device's outputs. A group's name moves with
+-- its place ("Group 04"), so a record keeps the group as a track ref (the layout carries it) and the name is read from it again.
+local function routing_named(track, wanted)
+  if type(wanted) ~= "string" or wanted == "" then bad("routing: one of the track's output routings, by name") end
+  local available, found = track.available_output_routings, nil
+  for _, name in ipairs(available) do
+    if name == wanted then return name end
+    if name:lower() == wanted:lower() then
+      if found then bad(string.format("%q names more than one routing: give it as Renoise writes it", wanted)) end
+      found = name
+    end
+  end
+  if found then return found end
+  bad(string.format("%s can't go to %q: its routings are %s", track.name, wanted, table.concat(available, ", ")))
+end
+
+local function group_named(song, name)
+  local found
+  for i = 1, rows.track_count(song) do
+    local track = song:track(i)
+    if track.type == T.TRACK_TYPE_GROUP and track.name == name then
+      if found then return nil end
+      found = i
+    end
+  end
+  return found
+end
+
+prop {
+  kind = "track-output", noun = "output routing", master = true, undoable = true,
+  read = function(track) return { routing = track.output_routing } end,
+  wanted = function(track, input) return { routing = routing_named(track, input.routing) } end,
+  write = function(track, state) track.output_routing = state.routing end,
+  same = function(a, b) return a.routing == b.routing end,
+  title = function(name, _, to) return name .. " routed to " .. base.q(to.routing) end,
+  wire = function(state, env)
+    if type(state) ~= "table" or type(state.routing) ~= "string" then return state end
+    local song = renoise.song()
+    local group = song and group_named(song, state.routing)
+    if not group then return state end
+    return { routing = state.routing, at = refs.make(env.epoch(), "track", group) }
+  end,
+  unwire = function(state, env)
+    if type(state) ~= "table" or type(state.at) ~= "string" then return state end
+    local song = the_song()
+    local group = refs.expect(state.at, "track", 1, env.epoch())[1]
+    if group > rows.track_count(song) or song:track(group).type ~= T.TRACK_TYPE_GROUP then
+      fail("changed", "the group " .. base.q(state.routing) .. " isn't where it was any more")
+    end
+    return { routing = song:track(group).name }
+  end,
+}
+
+prop {
+  kind = "track-delay", noun = "output delay", master = false, undoable = true,
+  read = function(track) return { delayMs = track.output_delay } end,
+  wanted = function(track, input)
+    if track.type ~= T.TRACK_TYPE_SEQUENCER then
+      bad("only a sequencer track has an output delay (Renoise refuses one on a group or a send track)")
+    end
+    local v = input.delayMs
+    if type(v) ~= "number" or v ~= v or v < -100 or v > 100 then bad("delayMs must be a number from -100 to 100") end
+    return { delayMs = v }
+  end,
+  write = function(track, state) track.output_delay = state.delayMs end,
+  same = function(a, b) return close(a.delayMs, b.delayMs) end,
+  title = function(name, _, to) return name .. " delay " .. number_text(to.delayMs) .. " ms" end,
+}
+
+-- The columns a track shows. Hiding a column hides what is in it (Renoise keeps it): the preview says so when it holds notes.
+local SUBCOLUMNS = {
+  { name = "volume", field = "volume_column_visible", word = "volume" },
+  { name = "panning", field = "panning_column_visible", word = "panning" },
+  { name = "delay", field = "delay_column_visible", word = "delay" },
+  { name = "sampleEffects", field = "sample_effects_column_visible", word = "sample effects" },
+}
+
+-- (only a sequencer track has note columns; a group raises on them, measured in 3.5.4)
+local function note_columns_of(track) return track.type == T.TRACK_TYPE_SEQUENCER and track.max_note_columns or 0 end
+
+local function has_notes(track, name)
+  if note_columns_of(track) == 0 then bad(name .. ": this track has no note columns (only a sequencer track has them)") end
+end
+
+local columns_fields = {
+  {
+    name = "noteColumns", read = function(t) return t.visible_note_columns end, write = function(t, v) t.visible_note_columns = v end,
+    check = function(v, name, t)
+      has_notes(t, name)
+      if type(v) ~= "number" or v ~= math.floor(v) or v < 1 or v > note_columns_of(t) then bad(string.format("noteColumns is from 1 to %d", note_columns_of(t))) end
+      return v
+    end,
+    text = function(v) return v == 1 and "1 note column" or (v .. " note columns") end,
+  },
+  {
+    name = "effectColumns", read = function(t) return t.visible_effect_columns end, write = function(t, v) t.visible_effect_columns = v end,
+    check = function(v, _, t)
+      local low, high = t.min_effect_columns, t.max_effect_columns
+      if type(v) ~= "number" or v ~= math.floor(v) or v < low or v > high then bad(string.format("effectColumns is from %d to %d on this track", low, high)) end
+      return v
+    end,
+    text = function(v) return v == 1 and "1 effect column" or (v .. " effect columns") end,
+  },
+}
+for _, sub in ipairs(SUBCOLUMNS) do
+  columns_fields[#columns_fields + 1] = {
+    name = sub.name, read = function(t) return note_columns_of(t) > 0 and t[sub.field] or false end, write = function(t, v) t[sub.field] = v end,
+    check = function(v, name, t)
+      has_notes(t, name)
+      return flag(v, name)
+    end,
+    text = function(v) return (v and "the " or "no ") .. sub.word .. " column" end,
+  }
+end
+
+-- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil (and nil past what is worth
+-- reading through).
+local HIDDEN_READS = 40000
+local function hidden_note(loc, wanted)
+  local song, track, index = renoise.song(), loc.object, loc.place.track
+  if not song then return nil end
+  local notes_from = wanted.noteColumns and wanted.noteColumns < track.visible_note_columns and wanted.noteColumns + 1 or nil
+  local effects_from = wanted.effectColumns and wanted.effectColumns < track.visible_effect_columns and wanted.effectColumns + 1 or nil
+  local subs = {}
+  for _, sub in ipairs(SUBCOLUMNS) do
+    if wanted[sub.name] == false and note_columns_of(track) > 0 and track[sub.field] then subs[#subs + 1] = sub end
+  end
+  if not notes_from and not effects_from and #subs == 0 then return nil end
+  local patterns, reads = 0, 0
+  for p = 1, #song.patterns do
+    local pattern_track = song:pattern(p):track(index)
+    local found = false
+    if not pattern_track.is_alias and not pattern_track.is_empty then
+      for l = 1, song:pattern(p).number_of_lines do
+        local line = pattern_track:line(l)
+        reads = reads + 1
+        if not line.is_empty then
+          for c = 1, note_columns_of(track) do
+            local column = line:note_column(c)
+            reads = reads + 1
+            if not column.is_empty then
+              if notes_from and c >= notes_from then found = true end
+              for _, sub in ipairs(subs) do
+                if (sub.name == "volume" and column.volume_string ~= "..") or (sub.name == "panning" and column.panning_string ~= "..")
+                  or (sub.name == "delay" and column.delay_string ~= "..")
+                  or (sub.name == "sampleEffects" and (column.effect_number_value ~= 0 or column.effect_amount_value ~= 0)) then
+                  found = true
+                end
+              end
+            end
+          end
+          if effects_from then
+            for c = effects_from, track.max_effect_columns do
+              if not line:effect_column(c).is_empty then found = true end
+            end
+          end
+        end
+        if found or reads > HIDDEN_READS then break end
+      end
+    end
+    if found then patterns = patterns + 1 end
+    if reads > HIDDEN_READS then return nil end
+  end
+  if patterns == 0 then return nil end
+  return string.format("What it hides holds notes in %s: Renoise keeps them, hidden (and plays them).",
+    patterns == 1 and "1 pattern" or (patterns .. " patterns"))
+end
+
+local columns_spec = base.settings({
+  kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
+})
+columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+prop(columns_spec)
+
+-- A note column's name and mute: the column is part of what the change is about, so the record keeps it (`col`).
+local column_spec = base.settings({
+  kind = "track-column", noun = "column", undoable = true, named = true,
+  fields = {
+    {
+      name = "name", read = function(o) return o.track:column_name(o.c) end, write = function(o, v) o.track:set_column_name(o.c, v) end,
+      check = function(v, name) return text_of(v, name, 64) end,
+      text = function(v) return v == "" and "unnamed" or ("named " .. base.q(v)) end,
+    },
+    {
+      name = "mute", read = function(o) return o.track:column_is_muted(o.c) end, write = function(o, v) o.track:set_column_is_muted(o.c, v) end,
+      check = flag, text = function(v) return v and "muted" or "unmuted" end,
+    },
+  },
+})
+local column_fields = column_spec.read
+column_spec.read = function(object, source)
+  local state = column_fields(object, source)
+  state.col = object.c
+  return state
+end
+column_spec.locate = function(song, env, input)
+  local index, track = find(song, env, input.ref, "track-column")
+  if note_columns_of(track) == 0 then bad(named(index, track) .. " has no note columns: only a sequencer track has them") end
+  local c = input.col
+  if type(c) ~= "number" or c ~= math.floor(c) or c < 1 or c > note_columns_of(track) then
+    bad(string.format("col is a note column from 1 to %d", note_columns_of(track)))
+  end
+  return {
+    object = { track = track, c = c }, name = string.format("%s column %d", named(index, track), c), place = { track = index, column = c },
+    target = target(env, index), id = base.track_id(track) .. "|" .. c,
+  }
+end
+column_spec.reread = function(song, place)
+  if place.track < 1 or place.track > rows.track_count(song) then return nil end
+  local track = song:track(place.track)
+  if place.column > note_columns_of(track) then return nil end
+  return { track = track, c = place.column }
+end
+column_spec.restore_input = function(restore)
+  return { ref = restore.target and restore.target.ref, col = type(restore.prior) == "table" and restore.prior.col or nil }
+end
+base.register(column_spec)
 
 return M

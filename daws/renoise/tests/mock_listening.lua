@@ -3,8 +3,7 @@
 --                 end_pos inclusive, raises for a line out of range or a second render; the test ends it with `finish_render`,
 --                 which writes the WAV (cut short with `fraction`) and calls back (unless `no_callback`).
 --   cancel_rendering  is recorded as a crash: it leaves Renoise's undo dead, so the tool must never call it.
---   solo          rewrites mute states: every other track goes OFF but what the soloed one needs (its group parents, a group's
---                 members, the send tracks it feeds, a send's sources), an un-solo sets every track ACTIVE, and a solo is exclusive.
+--   solo          is mock_song.lua's (`M.solo_set`): it rewrites mute states, and a solo is exclusive.
 --   samples       have a sample buffer (`buffer = {rate, frames, channels}` in their data) that save_as writes, and slices.
 --   transport     plays from start_at at the song's tempo (`playback_pos_beats` moves with the mock clock), follow mode drags the
 --                 edit position, and the song's length in beats is told.
@@ -152,81 +151,25 @@ function M.render_progress(value)
   M.impl(M.data.song).rendering_progress = value
 end
 
--- Renoise's solo
-
--- The tracks a solo of track `i` keeps playing (soloed with it).
-local function needed(i)
-  local tracks = M.data.tracks
-  local keep = { [i] = true }
-  for g, t in ipairs(tracks) do
-    if t.kind == "group" and g > i and g - t.members <= i then keep[g] = true end
-  end
-  local track = tracks[i]
-  if track.kind == "group" then
-    for k = i - track.members, i - 1 do keep[k] = true end
-  end
-  local sends, n = {}, 0
-  for k, t in ipairs(tracks) do
-    if t.kind == "send" then sends[n], n = k, n + 1 end
-  end
-  local function receivers(t)
-    local out = {}
-    for _, device in ipairs(t.devices or {}) do
-      if (device.path or ""):find("#Send", 1, true) then
-        for _, parameter in ipairs(device.params or {}) do
-          if parameter.name:match("^Receiver") and sends[parameter.value] then out[#out + 1] = sends[parameter.value] end
-        end
-      end
-    end
-    return out
-  end
-  for _, k in ipairs(receivers(track)) do keep[k] = true end
-  if track.kind == "send" then
-    for k, t in ipairs(tracks) do
-      for _, r in ipairs(receivers(t)) do
-        if r == i then keep[k] = true end
-      end
-    end
-  end
-  return keep
-end
-
-function M.solo_write(i, value)
-  local tracks = M.data.tracks
-  local track = tracks[i]
-  value = value == true
-  if (track.solo == true) == value then return end
-  local fired = {}
-  local keep = value and needed(i) or nil
-  for k, t in ipairs(tracks) do
-    if t.kind ~= "master" then
-      local solo = value and keep[k] == true or false
-      local mute = (not value or keep[k]) and 1 or 2
-      if (t.solo == true) ~= solo then
-        t.solo = solo
-        fired[#fired + 1] = t.solo_state_observable
-      end
-      if t.mute_state ~= mute then
-        t.mute_state = mute
-        fired[#fired + 1] = t.mute_state_observable
-      end
-    end
-  end
-  M.solo_writes = (M.solo_writes or 0) + 1
-  for _, observable in ipairs(fired) do M.fire(observable) end
-end
-
-function M.track_extras(i, t, fields, getters, setters)
-  if M.data.options.simple_solo then return end
-  setters.solo_state = function(value)
-    if t.kind == "master" then error("mock: the master track has no solo", 2) end
-    for k, candidate in ipairs(M.data.tracks) do
-      if candidate == t then return M.solo_write(k, value) end
-    end
-  end
-end
+-- Renoise's solo is mock_song.lua's (M4 n-song, measured); a producer's solo button, for the tests.
+function M.solo_write(i, value) M.solo_set(M.data.tracks[i], value == true) end
 
 -- Samples
+
+-- A sample's buffer saved as a WAV the bridge can read back (its header says its length), as Renoise does; a folder that isn't
+-- there gets Renoise's own error dialog and false.
+function M.save_wav(sample, path)
+  local buffer = sample.buffer
+  local dir = path:match("^(.*)[/\\][^/\\]+$")
+  if not buffer or (dir and not io.exists(dir)) then
+    M.modals[#M.modals + 1] = { "save_as", path }
+    M.errors[#M.errors + 1] = "modal: save_as failed"
+    return false
+  end
+  M.write_wav(path, buffer.frames, buffer.rate, buffer.channels)
+  M.saved_samples[#M.saved_samples + 1] = path
+  return true
+end
 
 function M.sample_extras(sample, fields, getters)
   local buffer = sample.buffer
@@ -299,71 +242,16 @@ end
 local reset = M.reset
 function M.reset(options)
   reset(options)
-  M.renders, M.pending_render, M.render_refuses, M.saved_samples, M.solo_writes, M.copies_from = {}, nil, nil, {}, 0, 0
+  M.renders, M.pending_render, M.render_refuses, M.saved_samples, M.copies_from = {}, nil, nil, {}, 0
   local transport = M.impl(renoise.Transport)
   transport.TIMING_MODEL_SPEED, transport.TIMING_MODEL_LPB = 1, 2
   return M
-end
-
--- PatternTrack:copy_from(other): the other's lines and its automation, put on the parameter at the same device and place of this
--- track (measured: a scratch copy's automation lands on its own devices), as one write with its undo step.
-local function deep(value)
-  if type(value) ~= "table" then return value end
-  local out = {}
-  for k, v in pairs(value) do out[k] = deep(v) end
-  return out
-end
-
-local function install_copy_from(song)
-  local d = M.data
-  local fields = M.impl(song)
-  local pattern = fields.pattern
-  fields.pattern = function(self, p)
-    local object_ = pattern(self, p)
-    local pattern_fields = M.impl(object_)
-    local track = pattern_fields.track
-    pattern_fields.track = function(this, t)
-      local pattern_track = track(this, t)
-      M.impl(pattern_track).copy_from = function(_, other)
-        local here = d.patterns[p]
-        local from_t, from_p
-        for pp, candidate in ipairs(d.patterns) do
-          for tt, data in pairs(candidate.tracks) do
-            if M.impl(other).__data == data then from_p, from_t = pp, tt end
-          end
-        end
-        assert(from_t, "mock: copy_from needs a pattern track of this song")
-        local source = d.patterns[from_p].tracks[from_t]
-        local old = here.tracks[t]
-        local copy = { alias = source.alias, lines = deep(source.lines), automation = {} }
-        for _, entry in ipairs(source.automation or {}) do
-          for di, device in ipairs(d.tracks[from_t].devices) do
-            for ki, parameter in ipairs(device.params or {}) do
-              local mine = d.tracks[t].devices[di] and d.tracks[t].devices[di].params and d.tracks[t].devices[di].params[ki]
-              if parameter == entry.parameter and mine then
-                copy.automation[#copy.automation + 1] = { parameter = mine, playmode = entry.playmode, points = deep(entry.points) }
-              end
-            end
-          end
-        end
-        copy.alias_observable = (old or {}).alias_observable
-        here.tracks[t] = copy
-        M.copies_from = (M.copies_from or 0) + 1
-        M.record(function() here.tracks[t] = old end, function() here.tracks[t] = copy end)
-        for _, fn in ipairs({ unpack(here.notifiers) }) do pcall(fn, { pattern = p, track = t, line = 1 }) end
-      end
-      M.impl(pattern_track).__data = d.patterns[p].tracks[t]
-      return pattern_track
-    end
-    return object_
-  end
 end
 
 local make_song = M.make_song
 function M.make_song(options)
   local song = make_song(options)
   install_render(song)
-  install_copy_from(song)
   return song
 end
 

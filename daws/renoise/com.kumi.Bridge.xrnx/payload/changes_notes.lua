@@ -464,17 +464,24 @@ local function title_of(verb, cells, pattern, p, track, index)
   return string.format("%s %s in %s on %s", verb, lines_text(lines_in(cells)), q(pattern_label(pattern, p)), q(base.named(index, track)))
 end
 
-local function preview_of(song, env, input, kind, verb)
+-- (`planner(ctx, input)` answers the cells before and after, and a title, for kinds that work the cells out themselves: M4 n-song's
+-- transpose and humanize; `ctx` is {p, index, track, pattern_track, pattern})
+local function preview_of(song, env, input, kind, verb, planner)
   local p, index, track, pattern_track, pattern = locate(song, env, input, kind)
-  local wants, count = parse_cells(pattern, track, input)
-  add_cleared(pattern_track, input, wants)
-  local prior, after = plan_of(pattern_track, wants, input.merge == true)
+  local prior, after, title
+  if planner then
+    prior, after, title = planner({ p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern }, input)
+  else
+    local wants = parse_cells(pattern, track, input)
+    add_cleared(pattern_track, input, wants)
+    prior, after = plan_of(pattern_track, wants, input.merge == true)
+  end
   if writes_of(after) > M.MAX_WRITES then
     bad(string.format("that is %d writes, more than one change takes (%d): split it into several", writes_of(after), M.MAX_WRITES))
   end
   local columns = read_columns(track)
   local display = {
-    title = title_of(verb, #after > 0 and after or prior, pattern, p, track, index),
+    title = title or title_of(verb, #after > 0 and after or prior, pattern, p, track, index),
     before = counts_of(prior), after = counts_of(after),
   }
   if #after == 0 then display.unchanged = true end
@@ -496,8 +503,8 @@ end
 -- doesn't pass over this either.
 local CHANGED = "the pattern changed in Renoise since Kumi's step (an edit, an undo or redo, or another change of Kumi's), so Kumi can't tell where its lines are now and left them as they are: Renoise's own undo can take them back, after the edits made since, which it takes back first"
 
-local function apply_of(song, env, input, fence, desc, kind, verb)
-  local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
+local function apply_of(song, env, input, fence, desc, kind, verb, planner)
+  local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb, planner)
   if not ok then base.gone_is_changed(preview) end
   if fence.id ~= nil and fence.id ~= preview.fence.id then
     fail("changed", base.moved_text(fence.label or base.named(plan.index, plan.track)))
@@ -699,11 +706,11 @@ end
 
 local function same_state(a, b) return same_cells(a.cells, b.cells) end
 
-local function register(kind, verb, noun)
+local function register(kind, verb, noun, planner)
   local spec = {
     kind = kind, custom = true,
-    preview = function(song, env, input) return (preview_of(song, env, input, kind, verb)) end,
-    apply = function(song, env, input, fence, desc) return apply_of(song, env, input, fence, desc, kind, verb) end,
+    preview = function(song, env, input) return (preview_of(song, env, input, kind, verb, planner)) end,
+    apply = function(song, env, input, fence, desc) return apply_of(song, env, input, fence, desc, kind, verb, planner) end,
     restore = restore_of(kind, noun),
     same = same_state,
     unsure_redo = true,
@@ -773,4 +780,401 @@ clear.apply = function(song, env, input, fence, desc)
 end
 clear.restore = restore_of("notes-clear", "Cells")
 base.register(clear)
+-- M4 (n-song): notes transposed, notes humanized, and a block of lines copied or moved. They write cells as notes-write does
+-- (whole cells, the visible columns raised first, read back), and Kumi's undo puts them back by the same plain rule.
+
+local NOTE_NAMES = { "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-" }
+local function note_name(value) return NOTE_NAMES[value % 12 + 1] .. math.floor(value / 12) end
+
+-- The lines a request names (`first`, `last`: the whole pattern when left out) and the note columns (`columns`, the shown
+-- ones when left out).
+local function range_of(ctx, input)
+  local lines = ctx.pattern.number_of_lines
+  local first, last = input.first or 1, input.last or lines
+  for _, value in ipairs({ first, last }) do
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > lines then
+      bad(string.format("first and last are line numbers from 1 to %d", lines))
+    end
+  end
+  if first > last then bad("first must not come after last") end
+  local track = ctx.track
+  if track.max_note_columns == 0 or track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
+    bad("that track has no note columns: only sequencer tracks do")
+  end
+  local columns = {}
+  if input.columns ~= nil then
+    if type(input.columns) ~= "table" or #input.columns == 0 then bad("columns: a list of note columns, 1 to 12") end
+    local seen = {}
+    for _, c in ipairs(input.columns) do
+      if type(c) ~= "number" or c ~= math.floor(c) or c < 1 or c > track.max_note_columns or seen[c] then
+        bad(string.format("columns: note columns from 1 to %d, each once", track.max_note_columns))
+      end
+      seen[c] = true
+      columns[#columns + 1] = c
+    end
+    table.sort(columns)
+  else
+    for c = 1, track.visible_note_columns do columns[c] = c end
+  end
+  return first, last, columns
+end
+
+local function notes_text(n) return n == 1 and "1 note" or n .. " notes" end
+
+local function place_text(ctx) return string.format("%s on %s", q(pattern_label(ctx.pattern, ctx.p)), q(base.named(ctx.index, ctx.track))) end
+
+-- notes-transpose: the notes in the range move by `semitones`; OFF and empty cells stay, and a note that would leave C-0..B-9
+-- refuses the whole change.
+local function transpose_planner(ctx, input)
+  local semitones = input.semitones
+  if type(semitones) ~= "number" or semitones ~= math.floor(semitones) or semitones == 0 or math.abs(semitones) > 119 then
+    bad("semitones is a whole number from -119 to 119, not 0")
+  end
+  local first, last, columns = range_of(ctx, input)
+  local prior, after = {}, {}
+  for l = first, last do
+    local line = ctx.pattern_track:line(l)
+    if not line.is_empty then
+      for _, c in ipairs(columns) do
+        local value = line:note_column(c).note_value
+        if value <= 119 then
+          local moved = value + semitones
+          if moved < 0 or moved > 119 then
+            bad(string.format("line %d column %d: %s %+d semitones is outside C-0 to B-9, so nothing was transposed", l, c, note_name(value), semitones))
+          end
+          local now = read_cell(ctx.pattern_track, { line = l, kind = "note", col = c })
+          local target = {}
+          for k, v in pairs(now) do target[k] = v end
+          target.note = note_name(moved)
+          prior[#prior + 1], after[#after + 1] = now, target
+        end
+      end
+    end
+  end
+  local title = string.format("Transposed %s %+d in %s", notes_text(#after), semitones, place_text(ctx))
+  return prior, after, title
+end
+
+register("notes-transpose", "Transposed", "Notes", transpose_planner)
+
+-- notes-humanize: each note's delay is moved later by up to `delay` (256ths of a line; a note can't play before its line), its
+-- volume by up to `volume` either way (00..80; an empty volume counts as 80, a volume command is left alone), from a seeded
+-- random sequence: the same request gives the same lines, so a retry or the apply after the preview writes what was shown.
+local function seeded(seed)
+  local state = bit.band(seed, 0x7fffffff)
+  if state == 0 then state = 0x2545F491 end
+  return function(n)
+    -- (xorshift32: the same on every LuaJIT)
+    state = bit.bxor(state, bit.lshift(state, 13))
+    state = bit.bxor(state, bit.rshift(state, 17))
+    state = bit.bxor(state, bit.lshift(state, 5))
+    return (state % 4294967296) % (n + 1)
+  end
+end
+
+local function seed_of(input, ctx)
+  if input.seed ~= nil then
+    if type(input.seed) ~= "number" or input.seed ~= math.floor(input.seed) or input.seed < 0 or input.seed > 2147483647 then
+      bad("seed is a whole number from 0 to 2147483647")
+    end
+    return input.seed
+  end
+  local text = table.concat({ ctx.p, ctx.index, input.first or 0, input.last or 0, input.delay or 0, input.volume or 0 }, ":")
+  local hash = 5381
+  for i = 1, #text do hash = (hash * 33 + text:byte(i)) % 2147483647 end
+  return hash
+end
+
+local function humanize_planner(ctx, input)
+  local delay, volume = input.delay or 0, input.volume or 0
+  if type(delay) ~= "number" or delay ~= math.floor(delay) or delay < 0 or delay > 255 then bad("delay is the most a note moves later, in 256ths of a line: 0 to 255") end
+  if type(volume) ~= "number" or volume ~= math.floor(volume) or volume < 0 or volume > 128 then bad("volume is the most a note's volume moves either way: 0 to 128 (80 hex is full)") end
+  if delay == 0 and volume == 0 then bad("give delay or volume (or both)") end
+  local first, last, columns = range_of(ctx, input)
+  local random = seeded(seed_of(input, ctx))
+  local prior, after = {}, {}
+  for l = first, last do
+    local line = ctx.pattern_track:line(l)
+    if not line.is_empty then
+      for _, c in ipairs(columns) do
+        local column = line:note_column(c)
+        if column.note_value <= 119 then
+          local now = read_cell(ctx.pattern_track, { line = l, kind = "note", col = c })
+          local target = {}
+          for k, v in pairs(now) do target[k] = v end
+          -- (one draw each, whether or not it changes anything: the sequence doesn't depend on what is in the cells)
+          local late, swing = random(delay), random(volume * 2) - volume
+          if delay > 0 then
+            local moved = math.min(255, column.delay_value + late)
+            target.delay = moved == 0 and ".." or string.format("%02X", moved)
+          end
+          if volume > 0 and (column.volume_value <= 0x80 or column.volume_value == 255) then
+            local base_volume = column.volume_value == 255 and 0x80 or column.volume_value
+            local moved = math.max(0, math.min(0x80, base_volume + swing))
+            if moved ~= base_volume then target.volume = string.format("%02X", moved) end
+          end
+          if not same_cell(now, target) then prior[#prior + 1], after[#after + 1] = now, target end
+        end
+      end
+    end
+  end
+  local parts = {}
+  if delay > 0 then parts[#parts + 1] = "delay up to " .. delay end
+  if volume > 0 then parts[#parts + 1] = "volume \194\177" .. volume end
+  local title = string.format("Humanized %s in %s (%s)", notes_text(#after), place_text(ctx), table.concat(parts, ", "))
+  return prior, after, title
+end
+
+register("notes-humanize", "Humanized", "Notes", humanize_planner)
+
+-- lines-copy: a block of lines (every note and effect column) copied, or moved, to another place: the same pattern track or
+-- another (the same track by default). The source may be an alias (its lines are its source's); a destination that is an alias
+-- is refused (its lines are another pattern's: write there). The destination's columns are raised to show what it gets.
+local function block_of(song, env, input)
+  local p = pattern_of(song, env, input.pattern)
+  local index, track = base.find(song, env, input.track, "lines-copy")
+  local to_p = input.toPattern ~= nil and pattern_of(song, env, input.toPattern) or p
+  local to_index, to_track = index, track
+  if input.toTrack ~= nil then to_index, to_track = base.find(song, env, input.toTrack, "lines-copy") end
+  local pattern, to_pattern = song:pattern(p), song:pattern(to_p)
+  local first, last = input.first or 1, input.last or pattern.number_of_lines
+  for _, value in ipairs({ first, last }) do
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > pattern.number_of_lines then
+      bad(string.format("first and last are line numbers from 1 to %d", pattern.number_of_lines))
+    end
+  end
+  if first > last then bad("first must not come after last") end
+  local at = input.line or first
+  local count = last - first + 1
+  if type(at) ~= "number" or at ~= math.floor(at) or at < 1 or at + count - 1 > to_pattern.number_of_lines then
+    bad(string.format("the block is %d lines: line is where it goes, from 1 to %d in that pattern", count, to_pattern.number_of_lines - count + 1))
+  end
+  local to_pattern_track = to_pattern:track(to_index)
+  if to_pattern_track.is_alias then
+    bad(string.format("that track in pattern %d is an alias of pattern %d: its lines are that pattern's, so write them there", to_p, to_pattern_track.alias_pattern_index))
+  end
+  if input.move ~= nil and type(input.move) ~= "boolean" then bad("move must be true or false") end
+  local move = input.move == true
+  if move and pattern:track(index).is_alias then
+    bad(string.format("that track in pattern %d is an alias of pattern %d: move its lines there", p, pattern:track(index).alias_pattern_index))
+  end
+  if p == to_p and index == to_index and at == first then bad("the block is where it would go") end
+  return {
+    p = p, index = index, track = track, pattern = pattern, pattern_track = pattern:track(index), first = first, last = last,
+    to_p = to_p, to_index = to_index, to_track = to_track, to_pattern = to_pattern, to_pattern_track = to_pattern_track, at = at,
+    count = count, move = move,
+  }
+end
+
+-- What the copy writes: the destination's cells that differ from the block's, and (a move) the source's cells left behind
+-- emptied. The block is read first, so a destination over its own source takes the block as it was.
+local function block_plan(block)
+  local source = {}
+  for l = 0, block.count - 1 do
+    local line = block.pattern_track:line(block.first + l)
+    source[l] = line.is_empty and false or {}
+    if source[l] then
+      for c = 1, 12 do source[l]["n" .. c] = read_cell(block.pattern_track, { line = block.first + l, kind = "note", col = c }) end
+      for c = 1, 8 do source[l]["e" .. c] = read_cell(block.pattern_track, { line = block.first + l, kind = "effect", col = c }) end
+    end
+  end
+  -- (what the block holds, for the fence: a copy writes what the preview read)
+  local held = {}
+  for l = 0, block.count - 1 do
+    for _, cell in pairs(source[l] or {}) do
+      if not is_empty_cell(cell) then held[#held + 1] = cell end
+    end
+  end
+  table.sort(held, cell_order)
+  local to_prior, to_after, written = {}, {}, {}
+  local has_notes = false
+  for l = 0, block.count - 1 do
+    local dst_line = block.at + l
+    local dst_empty = block.to_pattern_track:line(dst_line).is_empty
+    if source[l] or not dst_empty then
+      for _, kind in ipairs({ "note", "effect" }) do
+        for c = 1, kind == "note" and 12 or 8 do
+          local now = read_cell(block.to_pattern_track, { line = dst_line, kind = kind, col = c })
+          local from = source[l] and source[l][(kind == "note" and "n" or "e") .. c]
+          local target = { line = dst_line, kind = kind, col = c }
+          if from then
+            for k, v in pairs(from) do if k ~= "line" and k ~= "kind" and k ~= "col" then target[k] = v end end
+          else
+            local empty = kind == "note" and EMPTY_NOTE or EMPTY_EFFECT
+            for k, v in pairs(empty) do target[k] = v end
+          end
+          if kind == "note" and not is_empty_cell(target) then has_notes = true end
+          if not same_cell(now, target) then to_prior[#to_prior + 1], to_after[#to_after + 1] = now, target end
+          if block.p == block.to_p and block.index == block.to_index then written[dst_line] = true end
+        end
+      end
+    end
+  end
+  if has_notes and (block.to_track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER or block.to_track.max_note_columns == 0) then
+    bad(base.named(block.to_index, block.to_track) .. " has no note columns, and the block has notes")
+  end
+  local from_prior, from_after = {}, {}
+  if block.move then
+    for l = 0, block.count - 1 do
+      local src_line = block.first + l
+      if source[l] and not written[src_line] then
+        for key, cell in pairs(source[l]) do
+          if not is_empty_cell(cell) then
+            local target = { line = src_line, kind = cell.kind, col = cell.col }
+            for k, v in pairs(key:sub(1, 1) == "n" and EMPTY_NOTE or EMPTY_EFFECT) do target[k] = v end
+            from_prior[#from_prior + 1], from_after[#from_after + 1] = cell, target
+          end
+        end
+      end
+    end
+    table.sort(from_prior, cell_order)
+    table.sort(from_after, cell_order)
+  end
+  return to_prior, to_after, from_prior, from_after, fingerprint(held)
+end
+
+local function block_title(block, count)
+  local verb = block.move and "Moved" or "Copied"
+  local from = string.format("%s on %s", q(pattern_label(block.pattern, block.p)), q(base.named(block.index, block.track)))
+  local lines = string.format("lines %d to %d", block.first, block.last)
+  if block.first == block.last then lines = "line " .. block.first end
+  local to
+  if block.p == block.to_p and block.index == block.to_index then
+    to = "line " .. block.at
+  else
+    to = string.format("line %d of %s on %s", block.at, q(pattern_label(block.to_pattern, block.to_p)), q(base.named(block.to_index, block.to_track)))
+  end
+  return string.format("%s %s of %s to %s", verb, lines, from, to)
+end
+
+local function block_preview(song, env, input)
+  local block = block_of(song, env, input)
+  local to_prior, to_after, from_prior, from_after, held = block_plan(block)
+  local writes = writes_of(to_after) + writes_of(from_after)
+  if writes > M.MAX_WRITES then bad(string.format("that is %d writes, more than one change takes (%d): split it into several", writes, M.MAX_WRITES)) end
+  local display = { title = block_title(block), before = counts_of(to_prior), after = counts_of(to_after) }
+  if #to_after == 0 and #from_after == 0 then display.unchanged = true end
+  local needs = needs_of(to_after)
+  if needs.note > (block.to_track.visible_note_columns or 0) then display.note = "It shows note column " .. needs.note .. " first." end
+  return {
+    target = target_of(env, block.to_p, block.to_index),
+    prior = { cells = to_prior, columns = read_columns(block.to_track), source = { cells = from_prior } },
+    fence = {
+      cells = #to_prior, hash = fingerprint(to_prior), source = #from_prior, sourceHash = fingerprint(from_prior), block = held,
+      id = base.track_id(block.to_track), from = base.track_id(block.track), label = base.named(block.to_index, block.to_track),
+    },
+    display = display,
+  }, block, to_prior, to_after, from_prior, from_after
+end
+
+local function block_apply(song, env, input, fence, desc)
+  local ok, preview, block, to_prior, to_after, from_prior, from_after = pcall(block_preview, song, env, input)
+  if not ok then base.gone_is_changed(preview) end
+  if fence.id ~= preview.fence.id or fence.from ~= preview.fence.from then fail("changed", base.moved_text(fence.label)) end
+  if fence.hash ~= preview.fence.hash or fence.sourceHash ~= preview.fence.sourceHash or fence.cells ~= preview.fence.cells
+    or fence.block ~= preview.fence.block then
+    fail("changed", "the lines changed since the preview")
+  end
+  local display = preview.display
+  local applied = { cells = {}, columns = preview.prior.columns, source = { cells = {} } }
+  if #to_after == 0 and #from_after == 0 then
+    return { applied = applied, display = display, undo = { desc = desc, entry = false }, prior = preview.prior, target = preview.target }
+  end
+  song:describe_undo(desc)
+  local wrote, err = pcall(function()
+    raise_columns(block.to_track, needs_of(to_after))
+    for _, cell in ipairs(to_after) do write_cell(block.to_pattern_track, cell) end
+    for _, cell in ipairs(from_after) do write_cell(block.pattern_track, cell) end
+  end)
+  local function back()
+    pcall(function()
+      for _, cell in ipairs(to_prior) do write_cell(block.to_pattern_track, cell) end
+      for _, cell in ipairs(from_prior) do write_cell(block.pattern_track, cell) end
+    end)
+    set_columns(block.to_track, preview.prior.columns)
+  end
+  if not wrote then
+    back()
+    fail("failed", "Renoise wouldn't take those lines: " .. (type(err) == "table" and err.message or tostring(err)))
+  end
+  local to_result, from_result = {}, {}
+  for i, cell in ipairs(to_after) do
+    to_result[i] = read_cell(block.to_pattern_track, cell)
+    if not same_cell(to_result[i], cell) then back() fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col)) end
+  end
+  for i, cell in ipairs(from_after) do from_result[i] = read_cell(block.pattern_track, cell) end
+  applied = {
+    cells = to_result, columns = read_columns(block.to_track),
+    touch = env.pattern_touch_mark and env.pattern_touch_mark(block.to_p) or nil, lines = block.to_pattern.number_of_lines,
+    source = {
+      cells = from_result, touch = env.pattern_touch_mark and env.pattern_touch_mark(block.p) or nil, lines = block.pattern.number_of_lines,
+    },
+  }
+  return {
+    applied = applied, display = { title = display.title, before = display.before, after = counts_of(to_result), note = display.note },
+    -- (where the block came from: the source pattern's track, a ref the layout carries)
+    material = { source = refs.make(env.epoch(), "ptrack", block.p, block.index) },
+    undo = { desc = desc, entry = true }, prior = preview.prior, place = { pattern = block.to_p, track = block.to_index },
+    target = preview.target,
+  }
+end
+
+local function block_restore(song, env, restore, desc)
+  local p, index, track, pattern_track, pattern = locate_restored(song, env, restore)
+  local prior, applied = restore.prior, restore.applied
+  if type(prior) ~= "table" or type(applied) ~= "table" or type(prior.source) ~= "table" or type(applied.source) ~= "table" then
+    bad("prior and applied: the lines the copy wrote")
+  end
+  local source_track, source_pattern_track, source_pattern, sp
+  if #applied.source.cells > 0 then
+    if type(restore.material) ~= "table" then bad("material: where the block came from") end
+    local numbers = refs.expect(restore.material.source, "ptrack", 2, env.epoch())
+    sp = numbers[1]
+    if sp > #song.patterns then fail("gone", "the pattern the block came from isn't in the song any more") end
+    source_track = base.track_at(song, numbers[2])
+    source_pattern, source_pattern_track = song:pattern(sp), song:pattern(sp):track(numbers[2])
+    if source_pattern_track.is_alias then fail("changed", "the track the block came from is an alias now") end
+  end
+  local function changed(p_, mark)
+    if not env.pattern_touched_since then return false end
+    return env.pattern_touched_since(p_, mark)
+  end
+  local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, function(mark) return changed(p, mark) end)
+  local source_todo = {}
+  if source_pattern_track then
+    source_todo = restore_plan(source_pattern_track, { prior = prior.source, applied = applied.source }, source_pattern.number_of_lines,
+      function(mark) return changed(sp, mark) end)
+  end
+  local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
+  local spec = base.KINDS["lines-copy"]
+  if #todo == 0 and #source_todo == 0 then
+    lower_columns(song, index, track, prior.columns, applied.columns)
+    base.note_restored(env.journal, "lines-copy", { pattern = p, track = index }, applied, spec)
+    return { restored = { done = true }, display = { title = "Lines in " .. label .. " are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+  end
+  song:describe_undo(desc)
+  for _, cell in ipairs(todo) do write_cell(pattern_track, cell) end
+  for _, cell in ipairs(source_todo) do write_cell(source_pattern_track, cell) end
+  lower_columns(song, index, track, prior.columns, applied.columns)
+  base.note_restored(env.journal, "lines-copy", { pattern = p, track = index }, applied, spec)
+  return { restored = { done = true }, display = { title = "Lines put back in " .. label }, undo = { desc = desc, entry = true } }
+end
+
+base.register({
+  kind = "lines-copy", custom = true, preview = function(song, env, input) return (block_preview(song, env, input)) end,
+  apply = block_apply, restore = block_restore,
+  same = same_state, unsure_redo = true,
+  reread = base.KINDS["notes-write"].reread, read = base.KINDS["notes-write"].read,
+})
+
+-- (the plain rule's words, for the other kinds that write lines: M4 n-song)
+M.CHANGED = CHANGED
+
+-- n-instruments: the cells' text, plan and writes, for a phrase's lines (changes_phrases.lua): a phrase's lines are PatternLines.
+M.cells = {
+  parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
+  same_cell = same_cell, same_cells = same_cells, is_empty_cell = is_empty_cell, fingerprint = fingerprint, writes_of = writes_of,
+  counts_of = counts_of, needs_of = needs_of, lines_in = lines_in,
+}
+
 return M

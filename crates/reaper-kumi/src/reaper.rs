@@ -9,9 +9,16 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
 pub mod generic;
+mod items;
+// (r-tracks) M4's track, routing, project and action calls.
+mod io;
 mod objects;
 mod write;
+pub use items::*;
 pub use objects::*;
+// m4-r-fxenv: FX in any chain, envelopes, points and automation items.
+mod fxenv;
+pub use fxenv::{EnvPoint, EqParam};
 // M5 listening (m5-reaper): render settings, the audio device, sources, previews, accessors.
 mod audio;
 pub use audio::*;

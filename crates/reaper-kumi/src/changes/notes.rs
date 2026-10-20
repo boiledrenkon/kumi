@@ -23,14 +23,14 @@ fn changed(message: impl Into<String>) -> Fault {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Note {
-    channel: i32,
-    pitch: i32,
-    start: f64,
-    end: f64,
-    velocity: i32,
-    muted: bool,
-    selected: bool,
+pub(super) struct Note {
+    pub channel: i32,
+    pub pitch: i32,
+    pub start: f64,
+    pub end: f64,
+    pub velocity: i32,
+    pub muted: bool,
+    pub selected: bool,
 }
 
 /// What tells a note apart: everything but whether it is selected, to a thousandth of a tick.
@@ -41,7 +41,7 @@ impl Note {
         (self.channel, self.pitch, (self.start * 1000.0).round() as i64, (self.end * 1000.0).round() as i64, self.velocity, self.muted)
     }
 
-    fn json(&self) -> Value {
+    pub(super) fn json(&self) -> Value {
         json!([self.channel, self.pitch, self.start, self.end, self.velocity, self.muted as u8, self.selected as u8])
     }
 
@@ -80,7 +80,7 @@ fn counts(notes: &[Note]) -> HashMap<Key, usize> {
 }
 
 /// The notes of `a` that `b` has no note for: a note that is in both, as many times as `b` has it, doesn't count.
-fn difference(a: &[Note], b: &[Note]) -> Vec<Note> {
+pub(super) fn difference(a: &[Note], b: &[Note]) -> Vec<Note> {
     let mut have = counts(b);
     a.iter()
         .filter(|note| match have.get_mut(&note.key()) {
@@ -108,7 +108,7 @@ fn spec(note: &Note) -> crate::midi::NoteSpec {
 
 /// The notes in `remove` taken out of the take (as `events` has them) and the notes in `add` put in, all in one go:
 /// nothing else in the take changes.
-fn write_notes(ctx: &Ctx, take: Take, events: &[Event], remove: &[Note], add: &[Note]) -> Done<()> {
+pub(super) fn write_notes(ctx: &Ctx, take: Take, events: &[Event], remove: &[Note], add: &[Note]) -> Done<()> {
     let (remove, add): (Vec<_>, Vec<_>) = (remove.iter().map(spec).collect(), add.iter().map(spec).collect());
     let edited = crate::midi::edit_notes(events, &remove, &add).map_err(|message| changed(format!("the take changed: {message}")))?;
     if !ctx.reaper.set_midi_events(take, &edited) {
@@ -119,7 +119,7 @@ fn write_notes(ctx: &Ctx, take: Take, events: &[Event], remove: &[Note], add: &[
 
 /// The take's notes in the order of the one buffer REAPER gives all its MIDI in (a call, where a note at a time is a call
 /// each), and the buffer.
-fn read_all(ctx: &Ctx, take: Take) -> Done<(Vec<Note>, Vec<Event>)> {
+pub(super) fn read_all(ctx: &Ctx, take: Take) -> Done<(Vec<Note>, Vec<Event>)> {
     let events = ctx.reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
     let notes = crate::midi::notes(&events).iter().map(from_spec).collect();
     Ok((notes, events))
@@ -139,7 +139,7 @@ fn from_spec(note: &crate::midi::NoteSpec) -> Note {
 
 /// A write that did not leave the take as it should be: what was written is taken back, as far as it can be checked. If
 /// it can't be, nobody knows what the take holds.
-fn take_back(ctx: &Ctx, take: Take, events: &[Event], was: &Value, message: &str) -> Fault {
+pub(super) fn take_back(ctx: &Ctx, take: Take, events: &[Event], was: &Value, message: &str) -> Fault {
     let put_back = ctx.reaper.set_midi_events(take, events) && read_all(ctx, take).is_ok_and(|(notes, _)| fence_of(&notes) == *was);
     if put_back {
         failed(format!("{message}; what was written is taken back"))
@@ -149,7 +149,7 @@ fn take_back(ctx: &Ctx, take: Take, events: &[Event], was: &Value, message: &str
 }
 
 /// The take's notes as one value, to fence an index with: their number and a hash of what they are.
-fn fence_of(notes: &[Note]) -> Value {
+pub(super) fn fence_of(notes: &[Note]) -> Value {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for note in notes {
         let (channel, pitch, start, end, velocity, muted) = note.key();
@@ -162,16 +162,16 @@ fn fence_of(notes: &[Note]) -> Value {
     json!({"count": notes.len(), "hash": format!("{hash:016x}")})
 }
 
-fn take_of(ctx: &Ctx, reference: &Value) -> Done<Take> {
+pub(super) fn take_of(ctx: &Ctx, reference: &Value) -> Done<Take> {
     let text = reference.as_str().ok_or_else(|| bad("ref must be a take or item ref"))?;
     ctx.reads.midi_take(ctx.reaper, ctx.proj, Some(text))
 }
 
-fn target(ctx: &Ctx, take: Take) -> Value {
+pub(super) fn target(ctx: &Ctx, take: Take) -> Value {
     json!({"ref": refs::take_ref(&ctx.reaper.take_guid(take)), "kind": "take"})
 }
 
-fn take_label(ctx: &Ctx, take: Take) -> String {
+pub(super) fn take_label(ctx: &Ctx, take: Take) -> String {
     let name = ctx.reaper.take_name(take);
     if name.is_empty() {
         "a take".into()
@@ -184,7 +184,7 @@ fn title(verb: &str, count: usize, label: &str) -> String {
     format!("{verb} {count} note{} in {label}", if count == 1 { "" } else { "s" })
 }
 
-fn rows_of(ctx: &Ctx, take: Take, item_qn: f64, notes: impl Iterator<Item = (usize, Note)>) -> Vec<Value> {
+pub(super) fn rows_of(ctx: &Ctx, take: Take, item_qn: f64, notes: impl Iterator<Item = (usize, Note)>) -> Vec<Value> {
     notes.take(SHOWN).map(|(i, note)| rows::note_row(ctx.reaper, take, item_qn, i as i32, &note.midi())).collect()
 }
 

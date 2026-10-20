@@ -15,6 +15,9 @@ use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
 mod bodies;
+pub(crate) mod item_rows;
+// m4-r-fxenv: points, automation items and take envelopes.
+mod envelopes;
 
 pub use bodies::BODY_KINDS;
 
@@ -48,7 +51,9 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call"];
+const KINDS: [&str; 15] = [
+    "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call", "point", "autoitem",
+];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -537,14 +542,18 @@ impl Reads {
             "marker" => self.read_markers(reaper, proj, pager, false, cursor),
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
+            "event" => self.read_events(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
+            // m4-r-fxenv
+            "point" => self.read_points(reaper, proj, pager, parent, cursor),
+            "autoitem" => self.read_auto_items(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
         };
         // Where a row's `index` starts counting, which is where the change that takes the same index starts too: a track's
         // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
         let from = match kind {
             "track" => Some(1),
-            "fx" | "param" | "note" => Some(0),
+            "fx" | "param" | "note" | "event" | "point" | "autoitem" => Some(0),
             _ => None,
         };
         answer.map(|mut answer| {
@@ -581,7 +590,10 @@ impl Reads {
             Ref::Take(guid) => take_row(reaper, self.take_by_guid(reaper, proj, &guid)?, None),
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
-                rows::fx_row(reaper, fx, chain_position(reaper, fx))
+                // m4-r-fxenv: one FX read alone also says its state chunk, presets, wet and delta.
+                let mut row = rows::fx_row(reaper, fx, chain_position(reaper, fx));
+                envelopes::add_fx_details(reaper, fx, &mut row);
+                row
             }
             Ref::Param { fx: guid, index } => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
@@ -630,8 +642,10 @@ impl Reads {
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
-                rows::envelope_row(reaper, &track, envelope)
+                self.track_envelope_row(reaper, proj, &track, envelope)
             }
+            // m4-r-fxenv
+            other @ (Ref::TakeEnvelope { .. } | Ref::AutoItem { .. }) => self.read_one_m4(reaper, proj, &other)?,
         };
         Ok(json!({"items": [row], "epoch": self.epoch()}))
     }
@@ -964,6 +978,27 @@ impl Reads {
         self.page(pager, next, Some(notes.len()))
     }
 
+    /// A MIDI take's events that aren't notes (controllers, pitch bend, program changes, pressure, text, sysex), from the
+    /// one buffer the changes edit, with the indexes the event changes take (from 0); the source's end marker isn't one.
+    fn read_events(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
+        let parent = parent.ok_or_else(|| bad("event: pass the MIDI take as parent"))?;
+        let take = self.midi_take(reaper, proj, Some(parent))?;
+        let buffer = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let events = crate::changes::midi_events_of(&buffer);
+        let item_qn = take_start_qn(reaper, proj, take);
+        let mut position = self.position_within(cursor, events.len())?;
+        let mut next = None;
+        while let Some((event, _)) = events.get(position) {
+            let beats = reaper.ppq_to_quarter_notes(take, event.pos as f64).map_or(0.0, |qn| qn - item_qn);
+            if !pager.open() || !pager.push(crate::changes::midi_event_row(event, position, beats)) {
+                next = Some(position);
+                break;
+            }
+            position += 1;
+        }
+        self.page(pager, next, Some(events.len()))
+    }
+
     // ----- envelopes -----
 
     /// A track's envelopes, each with the GUID its ref is made of (none if REAPER gives it none): in the order REAPER lists
@@ -976,7 +1011,14 @@ impl Reads {
     }
 
     fn read_envelopes(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
-        let parent = parent.ok_or_else(|| bad("envelope: pass the track or FX as parent"))?;
+        let parent = parent.ok_or_else(|| bad("envelope: pass the track, take or FX as parent"))?;
+        // m4-r-fxenv: a take's envelopes (and a take FX's).
+        let take_fx = |guid: &str| self.fx_by_guid(reaper, proj, guid).is_ok_and(|fx| matches!(fx.owner, FxOwner::Take(_)));
+        match Ref::parse(parent).map_err(bad)? {
+            Ref::Take(_) | Ref::Item(_) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            Ref::Fx(guid) if take_fx(&guid) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            _ => {}
+        }
         let found: Vec<(TrackId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
             Ref::Track(id) => {
                 let track = self.track_by_id(reaper, proj, &id)?;
@@ -1008,7 +1050,7 @@ impl Reads {
                 break;
             }
             let (track, envelope) = &found[position];
-            if !pager.push(rows::envelope_row(reaper, track, *envelope)) {
+            if !pager.push(self.track_envelope_row(reaper, proj, track, *envelope)) {
                 next = Some(position);
                 break;
             }
@@ -1129,6 +1171,7 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["noteCount"] = notes.into();
         row["ccCount"] = ccs.into();
     }
+    item_rows::take_details(reaper, take, &mut row, place.is_none());
     row
 }
 
@@ -1151,6 +1194,15 @@ impl crate::reaper::generic::Handles for CallRefs<'_, '_> {
             ("MediaItem_Take", Ref::Take(guid)) => Handle::Take(reads.take_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
             ("TrackEnvelope", Ref::Envelope { track, which }) => {
                 Handle::Envelope(reads.envelope_by_ref(reaper, proj, &track, &which).map_err(|e| e.1)?)
+            }
+            // m4-r-fxenv
+            ("TrackEnvelope", Ref::TakeEnvelope { take, guid }) => {
+                let take = reads.take_by_ref(reaper, proj, &take).map_err(|e| e.1)?;
+                let envelope = (0..reaper.take_envelope_count(take))
+                    .filter_map(|i| reaper.take_envelope(take, i))
+                    .find(|e| reaper.envelope_guid(*e).is_some_and(|g| g.eq_ignore_ascii_case(&guid)))
+                    .ok_or("that take has no such envelope")?;
+                Handle::Envelope(envelope)
             }
             (base, other) => return Err(format!("{reference} is r:{}, where a {base} is wanted", other.kind())),
         };
@@ -2002,11 +2054,17 @@ mod tests {
             // A marker's GUID isn't a region's.
             "r:region:{MARK-1}",
             "r:marker:{REG-1}",
-            "r:env:{AAAA}:PANENV",
+            "r:env:{AAAA}:{NOPE}",
         ] {
             let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
             assert_eq!(code, "failed", "{reference}: {message}");
         }
+        // REAPER hands out a track's built-in envelope before it is shown (m4-r-fxenv, lab 7.82): hidden, off, no points.
+        let pan = lab.read(json!({"ref": "r:env:{AAAA}:PANENV"})).unwrap();
+        assert_eq!(
+            (pan["items"][0]["active"].clone(), pan["items"][0]["visible"].clone(), pan["items"][0]["pointCount"].clone()),
+            (json!(false), json!(false), json!(0))
+        );
         for reference in
             ["track:{AAAA}", "r:pattern:3", "r:track:", "r:param:{FX-EQ}:x", "r:send:{AAAA}:0:5", "r:send:{AAAA}:0", "r:marker:3"]
         {
@@ -2114,7 +2172,8 @@ mod tests {
             ask(&format!("r:item:{{I{t}-3}}"));
         }
         let calls = fake::with(|s| s.calls);
-        assert!(calls < 3 * 40, "{calls} calls for three cached items");
+        // (a row reads some 50 attributes, an item's fades and lock among them; a walk would be thousands)
+        assert!(calls < 3 * 60, "{calls} calls for three cached items");
     }
 
     fn snapshot(lab: &Lab) -> Answer {
@@ -2284,9 +2343,9 @@ mod tests {
         fake::with(|s| s.tracks[0].sends.push(FakeSend::to(3)));
         let (_, message) = lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}"})).unwrap_err();
         assert!(message.contains("2 such sends now") && message.contains("when there was one"), "{message}");
-        // Receives are told apart the same way.
+        // Receives are told apart the same way, with the pair's state as their send's refs carry it (M4).
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
-        assert_eq!(reverb[0]["ref"], "r:send:{DDDD}:-1:{AAAA}:1of2");
+        assert!(reverb[0]["ref"].as_str().unwrap().starts_with("r:send:{DDDD}:-1:{AAAA}:1of2."), "{}", reverb[0]["ref"]);
     }
 
     /// A hardware output is named by the output it goes to, so removing another output doesn't rename it.

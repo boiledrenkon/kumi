@@ -19,7 +19,8 @@ pub fn lab_dummy() -> bool {
     std::env::var(LAB_DUMMY_ENV).is_ok_and(|v| v == "1")
 }
 
-/// What `GetSetProjectInfo_String` reads into: its buffer has no size, and `RENDER_TARGETS` lists a file per stem.
+/// What `GetSetProjectInfo_String` reads a render setting into: its buffer has no size, `RENDER_TARGETS` lists a file per
+/// stem, and a producer's settings are put back exactly (the reads' `project_text` holds 4 KB).
 const PROJECT_TEXT: usize = 1 << 20;
 
 /// A media source REAPER made or handed out (a take's, or one made from a file).
@@ -66,8 +67,8 @@ impl Reaper<'_> {
         }
     }
 
-    /// A project setting's text (`RENDER_FILE`, `RENDER_TARGETS`…); None when REAPER refuses the key.
-    pub fn project_text(&self, proj: Project, key: &str) -> Option<String> {
+    /// A render setting's text (`RENDER_FILE`, `RENDER_TARGETS`…) whole, up to 1 MB; None when REAPER refuses the key.
+    pub fn project_text_long(&self, proj: Project, key: &str) -> Option<String> {
         let f = self.api.GetSetProjectInfo_String()?;
         let key = cstring(key);
         let mut buf = vec![0u8; PROJECT_TEXT];
@@ -77,14 +78,6 @@ impl Reaper<'_> {
         buf[PROJECT_TEXT - 1] = 0;
         let len = buf.iter().position(|&b| b == 0).unwrap_or(PROJECT_TEXT - 1);
         Some(String::from_utf8_lossy(&buf[..len]).into_owned())
-    }
-
-    pub fn set_project_text(&self, proj: Project, key: &str, value: &str) -> bool {
-        let Some(f) = self.api.GetSetProjectInfo_String() else { return false };
-        let key = cstring(key);
-        // Read, not written, when setting; REAPER wants it writable all the same.
-        let mut buf = cstring(value).into_bytes_with_nul();
-        unsafe { f(proj.0, key.as_ptr(), buf.as_mut_ptr().cast::<c_char>(), true) }
     }
 
     /// The address of a project's own config variable (`projrenderlimit`, the render speed) and its size in bytes.
@@ -129,11 +122,6 @@ impl Reaper<'_> {
         if let Some(f) = self.api.Audio_Init() {
             unsafe { f() }
         }
-    }
-
-    /// The device's output channels.
-    pub fn audio_outputs(&self) -> i32 {
-        self.api.GetNumAudioOutputs().map(|f| unsafe { f() }).unwrap_or(0)
     }
 
     /// Whether REAPER's audio reaches a device the producer hears: running, with outputs, and not REAPER's own dummy device

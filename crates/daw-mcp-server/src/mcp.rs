@@ -161,7 +161,24 @@ pub fn tools(host: &Host) -> Value {
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
     ]);
+    // (r-tracks) Saving the project, in either DAW: a file written, nothing in the project changed, so no change and no
+    // undo. The bridge's `project_save`; Renoise refuses `version`.
+    let (save_title, save) = match daw {
+        Daw::Reaper => ("Save the REAPER project", "Saves the open REAPER project where it is, or as its next version (version: true). A project never saved is saved only under path, a .rpp inside the folder REAPER saves projects in, and never over a file."),
+        _ => ("Save the Renoise song", "Saves the open Renoise song where it is, or as path (a whole path to a .xrns file that isn't there yet; the song is that file from then on). A song never saved is saved only under path, and never over a file. (version is REAPER's: Renoise refuses it.)"),
+    };
     if let Some(tools) = list.as_array_mut() {
+        tools.push(json!({
+            "name": "project_save",
+            "title": save_title,
+            "description": save,
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "version": {"type": "boolean"},
+                "path": {"type": "string"},
+                "epoch": {"type": "string", "description": "The epoch of the answer the project was read in: if the project open now is another, the save is refused as stale."},
+            })), "required": ["epoch"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        }));
         tools.extend(listening_tools(daw, &pick));
     }
     if daw == Daw::Reaper {
@@ -171,7 +188,25 @@ pub fn tools(host: &Host) -> Value {
             "description": "The epoch of the answer the ref, parent or cursor came from. If the project in the tab has changed since, the call is refused as stale instead of reading the other project.",
         });
         list[2]["inputSchema"]["properties"]["epoch"] = epoch.clone();
-        list[5]["inputSchema"]["properties"]["epoch"] = epoch;
+        list[5]["inputSchema"]["properties"]["epoch"] = epoch.clone();
+        // (r-tracks) Saving tracks as a template: a file written, nothing in the project changed, so no change and no undo.
+        if let Some(tools) = list.as_array_mut() {
+            tools.push(json!({
+                "name": "track_template_save",
+                "title": "Save REAPER tracks as a template",
+                "description": "Writes tracks as a track template (.RTrackTemplate) in REAPER's TrackTemplates folder (name) or at path; never over a file unless replace.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "trackRefs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "items": {"type": "boolean"},
+                    "envelopes": {"type": "boolean"},
+                    "replace": {"type": "boolean"},
+                    "epoch": epoch,
+                })), "required": ["trackRefs", "epoch"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
+            }));
+        }
     }
     if daw == Daw::Renoise {
         // A pattern's lines are read one track at a time.
@@ -194,6 +229,83 @@ pub fn tools(host: &Host) -> Value {
         if let Some(tools) = list.as_array_mut() {
             tools.retain(|tool| tool["name"] != "hear");
         }
+        // Renoise's actions (M4): a note auditioned, things selected or shown, an instrument saved to a file (n-instruments).
+        // None is a change. (Saving the song is the neutral project_save, listed for both DAWs.)
+        let actions = json!([
+            {
+                "name": "audition_note",
+                "title": "Audition a note in Renoise",
+                "description": "Plays a note (or notes, at once) on an instrument, out loud, for durationMs, on track (the selected one by default); sample plays that sample alone. stop: true ends what is playing.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "instrument": {"type": "string", "description": "The instrument's ref."},
+                    "instrumentRef": {"type": "string", "description": "The instrument's ref (as instrument)."},
+                    "track": {"type": "string", "description": "The track's ref to play on."},
+                    "trackRef": {"type": "string", "description": "The track's ref (as track)."},
+                    "note": {"type": ["string", "integer"], "description": "C-4, C#5 or 0 to 119 (48 is C-4)."},
+                    "notes": {"type": "array", "items": {"type": ["string", "integer"]}, "minItems": 1, "maxItems": 16},
+                    "volume": {"type": "number", "minimum": 0, "maximum": 1},
+                    "durationMs": {"type": "number", "minimum": 1, "maximum": 10000},
+                    "sample": {"type": "string", "description": "A sample's ref, to play it alone."},
+                    "sampleRef": {"type": "string", "description": "A sample's ref (as sample)."},
+                    "stop": {"type": "boolean"},
+                    "epoch": {"type": "string"},
+                    "layout": {"type": "integer", "minimum": 0},
+                })), "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+            },
+            {
+                "name": "select",
+                "title": "Select or show in Renoise",
+                "description": "Selects a track (or its device), an instrument (or its sample or phrase), a sequence slot (or the first slot that plays a pattern) and a line; shows a middle frame, the lower frame or the pattern matrix. Not an undo step.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "track": {"type": "string"}, "device": {"type": "string"}, "instrument": {"type": "string"},
+                    "sample": {"type": "string"}, "phrase": {"type": "string"}, "sequence": {"type": "string"}, "pattern": {"type": "string"},
+                    "trackRef": {"type": "string"}, "deviceRef": {"type": "string"}, "instrumentRef": {"type": "string"},
+                    "sampleRef": {"type": "string"}, "phraseRef": {"type": "string"}, "sequenceRef": {"type": "string"}, "patternRef": {"type": "string"},
+                    "line": {"type": "integer", "minimum": 1},
+                    "frame": {"type": "string", "enum": ["pattern", "mixer", "phrase", "keyzones", "sample", "modulation", "effects", "plugin", "midi"]},
+                    "lower": {"type": "string", "enum": ["dsp", "automation", "hidden"]},
+                    "matrix": {"type": "boolean"},
+                    "epoch": {"type": "string"},
+                    "layout": {"type": "integer", "minimum": 0},
+                })), "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            },
+            {
+                "name": "instrument_save",
+                "title": "Save a Renoise instrument",
+                "description": "Saves an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless path names that file exactly and overwrite: true. Not a change: no undo.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "instrumentRef": {"type": "string", "description": "The instrument."},
+                    "ref": {"type": "string", "description": "The instrument (as instrumentRef)."},
+                    "path": {"type": "string"},
+                    "overwrite": {"type": "boolean"},
+                    "epoch": {"type": "string"},
+                    "layout": {"type": "integer", "minimum": 0},
+                })), "required": ["path"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            },
+        ]);
+        if let (Some(tools), Value::Array(more)) = (list.as_array_mut(), actions) {
+            tools.extend(more);
+        }
+    }
+    if daw == Daw::Reaper {
+        // m4-r-fxenv: a chain saved as an FX chain file.
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "fx_chain_save",
+            "title": "Save an FX chain file",
+            "description": "Saves a chain's FX (fxRefs: some of them, in the chain's order) as an FX chain file (.RfxChain) under name in REAPER's FXChains folder: no FX ids, no automation. A file of that name is replaced only with overwrite. A file, not the project: no step of REAPER's undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "ref": {"type": "string", "description": "The track, take, item or container whose chain to save."},
+                "input": {"type": "boolean", "description": "The track's input FX chain."},
+                "fxRefs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 256},
+                "name": {"type": "string", "minLength": 1, "maxLength": 256, "description": "The file's name in FXChains; sub-folders as \"Vocals/Lead\"."},
+                "overwrite": {"type": "boolean"},
+                "epoch": {"type": "string"},
+            })), "required": ["ref", "name"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
     }
     list
 }
@@ -405,8 +517,9 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     result(id, tool_result(answer, is_error))
                 }
                 "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "transport_play"
-                | "cursor_set" | "undo_step_begin" | "undo_step_end" => {
+                | "cursor_set" | "undo_step_begin" | "undo_step_end" | "audition_note" | "select" | "instrument_save" => {
                     let (answer, is_error) = match name {
+                        "audition_note" | "select" | "instrument_save" => host.action(name, &arguments).await,
                         "change_preview" => host.change_preview(&arguments).await,
                         "change_apply" => host.change_apply(&arguments).await,
                         "change_undo" => host.change_undo(&arguments).await,
@@ -415,6 +528,16 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "undo_step_begin" | "undo_step_end" => host.undo_step(name, &arguments).await,
                         _ => host.change_release(&arguments),
                     };
+                    result(id, tool_result(answer, is_error))
+                }
+                // m4-r-fxenv
+                "fx_chain_save" if host.daw() == Daw::Reaper => {
+                    let (answer, is_error) = host.fx_chain_save(&arguments).await;
+                    result(id, tool_result(answer, is_error))
+                }
+                // (r-tracks) Saving: the project in either DAW, tracks as a template in REAPER.
+                "project_save" | "track_template_save" if name == "project_save" || host.daw() == Daw::Reaper => {
+                    let (answer, is_error) = host.passthrough(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 _ => error(id, -32602, &format!("Unknown tool: {name}")),

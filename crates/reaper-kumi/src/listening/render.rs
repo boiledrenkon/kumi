@@ -447,7 +447,7 @@ struct PutBack<'a, 'r> {
 impl<'a, 'r> PutBack<'a, 'r> {
     fn note(reaper: &'a Reaper<'r>, proj: Project) -> PutBack<'a, 'r> {
         let numbers = NUMBERS.iter().filter_map(|key| reaper.project_number(proj, key).map(|value| (*key, value))).collect();
-        let texts = TEXTS.iter().filter_map(|key| reaper.project_text(proj, key).map(|value| (*key, value))).collect();
+        let texts = TEXTS.iter().filter_map(|key| reaper.project_text_long(proj, key).map(|value| (*key, value))).collect();
         let master = reaper.master_track(proj);
         let mut selection: Vec<(Track, f64)> = master.iter().map(|m| (*m, reaper.track_value(*m, "I_SELECTED"))).collect();
         for index in 0..reaper.track_count(proj) {
@@ -480,7 +480,7 @@ impl<'a, 'r> PutBack<'a, 'r> {
         }
         for (key, value) in &self.saved.texts {
             reaper.set_project_text(proj, key, value);
-            if reaper.project_text(proj, key).is_some_and(|now| now != *value) {
+            if reaper.project_text_long(proj, key).is_some_and(|now| now != *value) {
                 missed.push(key.to_string());
             }
         }
@@ -700,7 +700,7 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
             expected.push((at, plan.pass_file(pass, n, number)));
         }
         let targets: Vec<PathBuf> = reaper
-            .project_text(proj, "RENDER_TARGETS")
+            .project_text_long(proj, "RENDER_TARGETS")
             .unwrap_or_default()
             .split(';')
             .map(str::trim)

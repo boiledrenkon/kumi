@@ -27,14 +27,51 @@ pub struct Kinds {
 pub fn kinds(daw: Daw) -> Kinds {
     match daw {
         Daw::Reaper => Kinds {
-            read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "spans"],
+            read: &[
+                "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
+                "autoitem", "spans",
+            ],
             bodies: &["arrange", "midi", "fx", "routing"],
-            outside_undo: &["loop-repeat"],
+            // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
+            outside_undo: &[
+                "loop-repeat",
+                "fx-eq-band",
+                "automation-override",
+                "project-notes",
+                "project-info",
+                "project-grid",
+                "project-timebase",
+            ],
         },
         Daw::Renoise => Kinds {
-            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param", "spans"],
+            // (an instrument's modulation sets and sample FX chains: n-instruments)
+            read: &[
+                "song",
+                "track",
+                "sequence",
+                "pattern",
+                "line",
+                "automation",
+                "instrument",
+                "sample",
+                "phrase",
+                "device",
+                "param",
+                "modset",
+                "chain",
+                "spans",
+            ],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
-            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern"],
+            outside_undo: &[
+                "track-mute",
+                "track-solo",
+                "loop-range",
+                "loop-pattern",
+                // M4 (n-song): the metronome switch and the editing settings (measured in 3.5.4)
+                "metronome-switch",
+                "edit-settings",
+                "plugin-suspend",
+            ],
         },
     }
 }

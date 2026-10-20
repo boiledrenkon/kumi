@@ -49,7 +49,7 @@ local function setup(options)
   if not options.no_reference then reference(env, options.reference) end
   if options.patch then options.patch(env) end
   mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers,
-    move_replaces = options.move_replaces })
+    move_replaces = options.move_replaces, temp_dir = env.dir })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
   dofile(env.bundle .. "main.lua")
@@ -209,9 +209,8 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  -- (later milestones add theirs after these)
-  eq(table.concat(welcome.methods, ",", 1, 14), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play")
-  eq(table.concat(welcome.events, ",", 1, 5), "project,tracks,selection,transport,undone_in_daw")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,render_start,listen_status,listen_cancel,audition,audition_stop,audio_file,scratch")
+  eq(table.concat(welcome.events, ","), "project,tracks,selection,transport,undone_in_daw,scratch_swept")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()
 end)

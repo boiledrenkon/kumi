@@ -1,0 +1,165 @@
+//! The kinds of change to items, takes, lanes, razor areas and MIDI events (M4), and the module each is made in.
+
+use serde_json::Value;
+
+use super::take_marks::Which as Marks;
+use super::{glue, items, lanes, midi_events, notes, take_marks, takes, transforms, Applied, Ctx, Done, Kind, Preview, Restore, Restored};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Which {
+    ItemAdd,
+    ItemImport,
+    ItemMove,
+    ItemSplit,
+    ItemTrim,
+    ItemFade,
+    ItemProps,
+    ItemGroup,
+    ItemDelete,
+    ItemCopy,
+    TakeProps,
+    TakeActive,
+    TakeAdd,
+    TakeDelete,
+    Stretch(Marks),
+    TakeMarkers(Marks),
+    TrackLanes,
+    LanePlays,
+    LaneName,
+    LaneComp,
+    Razor,
+    Glue,
+    Render,
+    Events(midi_events::Which),
+    Transform(transforms::Which),
+}
+
+/// The kind a name is, if it is one of these.
+pub(super) fn kind(name: &str) -> Option<Kind> {
+    match name {
+        "item-add" => Some(Kind::Items(Which::ItemAdd)),
+        "item-import" => Some(Kind::Items(Which::ItemImport)),
+        "item-move" => Some(Kind::Items(Which::ItemMove)),
+        "item-split" => Some(Kind::Items(Which::ItemSplit)),
+        "item-trim" => Some(Kind::Items(Which::ItemTrim)),
+        "item-fade" => Some(Kind::Items(Which::ItemFade)),
+        "item-props" => Some(Kind::Items(Which::ItemProps)),
+        "item-group" => Some(Kind::Items(Which::ItemGroup)),
+        "item-delete" => Some(Kind::Items(Which::ItemDelete)),
+        "item-duplicate" => Some(Kind::Items(Which::ItemCopy)),
+        "take-props" => Some(Kind::Items(Which::TakeProps)),
+        "take-active" => Some(Kind::Items(Which::TakeActive)),
+        "take-add" => Some(Kind::Items(Which::TakeAdd)),
+        "take-delete" => Some(Kind::Items(Which::TakeDelete)),
+        "stretch-markers-add" => Some(Kind::Items(Which::Stretch(Marks::Add))),
+        "stretch-markers-change" => Some(Kind::Items(Which::Stretch(Marks::Change))),
+        "stretch-markers-delete" => Some(Kind::Items(Which::Stretch(Marks::Delete))),
+        "take-markers-add" => Some(Kind::Items(Which::TakeMarkers(Marks::Add))),
+        "take-markers-change" => Some(Kind::Items(Which::TakeMarkers(Marks::Change))),
+        "take-markers-delete" => Some(Kind::Items(Which::TakeMarkers(Marks::Delete))),
+        "track-lanes" => Some(Kind::Items(Which::TrackLanes)),
+        "lane-plays" => Some(Kind::Items(Which::LanePlays)),
+        "lane-name" => Some(Kind::Items(Which::LaneName)),
+        "lane-comp" => Some(Kind::Items(Which::LaneComp)),
+        "razor-set" => Some(Kind::Items(Which::Razor)),
+        "items-glue" => Some(Kind::Items(Which::Glue)),
+        "items-render" => Some(Kind::Items(Which::Render)),
+        "midi-events-add" => Some(Kind::Items(Which::Events(midi_events::Which::Add))),
+        "midi-events-change" => Some(Kind::Items(Which::Events(midi_events::Which::Change))),
+        "midi-events-delete" => Some(Kind::Items(Which::Events(midi_events::Which::Delete))),
+        "notes-quantize" => Some(Kind::Items(Which::Transform(transforms::Which::Quantize))),
+        "notes-humanize" => Some(Kind::Items(Which::Transform(transforms::Which::Humanize))),
+        _ => None,
+    }
+}
+
+impl Which {
+    pub(super) fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
+        match self {
+            Which::ItemAdd => items::make_preview(ctx, input, false),
+            Which::ItemImport => items::make_preview(ctx, input, true),
+            Which::ItemMove => items::move_preview(ctx, input),
+            Which::ItemSplit => items::split_preview(ctx, input),
+            Which::ItemTrim => items::trim_preview(ctx, input),
+            Which::ItemFade => items::fade_preview(ctx, input),
+            Which::ItemProps => items::props_preview(ctx, input),
+            Which::ItemGroup => items::group_preview(ctx, input),
+            Which::ItemDelete => items::delete_preview(ctx, input),
+            Which::ItemCopy => items::copy_preview(ctx, input),
+            Which::TakeProps => takes::props_preview(ctx, input),
+            Which::TakeActive => takes::active_preview(ctx, input),
+            Which::TakeAdd => takes::add_preview(ctx, input),
+            Which::TakeDelete => takes::delete_preview(ctx, input),
+            Which::Stretch(which) => take_marks::stretch_preview(ctx, input, which),
+            Which::TakeMarkers(which) => take_marks::marker_preview(ctx, input, which),
+            Which::TrackLanes => lanes::lanes_preview(ctx, input),
+            Which::LanePlays => lanes::plays_preview(ctx, input),
+            Which::LaneName => lanes::name_preview(ctx, input),
+            Which::LaneComp => lanes::comp_preview(ctx, input),
+            Which::Razor => lanes::razor_preview(ctx, input),
+            Which::Glue => glue::glue_preview(ctx, input),
+            Which::Render => glue::render_preview(ctx, input),
+            Which::Events(which) => midi_events::preview(ctx, input, which),
+            Which::Transform(which) => transforms::preview(ctx, input, which),
+        }
+    }
+
+    pub(super) fn apply(self, ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+        match self {
+            Which::ItemAdd => items::make_apply(ctx, input, false),
+            Which::ItemImport => items::make_apply(ctx, input, true),
+            Which::ItemMove => items::move_apply(ctx, input, fence),
+            Which::ItemSplit => items::split_apply(ctx, input, fence),
+            Which::ItemTrim => items::trim_apply(ctx, input, fence),
+            Which::ItemFade => items::fade_apply(ctx, input, fence),
+            Which::ItemProps => items::props_apply(ctx, input, fence),
+            Which::ItemGroup => items::group_apply(ctx, input, fence),
+            Which::ItemDelete => items::delete_apply(ctx, input, fence),
+            Which::ItemCopy => items::copy_apply(ctx, input, fence),
+            Which::TakeProps => takes::props_apply(ctx, input, fence),
+            Which::TakeActive => takes::active_apply(ctx, input, fence),
+            Which::TakeAdd => takes::add_apply(ctx, input, fence),
+            Which::TakeDelete => takes::delete_apply(ctx, input, fence),
+            Which::Stretch(which) => take_marks::stretch_apply(ctx, input, fence, which),
+            Which::TakeMarkers(which) => take_marks::marker_apply(ctx, input, fence, which),
+            Which::TrackLanes => lanes::lanes_apply(ctx, input, fence),
+            Which::LanePlays => lanes::plays_apply(ctx, input, fence),
+            Which::LaneName => lanes::name_apply(ctx, input, fence),
+            Which::LaneComp => lanes::comp_apply(ctx, input, fence),
+            Which::Razor => lanes::razor_apply(ctx, input, fence),
+            Which::Glue => glue::glue_apply(ctx, input, fence),
+            Which::Render => glue::render_apply(ctx, input, fence),
+            Which::Events(which) => midi_events::apply(ctx, input, fence, which),
+            Which::Transform(which) => transforms::apply(ctx, input, fence, which),
+        }
+    }
+
+    pub(super) fn restore(self, ctx: &Ctx, restore: &Restore) -> Done<Restored> {
+        match self {
+            Which::ItemAdd | Which::ItemImport | Which::ItemCopy => items::created_restore(ctx, restore),
+            Which::ItemMove => items::move_restore(ctx, restore),
+            Which::ItemSplit => items::split_restore(ctx, restore),
+            Which::ItemTrim => items::trim_restore(ctx, restore),
+            Which::ItemFade => items::fade_restore(ctx, restore),
+            Which::ItemProps => items::props_restore(ctx, restore),
+            Which::ItemGroup => items::group_restore(ctx, restore),
+            Which::ItemDelete => items::delete_restore(ctx, restore),
+            Which::TakeProps => takes::props_restore(ctx, restore),
+            Which::TakeActive => takes::active_restore(ctx, restore),
+            Which::TakeAdd => takes::add_restore(ctx, restore),
+            Which::TakeDelete => takes::delete_restore(ctx, restore),
+            Which::Stretch(_) => take_marks::stretch_restore(ctx, restore),
+            Which::TakeMarkers(_) => take_marks::marker_restore(ctx, restore),
+            Which::TrackLanes => lanes::lanes_restore(ctx, restore),
+            Which::LanePlays => lanes::plays_restore(ctx, restore),
+            Which::LaneName => lanes::name_restore(ctx, restore),
+            Which::LaneComp => lanes::comp_restore(ctx, restore),
+            Which::Razor => lanes::razor_restore(ctx, restore),
+            Which::Glue => glue::glue_restore(ctx, restore),
+            Which::Render => glue::render_restore(ctx, restore),
+            Which::Events(_) => midi_events::restore(ctx, restore),
+            // (a transform's notes go back as a notes change's do: by value)
+            Which::Transform(_) => notes::restore(ctx, restore),
+        }
+    }
+}

@@ -245,6 +245,8 @@ function M.prop_preview(song, env, spec, input)
   local display = { title = spec.title(loc.name, now, wanted), before = now, after = wanted }
   if spec.same(now, wanted) then display.unchanged = true end
   if not spec.undoable then display.note = NOT_UNDOABLE end
+  -- (what the producer should know before it is made: columns hidden that hold notes)
+  if spec.note then display.note = spec.note(loc, now, wanted) or display.note end
   local shown = wire(spec, now, env, loc)
   -- (the fence names what was located as well as its value: another track at the ref's place is not this one; and, where the
   -- value is a place, what the wanted value names)
@@ -299,12 +301,18 @@ function M.prop_apply(song, env, spec, input, fence, desc)
     display = display,
     undo = { desc = desc, entry = spec.undoable },
     spec = spec, place = loc.place, prior = now, target = loc.target,
+    -- (M4 n-song: where a kind keeps its object by the place mechanism rather than by its ref, for the restore to find it)
+    material = spec.material and spec.material(env, loc) or nil,
   }
 end
 
 function M.prop_restore(song, env, spec, restore, desc)
   local reference = restore.target and restore.target.ref
-  local ok, loc = pcall(spec.locate, song, env, { ref = reference })
+  -- (a kind whose object takes more than its target's ref to find, a track's note column, finds it from the record: `restore_input`;
+  -- a kind found by its place, not its ref, gets the place it kept: n-instruments)
+  local input = spec.restore_input and spec.restore_input(restore)
+    or { ref = reference, place = spec.by_place and restore.target and restore.target.place or nil }
+  local ok, loc = pcall(spec.locate, song, env, input)
   if not ok then
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
@@ -530,14 +538,54 @@ function M.journal_sequence_event(journal, undoing)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     if entry.place and entry.place.seq and (entry.follows ~= "slots" or not undoing) then table.remove(journal.entries, i) end
+    -- (M4 n-song: a change told by the whole sequence holds only while nothing but Renoise's undo and redo changes it)
+    if entry.follows == "sequence" and not undoing then table.remove(journal.entries, i) end
   end
 end
 
--- A pattern made or deleted: the patterns the journal knows are numbered by their place and move with it.
+-- M4 (n-song): the pattern numbers of the sequences a change keeps, moved with a pattern made or deleted in the pool. A pattern
+-- deleted becomes a mark (so the sequence it was in matches nothing now), kept on a stack: Renoise's redo makes its patterns again
+-- in the reverse order its undo deleted them, so a pattern made where the newest mark was is that pattern again.
+local function shift_sequences(entry, type_, index)
+  local lists = {}
+  for _, state in ipairs({ entry.prior, entry.applied }) do
+    if type(state) == "table" and type(state.sequence) == "table" then lists[#lists + 1] = state.sequence end
+  end
+  entry.gone = entry.gone or {}
+  local stack = entry.gone
+  if type_ == "remove" then
+    entry.marks = (entry.marks or 0) + 1
+    local mark = "gone" .. entry.marks
+    for _, list in ipairs(lists) do
+      for k, p in ipairs(list) do
+        if p == index then list[k] = mark elseif type(p) == "number" and p > index then list[k] = p - 1 end
+      end
+    end
+    for _, item in ipairs(stack) do
+      if item.index > index then item.index = item.index - 1 end
+    end
+    stack[#stack + 1] = { index = index, mark = mark }
+  elseif type_ == "insert" then
+    local top = stack[#stack]
+    local revive = top and top.index == index and top.mark or nil
+    if revive then stack[#stack] = nil end
+    for _, list in ipairs(lists) do
+      for k, p in ipairs(list) do
+        if type(p) == "number" and p >= index then list[k] = p + 1 elseif revive and p == revive then list[k] = index end
+      end
+    end
+    for _, item in ipairs(stack) do
+      if item.index >= index then item.index = item.index + 1 end
+    end
+  end
+end
+
 function M.journal_pattern_event(journal, type_, index)
   for i = #journal.entries, 1, -1 do
     local place = journal.entries[i].place
-    if journal.entries[i].uses_patterns then
+    if journal.entries[i].follows == "sequence" then
+      shift_sequences(journal.entries[i], type_, index)
+    elseif journal.entries[i].uses_patterns then
       table.remove(journal.entries, i) -- (it holds pattern numbers, which the pool's change moved)
     elseif place and place.pattern then
       if type_ == "insert" then
@@ -579,10 +627,26 @@ end
 function M.journal_check(journal)
   local song = renoise.song()
   if not song then return end
+  local sequence
   for _, entry in ipairs(journal.entries) do
     local spec = entry.spec
     if entry.follows == "slots" then
       -- (decided below, over all of them)
+    elseif entry.follows == "sequence" then
+      -- (M4 n-song: the whole sequence is the one before Kumi's change, or the one it left)
+      if not sequence then
+        sequence = {}
+        for k, p in ipairs(song.sequencer.pattern_sequence) do sequence[k] = p end
+      end
+      local same = M.same_value
+      if entry.state == "applied" and same(sequence, entry.prior.sequence) and not same(sequence, entry.applied.sequence) then
+        entry.state = "undone"
+        stamp(journal, entry)
+        queue(journal, entry.desc, "undo")
+      elseif entry.state == "undone" and same(sequence, entry.applied.sequence) and redoable(journal, entry) then
+        entry.state = "applied"
+        queue(journal, entry.desc, "redo")
+      end
     elseif entry.follows then
       -- (a device or track moved: its place is followed through the swaps, and is where it started or where Kumi put it)
       local now = entry.place[entry.follows]
@@ -622,6 +686,54 @@ function M.journal_check(journal)
   check_slots(journal, song)
 end
 
+-- n-instruments: an operation on a list of instruments, or of what is in one (its samples, phrases, sets, chains, a set's or a
+-- chain's devices): the journal's places of that key (`key`) in the instrument, set or chain whose list it is (`scope`) move with
+-- it, and a change that made or removed one of them (`place.of` names what a change's place is of) is told when the producer's
+-- undo or redo does it again. An instrument removed takes everything in it with it.
+local function in_scope(place, scope)
+  for k, v in pairs(scope) do
+    if place[k] ~= v then return false end
+  end
+  return true
+end
+
+function M.journal_list_event(journal, key, scope, type_, index, index2, undoing)
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    local place = entry.place
+    if type(place) == "table" and type(place[key]) == "number" and in_scope(place, scope) then
+      local own = place.of == key
+      local handled = false
+      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key]) end
+      if not handled then
+        if type_ == "insert" then
+          if place[key] >= index then place[key] = place[key] + 1 end
+        elseif type_ == "remove" then
+          if place[key] == index and not (own and entry.shape) then
+            table.remove(journal.entries, i) -- (it is gone: nothing left to compare)
+          elseif place[key] > index then
+            place[key] = place[key] - 1
+          end
+        elseif type_ == "swap" then
+          if place[key] == index then place[key] = index2 elseif place[key] == index2 then place[key] = index end
+        end
+      end
+    end
+  end
+end
+
+-- n-instruments: Kumi put back a change that made or removed something itself, found by its place (the journal followed it).
+function M.note_restored_at(journal, kind, place)
+  for _, entry in ipairs(journal.entries) do
+    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
+      entry.state = "undone"
+      stamp(journal, entry)
+      return true
+    end
+  end
+  return false
+end
+
 -- Kumi put a change back itself: the change is not the producer's to undo any more (the producer's undo of that restore then
 -- brings it back, which is told as a redo).
 function M.note_restored(journal, kind, place, applied, spec)
@@ -634,6 +746,97 @@ function M.note_restored(journal, kind, place, applied, spec)
       return
     end
   end
+end
+
+-- M4 (n-song): a kind of several settings of one object (the song's groove, a track's columns), any of which a change gives:
+-- only those are read, fenced, written and put back, so a setting of the same kind the producer changes meanwhile is left to
+-- them. `fields`: {name, read(object), write(object, value), check(value, name, object), text(value)}, in the order a title
+-- lists them; the title opens with `heading`, or with the located object's name when `named`.
+function M.same_value(a, b)
+  if type(a) == "table" and type(b) == "table" then
+    for k, v in pairs(a) do
+      if not M.same_value(v, b[k]) then return false end
+    end
+    for k in pairs(b) do
+      if a[k] == nil then return false end
+    end
+    return true
+  end
+  return close(a, b)
+end
+
+function M.flag(value, name)
+  if type(value) ~= "boolean" then bad(name .. " must be true or false") end
+  return value
+end
+
+function M.text_of(value, name, most)
+  if type(value) ~= "string" or #value > most or value:find("[%c]") then bad(string.format("%s must be one line of text, at most %d bytes", name, most)) end
+  return value
+end
+
+function M.settings(spec)
+  local fields, names = spec.fields, {}
+  for i, field in ipairs(fields) do names[i] = field.name end
+  spec.read = function(object, source)
+    local state = {}
+    for _, field in ipairs(fields) do
+      if type(source) == "table" and source[field.name] ~= nil then state[field.name] = field.read(object) end
+    end
+    return state
+  end
+  spec.wanted = function(object, input)
+    local state, any = {}, false
+    for _, field in ipairs(fields) do
+      if input[field.name] ~= nil then
+        state[field.name] = field.check(input[field.name], field.name, object)
+        any = true
+      end
+    end
+    if not any then bad("give any of " .. table.concat(names, ", ")) end
+    return state
+  end
+  spec.write = function(object, state)
+    for _, field in ipairs(fields) do
+      local value = state[field.name]
+      if value ~= nil and not M.same_value(field.read(object), value) then field.write(object, value) end
+    end
+  end
+  spec.same = function(a, b)
+    for _, field in ipairs(fields) do
+      local x, y = a[field.name], b[field.name]
+      if (x == nil) ~= (y == nil) or (x ~= nil and not M.same_value(x, y)) then return false end
+    end
+    return true
+  end
+  spec.title = function(name, _, to)
+    local parts = {}
+    for _, field in ipairs(fields) do
+      if to[field.name] ~= nil then parts[#parts + 1] = field.text(to[field.name]) end
+    end
+    local text = table.concat(parts, ", ")
+    local heading = spec.named and name or spec.heading
+    if heading then return heading .. " " .. text end
+    return (text:gsub("^%l", string.upper))
+  end
+  return spec
+end
+
+-- M4 (n-song): a pattern as a place (the pool's log, places.lua): a record of it outlives patterns made or deleted elsewhere in the
+-- pool, which a pattern ref doesn't. Where it is now, or a refusal that touches nothing.
+function M.pattern_place(env, p)
+  return { n = p, mark = env.pattern_mark and env.pattern_mark() or nil }
+end
+
+function M.pattern_now(song, env, place)
+  if type(place) ~= "table" or not env.pattern_at then bad("material: where the pattern was") end
+  local p, why = env.pattern_at(place.n, place.mark)
+  if not p then
+    if why == "gone" then fail("gone", "that pattern was deleted in Renoise since") end
+    fail("stale", "the song's patterns changed in a way Kumi couldn't follow since (the tool watched the song anew): read again")
+  end
+  if p > #song.patterns then fail("gone", "that pattern isn't in the song any more") end
+  return p
 end
 
 return M

@@ -10,7 +10,7 @@ local byte, sub = string.byte, string.sub
 
 local M = {}
 
-M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore", "undo_step_begin", "undo_step_end", "transport_stop", "transport_play" }
+M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore", "undo_step_begin", "undo_step_end", "transport_stop", "transport_play", "audition_note", "select", "project_save", "instrument_save" }
 M.EVENTS = { "project", "tracks", "selection", "transport", "undone_in_daw" }
 -- (M5 m5-renoise: listening)
 for _, method in ipairs({ "render_start", "listen_status", "listen_cancel", "audition", "audition_stop", "audio_file", "scratch" }) do

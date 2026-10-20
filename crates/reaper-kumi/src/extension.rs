@@ -443,6 +443,11 @@ impl Extension {
             "cursor_set" => self.changes.cursor_set(&self.reaper(), &self.reads, params),
             "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
+            // m4-r-fxenv
+            "fx_chain_save" => self.changes.fx_chain_save(&self.reaper(), &self.reads, params),
+            // (r-tracks) Saving: actions, no change.
+            "project_save" => self.changes.project_save(&self.reaper(), &self.reads, params),
+            "track_template_save" => self.changes.track_template_save(&self.reaper(), &self.reads, params),
             // M5 listening (m5-reaper).
             "render_start" => self.listening.render_start(&self.reaper(), &self.reads, params),
             "capture_start" => self.listening.capture_start(&self.reaper(), &self.reads, params),

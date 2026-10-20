@@ -84,6 +84,21 @@ pub enum Ref {
         track: TrackId,
         which: EnvelopeId,
     },
+    // m4-r-fxenv: a take's envelopes and automation items.
+    /// A take's envelope (its volume, pan, mute or pitch, or a take FX parameter's), by the take's GUID and its own.
+    TakeEnvelope {
+        take: String,
+        guid: String,
+    },
+    /// An automation item of a track's envelope. REAPER gives one no id of its own (its pool's name and data are shared by
+    /// every copy), so it is named by its pool and where it starts; two of one pool at one place name neither.
+    AutoItem {
+        track: TrackId,
+        envelope: String,
+        pool: i64,
+        /// Seconds, as REAPER's own number prints: exactly what `D_POSITION` reads.
+        position: String,
+    },
 }
 
 impl TrackId {
@@ -165,6 +180,21 @@ impl Ref {
             }
             ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
             ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
+            // m4-r-fxenv
+            ("env", ["take", take, guid]) => {
+                Ref::TakeEnvelope { take: guid_of(take, "a take id")?, guid: guid_of(guid, "an envelope id")? }
+            }
+            ("env", ["take", ..]) => return Err(bad()),
+            ("aitem", [track, envelope, pool, position]) => {
+                let pool = pool.parse::<i64>().ok().filter(|pool| *pool >= 0).ok_or_else(bad)?;
+                let at = position.parse::<f64>().ok().filter(|at| at.is_finite() && *at >= 0.0).ok_or_else(bad)?;
+                Ref::AutoItem {
+                    track: TrackId::parse(track)?,
+                    envelope: guid_of(envelope, "an envelope id")?,
+                    pool,
+                    position: position_text(at),
+                }
+            }
             ("env", [track, name]) => {
                 let which = if looks_like_guid(name) {
                     EnvelopeId::Guid(name.to_string())
@@ -179,7 +209,7 @@ impl Ref {
                 track: TrackId::parse(track)?,
                 which: EnvelopeId::Param { fx: guid_of(fx, "an FX id")?, index: number(index, "a parameter index")? },
             },
-            ("track" | "item" | "take" | "fx" | "param" | "send" | "marker" | "region" | "env", _) => return Err(bad()),
+            ("track" | "item" | "take" | "fx" | "param" | "send" | "marker" | "region" | "env" | "aitem", _) => return Err(bad()),
             _ => return Err(format!("{text:?}: REAPER has no ref kind {kind:?}")),
         })
     }
@@ -194,7 +224,8 @@ impl Ref {
             Ref::Send { .. } => "send",
             Ref::Marker(_) => "marker",
             Ref::Region(_) => "region",
-            Ref::Envelope { .. } => "env",
+            Ref::Envelope { .. } | Ref::TakeEnvelope { .. } => "env",
+            Ref::AutoItem { .. } => "aitem",
         }
     }
 
@@ -209,6 +240,8 @@ impl Ref {
             Ref::Marker(guid) => marker_ref(guid),
             Ref::Region(guid) => region_ref(guid),
             Ref::Envelope { track, which } => envelope_ref(track, which),
+            Ref::TakeEnvelope { take, guid } => take_envelope_ref(take, guid),
+            Ref::AutoItem { track, envelope, pool, position } => format!("{PREFIX}:aitem:{}:{envelope}:{pool}:{position}", track.text()),
         }
     }
 }
@@ -247,6 +280,26 @@ pub fn envelope_ref(track: &TrackId, which: &EnvelopeId) -> String {
         EnvelopeId::Guid(guid) => format!("{PREFIX}:env:{}:{guid}", track.text()),
         EnvelopeId::Chunk(name) => format!("{PREFIX}:env:{}:{name}", track.text()),
         EnvelopeId::Param { fx, index } => format!("{PREFIX}:env:{}:{fx}:{index}", track.text()),
+    }
+}
+
+// m4-r-fxenv
+pub fn take_envelope_ref(take: &str, guid: &str) -> String {
+    format!("{PREFIX}:env:take:{take}:{guid}")
+}
+pub fn auto_item_ref(track: &TrackId, envelope: &str, pool: i64, position: f64) -> String {
+    format!("{PREFIX}:aitem:{}:{envelope}:{pool}:{}", track.text(), position_text(position))
+}
+/// A position as an automation item's ref holds it: the shortest text that reads back as the same number.
+pub fn position_text(position: f64) -> String {
+    // To a nanosecond: REAPER's undo and redo bring a position back from text with its last bits changed, and the ref
+    // should still read the same.
+    let text = format!("{:.9}", if position == 0.0 { 0.0 } else { position });
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.to_string()
     }
 }
 
@@ -344,7 +397,9 @@ impl Registry {
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
+        // A GUID the map holds with a pointer that no longer names it means the map is out of date, not a recent miss.
+        let stale = self.items.contains_key(guid);
+        if !stale && Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
             return None;
         }
         self.items.clear();
@@ -530,7 +585,10 @@ mod tests {
             Ref::Region(fx.into()),
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Guid(guid.into()) },
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Chunk("VOLENV2".into()) },
-            Ref::Envelope { track, which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
+            Ref::Envelope { track: track.clone(), which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
+            Ref::TakeEnvelope { take: guid.into(), guid: fx.into() },
+            Ref::AutoItem { track: track.clone(), envelope: fx.into(), pool: 3, position: "12.5".into() },
+            Ref::AutoItem { track, envelope: fx.into(), pool: 0, position: "0".into() },
         ] {
             let text = reference.text();
             assert_eq!(Ref::parse(&text).as_ref(), Ok(&reference), "{text}");
@@ -567,6 +625,13 @@ mod tests {
             ("r:env:{A}:VOL ENV", "well-formed"),
             // A position in the envelope list names a different envelope once the list changes: no ref has one.
             ("r:env:{A}:i3", "well-formed"),
+            ("r:env:take:{A}", "well-formed"),
+            ("r:env:take:{A}:x", "envelope id"),
+            ("r:aitem:{A}:{B}:1", "well-formed"),
+            ("r:aitem:{A}:{B}:-1:2", "well-formed"),
+            ("r:aitem:{A}:{B}:1:x", "well-formed"),
+            ("r:aitem:{A}:{B}:1:-2", "well-formed"),
+            ("r:aitem:{A}:B:1:2", "envelope id"),
         ] {
             let error = Ref::parse(text).unwrap_err();
             assert!(error.contains(needle), "{text}: {error}");
