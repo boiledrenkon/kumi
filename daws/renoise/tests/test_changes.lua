@@ -888,6 +888,47 @@ test("changes: a device is put in by its path or its name as one undo step, and 
   H.no_dialogs()
 end)
 
+test("changes: after Renoise's own undo and redo of a track or a device Kumi made, Kumi's undo takes it away; one changed since stays", function()
+  local env, peer = device_song()
+  -- a track
+  local epoch, layout = place(peer)
+  local input = { type = "sequencer", name = "Lead", index = 3 }
+  local previewed = preview(peer, "track-add", input)
+  local done = apply(peer, "track-add", input, "Kumi: add (kr01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }
+  mock.song:undo()
+  mock.song:redo()
+  local undone = restore(peer, "track-add", record, "Kumi: undo (kr02)", done.result.epoch, done.result.layout)
+  ok(undone.result, "the track Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+  local names = {}
+  for k, track in ipairs(mock.data.tracks) do names[k] = track.name end
+  eq(table.concat(names, ","), "Kick,Hat,Bass,Pad,Master,Send 1,Send 2")
+  -- a device, and one the producer turned after the redo
+  for _, turned in ipairs({ false, true }) do
+    epoch, layout = place(peer)
+    local add = { ref = track_ref(epoch, 3), path = "Gainer", index = 3 }
+    local p = preview(peer, "device-add", add)
+    local d = apply(peer, "device-add", add, "Kumi: add (kr03)", p.fence, epoch, layout)
+    ok(d.result, json.encode(d.error or {}))
+    mock.song:undo()
+    eq(paths_of(3), "Mixer,EQ 5,#Send")
+    mock.song:redo()
+    eq(paths_of(3), "Mixer,EQ 5,Gainer,#Send")
+    if turned then devices_of(3)[3].params[1].value = 2 end
+    local back = restore(peer, "device-add", { target = p.target, prior = p.prior, applied = d.result.applied, created = d.result.created,
+      material = d.result.material }, "Kumi: undo (kr04)", d.result.epoch, d.result.layout)
+    if turned then
+      failure(back, "changed")
+      eq(paths_of(3), "Mixer,EQ 5,Gainer,#Send")
+    else
+      ok(back.result, "the device Renoise's redo made again is Kumi's: " .. json.encode(back.error or {}))
+      eq(paths_of(3), "Mixer,EQ 5,#Send")
+    end
+  end
+  H.no_dialogs()
+end)
+
 test("changes: a device is refused when the song has none like it, the place is out of range or a send's settings are not for a send", function()
   local env, peer = device_song()
   local epoch = place(peer)

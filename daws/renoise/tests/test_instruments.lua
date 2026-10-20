@@ -517,6 +517,47 @@ test("instruments: Renoise's undo and redo of an instrument loaded as the last o
   eq(events[1].data.how, "redo")
 end)
 
+test("instruments: after Renoise's own undo and redo of an instrument Kumi added, duplicated or loaded, or a phrase it added, Kumi's undo takes it away; changed since: refused", function()
+  local cases = {
+    { "instrument-add", function(E) return { index = 4, name = "New" } end, "Drums,Bass synth,Pad" },
+    { "instrument-duplicate", function(E) return { ref = iref(E, 2) } end, "Drums,Bass synth,Pad" },
+    { "instrument-load", function(E, peer) return { path = saved_instrument(peer, 2), index = 1 } end, "Drums,Bass synth,Pad" },
+  }
+  for _, case in ipairs(cases) do
+    for _, changed in ipairs({ false, true }) do
+      local env, peer = setup()
+      local input = case[2](place(peer), peer)
+      local record, done = change(peer, case[1], input)
+      local made = done.created and done.created.ref
+      mock.song:undo()
+      eq(names(), "Drums,Bass synth,Pad", case[1] .. ": Renoise's undo")
+      mock.song:redo()
+      H.tick(2)
+      if changed then
+        -- (the producer adds a sample to it after the redo)
+        local i = tonumber(made:match(":(%d+)$"))
+        mock.song:instrument(i):insert_sample_at(1)
+      end
+      local undone = restore(peer, case[1], record)
+      if changed then
+        failure(undone, "changed")
+      else
+        ok(undone.result, case[1] .. ": what Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+        eq(names(), case[3], case[1])
+      end
+    end
+  end
+  -- a phrase
+  local env, peer = setup()
+  local record = change(peer, "phrase-add", { ref = iref(place(peer), 3), name = "Hook" })
+  mock.song:undo()
+  mock.song:redo()
+  H.tick(2)
+  ok(restore(peer, "phrase-add", record).result, "the phrase Renoise's redo made again is Kumi's")
+  eq(#instrument(3).phrases, 0)
+  H.no_dialogs()
+end)
+
 test("instruments: a load into an empty instrument, refused into one that isn't; a missing file or a kind Renoise won't load is bad-params", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 1)

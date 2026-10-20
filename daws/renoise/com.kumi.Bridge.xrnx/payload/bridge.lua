@@ -611,6 +611,20 @@ recount = function(kind, token, owner, list, count)
   log.write("info", "the " .. kind .. " list was out of step: watched anew on its own")
 end
 
+-- What the journal links Renoise's redo of a change that made something back to its undo with (changes_base `structural`): a
+-- list's place log, or the track shifts.
+local function linker(log)
+  if not log then return nil end
+  return {
+    mark = function() return places.mark(log) end,
+    back = function(mark, at) places.back(log, mark, at) end,
+  }
+end
+local track_linker = {
+  mark = function() return b.layout end,
+  back = function(mark, at) refs.back(b.shifts, mark, at) end,
+}
+
 -- Renoise's undo or redo of a load that replaced an instrument in place (an .xrni load: Kumi's, the producer's) tells an
 -- insert next to it, then the other one's remove: insert@i, remove@i+1 undone; insert@i+1, remove@i redone (lab 2026-10-20).
 -- For what keeps an instrument's place (the places log, the journal) the slot keeps its instrument, as in Kumi's own load:
@@ -677,7 +691,10 @@ local function on_structural(reason, kind, op, owner, token)
   -- (n-instruments: the journal's places of instruments and what is in them move with the list's operations)
   if op and INSTRUMENT_JOURNAL[kind] then
     local scope = instrument_scope(kind, token)
-    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, placed.type, placed.index, placed.index2, song:is_undo_redoing()) end
+    if scope then
+      changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, placed.type, placed.index, placed.index2, song:is_undo_redoing(),
+        linker(kind == "instruments" and b.ilog or (token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]])))
+    end
   end
   if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
@@ -686,7 +703,7 @@ local function on_structural(reason, kind, op, owner, token)
     -- (the journal's places are device places: they move, and a change that made or removed a device is told on the producer's undo)
     for track_index, candidate in ipairs(b.groups.tracks) do
       if candidate == token then
-        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing())
+        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing(), linker(token.dlog))
       end
     end
   end
@@ -761,7 +778,7 @@ local function on_tracks(op)
   b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
   local listed = true
-  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing())
+  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing(), nil, track_linker)
   if op.type == "insert" then
     listed = remember(b.groups.tracks, op.index)
     if type(op.index) == "number" and op.index >= 1 then

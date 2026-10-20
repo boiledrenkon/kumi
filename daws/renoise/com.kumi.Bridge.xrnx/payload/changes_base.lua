@@ -455,17 +455,24 @@ end
 
 -- An object that the change removed comes back (the producer's undo) or goes again (redo); one that the change made goes (undo)
 -- or comes back (redo). `type_` is what happened ("insert" or "remove") to the object at `at`.
-local function structural(journal, entry, type_, at, undoing, where)
+-- Renoise's redo makes again exactly what its undo of the change removed, and the list's place log sees another object come:
+-- with `linker` (the log the operation was just noted in: {mark = fn(), back = fn(mark, at)}), the redo's insert is linked back
+-- to the undo's remove, so the places kept before (Kumi's own record of the change among them) follow it again. What the
+-- object holds is each restore's to check, as ever.
+local function structural(journal, entry, type_, at, undoing, where, linker)
   local returns = (entry.shape == "deleted") == (type_ == "insert")
   if undoing and where == at then
     if returns and entry.state == "applied" then
       entry.state = "undone"
       stamp(journal, entry)
       queue(journal, entry.desc, "undo")
+      entry.gone_mark = linker and entry.shape == "made" and linker.mark() or nil
       return true
     elseif not returns and entry.state == "undone" and redoable(journal, entry) then
       entry.state = "applied"
       queue(journal, entry.desc, "redo")
+      if linker and entry.gone_mark then linker.back(entry.gone_mark, at) end
+      entry.gone_mark = nil
       return true
     end
   end
@@ -488,7 +495,7 @@ local function shift_places(entry, type_, index)
   end
 end
 
-function M.journal_track_event(journal, type_, index, undoing, index2)
+function M.journal_track_event(journal, type_, index, undoing, index2, linker)
   if type_ == "swap" then
     -- (two tracks changed places: what is on them goes with them; a deleted track's place is where it will come back)
     for _, entry in ipairs(journal.entries) do
@@ -506,7 +513,7 @@ function M.journal_track_event(journal, type_, index, undoing, index2)
     if place and place.track then
       if entry.shape and place.device == nil then
         -- (an object that is a track itself: undone when it is made or removed again at its place)
-        if not structural(journal, entry, type_, index, undoing, place.track) then
+        if not structural(journal, entry, type_, index, undoing, place.track, linker) then
           if type_ == "insert" then
             if place.track >= index then place.track = place.track + 1 end
           elseif place.track > index then
@@ -526,13 +533,13 @@ end
 
 -- A device made, deleted or swapped on a track: the places of the devices the journal knows move with it, and a change that
 -- made or removed a device is told when the producer's undo or redo does it again.
-function M.journal_device_event(journal, track, type_, index, index2, undoing)
+function M.journal_device_event(journal, track, type_, index, index2, undoing, linker)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     local place = entry.place
     if place and place.device and place.track == track then
       local handled = false
-      if entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place.device) end
+      if entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place.device, linker) end
       if not handled then
         if type_ == "insert" then
           if place.device >= index then place.device = place.device + 1 end
@@ -717,14 +724,14 @@ local function in_scope(place, scope)
   return true
 end
 
-function M.journal_list_event(journal, key, scope, type_, index, index2, undoing)
+function M.journal_list_event(journal, key, scope, type_, index, index2, undoing, linker)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     local place = entry.place
     if type(place) == "table" and type(place[key]) == "number" and in_scope(place, scope) then
       local own = place.of == key
       local handled = false
-      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key]) end
+      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key], linker) end
       if not handled then
         if type_ == "insert" then
           if place[key] >= index then place[key] = place[key] + 1 end

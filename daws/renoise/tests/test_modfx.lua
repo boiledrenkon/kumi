@@ -266,6 +266,26 @@ test("modfx: chain devices: added by name after the mixer, bypassed, moved, a pa
   failure(call(peer, "change_preview", { kind = "chaindevice-add", input = { ref = chain_ref(place(peer), 1, 1), path = "Nope" }, epoch = place(peer) }), "bad-params")
 end)
 
+test("modfx: after Renoise's own undo and redo of a set, a modulation device, a chain or a chain device Kumi added, Kumi's undo takes it away", function()
+  local cases = {
+    { "modset-add", function(E) return { ref = iref(E, 1), name = "Filter" } end, function() return #instrument(1).sets end, 1 },
+    { "moddevice-add", function(E) return { ref = modset_ref(E, 1, 1), path = "LFO", target = "pitch" } end, function() return #instrument(1).sets[1].devices end, 2 },
+    { "chain-add", function(E) return { ref = iref(E, 1), name = "Verb" } end, function() return #instrument(1).chains end, 1 },
+    { "chaindevice-add", function(E) return { ref = chain_ref(E, 1, 1), path = "Gainer" } end, function() return #instrument(1).chains[1].devices end, 2 },
+  }
+  for _, case in ipairs(cases) do
+    local env, peer = setup_modfx()
+    local record = change(peer, case[1], case[2](place(peer)))
+    mock.song:undo()
+    eq(case[3](), case[4], case[1] .. ": Renoise's undo")
+    mock.song:redo()
+    eq(case[3](), case[4] + 1, case[1] .. ": Renoise's redo")
+    local undone = restore(peer, case[1], record)
+    ok(undone.result, case[1] .. ": what Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+    eq(case[3](), case[4], case[1])
+  end
+end)
+
 test("places, chain device deleted × a device the producer made and deleted at its place since: it goes back after the mixer", function()
   local env, peer, epoch = setup_modfx()
   local chain = mock.song:instrument(1):sample_device_chain(1)
