@@ -610,7 +610,7 @@ impl ReaperScript {
                     "n": fx.name,
                     "o": position,
                     "p": id,
-                    "f": {"enabled": true, "params": {"count": fx.params.len(), "paramsHash": print.join(",")}},
+                    "f": {"enabled": true, "parameters": {"count": fx.params.len(), "parametersHash": print.join(",")}},
                 });
                 if values {
                     record["v"] = fx.params.iter().map(|(_, v)| json!(v)).collect::<Vec<_>>().into();

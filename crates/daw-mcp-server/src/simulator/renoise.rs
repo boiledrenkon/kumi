@@ -282,7 +282,7 @@ impl RenoiseScript {
                 for k in 0..added {
                     out.push(json!({
                         "k": "device", "n": "EQ 10", "o": before + 2 + k, "p": format!("track#/{track}"),
-                        "f": {"path": "Audio/Effects/Native/EQ 10", "active": true, "params": {"count": 0, "paramsHash": "811c9dc5"}},
+                        "f": {"path": "Audio/Effects/Native/EQ 10", "active": true, "parameters": {"count": 0, "parametersHash": "811c9dc5"}},
                     }));
                 }
                 continue;

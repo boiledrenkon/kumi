@@ -116,7 +116,7 @@ test("digest: the song is its tracks with their devices, then its patterns and i
   eq(eq5.n, "EQ 5")
   eq(eq5.f.path, "Audio/Effects/Native/EQ 5")
   eq(eq5.f.active, true)
-  eq(eq5.f.params.count, 2)
+  eq(eq5.f.parameters.count, 2)
   ok(eq5.v == nil and eq5.r == nil, "no values or refs unless asked")
   local intro = find(records, "pattern", 2)
   eq(intro.n, "Pattern 01")
@@ -171,8 +171,8 @@ test("digest: an automated parameter follows its automation, so it is left out",
   eq(eq5.v[1], json.null, "its value is the automation's, not one the producer set")
   param.value = 0.9
   local _, moved = whole(peer, { values = true })
-  eq(moved[2].f.params.paramsHash, eq5.f.params.paramsHash, "moving with its automation is no change")
-  ok(before[2].f.params.paramsHash ~= eq5.f.params.paramsHash, "taken out of the fingerprint")
+  eq(moved[2].f.parameters.parametersHash, eq5.f.parameters.parametersHash, "moving with its automation is no change")
+  ok(before[2].f.parameters.parametersHash ~= eq5.f.parameters.parametersHash, "taken out of the fingerprint")
 end)
 
 test("digest: pages of any size add up to the same digest, and a cursor from another epoch is refused", function()

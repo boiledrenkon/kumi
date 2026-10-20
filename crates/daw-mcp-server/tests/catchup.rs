@@ -162,7 +162,7 @@ async fn watching_tells_what_the_producer_added_and_the_parameters_they_moved_by
     // …so its gain, turned after, is told against that, not against nothing.
     lab.script.set_param(&eq, 0, 0.75);
     let watched = lab.ok("watch_stop").await;
-    assert_eq!(said(&watched), ["~FX ReaComp (params.paramsHash, parameters.Ratio)", "+FX ReaEQ"], "{watched}");
+    assert_eq!(said(&watched), ["~FX ReaComp (parameters.parametersHash, parameters.Ratio)", "+FX ReaEQ"], "{watched}");
     let ratio = &watched["changes"][0]["details"][1];
     assert_eq!((ratio["from"].clone(), ratio["to"].clone()), (json!(0.1), json!({"value": 0.4, "shows": "40 %"})));
     let added = &watched["changes"][1];

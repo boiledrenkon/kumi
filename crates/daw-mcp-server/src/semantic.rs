@@ -510,18 +510,18 @@ mod tests {
         let before = snapshot(vec![
             json!({"k": "track", "id": "{A}", "n": "Drums", "o": 1, "f": {"mixer": {"volume": 0.0}}}),
             json!({"k": "track", "id": "{B}", "n": "Bass", "o": 2, "f": {"mixer": {"volume": -6.0}}}),
-            json!({"k": "FX", "id": "{F1}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"params": {"paramsHash": "1"}}}),
+            json!({"k": "FX", "id": "{F1}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"parameters": {"parametersHash": "1"}}}),
         ]);
         let after = snapshot(vec![
             json!({"k": "track", "id": "{B}", "n": "Bass DI", "o": 1, "f": {"mixer": {"volume": -3.0}}}),
             json!({"k": "track", "id": "{C}", "n": "Keys", "o": 2}),
-            json!({"k": "FX", "id": "{F1}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"params": {"paramsHash": "2"}}}),
+            json!({"k": "FX", "id": "{F1}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"parameters": {"parametersHash": "2"}}}),
             json!({"k": "FX", "id": "{F2}", "n": "ReaEQ", "o": 0, "p": "{C}"}),
         ]);
         let diff = diff(&before, &after, false, &HashMap::new());
         assert_eq!(
             said(&diff),
-            ["~track Bass DI renamed (mixer.volume)", "-track Drums", "+track Keys", "~FX ReaComp (params.paramsHash)"]
+            ["~track Bass DI renamed (mixer.volume)", "-track Drums", "+track Keys", "~FX ReaComp (parameters.parametersHash)"]
         );
         // Catch-up says what changed, not the numbers.
         let Change::Changed { details, .. } = &diff.changes[0] else { panic!() };
@@ -594,7 +594,7 @@ mod tests {
         let after = snapshot(vec![
             json!({"k": "track", "id": "{A}", "n": "Vox", "o": 1}),
             json!({"k": "FX", "id": "{F1}", "n": "ReaEQ", "o": 0, "p": "{A}", "v": [0.5, 0.3, 0.9]}),
-            json!({"k": "FX", "id": "{F2}", "n": "ReaComp", "o": 1, "p": "{A}", "v": [0.1, 0.7], "f": {"enabled": true, "params": {"paramsHash": "z"}}}),
+            json!({"k": "FX", "id": "{F2}", "n": "ReaComp", "o": 1, "p": "{A}", "v": [0.1, 0.7], "f": {"enabled": true, "parameters": {"parametersHash": "z"}}}),
             json!({"k": "track", "id": "{B}", "n": "Vox Bus", "o": 2, "f": {"mixer": {"volume": -3.0}}}),
             json!({"k": "FX", "id": "{F3}", "n": "ReaVerbate", "o": 0, "p": "{B}"}),
         ]);
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(moved, &[Moved { index: 1, from: json!(0.5), to: json!(0.7) }], "against its first look, not its defaults");
         assert_eq!(item.on.as_deref(), Some("Vox"));
         assert_eq!(made_of.get("enabled"), Some(&json!(true)));
-        assert!(!made_of.contains_key("params"), "fingerprints aren't what it's made of: {made_of:?}");
+        assert!(!made_of.contains_key("parameters"), "fingerprints aren't what it's made of: {made_of:?}");
         let Change::Added { made_of, .. } = &diff.changes[0] else { panic!() };
         assert_eq!(made_of.get("FX"), Some(&json!(["ReaVerbate"])), "{made_of:?}");
         assert_eq!(made_of.get("mixer"), Some(&json!({"volume": -3.0})));

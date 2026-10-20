@@ -411,7 +411,7 @@ impl Reads {
                             "mute": mute,
                             "takes": takes,
                             "source": rows::source_word(reaper, take),
-                            "contentHash": content_hash,
+                            "content": {"contentHash": content_hash},
                         },
                     }));
                 }
@@ -513,7 +513,7 @@ impl Reads {
             "f": {
                 "enabled": reaper.fx_enabled(fx),
                 "offline": reaper.fx_offline(fx),
-                "params": {"count": count, "paramsHash": if hashed { json!(print.hex()) } else { Value::Null }},
+                "parameters": {"count": count, "parametersHash": if hashed { json!(print.hex()) } else { Value::Null }},
             },
         });
         if fx.index & INPUT_FX != 0 {
@@ -736,7 +736,10 @@ mod tests {
         let (old, new) = (find(&before, "{BBBB}"), find(&after, "{BBBB}"));
         assert_ne!(old["f"]["mixer"]["volume"], new["f"]["mixer"]["volume"]);
         assert_ne!(old["f"]["items"]["itemsHash"], new["f"]["items"]["itemsHash"], "the track sums its items up too");
-        assert_ne!(find(&before, "{FX-EQ}")["f"]["params"]["paramsHash"], find(&after, "{FX-EQ}")["f"]["params"]["paramsHash"]);
+        assert_ne!(
+            find(&before, "{FX-EQ}")["f"]["parameters"]["parametersHash"],
+            find(&after, "{FX-EQ}")["f"]["parameters"]["parametersHash"]
+        );
         assert_eq!(find(&after, "{CCCC}")["n"], "Snare Top");
     }
 }

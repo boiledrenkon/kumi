@@ -2107,9 +2107,9 @@
             {
               "f": {
                 "active": true,
-                "params": {
+                "parameters": {
                   "count": 0,
-                  "paramsHash": "811c9dc5"
+                  "parametersHash": "811c9dc5"
                 },
                 "path": "Audio/Effects/Native/Doofer"
               },
@@ -2476,9 +2476,9 @@
             {
               "f": {
                 "active": true,
-                "params": {
+                "parameters": {
                   "count": 0,
-                  "paramsHash": "811c9dc5"
+                  "parametersHash": "811c9dc5"
                 },
                 "path": "Audio/Effects/Native/Doofer"
               },

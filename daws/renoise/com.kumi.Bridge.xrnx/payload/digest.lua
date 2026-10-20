@@ -162,7 +162,7 @@ local function track_records(job, song, t, epoch, parents, budget, out)
       n = device.display_name,
       o = d,
       p = key,
-      f = { path = device.device_path or "", active = device.is_active, params = { count = #parameters, paramsHash = hex(print) } },
+      f = { path = device.device_path or "", active = device.is_active, parameters = { count = #parameters, parametersHash = hex(print) } },
     }
     if listed then record.v = json.array(values) end
     if budget.values_on then record.r = refs.make(epoch, "device", t, d) end
