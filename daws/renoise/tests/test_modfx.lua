@@ -286,6 +286,32 @@ test("modfx: after Renoise's own undo and redo of a set, a modulation device, a 
   end
 end)
 
+test("modfx: Renoise's own undo and redo of a modulation device's move are told, and Kumi's undo moves it back after them", function()
+  local env, peer, epoch = setup_modfx()
+  local function names()
+    local out = {}
+    for k, d in ipairs(instrument(1).sets[1].devices) do out[k] = d.path:match("([^/]+)$") end
+    return table.concat(out, ",")
+  end
+  eq(names(), "AHDSR,Envelope")
+  local record = change(peer, "moddevice-move", { ref = moddevice_ref(epoch, 1, 1, 1), index = 2 }, "Kumi: move (km51)")
+  eq(names(), "Envelope,AHDSR")
+  I.told(peer)
+  mock.song:undo()
+  eq(names(), "AHDSR,Envelope")
+  local events = I.told(peer)
+  eq(#events, 1, "the undo told")
+  eq(events[1].data.how, "undo")
+  mock.song:redo()
+  eq(names(), "Envelope,AHDSR")
+  events = I.told(peer)
+  eq(#events, 1, "the redo told")
+  eq(events[1].data.how, "redo")
+  local undone = restore(peer, "moddevice-move", record, nil, { of = "Kumi: move (km51)" })
+  ok(undone.result, "the move Renoise's redo made again: " .. json.encode(undone.error or {}))
+  eq(names(), "AHDSR,Envelope")
+end)
+
 test("places, chain device deleted × a device the producer made and deleted at its place since: it goes back after the mixer", function()
   local env, peer, epoch = setup_modfx()
   local chain = mock.song:instrument(1):sample_device_chain(1)

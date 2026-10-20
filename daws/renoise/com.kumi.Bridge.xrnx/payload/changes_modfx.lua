@@ -522,6 +522,13 @@ local function moddevice_move_plan(song, env, input)
   return { n = n, label = label, to = to, print = moddevice_print(objects.moddevice) }
 end
 
+-- A set's devices in order, each as what it is and holds: what the journal compares to tell Renoise's undo and redo of a move.
+local function set_order(set)
+  local out = {}
+  for k = 1, #set.devices do out[k] = moddevice_print(set:device(k)) end
+  return out
+end
+
 local function move_moddevice(set, from, to)
   local old = set:device(from)
   local made = set:insert_device_at(M.moddevice_path(old, set), old.target, to > from and to + 1 or to)
@@ -548,17 +555,26 @@ base.register({
       return { applied = { index = plan.to, print = plan.print }, display = display, undo = { desc = desc, entry = false }, prior = { index = plan.n[3] }, target = places_.target_of(env, "moddevice", m) }
     end
     local set = song:instrument(plan.n[1]):sample_modulation_set(plan.n[2])
+    local order = set_order(set)
     song:describe_undo(desc)
     move_moddevice(set, plan.n[3], plan.to)
     return {
       applied = { index = plan.to, print = moddevice_print(set:device(plan.to)) }, material = { at = places_.place_of(env, "moddevice", m) },
-      target = places_.target_of(env, "moddevice", m), display = display, undo = { desc = desc, entry = true }, prior = { index = plan.n[3] },
+      target = places_.target_of(env, "moddevice", m), display = display, undo = { desc = desc, entry = true },
+      -- (the journal follows the set's order of devices: Renoise's undo and redo of the move put back one or the other)
+      prior = { index = plan.n[3], order = order }, journal_applied = { order = set_order(set) },
+      place = places_.journal_place("modset", { plan.n[1], plan.n[2] }),
     }
   end,
   restore = function(song, env, restore, desc)
     local material, prior, applied = restore.material, restore.prior, restore.applied
     if type(material) ~= "table" or type(material.at) ~= "table" then bad("material: where the device moved") end
     local n, why, which = places_.follow(env, material.at)
+    -- (Renoise's undo and redo of the move made its copy again: the device the move left is at its place in the same set)
+    if not n and restore.redone and type(material.at.at) == "table" then
+      local set_n = places_.follow(env, { of = "modset", at = { material.at.at[1], material.at.at[2] } })
+      if set_n then n, why, which = { set_n[1], set_n[2], applied.index }, nil, nil end
+    end
     if not n then places_.follow_failed(why, which, nil) end
     local objects = places_.resolve(song, "moddevice", n)
     local label = places_.label_of("moddevice", n, objects)
@@ -570,8 +586,12 @@ base.register({
     if has_mappings(objects.instrument) then fail("changed", "the instrument's macros have mappings now, which moving it back this way would lose") end
     song:describe_undo(desc)
     move_moddevice(objects.modset, n[3], prior.index)
+    base.note_restored_at(env.journal, "moddevice-move", places_.journal_place("modset", { n[1], n[2] }))
     return { restored = { index = prior.index }, display = { title = string.format("Moved %s back to place %d", label, prior.index) }, undo = { desc = desc, entry = true } }
   end,
+  reread = places_.reread("modset"),
+  read = function(set) return { order = set_order(set) } end,
+  same = function(a, b) return base.same_table(a.order, b.order) end,
 })
 
 -- moddevice-set {ref: moddevice, operator?, bipolar?, tempoSynced?, active?, name?, points?, length?, playMode?, loopMode?,
