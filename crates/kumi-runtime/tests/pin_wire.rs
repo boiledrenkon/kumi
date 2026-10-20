@@ -689,10 +689,17 @@ fn events() -> Vec<SessionEvent> {
     events.push(SessionEvent::Action(ActionEvent { title: "Playing from bar 17".into(), playing: Some(true), recording: Some(false) }));
     events.push(SessionEvent::Action(ActionEvent { title: "Showed the Clip view".into(), playing: None, recording: None }));
     events.push(SessionEvent::Transport {
-        transport: Some(LiveTransport { playing: true, tempo: Some(124.0), beat: Some(65.25), at: 1234.5, beats_per_bar: Some(4.0) }),
+        transport: Some(LiveTransport {
+            playing: true,
+            tempo: Some(124.0),
+            beat: Some(65.25),
+            at: 1234.5,
+            beats_per_bar: Some(4.0),
+            meter: None,
+        }),
     });
     events.push(SessionEvent::Transport {
-        transport: Some(LiveTransport { playing: false, tempo: None, beat: None, at: 0.0, beats_per_bar: None }),
+        transport: Some(LiveTransport { playing: false, tempo: None, beat: None, at: 0.0, beats_per_bar: None, meter: None }),
     });
     events.push(SessionEvent::Transport { transport: None });
     events.push(SessionEvent::Watching { on: true });
