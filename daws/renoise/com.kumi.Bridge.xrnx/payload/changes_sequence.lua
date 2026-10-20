@@ -469,7 +469,7 @@ local function unique_restore(song, env, restore, desc)
     local s = base.follow_slot(kept, now, change.slot)
     if not s then stale("made the patterns unique") end
     local copy, original
-    if redone_after then
+    if redone_after and redone_before then
       copy, original = redone_after[change.slot], redone_before[change.slot]
     else
       copy, original = env.pattern_at(change.to, applied.pool), env.pattern_at(change.from, applied.pool)
