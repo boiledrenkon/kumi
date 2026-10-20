@@ -10,7 +10,7 @@ use crate::{
     core::{contracts::ChangeState, errors::RuntimeError, refs::RefScheme},
     listening::{
         notes::{Kit, Note},
-        renderer::{ClipNotes, NotePatch, Renderer},
+        renderer::{ClipNotes, NotePatch, Renderer, Window},
     },
 };
 use kumi_common::abort::Signal;
@@ -231,7 +231,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// The item a MIDI item's or take's ref names, as the item read gives it (a take is found as its item's active one).
-    async fn item_row(&self, named: &str, signal: &Signal) -> Result<Value, String> {
+    pub(super) async fn item_row(&self, named: &str, signal: &Signal) -> Result<Value, String> {
         let long = self.long(named);
         let vocab = &self.profile().vocab;
         let cant = |why: String| why;
@@ -361,6 +361,21 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         self.parts.borrow_mut().insert(clip.to_owned(), Part::Lines { pattern, track, place, lpb, lines, cells, taken });
         let end = lines as f64 / lpb;
         Ok(ClipNotes { name, notes, song_zero, to: end, end })
+    }
+
+    /// Where a Renoise pattern (or a pattern track) plays in the song, and for how long: over its first slot in the
+    /// pattern sequence. None for anything else, or a pattern no slot plays.
+    pub(super) async fn pattern_window(&self, long: &str, signal: &Signal) -> Option<Window> {
+        if !matches!(self.kind_of(long).as_deref(), Some("pattern" | "ptrack")) {
+            return None;
+        }
+        let (pattern, epoch) = (*numbers(long).first()?, epoch_of(long).to_owned());
+        let song = self.rows(json!({"kind": "song"}), 1, signal).await.ok()?.ok()?;
+        let lpb = song.first()?.get("lpb")?.as_f64().filter(|lpb| *lpb >= 1.)?;
+        let row = self.rows(json!({"ref": format!("{epoch}:pattern:{pattern}")}), 1, signal).await.ok()?.ok()?;
+        let lines = row.first()?.get("lines")?.as_f64()?;
+        let from = self.pattern_start(pattern, lpb, signal).await?;
+        Some(Window { from, beats: lines / lpb })
     }
 
     /// Where a pattern first plays in the song, in beats: its first slot in the pattern sequence (None when no slot

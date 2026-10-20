@@ -509,3 +509,109 @@ async fn groove_moves_a_renoise_pattern_tracks_notes_by_their_delays_and_volumes
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reaper_says_what_it_noted_when_a_render_fails_and_a_capture_is_split_where_the_playhead_jumped() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            // A render that fails says why, and what the bridge noted on the way.
+            script.listening().note_next(&["REAPER stopped playback to render"]);
+            script.listening().fail_next("failed", "REAPER couldn't write the file");
+            let failed = reaper
+                .hear(&HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(8.), ..Default::default() }, Signal::new())
+                .await
+                .unwrap();
+            let why = failed.unwrap_err();
+            assert!(why.contains("couldn't write the file (REAPER stopped playback to render)"), "{why}");
+            // While REAPER plays, the loop wrapped two seconds in: two takes, each a stretch it played straight through.
+            script.set_playing(true);
+            script.listening().set_capture_marks(json!([[0, 10.0, 20.0, true], [96000, 10.0, 20.0, true]]));
+            let heard = reaper
+                .hear(&HearRequest { mix: Some(true), seconds: Some(4.), ..Default::default() }, Signal::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let takes: Vec<(&str, f64, Option<f64>)> = heard.iter().map(|take| (take.label.as_str(), take.start, take.seconds)).collect();
+            assert_eq!(takes, [("The mix from bar 6", 0., Some(2.)), ("The mix from bar 6 (pass 2)", 2., Some(2.))]);
+            // Copies an earlier session left, swept by the bridge: the producer is told which, once.
+            simulator.emit("scratch_swept", json!({"count": 1, "names": ["Kumi · try ab12 1"]}));
+            for _ in 0..50 {
+                if told.borrow().iter().any(|said| said.contains("an earlier session left")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let swept: Vec<String> = told.borrow().iter().filter(|said| said.contains("an earlier session left")).cloned().collect();
+            assert_eq!(swept, ["REAPER removed Kumi's scratch copy an earlier session left in the project: “Kumi · try ab12 1”"]);
+            assert_ours(&told.borrow());
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_items_audio_is_only_what_it_plays_of_its_source_the_way_it_plays_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            // The item plays a second of its 4-second source from half a second in, reversed.
+            script.listening().set_item_part(0.5, 1.0, 1.0, true);
+            let file = reaper.audio_file("r:item:{I-T0001}", Signal::new()).await.unwrap().unwrap();
+            assert!(file.contains("reversed"), "{file}");
+            let bytes = std::fs::read(&file).unwrap();
+            let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as f64;
+            assert!((data / (48_000. * 2. * 4.) - 1.).abs() < 0.01, "one second of 32-bit stereo: {data} bytes");
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_pattern_is_auditioned_over_its_first_slot_in_the_sequence() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate {
+                    track: "1:track:1".into(),
+                    clip: Some("1:pattern:2".into()),
+                    label: Some("kick".into()),
+                    mix: None,
+                }],
+                from_beat: None,
+                beats: None,
+                reference: None,
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let result = renoise.audition(&request, Signal::new()).await.unwrap();
+            assert!(result.is_ok(), "{result:?}");
+            // Pattern 2 first plays in slot 2, after pattern 1's 32 lines (8 beats at 4 lines a beat).
+            assert_eq!(script.listening().renders().last().unwrap()["range"], json!({"fromBeat": 8.0, "beats": 8.0}));
+            let played = script.listening().previews();
+            assert_eq!(played.len(), 1, "the render, played with the song's own playback");
+            assert_ours(&told.borrow());
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

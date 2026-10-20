@@ -180,17 +180,19 @@ fn free_on(_path: &Path) -> Option<u64> {
 }
 
 /// The listening folder without what's old (older than `PRUNE_AGE`), then without the oldest while it holds more than
-/// `most` bytes. Only its own files: never a folder in it (Kumi's `kept/`), and never one of `keep` (a running job's).
-/// How many files went.
+/// `most` bytes. Only the audio the bridges wrote there: never a folder in it (Kumi's `kept/`), never one of `keep` (a
+/// running job's), and never the bridges' own files (the scratch journal, which they keep for weeks to sweep copies a
+/// crash left behind). How many files went.
 pub fn prune(folder: &Path, keep: &[PathBuf], age: Duration, most: u64) -> usize {
     let Ok(entries) = std::fs::read_dir(folder) else { return 0 };
+    let audio = |path: &Path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("wav"));
     let mut files: Vec<(PathBuf, SystemTime, u64)> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let meta = entry.metadata().ok()?;
             meta.is_file().then(|| (entry.path(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
         })
-        .filter(|(path, _, _)| !keep.contains(path))
+        .filter(|(path, _, _)| audio(path) && !keep.contains(path))
         .collect();
     files.sort_by_key(|(_, modified, _)| *modified);
     let now = SystemTime::now();
@@ -759,11 +761,13 @@ mod tests {
         let a = file("a.wav", 100, 30);
         let b = file("b.wav", 100, 20);
         let c = file("c.wav", 100, 10);
+        let journal = file("scratch.json", 10, 30 * 24 * 3600);
         std::fs::create_dir(dir.path().join("kept")).unwrap();
         let removed = prune(dir.path(), std::slice::from_ref(&older_running), Duration::from_secs(2 * 3600), 250);
         assert_eq!(removed, 2, "the old one, then the oldest while over 250 bytes");
         assert!(!old.exists() && !a.exists());
         assert!(older_running.exists() && b.exists() && c.exists() && dir.path().join("kept").is_dir());
+        assert!(journal.exists(), "the bridges' scratch journal stays, however old");
     }
 
     #[test]

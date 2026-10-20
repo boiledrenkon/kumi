@@ -308,7 +308,15 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let changes = Rc::downgrade(&self.changes);
+        let listening = Rc::downgrade(&self.listening);
         let unlisten = endpoint.on_live_event(Rc::new(move |event| {
+            // Scratch copies an earlier session left were removed: the producer is told.
+            if event.get("name").and_then(Value::as_str) == Some("scratch_swept") {
+                if let (Some(listening), Some(data)) = (listening.upgrade(), event.get("data")) {
+                    listening.swept(data);
+                }
+                return;
+            }
             // The producer undid (or redid) Kumi's changes with the DAW's own undo: HISTORY follows.
             if event.get("name").and_then(Value::as_str) == Some("undone_in_daw") {
                 if let (Some(changes), Some(data)) = (changes.upgrade(), event.get("data")) {
@@ -578,6 +586,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         if let Ok(Ok(status)) = self.call("status", json!({}), signal.clone()).await {
             self.listening.renderer.set_flags(Flags::of(&status));
+            if let Some(swept) = status.pointer("/listening/swept") {
+                self.listening.swept(swept);
+            }
             self.flags_at.set(Some(std::time::Instant::now()));
         }
     }

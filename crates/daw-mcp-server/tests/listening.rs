@@ -84,7 +84,7 @@ async fn a_render_is_a_job_followed_to_its_files_in_kumis_folder_with_what_each_
     let (job, is_error) = lab
         .tool(
             "render",
-            json!({"sources": [{"id": "mix", "what": "master"}, {"id": "bass", "what": "track", "ref": "r:track:{T0002}"}], "range": two_bars(), "preRollBeats": 4}),
+            json!({"sources": [{"id": "mix", "what": "master"}, {"id": "bass", "what": "track", "ref": "r:track:{T0002}"}], "range": two_bars(), "preRollBeats": 4, "epoch": "sim-1"}),
         )
         .await;
     assert!(!is_error, "{job}");
@@ -233,8 +233,9 @@ async fn an_items_audio_is_its_source_file_and_a_midi_item_says_it_has_none() {
 async fn scratch_copies_are_made_set_heard_and_dropped() {
     let script = ReaperScript::new(3, 0);
     let mut lab = Lab::reaper(&script).await;
-    let (made, is_error) =
-        lab.tool("scratch", json!({"action": "make", "ref": "r:track:{T0001}", "count": 3, "label": "Kumi: search"})).await;
+    let (made, is_error) = lab
+        .tool("scratch", json!({"action": "make", "ref": "r:track:{T0001}", "count": 3, "label": "Kumi: search", "epoch": "sim-1"}))
+        .await;
     assert!(!is_error, "{made}");
     let copies: Vec<String> = made["copies"].as_array().unwrap().iter().map(|copy| copy["ref"].as_str().unwrap().to_string()).collect();
     assert_eq!(copies.len(), 3);
@@ -245,7 +246,7 @@ async fn scratch_copies_are_made_set_heard_and_dropped() {
     assert!(!is_error && set["set"] == 3, "{set}");
     let sources: Vec<Value> =
         copies.iter().enumerate().map(|(n, copy)| json!({"id": format!("try{n}"), "what": "track", "ref": copy})).collect();
-    let (job, is_error) = lab.tool("render", json!({"sources": sources, "range": two_bars()})).await;
+    let (job, is_error) = lab.tool("render", json!({"sources": sources, "range": two_bars(), "epoch": "sim-1"})).await;
     assert!(!is_error, "{job}");
     assert_eq!(lab.wait(&job).await["files"].as_array().unwrap().len(), 3);
     let (dropped, _) = lab.tool("scratch", json!({"action": "drop", "scratchId": made["scratchId"]})).await;
@@ -270,8 +271,9 @@ async fn renoise_renders_a_track_soloed_through_the_master_and_never_hears_what_
     let mut lab = Lab::renoise(&script).await;
     let (listed, _) = lab.tool_list().await;
     assert!(listed.iter().all(|name| name != "hear"), "Renoise offers no live hearing: {listed:?}");
-    let (job, is_error) =
-        lab.tool("render", json!({"sources": [{"id": "kick", "what": "track", "ref": "1:track:1"}], "range": two_bars()})).await;
+    let (job, is_error) = lab
+        .tool("render", json!({"sources": [{"id": "kick", "what": "track", "ref": "1:track:1"}], "range": two_bars(), "epoch": "1"}))
+        .await;
     assert!(!is_error, "{job}");
     let done = lab.wait(&job).await;
     assert_eq!((done["files"][0]["stage"].as_str(), done["files"][0]["throughMaster"].as_bool()), (Some("post-fader"), Some(true)));

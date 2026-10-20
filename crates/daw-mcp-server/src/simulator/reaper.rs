@@ -896,9 +896,18 @@ impl ReaperScript {
             ("project", _) => vec![Self::project(state)],
             ("track", _) => state.tracks.clone(),
             // Each track plays its one item, from the start for two bars.
-            ("spans", _) => {
-                state.tracks.iter().skip(1).map(|row| json!({"ref": row["ref"], "name": row["name"], "spans": [[0.0, 8.0]]})).collect()
-            }
+            ("spans", _) => state
+                .tracks
+                .iter()
+                .skip(1)
+                .map(|row| {
+                    let mut spans = json!({"ref": row["ref"], "name": row["name"], "spans": [[0.0, 8.0]]});
+                    if row["mute"] == true {
+                        spans["mute"] = true.into();
+                    }
+                    spans
+                })
+                .collect(),
             ("item", Some(parent)) => state
                 .tracks
                 .iter()

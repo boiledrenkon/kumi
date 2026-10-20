@@ -101,6 +101,10 @@ pub(super) struct Table {
     /// The equaliser fit draws on, by a word in its name, and whether its first and last bands are shelves.
     pub eq: &'static str,
     pub eq_shelves_at_ends: bool,
+    /// Whether the bridge can hear what the DAW plays (REAPER's audio hook; Renoise's Lua can't).
+    pub captures: bool,
+    /// The name prefixes of a plug-in's device where the rows don't say (REAPER's "VST3: …").
+    pub plugin_prefixes: &'static [&'static str],
 }
 
 /// REAPER (the extension): pre-fader stems in one pass, the master with and without its FX, ReaLimit and JS Volume
@@ -129,6 +133,8 @@ pub(super) const REAPER: Table = Table {
     scratch_field: "normalized",
     eq: "ReaEQ",
     eq_shelves_at_ends: false,
+    captures: true,
+    plugin_prefixes: &["VST:", "VSTi:", "VST3:", "VST3i:", "AU:", "AUi:", "CLAP:", "CLAPi:", "LV2:", "LV2i:", "DX:", "DXi:"],
 };
 
 /// Renoise (the tool): one solo render per track, through its fader and the Master track's devices; the Maximizer and
@@ -157,6 +163,8 @@ pub(super) const RENOISE: Table = Table {
     scratch_field: "value",
     eq: "EQ 10",
     eq_shelves_at_ends: true,
+    captures: false,
+    plugin_prefixes: &[],
 };
 
 pub(super) fn table(id: Option<DawId>) -> &'static Table {
@@ -203,6 +211,8 @@ pub(super) struct TrackRow {
     pub(super) name: String,
     kind: String,
     volume_db: Option<f64>,
+    /// Muted (REAPER), or not active (Renoise's MUTED and OFF).
+    muted: bool,
 }
 
 /// One of a track's devices as listening reads it.
@@ -221,6 +231,8 @@ struct Scratch {
     /// The copied device's place in its track's chain, and its knobs' places by name.
     device: u64,
     knobs: IndexMap<String, u64>,
+    /// The steps setting the copies (and dropping them) left in the DAW's undo (Renoise's: one a set), told when they go.
+    steps: Cell<u64>,
 }
 
 /// The DAW as the listening tools meet it, through Kumi's host.
@@ -247,6 +259,85 @@ fn object(value: Value) -> JsonObject {
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// What the bridge noted with an answer (`notes`), in order.
+pub(super) fn notes_of(value: &Value) -> Vec<String> {
+    value.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
+}
+
+/// A reason with what the bridge noted after it, in parentheses.
+fn with_notes(said: String, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return said;
+    }
+    format!("{said} ({})", notes.iter().map(|note| note.trim_end_matches('.')).collect::<Vec<_>>().join("; "))
+}
+
+/// How many values a stepped parameter has: the texts of its steps (a grid read's `items`), or its own count (`steps`).
+pub(super) fn steps_of(row: &Value) -> Option<u64> {
+    let items = row.get("items").and_then(Value::as_array).map_or(0, Vec::len) as u64;
+    row.get("steps").and_then(Value::as_u64).or((items >= 2).then_some(items)).filter(|steps| *steps >= 2)
+}
+
+/// The stretches of a capture the playhead played straight through, from its marks (`[frame, seconds, beats, playing]` at
+/// the first frame and at each jump: a loop, a seek, a stop): each one's start and length in the file, in seconds, and
+/// what it was ("The mix from bar 5", a pass number when the loop played it again). Stretches while stopped, and those
+/// under half a second, are left out.
+fn stretches(marks: Option<&Value>, rate: f64, held: Option<f64>, beats_per_bar: f64) -> Vec<(f64, f64, String)> {
+    let marks: Vec<(f64, Option<f64>, bool)> = marks
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|mark| {
+            Some((mark.get(0)?.as_f64()?, mark.get(2).and_then(Value::as_f64), mark.get(3).and_then(Value::as_bool).unwrap_or(true)))
+        })
+        .collect();
+    let end = held.map(|seconds| seconds * rate);
+    let mut found: Vec<(f64, f64, String)> = vec![];
+    let mut seen: IndexMap<String, usize> = IndexMap::new();
+    for (at, (frame, beat, playing)) in marks.iter().enumerate() {
+        let Some(next) = marks.get(at + 1).map(|(frame, ..)| *frame).or(end) else { continue };
+        let seconds = (next - frame) / rate;
+        if !playing || seconds < 0.5 {
+            continue;
+        }
+        let base = match beat {
+            Some(beat) => format!("The mix from bar {}", (beat / beats_per_bar.max(1.)).floor() as i64 + 1),
+            None => "The mix".to_string(),
+        };
+        let pass = seen.entry(base.clone()).or_insert(0);
+        *pass += 1;
+        let label = if *pass == 1 { base } else { format!("{base} (pass {pass})") };
+        found.push((frame / rate, seconds, label));
+    }
+    found
+}
+
+/// Channels of samples as a 32-bit float WAV.
+fn float_wav(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
+    let count = channels.len().max(1) as u16;
+    let frames = channels.first().map_or(0, Vec::len);
+    let data = frames * count as usize * 4;
+    let mut wav = Vec::with_capacity(44 + data);
+    wav.extend(b"RIFF");
+    wav.extend((36 + data as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend(3u16.to_le_bytes());
+    wav.extend(count.to_le_bytes());
+    wav.extend(rate.to_le_bytes());
+    wav.extend((rate * count as u32 * 4).to_le_bytes());
+    wav.extend((count * 4).to_le_bytes());
+    wav.extend(32u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend((data as u32).to_le_bytes());
+    for frame in 0..frames {
+        for channel in channels {
+            wav.extend(channel.get(frame).copied().unwrap_or(0.).to_le_bytes());
+        }
+    }
+    wav
 }
 
 impl<S: RefScheme + 'static> OwnRenderer<S> {
@@ -383,6 +474,11 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                     name: text(row, "name").unwrap_or_default(),
                     kind: text(row, "type").unwrap_or_default(),
                     volume_db: row.get("volumeDb").and_then(Value::as_f64),
+                    muted: match row.get("mute") {
+                        Some(Value::Bool(muted)) => *muted,
+                        Some(Value::String(state)) => state != "active",
+                        _ => false,
+                    },
                 })
             })
             .collect();
@@ -390,11 +486,59 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Ok(Ok(rows))
     }
 
+    /// Keeps a scratch copy by its name, its ref registered in the book so it follows what moves the tracks (Renoise's
+    /// refs are places); its ref as the book names it.
+    pub(super) fn keep_copy(&self, name: String, long: &str) -> String {
+        let short = self.link.book.borrow_mut().short_ref(long);
+        self.copies.borrow_mut().insert(name, short.clone());
+        short
+    }
+
+    /// A scratch copy's ref now, by its name.
+    pub(super) fn copy_ref(&self, name: &str) -> Option<String> {
+        let short = self.copies.borrow().get(name).cloned()?;
+        Some(self.link.book.borrow().lengthen(&json!({"ref": short}))["ref"].as_str().unwrap_or(&short).to_owned())
+    }
+
+    /// Says what scratch copies left in the DAW's undo, when they left anything.
+    pub(super) fn tell_scratch_steps(&self, steps: u64) {
+        if steps > 0 {
+            self.tell_app(&format!(
+                "Kumi's scratch copies left {steps} step{} in {}'s undo",
+                if steps == 1 { "" } else { "s" },
+                self.app()
+            ));
+        }
+    }
+
+    /// Drops a make's copies: whether all went; what the bridge noted, or why some stayed, is told. A make the bridge
+    /// doesn't know (dropped already, or forgotten after a crash) has nothing to drop.
+    pub(super) async fn drop_make(&self, scratch: &str, steps: u64) -> bool {
+        let dropped = self.link.call("scratch", json!({"action": "drop", "scratchId": scratch}), self.cleanup_signal()).await;
+        let (all, notes, more) = match &dropped {
+            Ok(Ok(done)) => (
+                done.get("left").and_then(Value::as_u64).unwrap_or(0) == 0,
+                notes_of(done),
+                done.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0),
+            ),
+            Ok(Err(refused)) if refused.code.as_deref() == Some("bad-params") => (true, vec![], 0),
+            _ => (false, vec![], 0),
+        };
+        self.tell_scratch_steps(steps + more);
+        for note in &notes {
+            self.tell_app(note);
+        }
+        if !all && notes.is_empty() {
+            self.tell_app(self.profile().vocab.render_leftovers);
+        }
+        all
+    }
+
     /// A track by what the model or a round names it (a ref of this turn, a long ref, a scratch copy's or a track's
     /// name): its long ref and its name now.
     pub(super) async fn resolve(&self, named: &str, signal: &Signal) -> Result<Result<(String, String), String>, RuntimeError> {
-        if let Some(reference) = self.copies.borrow().get(named) {
-            return Ok(Ok((reference.clone(), named.to_owned())));
+        if let Some(reference) = self.copy_ref(named) {
+            return Ok(Ok((reference, named.to_owned())));
         }
         let long = self.link.book.borrow().lengthen(&json!({"ref": named}))["ref"].as_str().unwrap_or(named).to_owned();
         let tracks = match self.track_rows(signal).await? {
@@ -452,7 +596,10 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                     // REAPER says enabled and offline; Renoise says active.
                     on: row.get("enabled").or(row.get("active")).and_then(Value::as_bool).unwrap_or(true)
                         && row.get("offline") != Some(&Value::Bool(true)),
-                    plugin: row.get("plugin").and_then(Value::as_bool).unwrap_or(false),
+                    plugin: row.get("plugin").and_then(Value::as_bool).unwrap_or_else(|| {
+                        let name = text(row, "name").unwrap_or_default();
+                        self.table.plugin_prefixes.iter().any(|prefix| name.starts_with(prefix))
+                    }),
                     index: row.get("index").and_then(Value::as_u64).unwrap_or(at as u64),
                 })
             })
@@ -501,9 +648,10 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             match status.get("state").and_then(Value::as_str) {
                 Some("done") => return Ok(Ok(status)),
                 Some("failed") => {
-                    return Ok(Err(text(&status, "error").unwrap_or_else(|| format!("{} couldn't render it", self.app()))));
+                    let why = text(&status, "error").unwrap_or_else(|| format!("{} couldn't render it", self.app()));
+                    return Ok(Err(with_notes(why, &notes_of(&status))));
                 }
-                Some("cancelled") => return Ok(Err(format!("{} stopped the render", self.app()))),
+                Some("cancelled") => return Ok(Err(with_notes(format!("{} stopped the render", self.app()), &notes_of(&status)))),
                 _ => {
                     // A long render says how far it is (a short one is over before it would).
                     let progress = status.get("progress").and_then(Value::as_f64).unwrap_or(0.);
@@ -652,6 +800,10 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     /// The window an item (REAPER) or a pattern (Renoise) plays over, from its row.
     async fn window_of(&self, part: &str, signal: &Signal) -> Result<Result<Window, String>, RuntimeError> {
         let long = self.link.book.borrow().lengthen(&json!({"ref": part}))["ref"].as_str().unwrap_or(part).to_owned();
+        // A Renoise pattern (or pattern track) plays where its first slot in the sequence is.
+        if let Some(window) = self.pattern_window(&long, signal).await {
+            return Ok(Ok(window));
+        }
         let read = match self.link.call("read", self.read_placed(json!({"ref": long})), signal.clone()).await? {
             Ok(read) => read,
             Err(refused) => return Ok(Err(refused.why)),
@@ -868,7 +1020,32 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 Err(why) => Err(RuntimeError::Observation(why)),
             };
         }
-        Ok(text(&answer, "file"))
+        let Some(file) = text(&answer, "file") else { return Ok(None) };
+        let (offset, length) = (answer.get("offset").and_then(Value::as_f64), answer.get("length").and_then(Value::as_f64));
+        let speed = answer.get("playRate").and_then(Value::as_f64).unwrap_or(1.);
+        let reversed = answer.get("reversed") == Some(&Value::Bool(true));
+        // An item played at another speed is heard as REAPER plays it: its track's own audio rendered over the item.
+        if (speed - 1.).abs() > 1e-6 && self.table.no_items.is_none() {
+            if let Ok(item) = self.item_row(&long, &signal).await {
+                let (track, from, beats) = (
+                    text(&item, "trackRef"),
+                    item.get("positionBeats").and_then(Value::as_f64),
+                    item.get("lengthBeats").and_then(Value::as_f64),
+                );
+                if let (Some(track), Some(from), Some(beats)) = (track, from, beats) {
+                    if let Ok(rendered) = self.render(&track, from, beats, signal.clone()).await? {
+                        if let Some(path) = rendered.get("file").and_then(Value::as_str) {
+                            return Ok(Some(path.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+        if offset.is_none() && length.is_none() && !reversed {
+            return Ok(Some(file));
+        }
+        // Only what the item (or the slice) plays of its file, the way it plays it; the whole file if it can't be cut.
+        Ok(Some(self.cut(&file, offset.unwrap_or(0.), length, reversed, &signal).await.unwrap_or(file)))
     }
 
     async fn hear_pass(&self, candidates: &[AuditionCandidate], window: Window, before_main: bool, signal: Signal) -> Pass {
@@ -1229,18 +1406,15 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let mut names = vec![];
         for copy in made.get("copies").and_then(Value::as_array).into_iter().flatten() {
             if let (Some(reference), Some(name)) = (text(copy, "ref"), text(copy, "name")) {
-                self.copies.borrow_mut().insert(name.clone(), reference);
+                self.keep_copy(name.clone(), &reference);
                 names.push(name);
             }
         }
-        if let Some(steps) = made.pointer("/undo/steps").and_then(Value::as_u64).filter(|steps| *steps > 0) {
-            self.tell_app(&format!(
-                "Kumi's scratch copies left {steps} step{} in {}'s undo",
-                if steps == 1 { "" } else { "s" },
-                self.app()
-            ));
+        self.tell_scratch_steps(made.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0));
+        for note in notes_of(&made) {
+            self.tell_app(&note);
         }
-        Ok(Ok(Copies { names, held: Box::new(Scratch { id, device: place, knobs }) }))
+        Ok(Ok(Copies { names, held: Box::new(Scratch { id, device: place, knobs, steps: Cell::new(0) }) }))
     }
     async fn set_copies(
         &self,
@@ -1251,7 +1425,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let Some(held) = copies.held.downcast_ref::<Scratch>() else { return Ok(Err("those copies aren't Kumi's scratch copies".into())) };
         let mut set = vec![];
         for (name, knobs) in &values {
-            let Some(reference) = self.copies.borrow().get(name).cloned() else { continue };
+            let Some(reference) = self.copy_ref(name) else { continue };
             for (knob, raw) in knobs.as_object().into_iter().flatten() {
                 let Some(param) = held.knobs.get(knob) else { return Ok(Err(format!("the device has no knob “{knob}”"))) };
                 let mut value = json!({"ref": reference, "device": held.device, "param": param});
@@ -1263,18 +1437,17 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             return Ok(Ok(()));
         }
         Ok(match self.ask("scratch", json!({"action": "set", "scratchId": held.id, "values": set}), signal).await? {
-            Ok(_) => Ok(()),
+            Ok(done) => {
+                held.steps.set(held.steps.get() + done.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0));
+                Ok(())
+            }
             Err(refused) => Err(refused.why),
         })
     }
     async fn close_copies(&self, copies: Copies) {
         let Ok(held) = copies.held.downcast::<Scratch>() else { return };
-        let dropped = self.link.call("scratch", json!({"action": "drop", "scratchId": held.id}), self.cleanup_signal()).await;
+        self.drop_make(&held.id, held.steps.get()).await;
         self.copies.borrow_mut().retain(|name, _| !copies.names.contains(name));
-        match dropped {
-            Ok(Ok(done)) if done.get("left").and_then(Value::as_u64).unwrap_or(0) == 0 => {}
-            _ => self.tell_app(self.profile().vocab.render_leftovers),
-        }
     }
 
     async fn track_devices(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError> {
@@ -1290,7 +1463,8 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         Ok(self.parameters(&long, false, &signal).await?.ok().map(|rows| rows.iter().filter_map(|row| text(row, "name")).collect()))
     }
     async fn read_seen(&self, device: &mut Seen, signal: Signal) {
-        let Ok(Ok(rows)) = self.parameters(&device.reference, false, &signal).await else { return };
+        // (a grid of two points: a stepped parameter answers its steps' texts)
+        let Ok(Ok(rows)) = self.rows(json!({"kind": "param", "parent": device.reference, "grid": 2}), 16, &signal).await else { return };
         device.turnable = rows.iter().filter_map(|row| text(row, "name")).collect();
         // A switch: a parameter of two steps (or 0 to 1), on at its top.
         device.switched_on = rows
@@ -1298,7 +1472,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             .filter(|row| {
                 let max = row.get("max").and_then(Value::as_f64).unwrap_or(1.);
                 let value = row.get("value").and_then(Value::as_f64).unwrap_or(0.);
-                row.get("steps").and_then(Value::as_u64) == Some(2) && value >= max * 0.5
+                steps_of(row) == Some(2) && value >= max * 0.5
             })
             .filter_map(|row| text(row, "name"))
             .collect();
@@ -1423,6 +1597,10 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 reply.insert(key.into(), value.clone());
             }
         }
+        let notes = notes_of(&done);
+        if !notes.is_empty() {
+            reply.insert("notes".into(), json!(notes));
+        }
         Ok(Ok(reply))
     }
     fn short_ref(&self, long: &str) -> String {
@@ -1459,10 +1637,19 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
 
     async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
         let Ok(Ok(rows)) = self.rows(json!({"kind": "spans", "limit": 64}), 1, &signal).await else { return vec![] };
+        // What plays nowhere, or isn't one of the song's parts: a muted track (the row says so, or the track's own row),
+        // the master, a send, and Kumi's scratch copies.
+        let tracks = self.track_rows(&signal).await.ok().and_then(Result::ok).unwrap_or_default();
+        let silent = |row: &Value| {
+            let reference = text(row, "ref").unwrap_or_default();
+            let track = tracks.iter().find(|track| track.reference == reference);
+            row.get("mute") == Some(&Value::Bool(true))
+                || track.is_some_and(|track| track.muted || matches!(track.kind.as_str(), "master" | "send"))
+                || text(row, "name").is_some_and(|name| self.copies.borrow().contains_key(&name))
+        };
         rows.iter()
             .take(64)
-            // (a muted track plays nowhere)
-            .filter(|row| row.get("mute") != Some(&Value::Bool(true)))
+            .filter(|row| !silent(row))
             .filter_map(|row| {
                 let spans = row
                     .get("spans")
@@ -1478,6 +1665,47 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
 }
 
 impl<S: RefScheme + 'static> OwnRenderer<S> {
+    /// What a file holds from `offset` for `length` seconds (to its end without one), reversed if asked, written as a WAV
+    /// in Kumi's listening folder (the host prunes it with the renders): its path.
+    async fn cut(&self, file: &str, offset: f64, length: Option<f64>, reversed: bool, signal: &Signal) -> Result<String, String> {
+        let mut source = crate::audio::decode::open_audio(file, Some(signal.clone())).await.map_err(|error| error.0)?;
+        let rate = source.sample_rate;
+        source.seek(offset.max(0.) * rate);
+        let frames = length.map_or(usize::MAX, |length| (length.max(0.) * rate) as usize);
+        let mut channels: Vec<Vec<f32>> = vec![];
+        let mut read = 0;
+        while read < frames {
+            let Some(block) = source.read(65_536.min(frames - read)).await.map_err(|error| error.0)? else { break };
+            let Some(first) = block.first() else { break };
+            if first.is_empty() {
+                break;
+            }
+            read += first.len();
+            channels.resize(channels.len().max(block.len()), vec![]);
+            for (channel, samples) in channels.iter_mut().zip(&block) {
+                channel.extend_from_slice(samples);
+            }
+        }
+        let _ = source.close().await;
+        if channels.is_empty() {
+            return Err("nothing to cut".into());
+        }
+        if reversed {
+            channels.iter_mut().for_each(|channel| channel.reverse());
+        }
+        let stem = std::path::Path::new(file).file_stem().and_then(|stem| stem.to_str()).unwrap_or("audio");
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let path = self.folder.join(format!(
+            "{stem} · {:.3}+{:.3}{} · {stamp}.wav",
+            offset,
+            read as f64 / rate,
+            if reversed { " reversed" } else { "" }
+        ));
+        std::fs::create_dir_all(&self.folder).map_err(|error| error.to_string())?;
+        std::fs::write(&path, float_wav(&channels, rate as u32)).map_err(|error| error.to_string())?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     /// The track a device is on, and that track's chain: by the device's own ref where it names its track (Renoise's
     /// places), else found among the tracks' chains.
     async fn track_of_device(&self, device: &str, signal: &Signal) -> Result<Option<(String, Vec<DeviceRow>)>, RuntimeError> {
@@ -1533,6 +1761,8 @@ pub struct OwnListening<S: RefScheme + 'static> {
     pub listening: Rc<Listening>,
     /// Held for each listening call: a stopped answer's clean-up runs to its end before the next one starts.
     busy: tokio::sync::Mutex<()>,
+    /// The scratch copies an earlier session left that the producer was told the bridge removed.
+    swept: RefCell<std::collections::HashSet<String>>,
 }
 
 impl<S: RefScheme + 'static> OwnListening<S> {
@@ -1546,7 +1776,31 @@ impl<S: RefScheme + 'static> OwnListening<S> {
             context.listener.clone(),
             context.references.clone(),
         );
-        Rc::new(Self { renderer, listening, busy: tokio::sync::Mutex::new(()) })
+        Rc::new(Self { renderer, listening, busy: tokio::sync::Mutex::new(()), swept: RefCell::default() })
+    }
+
+    /// The bridge removed scratch copies an earlier session left behind (a crash, a quit mid-search): the producer is
+    /// told once which, as the project changed without them asking (`scratch_swept`, REAPER's `listening.swept`).
+    pub fn swept(&self, data: &Value) {
+        let names: Vec<String> = data
+            .get("names")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|name| self.swept.borrow_mut().insert((*name).to_owned()))
+            .map(|name| format!("“{name}”"))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let place = self.renderer.profile().words.place;
+        self.renderer.tell_app(&format!(
+            "{} removed Kumi's scratch cop{} an earlier session left in the {place}: {}",
+            self.renderer.app(),
+            if names.len() == 1 { "y" } else { "ies" },
+            names.join(", ")
+        ));
     }
 
     /// The DAW, for one listening call: once a stopped one has put the DAW back.
@@ -1657,8 +1911,13 @@ impl<S: RefScheme + 'static> OwnListening<S> {
         // A DAW that can't hear what it plays stops playing to render (Renoise does): a listen with no place doesn't stop
         // the producer's playback.
         if playing && request.from_beat.is_none() && request.whole != Some(true) {
+            let why = if renderer.table.captures {
+                format!("Kumi can't hear what {app} plays just now (its audio isn't running for Kumi)")
+            } else {
+                format!("{app}'s scripts can't hear what it plays")
+            };
             return Ok(Err(format!(
-                "{app}'s scripts can't hear what it plays, and a render stops its playback: give from_beat and beats (or stop {app}), and Kumi renders the part."
+                "{why}, and a render stops its playback: give from_beat and beats (or stop {app}), and Kumi renders the part."
             )));
         }
         let looped = transport.get("loop").filter(|lp| lp.get("on") == Some(&Value::Bool(true)));
@@ -1739,23 +1998,36 @@ impl<S: RefScheme + 'static> OwnListening<S> {
         let Some(file) = done.pointer("/files/0") else { return Ok(Err(format!("{} captured nothing", renderer.app()))) };
         let held = file.get("seconds").and_then(Value::as_f64);
         let partial = file.get("partial") == Some(&Value::Bool(true));
-        let mut notes: Vec<String> =
-            done.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        if partial {
+        let mut notes = notes_of(&done);
+        // (the bridge says itself when it stopped early)
+        if partial && notes.is_empty() {
             notes.push(format!(
                 "{} stopped before the end: {} s were heard.",
                 renderer.app(),
                 held.map_or("a few".into(), |s| format!("{:.1}", s))
             ));
         }
-        Ok(Ok(vec![HeardTake {
-            label: "The whole mix".into(),
-            file: text(file, "file").unwrap_or_default(),
-            start: 0.,
-            seconds: held,
-            live: true,
-            note: (!notes.is_empty()).then(|| notes.join(" ")),
-        }]))
+        let path = text(file, "file").unwrap_or_default();
+        let rate = file.get("sampleRate").and_then(Value::as_f64).filter(|rate| *rate > 0.).unwrap_or(48_000.);
+        let stretches = stretches(done.get("marks"), rate, held, renderer.beats_per_bar.get());
+        let note = (!notes.is_empty()).then(|| notes.join(" "));
+        if stretches.len() <= 1 {
+            let (start, seconds) = stretches.first().map_or((0., held), |(start, seconds, _)| (*start, Some(*seconds)));
+            return Ok(Ok(vec![HeardTake { label: "The whole mix".into(), file: path, start, seconds, live: true, note }]));
+        }
+        // The playhead jumped (a loop, a seek): each stretch it played straight through is a take of its own.
+        Ok(Ok(stretches
+            .into_iter()
+            .enumerate()
+            .map(|(at, (start, seconds, label))| HeardTake {
+                label,
+                file: path.clone(),
+                start,
+                seconds: Some(seconds),
+                live: true,
+                note: if at == 0 { note.clone() } else { None },
+            })
+            .collect()))
     }
 }
 

@@ -63,6 +63,12 @@ struct State {
     next_copy: u32,
     /// Refs whose audio is MIDI (REAPER) or that have no sample data (Renoise).
     silent_refs: Vec<String>,
+    /// What the next job notes, whatever its end.
+    next_notes: Vec<String>,
+    /// The marks the next capture answers (where the playhead was at its first frame and at each jump).
+    capture_marks: Option<Value>,
+    /// What part of its source an item plays (REAPER): offset and length in the file, its play rate, reversed.
+    item_part: Option<(f64, f64, f64, bool)>,
 }
 
 /// The listening side of a simulated bridge. Clones share it.
@@ -129,8 +135,27 @@ impl SimListening {
                 audition_works: true,
                 next_copy: 0,
                 silent_refs: vec![],
+                next_notes: vec![],
+                capture_marks: None,
+                item_part: None,
             })),
         }
+    }
+
+    /// What the next job notes (its answer's `notes`), whatever its end.
+    pub fn note_next(&self, notes: &[&str]) {
+        self.state.lock().unwrap().next_notes = notes.iter().map(|note| note.to_string()).collect();
+    }
+
+    /// The marks the next capture answers: `[frame, seconds, beats, playing]` at its first frame and at each jump.
+    pub fn set_capture_marks(&self, marks: Value) {
+        self.state.lock().unwrap().capture_marks = Some(marks);
+    }
+
+    /// What part of its 4-second source an item plays from now on (REAPER): offset and length in the file, its play
+    /// rate, and whether reversed.
+    pub fn set_item_part(&self, offset: f64, length: f64, rate: f64, reversed: bool) {
+        self.state.lock().unwrap().item_part = Some((offset, length, rate, reversed));
     }
 
     /// Renders land here (a test points it at `<home>/bridges/<daw>/listening`, as the bridge's folder is).
@@ -317,6 +342,13 @@ impl SimListening {
                 continue;
             }
             let reference = source["ref"].as_str().unwrap_or_default();
+            // (track refs are read in an epoch: the extension and the tool both want it)
+            if params.get("epoch").and_then(Value::as_str).is_none() {
+                return Err(bad("epoch: the epoch the track refs were read in"));
+            }
+            if state.daw == Daw::Renoise && source["stage"] == "items" {
+                return Err(bad("Renoise's tracks hold no audio of their own"));
+            }
             if !known(reference) && !state.scratch.values().flatten().any(|(copy, ..)| copy == reference) {
                 return Err(("gone".into(), format!("{reference} isn't in the project any more: read again")));
             }
@@ -354,7 +386,8 @@ impl SimListening {
             "epoch": epoch,
         });
         let error = state.fail_next.take();
-        state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes: vec![] });
+        let notes = std::mem::take(&mut state.next_notes);
+        state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes });
         Ok(answer)
     }
 
@@ -369,9 +402,10 @@ impl SimListening {
         let seconds = params["seconds"].as_f64().unwrap_or(8.);
         let path = state.folder.join(format!("{id}-master.wav"));
         let answer = json!({"jobId": id, "state": "running", "seconds": seconds, "files": [{"id": "master", "file": path}]});
-        let marks = json!([[0, 10.0, 20.0, true]]);
+        let marks = state.capture_marks.take().unwrap_or_else(|| json!([[0, 10.0, 20.0, true]]));
         let files = vec![("master".to_string(), path, 0., seconds, DEFAULT_LEVEL, "master")];
-        state.jobs.insert(id, Job { kind: "capture", state: "running", polls: 0, files, marks: Some(marks), error: None, notes: vec![] });
+        let notes = std::mem::take(&mut state.next_notes);
+        state.jobs.insert(id, Job { kind: "capture", state: "running", polls: 0, files, marks: Some(marks), error: None, notes });
         Ok(answer)
     }
 
@@ -394,8 +428,12 @@ impl SimListening {
                         }
                     }
                     ended = true;
-                    failed =
-                        Some(json!({"jobId": id, "kind": job.kind, "state": state_word, "progress": 0, "error": message, "code": code}));
+                    let mut answer =
+                        json!({"jobId": id, "kind": job.kind, "state": state_word, "progress": 0, "error": message, "code": code});
+                    if !job.notes.is_empty() {
+                        answer["notes"] = json!(job.notes);
+                    }
+                    failed = Some(answer);
                 } else if job.polls > steps {
                     for (n, (_, path, _, seconds, level, _)) in job.files.iter().enumerate() {
                         if let Err(error) = write_noise(path, *seconds, *level, n as u32 + 7) {
@@ -472,10 +510,27 @@ impl SimListening {
         let from = params["fromSeconds"].as_f64().unwrap_or(0.);
         let seconds = params["seconds"].as_f64().unwrap_or(f64::INFINITY).min((length - from).max(0.));
         let id = params["previewId"].as_str().unwrap_or_default().to_string();
+        if state.daw == Daw::Renoise {
+            // Renoise plays the song itself over the part a render of its own was made from, never over the producer's
+            // playing (as the tool does).
+            if state.playing_now {
+                return Err(("failed".into(), "Renoise is playing: Kumi doesn't move your playhead".into()));
+            }
+            if !state.jobs.values().flat_map(|job| &job.files).any(|(_, path, ..)| path.as_path() == Path::new(file)) {
+                return Err(("failed".into(), "Renoise plays only what it rendered for Kumi".into()));
+            }
+        }
         state.previews.push(params.clone());
         state.playing = Some(id.clone());
-        let via = if state.daw == Daw::Reaper { "preview" } else { "instrument" };
-        Ok(json!({"previewId": id, "playing": true, "seconds": seconds, "via": via}))
+        let mut answer = json!({"previewId": id, "playing": true, "seconds": seconds});
+        match state.daw {
+            Daw::Reaper => answer["via"] = "preview".into(),
+            Daw::Renoise => {
+                answer["via"] = "song".into();
+                answer["note"] = "Renoise plays the song over that part".into();
+            }
+        }
+        Ok(answer)
     }
 
     fn audio_file(state: &mut State, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Answer {
@@ -493,8 +548,21 @@ impl SimListening {
         match (state.daw, kind) {
             (Daw::Reaper, "item" | "take") => {
                 let path = state.folder.join("media").join(format!("{}.wav", kind_file(&reference)));
-                write_noise(&path, 2., DEFAULT_LEVEL, 3).map_err(|error| ("failed".to_string(), error.to_string()))?;
-                Ok(json!({"file": path, "seconds": 2.0, "channels": 2, "sampleRate": RATE, "kind": "source", "name": "loop.wav"}))
+                let seconds = if state.item_part.is_some() { 4. } else { 2. };
+                write_noise(&path, seconds, DEFAULT_LEVEL, 3).map_err(|error| ("failed".to_string(), error.to_string()))?;
+                let mut answer =
+                    json!({"file": path, "seconds": seconds, "channels": 2, "sampleRate": RATE, "kind": "source", "name": "loop.wav"});
+                if let Some((offset, length, rate, reversed)) = state.item_part {
+                    answer["offset"] = offset.into();
+                    answer["length"] = length.into();
+                    if (rate - 1.).abs() > 1e-9 {
+                        answer["playRate"] = rate.into();
+                    }
+                    if reversed {
+                        answer["reversed"] = true.into();
+                    }
+                }
+                Ok(answer)
             }
             (Daw::Renoise, "sample") => {
                 let id = params["jobId"].as_str().unwrap_or("j0");
@@ -514,9 +582,13 @@ impl SimListening {
 
     fn scratch(state: &mut State, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Answer {
         let id = params["scratchId"].as_str().unwrap_or_default().to_string();
-        let steps = if state.daw == Daw::Renoise { 1 } else { 0 };
+        let daw = state.daw;
+        let steps = if daw == Daw::Renoise { 1 } else { 0 };
         match params["action"].as_str() {
             Some("make") => {
+                if params.get("epoch").and_then(Value::as_str).is_none() {
+                    return Err(bad("epoch: the epoch the track ref was read in"));
+                }
                 let source = params["ref"].as_str().unwrap_or_default().to_string();
                 if !known(&source) {
                     return Err(("gone".into(), format!("{source} isn't in the project any more: read again")));
@@ -545,6 +617,11 @@ impl SimListening {
                 let Some(copies) = state.scratch.get_mut(&id) else { return Err(bad(format!("no scratch copies {id}"))) };
                 let mut set = 0;
                 for value in params["values"].as_array().into_iter().flatten() {
+                    // REAPER sets a normalized value, Renoise the parameter's own (as each bridge takes it)
+                    let (wanted, other) = if daw == Daw::Reaper { ("normalized", "value") } else { ("value", "normalized") };
+                    if value.get(wanted).is_none() || value.get(other).is_some() {
+                        return Err(bad(format!("each value: {wanted}")));
+                    }
                     let reference = value["ref"].as_str().unwrap_or_default();
                     let copy = copies
                         .iter_mut()
@@ -555,10 +632,12 @@ impl SimListening {
                 }
                 Ok(json!({"set": set, "undo": {"steps": steps}}))
             }
-            Some("drop") => {
-                let dropped = state.scratch.remove(&id).map_or(0, |copies| copies.len());
-                Ok(json!({"dropped": dropped, "left": 0, "undo": {"steps": steps}}))
-            }
+            Some("drop") => match state.scratch.remove(&id) {
+                Some(copies) => Ok(json!({"dropped": copies.len(), "left": 0, "undo": {"steps": steps}})),
+                // (REAPER answers a drop it doesn't know as nothing dropped; Renoise refuses it)
+                None if daw == Daw::Reaper => Ok(json!({"dropped": 0, "left": 0, "undo": {"steps": 0}})),
+                None => Err(bad(format!("no scratch copies {id}"))),
+            },
             _ => Err(bad("action is make, set or drop")),
         }
     }
