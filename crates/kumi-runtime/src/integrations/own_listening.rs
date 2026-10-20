@@ -1257,9 +1257,13 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
     async fn turn_gain(&self, gain: f64, track: Option<&str>, signal: Signal) -> Result<(String, bool), String> {
         let (scope, _) = self.scope(track, &signal).await.map_err(|error| error.to_string())??;
         let mut devices = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
+        // A gain device Kumi adds isn't in what was heard: its knob is set to the turn itself, whatever it starts at (REAPER
+        // adds a JS Volume Adjustment at +6 dB, measured).
+        let mut fresh = false;
         let stage = match self.gain_stage(&devices) {
             Some(stage) => stage,
             None => {
+                fresh = true;
                 let (add, name) = self.table.gain_device;
                 let mut input = json!({"ref": scope});
                 input[self.table.add_field] = add.into();
@@ -1273,7 +1277,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         };
         let (device, knob, inverted, limited) = stage;
         let turn = if inverted { -gain } else { gain };
-        let (_, wanted) = self.turn_knob(&device, knob, turn, &signal).await?;
+        let (_, wanted) = self.turn_knob(&device, knob, turn, fresh, &signal).await?;
         // Said by the level it turns: "Volume Adjustment gain", "ReaLimit level (its Threshold)".
         let named = plugin_name(&device.name);
         let mut label = if inverted { format!("{named} level (its {knob})") } else { format!("{named} gain") };
@@ -1285,23 +1289,24 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             let (add, name) = self.table.gain_device;
             let chain = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
             let found = chain.iter().rev().find(|row| row.on && self.table.gains.iter().any(|(word, _)| row.name.contains(word))).cloned();
-            let gainer = match found {
-                Some(found) => found,
+            let (gainer, fresh) = match found {
+                Some(found) => (found, false),
                 None => {
                     let mut input = json!({"ref": scope});
                     input[self.table.add_field] = add.into();
                     self.change(self.table.add_tool, input, signal.clone()).await?;
                     let chain = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
-                    chain
+                    let added = chain
                         .iter()
                         .rev()
                         .find(|row| row.name.contains(name))
                         .cloned()
-                        .ok_or_else(|| format!("the {name} Kumi added didn't appear"))?
+                        .ok_or_else(|| format!("the {name} Kumi added didn't appear"))?;
+                    (added, true)
                 }
             };
             let gain_knob = self.table.gains.iter().find(|(word, _)| gainer.name.contains(word)).map_or("Gain", |(_, knob)| *knob);
-            self.turn_knob(&gainer, gain_knob, left, &signal).await?;
+            self.turn_knob(&gainer, gain_knob, left, fresh, &signal).await?;
             label = format!("{label} and {} gain", plugin_name(&gainer.name));
         }
         Ok((label, limited))
@@ -1783,7 +1788,8 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// Turns a device's knob by `turn` dB, by its text (a change of the DAW's): the knob's ref and the dB it was asked for.
-    async fn turn_knob(&self, device: &DeviceRow, knob: &str, turn: f64, signal: &Signal) -> Result<(String, f64), String> {
+    /// A device just added (`fresh`) is set to `turn` dB itself: what was heard didn't have it.
+    async fn turn_knob(&self, device: &DeviceRow, knob: &str, turn: f64, fresh: bool, signal: &Signal) -> Result<(String, f64), String> {
         let rows = self.parameters(&device.reference, false, signal).await.map_err(|error| error.to_string())??;
         let row = rows
             .iter()
@@ -1792,7 +1798,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let reference = text(row, "ref").ok_or("a parameter without a ref")?;
         let shown = text(row, "formatted").or_else(|| text(row, "valueString")).unwrap_or_default();
         let now = shown_db(knob, &shown).ok_or_else(|| format!("{}'s {knob} doesn't show dB", device.name))?;
-        let wanted = if now.is_finite() { now + turn } else { turn };
+        let wanted = if now.is_finite() && !fresh { now + turn } else { turn };
         let mut input = json!({"ref": reference});
         input[self.table.text_field] = format!("{:.1} dB", (wanted * 10.).round() / 10.).into();
         self.change(self.table.param_tool, input, signal.clone()).await?;
@@ -2078,7 +2084,14 @@ impl<S: RefScheme + 'static> OwnListening<S> {
         } else {
             request.tracks.iter().map(|track| AuditionCandidate { track: track.clone(), mix: None, label: None, clip: None }).collect()
         };
-        let heard: Vec<String> = candidates.iter().map(|c| if c.mix == Some(true) { "the mix".into() } else { c.track.clone() }).collect();
+        // Said by the tracks' names, whatever named them (a ref, mostly).
+        let mut heard: Vec<String> = vec![];
+        for candidate in &candidates {
+            heard.push(match candidate.mix {
+                Some(true) => "the mix".into(),
+                _ => renderer.resolve(&candidate.track, &signal).await?.map_or_else(|_| candidate.track.clone(), |(_, name)| name),
+            });
+        }
         renderer.tell_app(&format!("Rendering {} · listening to {}", renderer.bars(window), heard.join(", ")));
         let pass = renderer.hear_candidates(&candidates, window, false, &signal).await;
         renderer.tell_app("Listened");

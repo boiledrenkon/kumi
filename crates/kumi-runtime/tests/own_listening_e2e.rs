@@ -136,6 +136,15 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             assert_eq!(played[0]["fromSeconds"], 2.0, "from where the part starts, past the pre-roll");
             assert!(reaper.first_heard(since).is_some_and(|at| at >= since), "the producer heard Kumi's listen");
             said.push(audition.text);
+            // A round REAPER couldn't play out loud is said to be rendered, not heard.
+            script.listening().set_audition(false);
+            let unheard = tool(&observed, "audition")
+                .execute(object(json!({"candidates": [{"track": track(2)}, {"track": track(3)}], "from_beat": 16, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(unheard.text.contains("The producer didn't hear this round: REAPER rendered it without playing it out loud."), "{}", unheard.text);
+            script.listening().set_audition(true);
+            said.push(unheard.text);
 
             // A judged run's first listen: the mix, rendered and played out loud.
             let judge = tool(&observed, "judge")
@@ -159,6 +168,11 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             let tracks = reaper.hear(&HearRequest { tracks: vec![track(2)], ..Default::default() }, Signal::new()).await.unwrap();
             assert!(tracks.as_ref().is_err_and(|why| why.contains("give from_beat and beats")), "{tracks:?}");
             script.set_playing(false);
+            // A track heard on its own is said by its name, not its ref.
+            let one = reaper.hear(&HearRequest { tracks: vec![track(2)], from_beat: Some(0.), beats: Some(4.), ..Default::default() }, Signal::new()).await;
+            assert!(one.as_ref().is_ok_and(|heard| heard.is_ok()), "{one:?}");
+            let name = context["tracks"][2]["name"].as_str().unwrap();
+            assert!(told.borrow().iter().any(|title| title.ends_with(&format!("· listening to {name}"))), "{:?}", told.borrow());
 
             // The render tool: a track's own items before its FX.
             let render = tool(&observed, "render").execute(object(json!({"track": track(1), "from_beat": 0, "beats": 4})), Signal::new()).await.unwrap();
@@ -319,6 +333,15 @@ async fn a_judged_round_brings_reapers_level_back_with_a_volume_fx_it_adds_on_th
             assert_eq!(script.fx_names("r:track:master"), ["JS: Volume Adjustment"], "the gain FX rebalancing added: {}", round.text);
             let adjusted = script.fx_param("r:track:master", "Volume Adjustment", "Adjustment (dB)").unwrap();
             assert!(adjusted > 0.5, "turned up toward −6 LUFS: {adjusted}");
+            // REAPER adds the gain FX at +6 dB: what it is set to is the turn the round says, not +6 dB more.
+            let said = Regex::new(r"Volume Adjustment gain \+?(-?[0-9.]+) dB").unwrap();
+            let turned: f64 = said.captures(&round.text).and_then(|found| found[1].parse().ok()).unwrap_or(f64::NAN);
+            assert!(
+                (-150. + 300. * adjusted - turned).abs() < 0.06,
+                "set to {} dB for a {turned} dB turn: {}",
+                -150. + 300. * adjusted,
+                round.text
+            );
             assert!(round.text.contains("\"kept\":true"), "{}", round.text);
             assert_ours(&[round.text]);
             reaper.close().await.unwrap();

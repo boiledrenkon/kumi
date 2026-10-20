@@ -88,10 +88,9 @@ impl Listening {
                 // The producer hears an audition as Kumi does: a DAW that captured every candidate without playing it
                 // says so, and the producer is told it wasn't played out loud.
                 if !rendered.sources.is_empty() && rendered.sources.iter().all(|source| !source.audible) {
-                    notes.push(format!(
-                        "The producer didn't hear this round: {} captured it without playing it out loud.",
-                        self.host.profile().words.app
-                    ));
+                    let profile = self.host.profile();
+                    let how = if profile.caps.renders_to_listen { "rendered" } else { "captured" };
+                    notes.push(format!("The producer didn't hear this round: {} {how} it without playing it out loud.", profile.words.app));
                 }
                 for (index, source) in rendered.sources.iter().enumerate() {
                     let at = takes.iter().position(|take| take.track == source.track || take.track == source.name).unwrap_or(index);

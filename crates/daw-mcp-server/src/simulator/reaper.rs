@@ -145,8 +145,9 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         "VST: ReaLimit (Cockos)" | "ReaLimit" => {
             vec![("Threshold".into(), 1., db(-60., 0., true)), ("Ceiling".into(), 0.99, db(-20., 0., true))]
         }
+        // (added at +6 dB, as REAPER 7.82 adds it: measured)
         "JS: Volume Adjustment" | "Volume Adjustment" => {
-            vec![("Adjustment (dB)".into(), 0.5, db(-150., 150., false)), ("Max Volume (dB)".into(), 0.5, db(-150., 150., false))]
+            vec![("Adjustment (dB)".into(), 0.52, db(-150., 150., false)), ("Max Volume (dB)".into(), 0.5, db(-150., 150., false))]
         }
         "VST: ReaEQ (Cockos)" | "ReaEQ" => {
             let mut params = vec![];
