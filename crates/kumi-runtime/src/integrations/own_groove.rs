@@ -212,15 +212,6 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         self.link.book.borrow().scheme.kind_of(long).map(str::to_owned)
     }
 
-    /// A ref as an edit's change names it, the same whatever epoch a positional one was read in.
-    fn same_part(&self, a: &str, b: &str) -> bool {
-        if self.link.book.borrow().scheme.positional() {
-            a.split_once(':').map(|(_, rest)| rest) == b.split_once(':').map(|(_, rest)| rest)
-        } else {
-            a == b
-        }
-    }
-
     /// A part's notes, each with the id Kumi moves it by: the ones the DAW plays (not muted, inside the item or pattern).
     pub(super) async fn part_notes(&self, clip: &str, signal: Signal) -> Result<ClipNotes, String> {
         if self.link.book.borrow().scheme.positional() {
@@ -359,7 +350,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         found.retain(|(_, cell, _)| !muted.contains(&cell.col));
         let tracks = self.track_rows(signal).await.map_err(error)??;
         let track_name =
-            tracks.iter().find(|row| self.same_part(&row.reference, &track)).map_or(format!("track {t}"), |row| format!("“{}”", row.name));
+            tracks.iter().find(|row| self.same_place(&row.reference, &track)).map_or(format!("track {t}"), |row| format!("“{}”", row.name));
         let name = format!("{track_name} in {label}");
         if found.is_empty() {
             return Err(format!("{name} has no notes to measure."));
@@ -465,7 +456,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             entries.get(id).is_some_and(|entry| {
                 let entry = entry.borrow();
                 let edit = entry.tool.as_deref().is_some_and(|tool| NOTE_TOOLS.contains(&tool));
-                edit && clip.zip(entry.clip.as_deref()).is_some_and(|(part, on)| self.same_part(part, on))
+                edit && clip.zip(entry.clip.as_deref()).is_some_and(|(part, on)| self.same_place(part, on))
             })
         })
     }
@@ -541,7 +532,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         };
         let vocab = &self.profile().vocab;
         track
-            .and_then(|track| tracks.iter().find(|row| self.same_part(&row.reference, &track)).map(|row| row.name.clone()))
+            .and_then(|track| tracks.iter().find(|row| self.same_place(&row.reference, &track)).map(|row| row.name.clone()))
             .ok_or_else(|| format!("{audio} isn't what plays the drum stem: give {}", vocab.stem_audio))
     }
 
@@ -565,7 +556,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             .filter(|(id, ..)| {
                 entries.get(id).is_some_and(|entry| matches!(entry.borrow().record.state, ChangeState::Applied | ChangeState::Kept))
             })
-            .map(|(_, reference, from, to)| (reference.clone(), from.clone(), to.clone()))
+            .map(|(_, reference, from, to)| (self.place_key(reference), from.clone(), to.clone()))
             .collect()
     }
 }

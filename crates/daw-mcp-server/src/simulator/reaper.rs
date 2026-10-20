@@ -97,6 +97,8 @@ pub struct SimFx {
     pub guid: String,
     pub name: String,
     pub params: Vec<(String, f64, ParamShows)>,
+    /// An input FX (the master's: its monitoring FX), which no render holds.
+    pub input: bool,
 }
 
 /// How an FX parameter of the sim's shows its normalized value.
@@ -164,7 +166,7 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         "ReaEQ" => "VST: ReaEQ (Cockos)",
         other => other,
     };
-    Some(SimFx { guid, name: name.into(), params })
+    Some(SimFx { guid, name: name.into(), params, input: false })
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -251,6 +253,16 @@ impl ReaperScript {
         let reference = format!("r:fx:{}", fx.guid);
         state.fx.entry(track.to_owned()).or_default().push(fx);
         state.changed += 1;
+        reference
+    }
+
+    /// An input FX the producer puts on a track (on the master, a monitoring FX): its ref.
+    pub fn add_input_fx(&self, track: &str, name: &str) -> String {
+        let reference = self.add_fx(track, name);
+        let mut state = self.state.lock().unwrap();
+        if let Some(fx) = state.fx.get_mut(track).and_then(|chain| chain.last_mut()) {
+            fx.input = true;
+        }
         reference
     }
 
@@ -850,7 +862,11 @@ impl ReaperScript {
 
     /// An FX row as the extension reads it.
     fn fx_row(fx: &SimFx, at: usize) -> Value {
-        json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": false, "paramCount": fx.params.len()})
+        let mut row = json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": false, "paramCount": fx.params.len()});
+        if fx.input {
+            row["input"] = true.into();
+        }
+        row
     }
 
     /// The project row: another project in the tab (`switch_tab`) is another identity.

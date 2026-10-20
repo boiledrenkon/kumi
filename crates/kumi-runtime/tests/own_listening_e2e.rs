@@ -532,7 +532,8 @@ async fn reaper_says_what_it_noted_when_a_render_fails_and_a_capture_is_split_wh
                 .unwrap();
             let why = failed.unwrap_err();
             assert!(why.contains("couldn't write the file (REAPER stopped playback to render)"), "{why}");
-            // While REAPER plays, the loop wrapped two seconds in: two takes, each a stretch it played straight through.
+            // While REAPER plays, the loop wrapped two seconds in: the stretches aren't parts heard at once, so the first longest
+            // one is measured, and the jump is said.
             script.set_playing(true);
             script.listening().set_capture_marks(json!([[0, 10.0, 20.0, true], [96000, 10.0, 20.0, true]]));
             let heard = reaper
@@ -541,7 +542,9 @@ async fn reaper_says_what_it_noted_when_a_render_fails_and_a_capture_is_split_wh
                 .unwrap()
                 .unwrap();
             let takes: Vec<(&str, f64, Option<f64>)> = heard.iter().map(|take| (take.label.as_str(), take.start, take.seconds)).collect();
-            assert_eq!(takes, [("The mix from bar 6", 0., Some(2.)), ("The mix from bar 6 (pass 2)", 2., Some(2.))]);
+            assert_eq!(takes, [("The mix from bar 6", 0., Some(2.))]);
+            let note = heard[0].note.clone().unwrap_or_default();
+            assert!(note.contains("REAPER jumped while Kumi listened (The mix from bar 6, The mix from bar 6 (pass 2))"), "{note}");
             // Copies an earlier session left, swept by the bridge: the producer is told which, once.
             simulator.emit("scratch_swept", json!({"count": 1, "names": ["Kumi · try ab12 1"]}));
             for _ in 0..50 {
@@ -614,6 +617,49 @@ async fn a_renoise_pattern_is_auditioned_over_its_first_slot_in_the_sequence() {
             assert_eq!(played.len(), 1, "the render, played with the song's own playback");
             assert_ours(&told.borrow());
             renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_and_monitoring_fx_are_no_gain_stage() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            // ReaLimit on the master at its 0 dB threshold (as far up as it goes), and a monitoring limiter after it.
+            script.add_fx("r:track:master", "ReaLimit");
+            script.add_input_fx("r:track:master", "ReaLimit");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let judge = tool(&observed, "judge");
+            let start = judge
+                .execute(object(json!({"goal": {"loudness": -6, "problems": false}, "from_beat": 0, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            // A change that takes the mix past the goal's loudness, but closer to it than before: kept, and brought back down.
+            script.listening().set_master_level(0.5);
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            let bass = context["tracks"][2]["ref"].as_str().unwrap().to_owned();
+            let change = tool(&observed, "track_volume").execute(object(json!({"ref": bass, "volumeDb": 3})), Signal::new()).await.unwrap();
+            assert!(!change.is_error, "{}", change.text);
+            let round = judge.execute(object(json!({"change": "Bass up 3 dB"})), Signal::new()).await.unwrap();
+            assert!(!round.is_error, "{}", round.text);
+            // The main chain's ReaLimit can't raise its threshold past 0 dB: a Volume Adjustment after it turns down; the
+            // monitoring ReaLimit is never touched.
+            assert_eq!(
+                script.fx_names("r:track:master"),
+                ["VST: ReaLimit (Cockos)", "VST: ReaLimit (Cockos)", "JS: Volume Adjustment"],
+                "{}",
+                round.text
+            );
+            let adjusted = script.fx_param("r:track:master", "Volume Adjustment", "Adjustment (dB)").unwrap();
+            assert!(adjusted < 0.5, "turned down: {adjusted} ({})", round.text);
+            reaper.close().await.unwrap();
             simulator.stop();
         })
         .await;

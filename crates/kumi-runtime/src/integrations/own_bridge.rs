@@ -876,6 +876,10 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         true
     }
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
+        // What Kumi plays out loud stops too (a preview isn't the DAW's playback).
+        if self.listening.renderer.flags().known {
+            let _ = self.call("audition_stop", json!({}), signal.clone()).await;
+        }
         Ok(self.changes.history.stop_everything(signal).await)
     }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {

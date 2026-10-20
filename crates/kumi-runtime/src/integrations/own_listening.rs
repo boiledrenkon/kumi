@@ -146,7 +146,7 @@ pub(super) const RENOISE: Table = Table {
     master_ref: None,
     analyzers: &["Analyzer", "Scope", "Spectrum"],
     gains: &[("Gainer", "Gain")],
-    linear: &["Gainer", "EQ", "Filter", "DC Offset", "Stereo Expander", "Mixer"],
+    linear: &["Gainer", "EQ", "Filter", "DC Offset", "Stereo Expander", "Mixer", "TrackVolPan", "Track Vol/Pan"],
     limiters: &[("Maximizer", "Boost", false)],
     gain_device: ("Audio/Effects/Native/Gainer", "Gainer"),
     safety_limiter: ("Audio/Effects/Native/Maximizer", "Maximizer"),
@@ -223,6 +223,8 @@ pub(super) struct DeviceRow {
     pub on: bool,
     pub plugin: bool,
     pub index: u64,
+    /// The track's own mixer (Renoise's first device: its fader and pan, not something on the track).
+    pub mixer: bool,
 }
 
 /// What a scratch set keeps to set and drop its copies.
@@ -253,6 +255,9 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     pub(super) parts: RefCell<HashMap<String, Part>>,
     /// Kumi's listens played out loud (from, to, in ms): what the producer heard of Kumi's work.
     pub(super) played: RefCell<std::collections::VecDeque<(i64, i64)>>,
+    /// The change that kept the last goal's best on a track of its own: taken back when a better one replaces it, by
+    /// this goal or a resumed one.
+    pub(super) goal_best: RefCell<Option<String>>,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -360,6 +365,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             tracks: RefCell::default(),
             parts: RefCell::default(),
             played: RefCell::default(),
+            goal_best: RefCell::default(),
         }
     }
 
@@ -458,6 +464,11 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Ok(Ok(rows))
     }
 
+    /// The tracks are read again next time (they just changed).
+    pub(super) fn forget_tracks(&self) {
+        self.tracks.borrow_mut().take();
+    }
+
     /// The project's tracks (read once a second at most).
     pub(super) async fn track_rows(&self, signal: &Signal) -> Result<Result<Vec<TrackRow>, String>, RuntimeError> {
         if let Some((at, rows)) = self.tracks.borrow().as_ref() {
@@ -487,6 +498,24 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             .collect();
         *self.tracks.borrow_mut() = Some((Instant::now(), rows.clone()));
         Ok(Ok(rows))
+    }
+
+    /// Whether two refs name the same thing: Renoise's positional refs by their place, whatever epoch each was read in (a
+    /// device added moves the epoch and keeps the tracks); REAPER's as they are.
+    pub(super) fn same_place(&self, a: &str, b: &str) -> bool {
+        if self.link.book.borrow().scheme.positional() {
+            a.split_once(':').map(|(_, rest)| rest) == b.split_once(':').map(|(_, rest)| rest)
+        } else {
+            a == b
+        }
+    }
+
+    /// A ref as a run follows it (a rename's): Renoise's without its epoch.
+    pub(super) fn place_key(&self, long: &str) -> String {
+        match long.split_once(':') {
+            Some((_, rest)) if self.link.book.borrow().scheme.positional() => rest.to_owned(),
+            _ => long.to_owned(),
+        }
     }
 
     /// Keeps a scratch copy by its name, its ref registered in the book so it follows what moves the tracks (Renoise's
@@ -550,7 +579,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         };
         let place = self.profile().words.place;
         if self.link.book.borrow().scheme.kind_of(&long) == Some("track") {
-            return Ok(match tracks.iter().find(|track| track.reference == long) {
+            return Ok(match tracks.iter().find(|track| self.same_place(&track.reference, &long)) {
                 Some(track) => Ok((long, track.name.clone())),
                 None => Err(format!("{named} isn't a track in the {place} now: read again for its ref")),
             });
@@ -592,8 +621,12 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Ok(Ok(rows
             .iter()
             .enumerate()
+            // (REAPER's input FX, and the master's monitoring FX, are in no render)
+            .filter(|(_, row)| row.get("input") != Some(&Value::Bool(true)))
             .filter_map(|(at, row)| {
                 Some(DeviceRow {
+                    mixer: text(row, "path").is_some_and(|path| path.ends_with("TrackVolPan"))
+                        || matches!(text(row, "name").as_deref(), Some("TrackVolPan" | "Track Vol/Pan" | "Mixer")),
                     reference: text(row, "ref")?,
                     name: text(row, "name").unwrap_or_default(),
                     // REAPER says enabled and offline; Renoise says active.
@@ -641,7 +674,11 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             };
             let status = match asked {
                 Ok(Ok(status)) => status,
-                Ok(Err(refused)) => return Ok(Err(refused.why)),
+                // (the job may run on: it's stopped, so the next listen doesn't find the DAW busy with it)
+                Ok(Err(refused)) => {
+                    self.cancel_job(&id).await;
+                    return Ok(Err(refused.why));
+                }
                 Err(_) if signal.is_cancelled() => {
                     self.cancel_job(&id).await;
                     return Err(RuntimeError::Aborted);
@@ -704,8 +741,34 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             Ok(done) => done,
             Err(why) => return Ok(Err(why)),
         };
-        let notes: Vec<String> =
-            done.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        let mut notes = notes_of(&done);
+        // A render that played the song's tempo commands into its transport (Renoise's does): the tempo goes back to what
+        // the producer had, quietly, as the bridge puts their mutes back.
+        if let (Some(bpm), Some(lpb)) =
+            (done.pointer("/tempo/before/bpm").and_then(Value::as_f64), done.pointer("/tempo/before/lpb").and_then(Value::as_u64))
+        {
+            let mut back = vec![];
+            if done.pointer("/tempo/bpm").and_then(Value::as_f64).is_some_and(|now| (now - bpm).abs() > 1e-6) {
+                back.push(
+                    self.plan.history.quietly(None, self.change("song_bpm", json!({"bpm": bpm}), self.cleanup_signal())).await.is_ok(),
+                );
+            }
+            if done.pointer("/tempo/lpb").and_then(Value::as_u64).is_some_and(|now| now != lpb) {
+                back.push(
+                    self.plan.history.quietly(None, self.change("song_lpb", json!({"lpb": lpb}), self.cleanup_signal())).await.is_ok(),
+                );
+            }
+            if !back.is_empty() && back.iter().all(|done| *done) {
+                notes.push(format!(
+                    "Kumi set the tempo back to {} BPM, LPB {lpb}.",
+                    kumi_common::js::number::to_string((bpm * 100.).round() / 100.)
+                ));
+            }
+        }
+        // (told as well: not every tool's reply carries a render's notes)
+        for note in &notes {
+            self.tell_app(note);
+        }
         let mut files = IndexMap::new();
         for file in done.get("files").and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(path)) = (text(file, "id"), text(file, "file")) else { continue };
@@ -719,9 +782,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     /// Plays a render out loud where the producer listens (its part, at most `PLAYED_SECONDS`), without waiting: whether
     /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't.
     pub(super) async fn play(&self, render: &Render) -> (bool, Option<String>) {
-        if !self.flags.get().audition {
-            return (false, None);
-        }
+        // (tried whatever the flags said last: REAPER opens its audio device for a preview itself, and says why not)
         let seconds = render.seconds.unwrap_or(PLAYED_SECONDS).min(PLAYED_SECONDS);
         let args = json!({"file": render.file, "fromSeconds": render.start, "seconds": seconds});
         match self.link.call("audition", args, self.cleanup_signal()).await {
@@ -801,7 +862,10 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                     notes.extend(said);
                 } else {
                     let why = said.map(|why| format!(" ({})", why.trim_end_matches('.'))).unwrap_or_default();
-                    notes.push(format!("{} couldn't play it out loud{why}, so the producer didn't hear it.", self.app()));
+                    let unheard = format!("{} couldn't play it out loud{why}, so the producer didn't hear it.", self.app());
+                    // (told as well: not every tool's reply carries a pass's notes)
+                    self.tell_app(&unheard);
+                    notes.push(unheard);
                 }
                 played
             }
@@ -879,18 +943,20 @@ fn shown_db(knob: &str, shown: &str) -> Option<f64> {
 fn grid_from_units(value: f64, shown: &str, min: f64, max: f64) -> Option<Vec<(f64, String)>> {
     let reading = parse_display(shown)?;
     let near = (reading.value - value).abs() <= ((max - min).abs() * 1e-3).max(1e-6);
-    if !near || !(max > min) || reading.unit.is_empty() {
+    if !near || !(max > min) {
         return None;
     }
+    // (a bare number is the value itself: an EQ's bandwidth "2.00")
     let unit = match reading.unit.as_str() {
-        "db" => "dB",
-        "hz" => "Hz",
-        "ms" => "ms",
-        "s" | "sec" => "s",
-        "%" => "%",
+        "" => "",
+        "db" => " dB",
+        "hz" => " Hz",
+        "ms" => " ms",
+        "s" | "sec" => " s",
+        "%" => " %",
         _ => return None,
     };
-    Some((0..=8).map(|step| min + (max - min) * step as f64 / 8.).map(|at| (at, format!("{at:.4} {unit}"))).collect())
+    Some((0..=8).map(|step| min + (max - min) * step as f64 / 8.).map(|at| (at, format!("{at:.4}{unit}"))).collect())
 }
 
 /// A listen's pass, from what it captured.
@@ -947,6 +1013,10 @@ pub(super) fn eq_bands(knobs: &[DeviceKnob], shelves_at_ends: bool) -> Vec<EqBan
             let (frequency, gain) = (knob("freq")?, knob("gain")?);
             let width = knob("width");
             let lower = label.to_lowercase();
+            // (a pass, notch or band-pass band cuts, it doesn't boost or cut around a frequency: no fit goes there)
+            if lower.contains("pass") || lower.contains("notch") {
+                return None;
+            }
             let shape = if lower.contains("low shelf") || (shelves_at_ends && at == 0) {
                 Shape::LowShelf
             } else if lower.contains("high shelf") || (shelves_at_ends && at + 1 == count) {
@@ -1009,7 +1079,8 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         self.resolve(named, &signal).await.ok()?.ok().map(|(_, name)| name)
     }
     async fn track_ref(&self, named: &str, signal: Signal) -> Option<String> {
-        self.resolve(named, &signal).await.ok()?.ok().map(|(reference, _)| reference)
+        // (only a run's renames follow it: by its place)
+        self.resolve(named, &signal).await.ok()?.ok().map(|(reference, _)| self.place_key(&reference))
     }
     async fn clip_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
         let named = named.trim();
@@ -1078,7 +1149,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             }
             // With tracks rendered through the master, what acts on one track as on the mix is in both already.
             if self.table.post_fader {
-                if !self.table.linear.iter().any(|word| device.name.contains(word)) {
+                if !device.mixer && !self.table.linear.iter().any(|word| device.name.contains(word)) {
                     state.unfair.push(device.name.clone());
                 }
                 continue;
@@ -1118,7 +1189,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         }
         let (reference, _) = self.resolve(track, &signal).await.ok()?.ok()?;
         let tracks = self.track_rows(&signal).await.ok()?.ok()?;
-        let row = tracks.iter().find(|row| row.reference == reference)?;
+        let row = tracks.iter().find(|row| self.same_place(&row.reference, &reference))?;
         Some(row.volume_db.unwrap_or(-120.).max(-120.))
     }
 
@@ -1201,22 +1272,38 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             }
         };
         let (device, knob, inverted, limited) = stage;
-        let rows = self.parameters(&device.reference, false, &signal).await.map_err(|error| error.to_string())??;
-        let row = rows
-            .iter()
-            .find(|row| text(row, "name").as_deref() == Some(knob))
-            .ok_or_else(|| format!("Kumi couldn't find {}'s {knob}", device.name))?;
-        let reference = text(row, "ref").ok_or("a parameter without a ref")?;
-        let shown = text(row, "formatted").or_else(|| text(row, "valueString")).unwrap_or_default();
-        let now = shown_db(knob, &shown).ok_or_else(|| format!("{}'s {knob} doesn't show dB", device.name))?;
         let turn = if inverted { -gain } else { gain };
-        let wanted = if now.is_finite() { now + turn } else { turn };
-        let mut input = json!({"ref": reference});
-        input[self.table.text_field] = format!("{:.1} dB", (wanted * 10.).round() / 10.).into();
-        self.change(self.table.param_tool, input, signal).await?;
+        let (_, wanted) = self.turn_knob(&device, knob, turn, &signal).await?;
         // Said by the level it turns: "Volume Adjustment gain", "ReaLimit level (its Threshold)".
         let named = plugin_name(&device.name);
-        let label = if inverted { format!("{named} level (its {knob})") } else { format!("{named} gain") };
+        let mut label = if inverted { format!("{named} level (its {knob})") } else { format!("{named} gain") };
+        // What a limiter's knob couldn't take (a Maximizer's Boost stops at 0 dB, ReaLimit's Threshold at 0 dB) goes on a
+        // gain device after it.
+        let got = self.knob_db(&device, knob, &signal).await.ok().filter(|_| limited);
+        let left = got.map_or(0., |got| if inverted { got - wanted } else { wanted - got });
+        if left.abs() >= 0.2 {
+            let (add, name) = self.table.gain_device;
+            let chain = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
+            let found = chain.iter().rev().find(|row| row.on && self.table.gains.iter().any(|(word, _)| row.name.contains(word))).cloned();
+            let gainer = match found {
+                Some(found) => found,
+                None => {
+                    let mut input = json!({"ref": scope});
+                    input[self.table.add_field] = add.into();
+                    self.change(self.table.add_tool, input, signal.clone()).await?;
+                    let chain = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
+                    chain
+                        .iter()
+                        .rev()
+                        .find(|row| row.name.contains(name))
+                        .cloned()
+                        .ok_or_else(|| format!("the {name} Kumi added didn't appear"))?
+                }
+            };
+            let gain_knob = self.table.gains.iter().find(|(word, _)| gainer.name.contains(word)).map_or("Gain", |(_, knob)| *knob);
+            self.turn_knob(&gainer, gain_knob, left, &signal).await?;
+            label = format!("{label} and {} gain", plugin_name(&gainer.name));
+        }
         Ok((label, limited))
     }
     async fn limited(&self, track: Option<&str>, signal: Signal) -> bool {
@@ -1381,7 +1468,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
     async fn on_track(&self, device: &str, track: &str, signal: Signal) -> bool {
         let long = self.link.book.borrow().lengthen(&json!({"ref": device}))["ref"].as_str().unwrap_or(device).to_owned();
         let Ok(Ok((scope, _))) = self.resolve(track, &signal).await else { return false };
-        matches!(self.devices(&scope, &signal).await, Ok(Ok(devices)) if devices.iter().any(|row| row.reference == long))
+        matches!(self.devices(&scope, &signal).await, Ok(Ok(devices)) if devices.iter().any(|row| self.same_place(&row.reference, &long)))
     }
     async fn open_copies(
         &self,
@@ -1399,7 +1486,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let Some((track, chain)) = self.track_of_device(&long, &signal).await? else {
             return Ok(Err("Kumi couldn't find the device's track; read it again.".into()));
         };
-        let Some(place) = chain.iter().find(|row| row.reference == long).map(|row| row.index) else {
+        let Some(place) = chain.iter().find(|row| self.same_place(&row.reference, &long)).map(|row| row.index) else {
             return Ok(Err("Kumi couldn't find the device on its track; read it again.".into()));
         };
         let knobs = match self.parameters(&long, false, &signal).await? {
@@ -1412,11 +1499,16 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             Err(why) => return Ok(Err(why)),
         };
         let args = json!({"action": "make", "ref": track, "count": count, "label": label, "range": {"fromBeat": window.from, "beats": window.beats}});
-        let made = match self.ask("scratch", args, signal).await? {
+        // Asked in the clean-up's own time: copies made while the producer stopped are dropped, never left behind.
+        let made = match self.ask("scratch", args, self.cleanup_signal()).await? {
             Ok(made) => made,
             Err(refused) => return Ok(Err(refused.why)),
         };
         let Some(id) = text(&made, "scratchId") else { return Ok(Err(format!("{} made no scratch copies", self.app()))) };
+        if signal.is_cancelled() {
+            self.drop_make(&id, made.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0)).await;
+            return Err(RuntimeError::Aborted);
+        }
         let mut names = vec![];
         for copy in made.get("copies").and_then(Value::as_array).into_iter().flatten() {
             if let (Some(reference), Some(name)) = (text(copy, "ref"), text(copy, "name")) {
@@ -1469,7 +1561,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let Some((_, chain)) = self.track_of_device(&long, &signal).await? else {
             return Err(RuntimeError::Observation("Kumi couldn't find the device's track; read it again.".into()));
         };
-        let at = chain.iter().position(|row| row.reference == long).unwrap_or(0);
+        let at = chain.iter().position(|row| self.same_place(&row.reference, &long)).unwrap_or(0);
         Ok((chain.iter().map(seen).collect(), at))
     }
     async fn listed_names(&self, device: &str, signal: Signal) -> Result<Option<Vec<String>>, RuntimeError> {
@@ -1656,7 +1748,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let tracks = self.track_rows(&signal).await.ok().and_then(Result::ok).unwrap_or_default();
         let silent = |row: &Value| {
             let reference = text(row, "ref").unwrap_or_default();
-            let track = tracks.iter().find(|track| track.reference == reference);
+            let track = tracks.iter().find(|track| self.same_place(&track.reference, &reference));
             row.get("mute") == Some(&Value::Bool(true))
                 || track.is_some_and(|track| track.muted || matches!(track.kind.as_str(), "master" | "send"))
                 || text(row, "name").is_some_and(|name| self.copies.borrow().contains_key(&name))
@@ -1679,6 +1771,34 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
 }
 
 impl<S: RefScheme + 'static> OwnRenderer<S> {
+    /// What a device's knob shows now, in dB.
+    async fn knob_db(&self, device: &DeviceRow, knob: &str, signal: &Signal) -> Result<f64, String> {
+        let rows = self.parameters(&device.reference, false, signal).await.map_err(|error| error.to_string())??;
+        let row = rows
+            .iter()
+            .find(|row| text(row, "name").as_deref() == Some(knob))
+            .ok_or_else(|| format!("Kumi couldn't find {}'s {knob}", device.name))?;
+        let shown = text(row, "formatted").or_else(|| text(row, "valueString")).unwrap_or_default();
+        shown_db(knob, &shown).ok_or_else(|| format!("{}'s {knob} doesn't show dB", device.name))
+    }
+
+    /// Turns a device's knob by `turn` dB, by its text (a change of the DAW's): the knob's ref and the dB it was asked for.
+    async fn turn_knob(&self, device: &DeviceRow, knob: &str, turn: f64, signal: &Signal) -> Result<(String, f64), String> {
+        let rows = self.parameters(&device.reference, false, signal).await.map_err(|error| error.to_string())??;
+        let row = rows
+            .iter()
+            .find(|row| text(row, "name").as_deref() == Some(knob))
+            .ok_or_else(|| format!("Kumi couldn't find {}'s {knob}", device.name))?;
+        let reference = text(row, "ref").ok_or("a parameter without a ref")?;
+        let shown = text(row, "formatted").or_else(|| text(row, "valueString")).unwrap_or_default();
+        let now = shown_db(knob, &shown).ok_or_else(|| format!("{}'s {knob} doesn't show dB", device.name))?;
+        let wanted = if now.is_finite() { now + turn } else { turn };
+        let mut input = json!({"ref": reference});
+        input[self.table.text_field] = format!("{:.1} dB", (wanted * 10.).round() / 10.).into();
+        self.change(self.table.param_tool, input, signal.clone()).await?;
+        Ok((reference, wanted))
+    }
+
     /// What a file holds from `offset` for `length` seconds (to its end without one), reversed if asked, written as a WAV
     /// in Kumi's listening folder (the host prunes it with the renders): its path.
     async fn cut(&self, file: &str, offset: f64, length: Option<f64>, reversed: bool, signal: &Signal) -> Result<String, String> {
@@ -1733,7 +1853,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         };
         for track in candidates.into_iter().take(512) {
             if let Ok(devices) = self.devices(&track, signal).await? {
-                if devices.iter().any(|row| row.reference == device) {
+                if devices.iter().any(|row| self.same_place(&row.reference, device)) {
                     return Ok(Some((track, devices)));
                 }
             }
@@ -1973,17 +2093,28 @@ impl<S: RefScheme + 'static> OwnListening<S> {
                 if pass.audible {
                     notes.push(format!("{app} rendered it offline; Kumi plays it out loud now."));
                 }
+                // Only the first is played out loud: the others say so.
+                let label = |name: &String, mix: bool| if mix { "The whole mix".to_string() } else { name.clone() };
+                let first =
+                    captured.sources.iter().find(|(name, _)| captured.files.contains_key(name)).map(|(name, mix)| label(name, *mix));
                 let takes: Vec<HeardTake> = captured
                     .sources
                     .iter()
                     .filter_map(|(name, mix)| {
+                        let label = label(name, *mix);
+                        let said = match &first {
+                            Some(first) if *first != label && pass.audible => {
+                                Some(format!("{app} rendered it offline; the producer heard only {first} out loud."))
+                            }
+                            _ => note(&notes),
+                        };
                         captured.files.get(name).map(|render| HeardTake {
-                            label: if *mix { "The whole mix".into() } else { name.clone() },
+                            label,
                             file: render.file.clone(),
                             start: render.start,
                             seconds: Some(render.seconds.unwrap_or(window.beats * 60. / tempo)),
                             live: false,
-                            note: note(&notes),
+                            note: said,
                         })
                     })
                     .collect();
@@ -2024,24 +2155,23 @@ impl<S: RefScheme + 'static> OwnListening<S> {
         let path = text(file, "file").unwrap_or_default();
         let rate = file.get("sampleRate").and_then(Value::as_f64).filter(|rate| *rate > 0.).unwrap_or(48_000.);
         let stretches = stretches(done.get("marks"), rate, held, renderer.beats_per_bar.get());
-        let note = (!notes.is_empty()).then(|| notes.join(" "));
         if stretches.len() <= 1 {
             let (start, seconds) = stretches.first().map_or((0., held), |(start, seconds, _)| (*start, Some(*seconds)));
+            let note = (!notes.is_empty()).then(|| notes.join(" "));
             return Ok(Ok(vec![HeardTake { label: "The whole mix".into(), file: path, start, seconds, live: true, note }]));
         }
-        // The playhead jumped (a loop, a seek): each stretch it played straight through is a take of its own.
-        Ok(Ok(stretches
-            .into_iter()
-            .enumerate()
-            .map(|(at, (start, seconds, label))| HeardTake {
-                label,
-                file: path.clone(),
-                start,
-                seconds: Some(seconds),
-                live: true,
-                note: if at == 0 { note.clone() } else { None },
-            })
-            .collect()))
+        // The playhead jumped (a loop, a seek): what's measured is the longest stretch it played straight through (the
+        // stretches aren't parts heard at once).
+        // (the first of the longest)
+        let (start, seconds, label) =
+            stretches.iter().cloned().reduce(|best, next| if next.1 > best.1 + 1e-9 { next } else { best }).unwrap();
+        notes.push(format!(
+            "{} jumped while Kumi listened ({}): this is the longest stretch it played straight through, {:.1} s.",
+            renderer.app(),
+            stretches.iter().map(|(_, _, label)| label.as_str()).collect::<Vec<_>>().join(", "),
+            seconds
+        ));
+        Ok(Ok(vec![HeardTake { label, file: path, start, seconds: Some(seconds), live: true, note: Some(notes.join(" ")) }]))
     }
 }
 
@@ -2140,7 +2270,10 @@ mod tests {
         assert!((scale.raw(6.) - 6.).abs() < 1e-6 && (scale.shown(-12.) + 12.).abs() < 1e-6, "dB is the value");
         assert!(Scale::read(&grid_from_units(1000., "1000 Hz", 20., 20000.).unwrap()).is_some());
         assert!(grid_from_units(1., "0.000 dB", 0., 4.).is_none(), "the Gainer's linear gain shows dB");
-        assert!(grid_from_units(4., "4.00", 0.0001, 4.).is_none(), "a bare number");
+        // A bare number that is the value (an EQ's bandwidth) scales as itself, so a fit can set it.
+        let width = Scale::read(&grid_from_units(4., "4.00", 0.0001, 4.).unwrap()).unwrap();
+        assert!((width.raw(2.) - 2.).abs() < 1e-3, "a bandwidth of 2 is 2: {}", width.raw(2.));
+        assert!(grid_from_units(4., "11.00", 0.0001, 4.).is_none(), "a bare number that isn't the value");
         assert_eq!(shown_db("Adjustment (dB)", "6.0"), Some(6.));
         assert_eq!(shown_db("Boost", "4.500 dB"), Some(4.5));
         assert_eq!(shown_db("Ratio", "4.0"), None);
