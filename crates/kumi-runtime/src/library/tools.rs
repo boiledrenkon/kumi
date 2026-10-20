@@ -130,7 +130,7 @@ fn sample_tools(profile: &DawProfile) -> &'static str {
 fn preset_loading(profile: &DawProfile) -> &'static str {
     match profile.id {
         Some(DawId::Reaper) => ". Load one by its kind: an fx chain with fx_chain_load (file: its path); a track template with track_template_insert (path); a jsfx with fx_add (name: its add, \"JS: midi/midi_choke\"); fx presets are one plug-in's presets (in presets): add that FX, then fx_preset by one's name; a plug-in preset with fx_preset on that plug-in (preset: its path); a project template is a whole project to start from, opened in REAPER",
-        Some(DawId::Renoise) => ". Load one by its kind: an instrument or a multi-sample with instrument_load (path); an effect preset is one of a device's presets (device): add that device with device_add, then device_preset with the preset's name; an effect chain, phrase, phrase script or modulation set is loaded in Renoise from its library (its path says where)",
+        Some(DawId::Renoise) => ". Load one by its kind, with its path: an instrument or a multi-sample with instrument_load; an effect preset is for one device (device): add that device with device_add, then device_preset_data (ref: the new device, path); an effect chain onto a track with device_chain_load (trackRef, path; a track that has devices needs replace: true, and they are replaced); a phrase into an instrument with phrase_load (ref, path); a modulation set into an instrument with modset_load (ref, path); a phrase script is loaded in Renoise from its library (its path says where)",
         _ => "",
     }
 }

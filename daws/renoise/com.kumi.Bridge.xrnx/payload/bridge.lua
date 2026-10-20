@@ -962,6 +962,12 @@ local place_env = {
     if not log_ then return unknown_log() end
     return places.after(log_, n, mark, 1)
   end,
+  -- (M4 n-devices: the device Kumi put back at `now` on track `t` is the one it removed, `removed` the mark just after the
+  -- remove: places kept from before it follow it)
+  device_back = function(t, removed, now)
+    local log_ = device_log(t)
+    return log_ and places.back(log_, removed, now) or false
+  end,
   -- (the count of pattern `p`'s changed lines so far, as a mark; and whether any changed since one: nil and "unknown" when the
   -- mark is of another pattern or watch)
   pattern_touch_mark = function(p)
