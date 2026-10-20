@@ -31,6 +31,9 @@ pub struct TreeFocus {
     pub device: Option<String>,
     pub chain: Option<String>,
     pub device_ref: Option<String>,
+    /// A container's insides can't be selected on their own (REAPER, Renoise): a focused one shows open, and its one
+    /// unnamed chain is its devices.
+    pub open_containers: bool,
 }
 fn appended(trail: &[String], refs: &[&str]) -> Vec<String> {
     trail.iter().cloned().chain(refs.iter().map(|s| (*s).to_string())).collect()
@@ -107,6 +110,7 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
     struct Walker {
         path: Vec<String>,
         rows: Vec<TreeRow>,
+        open_containers: bool,
     }
     impl Walker {
         fn role(&self, reference: &str) -> TreeRole {
@@ -122,9 +126,9 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
             for (index, device) in devices.iter().enumerate() {
                 let last = index == devices.len() - 1;
                 let chains = device.chains.as_deref().unwrap_or_default();
-                // A container of a DAW of Kumi's own (REAPER's, Renoise's): its one unnamed chain is its devices, and the
-                // focused one shows its lanes open (nothing inside it can be selected on its own).
-                let own = device.role.is_some_and(|role| role.form == DeviceForm::Container);
+                // A container of a DAW whose containers' insides can't be selected (REAPER's, Renoise's): its one unnamed
+                // chain is its devices, and the focused one shows its lanes open.
+                let own = self.open_containers && device.role.is_some_and(|role| role.form == DeviceForm::Container);
                 let unnamed = own && chains.len() == 1 && chains[0].name.is_empty();
                 let focused = self.path.last() == Some(&device.r#ref);
                 let expanded = self.path.contains(&device.r#ref) && !chains.is_empty();
@@ -177,7 +181,7 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
             }
         }
     }
-    let mut walker = Walker { path, rows: vec![] };
+    let mut walker = Walker { path, rows: vec![], open_containers: focus.open_containers };
     walker.devices(&tree.devices, "", &[]);
     walker.rows
 }

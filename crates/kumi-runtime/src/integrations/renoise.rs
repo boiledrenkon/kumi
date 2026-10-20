@@ -236,6 +236,7 @@ pub const VIEW: ViewPresentation = ViewPresentation {
         BodyKind::Keyzones => "Keyzones",
         other => (ViewPresentation::NONE.heading)(other),
     },
+    open_containers: true,
     ..ViewPresentation::NONE
 };
 

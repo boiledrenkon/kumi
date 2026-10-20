@@ -357,7 +357,8 @@ impl TuiApp {
             Some(rows) => rows,
             None => {
                 let [device, chain, device_ref] = key.clone();
-                let rows: Rc<[TreeRow]> = tree_rows(tree, &TreeFocus { device, chain, device_ref }).into();
+                let open_containers = crate::daw::view().open_containers;
+                let rows: Rc<[TreeRow]> = tree_rows(tree, &TreeFocus { device, chain, device_ref, open_containers }).into();
                 drop(state);
                 self.0.state.borrow_mut().tree_rows = Some((revision, key, rows.clone()));
                 rows

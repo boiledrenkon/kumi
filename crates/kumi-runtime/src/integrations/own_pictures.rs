@@ -222,6 +222,14 @@ pub fn zone(answers: &Answers) -> Option<ChangePicture> {
         base: number(state, "baseNote").map(|n| n.clamp(0., 127.) as u8),
     };
     let (before, after) = (answers.shown_before(), answers.shown("after"));
+    // A whole instrument laid out (Renoise's Drumkit layout): every zone before and after, by its sample's place.
+    if let (Some(was), Some(now)) = (before.get("zones").and_then(Value::as_array), after.get("zones").and_then(Value::as_array)) {
+        let (was, now): (Vec<PictureZone>, Vec<PictureZone>) = (was.iter().map(zone).collect(), now.iter().map(zone).collect());
+        let moved = was.iter().zip(&now).filter(|(a, b)| a != b).count();
+        let said = format!("{moved} of {} moved", now.len());
+        let values = vec![PictureValue { name: "Zones".into(), to_text: Some(said), ..Default::default() }];
+        return Some(ChangePicture::Zones { before: was, after: now, values });
+    }
     if !["noteRange", "velocityRange", "baseNote"].iter().any(|key| after.get(*key).is_some()) {
         return None;
     }
@@ -397,6 +405,10 @@ mod tests {
         (preview, applied)
     }
 
+    fn zone_picture(preview: &Value, applied: &Value) -> Option<ChangePicture> {
+        zone(&Answers { preview, applied })
+    }
+
     #[test]
     fn a_trackers_cells_are_drawn_line_by_line_in_its_own_notation() {
         let note = |line: u32, note: &str, instrument: &str, volume: &str| json!({"line": line, "kind": "note", "col": 1, "note": note, "instrument": instrument, "volume": volume, "panning": "..", "delay": "..", "fx": "0000"});
@@ -509,6 +521,14 @@ mod tests {
         let said: Vec<(&str, Option<&str>, Option<&str>)> =
             values.iter().map(|v| (v.name.as_str(), v.from_text.as_deref(), v.to_text.as_deref())).collect();
         assert_eq!(said, [("Keys", Some("C3–B3"), Some("C4–B4")), ("Base note", Some("C3"), Some("C4"))], "in FOCUS's names");
+        // A Drumkit layout: every zone.
+        let zone = |low: u8, high: u8| json!({"noteRange": [low, high], "velocityRange": [0, 127], "baseNote": low});
+        let (preview, applied) = answers(
+            json!({"display": {"before": {"zones": [zone(0, 119), zone(0, 119), zone(36, 36)]}}}),
+            json!({"display": {"after": {"zones": [zone(36, 36), zone(37, 37), zone(36, 36)]}}}),
+        );
+        let Some(ChangePicture::Zones { before, after, values }) = zone_picture(&preview, &applied) else { panic!() };
+        assert_eq!((before.len(), after[1].notes, values[0].to_text.as_deref()), (3, [37, 37], Some("2 of 3 moved")));
         let (preview, applied) = answers(
             json!({"display": {"before": {"volumeDb": -6.0, "fineTune": 0, "loop": "off"}}}),
             json!({"display": {"after": {"volumeDb": 0.0, "fineTune": 0, "loop": "forward"}}}),

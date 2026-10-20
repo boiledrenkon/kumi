@@ -182,6 +182,7 @@ pub const VIEW: ViewPresentation = ViewPresentation {
         other => (ViewPresentation::NONE.heading)(other),
     },
     timeline_notes: true,
+    open_containers: true,
     ..ViewPresentation::NONE
 };
 

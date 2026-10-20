@@ -299,6 +299,9 @@ pub struct ViewPresentation {
     /// Whether an item in the note editor over the timeline shows its notes (REAPER's MIDI editor), rather than the
     /// timeline (Live's Arrangement clips).
     pub timeline_notes: bool,
+    /// Whether a container's insides can't be selected on their own (REAPER's containers, Renoise's Doofers and
+    /// Splitters): FOCUS shows a focused one open, its one unnamed chain as its devices.
+    pub open_containers: bool,
 }
 
 impl ViewPresentation {
@@ -317,6 +320,7 @@ impl ViewPresentation {
             BodyKind::Routing => "Routing",
         },
         timeline_notes: false,
+        open_containers: false,
     };
 }
 
