@@ -105,6 +105,8 @@ pub(super) struct Table {
     pub captures: bool,
     /// The name prefixes of a plug-in's device where the rows don't say (REAPER's "VST3: …").
     pub plugin_prefixes: &'static [&'static str],
+    /// How a render's notes start that say it stopped what was playing: of Kumi's own play, said once a run.
+    pub stop_notes: &'static [&'static str],
 }
 
 /// REAPER (the extension): pre-fader stems in one pass, the master with and without its FX, ReaLimit and JS Volume
@@ -135,6 +137,7 @@ pub(super) const REAPER: Table = Table {
     eq_shelves_at_ends: false,
     captures: true,
     plugin_prefixes: &["VST:", "VSTi:", "VST3:", "VST3i:", "AU:", "AUi:", "CLAP:", "CLAPi:", "LV2:", "LV2i:", "DX:", "DXi:"],
+    stop_notes: &["The audition playing was stopped", "REAPER stopped playback to render"],
 };
 
 /// Renoise (the tool): one solo render per track, through its fader and the Master track's devices; the Maximizer and
@@ -165,6 +168,7 @@ pub(super) const RENOISE: Table = Table {
     eq_shelves_at_ends: true,
     captures: false,
     plugin_prefixes: &[],
+    stop_notes: &["Renoise stopped playback to render"],
 };
 
 pub(super) fn table(id: Option<DawId>) -> &'static Table {
@@ -258,6 +262,10 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     /// The change that kept the last goal's best on a track of its own: taken back when a better one replaces it, by
     /// this goal or a resumed one.
     pub(super) goal_best: RefCell<Option<String>>,
+    /// A render stopping Kumi's own play was said in this run (a new answer's run says it again).
+    pub(super) stop_told: Cell<bool>,
+    /// The last render's notes, told as it ended: the engine passing them on doesn't tell them again.
+    told_notes: RefCell<Vec<String>>,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -374,6 +382,8 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             parts: RefCell::default(),
             played: RefCell::default(),
             goal_best: RefCell::default(),
+            stop_told: Cell::new(false),
+            told_notes: RefCell::default(),
         }
     }
 
@@ -741,6 +751,9 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     ) -> Result<Result<(IndexMap<String, (Render, Value)>, Vec<String>), String>, RuntimeError> {
         let pre_roll = self.beats_per_bar.get().min(window.from).max(0.);
         let args = json!({"sources": sources, "range": {"fromBeat": window.from, "beats": window.beats}, "preRollBeats": pre_roll});
+        // Kumi's own listen still playing out loud: the render stops it, which a run says once (each listen of a judged
+        // run or a goal stops the last one).
+        let own_playing = self.played.borrow().back().is_some_and(|(_, to)| *to > chrono::Utc::now().timestamp_millis());
         let started = match self.ask("render", args, signal.clone()).await? {
             Ok(started) => started,
             Err(refused) => return Ok(Err(refused.why)),
@@ -750,6 +763,14 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             Err(why) => return Ok(Err(why)),
         };
         let mut notes = notes_of(&done);
+        if own_playing {
+            let stops = |note: &String| self.table.stop_notes.iter().any(|start| note.starts_with(start));
+            if self.stop_told.get() {
+                notes.retain(|note| !stops(note));
+            } else if notes.iter().any(stops) {
+                self.stop_told.set(true);
+            }
+        }
         // A render that played the song's tempo commands into its transport (Renoise's does): the tempo goes back to what
         // the producer had, quietly, as the bridge puts their mutes back.
         if let (Some(bpm), Some(lpb)) =
@@ -777,6 +798,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         for note in &notes {
             self.tell_app(note);
         }
+        *self.told_notes.borrow_mut() = notes.clone();
         let mut files = IndexMap::new();
         for file in done.get("files").and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(path)) = (text(file, "id"), text(file, "file")) else { continue };
@@ -1075,6 +1097,13 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         self.cleanup_signal()
     }
     fn tell(&self, title: &str, _playing: Option<bool>) {
+        // (a render's note was told as it ended: once is enough)
+        let mut told = self.told_notes.borrow_mut();
+        if let Some(at) = told.iter().position(|note| note == title) {
+            told.remove(at);
+            return;
+        }
+        drop(told);
         // (the DAW doesn't play for a render: what plays out loud after is said on its own)
         self.tell_app(title);
     }
@@ -2006,6 +2035,7 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     pub fn new_turn(&self, continuing: bool) {
         if !continuing {
             self.listening.new_answer(self.renderer.applied());
+            self.renderer.stop_told.set(false);
         }
     }
 

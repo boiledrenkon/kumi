@@ -311,7 +311,7 @@ async fn a_judged_round_brings_reapers_level_back_with_a_volume_fx_it_adds_on_th
             let home = tempfile::tempdir().unwrap();
             let script = ReaperScript::new(3, 0);
             let simulator = reaper_lab(&script, home.path(), |_| {}).await;
-            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
             reaper.start(Signal::new()).await.unwrap();
             let observed = reaper.observe(Signal::new(), None).await.unwrap();
             let judge = tool(&observed, "judge");
@@ -343,6 +343,10 @@ async fn a_judged_round_brings_reapers_level_back_with_a_volume_fx_it_adds_on_th
                 round.text
             );
             assert!(round.text.contains("\"kept\":true"), "{}", round.text);
+            // Each listen of the run stopped the last one playing out loud: said once.
+            let stopped = told.borrow().iter().filter(|title| title.starts_with("The audition playing was stopped")).count();
+            assert_eq!(stopped, 1, "{:?}", told.borrow());
+            assert!(!round.text.contains("The audition playing was stopped"), "said once, at the run's first: {}", round.text);
             assert_ours(&[round.text]);
             reaper.close().await.unwrap();
             simulator.stop();

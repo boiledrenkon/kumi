@@ -448,7 +448,18 @@ impl SimListening {
             "epoch": epoch,
         });
         let error = state.fail_next.take();
-        let notes = std::mem::take(&mut state.next_notes);
+        let mut notes = std::mem::take(&mut state.next_notes);
+        // A render stops what Kumi plays out loud, as each bridge says (REAPER closes its audio device to render; Renoise's
+        // audition is the song playing, which a render stops).
+        if state.playing.take().is_some() {
+            notes.insert(
+                0,
+                match state.daw {
+                    Daw::Reaper => "The audition playing was stopped: REAPER closes its audio device to render".into(),
+                    Daw::Renoise => "Renoise stopped playback to render.".into(),
+                },
+            );
+        }
         state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes });
         Ok(answer)
     }
