@@ -398,7 +398,7 @@ pub(super) unsafe extern "C" fn set_item_state_chunk(item: *mut MediaItem, chunk
         let fxids = chunk.lines().filter(|line| line.starts_with("FXID ")).count();
         let pools = chunk.lines().filter(|line| line.starts_with("POOLEDEVTS ")).count();
         let midi = state.takes.iter().filter(|t| t.source.as_deref() == Some("MIDI")).count();
-        let (takes, all_fx) = (state.takes.len(), state.takes.iter().map(|t| t.fx.len()).sum::<usize>());
+        let (takes, all_fx) = (state.takes.len(), state.takes.iter().map(|t| fx_count(&t.fx)).sum::<usize>());
         for (k, take) in state.takes.iter_mut().enumerate() {
             take.guid = match guids.get(k) {
                 Some(guid) if guids.len() == takes => guid.clone(),
@@ -408,10 +408,7 @@ pub(super) unsafe extern "C" fn set_item_state_chunk(item: *mut MediaItem, chunk
                 }
             };
             if fxids < all_fx {
-                for fx in take.fx.iter_mut() {
-                    s.items.made += 1;
-                    fx.guid = format!("{{FX-NEW-{}}}", s.items.made);
-                }
+                renew_fx_ids(&mut s.items.made, &mut take.fx);
             }
         }
         let _ = (pools, midi);
@@ -420,6 +417,22 @@ pub(super) unsafe extern "C" fn set_item_state_chunk(item: *mut MediaItem, chunk
         s.undo_dirty = true;
         true
     })
+}
+
+/// FX and, in containers, the FX in them: one `FXID` line each in a chunk.
+fn fx_count(fx: &[FakeFx]) -> usize {
+    fx.iter().map(|f| 1 + f.children.as_deref().map_or(0, fx_count)).sum()
+}
+
+/// New ids for every FX of a chain copied without its `FXID` lines, those in containers too, as REAPER gives (lab, 7.82).
+fn renew_fx_ids(made: &mut u32, fx: &mut [FakeFx]) {
+    for f in fx {
+        *made += 1;
+        f.guid = format!("{{FX-NEW-{made}}}");
+        if let Some(children) = f.children.as_mut() {
+            renew_fx_ids(made, children);
+        }
+    }
 }
 
 pub(super) unsafe extern "C" fn update_item_in_project(_item: *mut MediaItem) {
