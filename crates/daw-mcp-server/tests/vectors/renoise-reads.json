@@ -2088,8 +2088,8 @@
                 "kind": "sequencer",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2135,7 +2135,7 @@
                 "mixer": {
                   "mute": "active",
                   "pan": 1,
-                  "postPan": 0.5,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": -6.02,
@@ -2166,8 +2166,8 @@
                 "kind": "group",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2197,8 +2197,8 @@
                 "kind": "sequencer",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2229,8 +2229,8 @@
                 "kind": "group",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2259,8 +2259,8 @@
                 },
                 "kind": "master",
                 "mixer": {
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "volume": 0,
                   "width": 0
@@ -2289,8 +2289,8 @@
                 "kind": "send",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2457,8 +2457,8 @@
                 "kind": "sequencer",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2506,7 +2506,7 @@
                 "mixer": {
                   "mute": "active",
                   "pan": 1,
-                  "postPan": 0.5,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": -6.02,
@@ -2537,8 +2537,8 @@
                 "kind": "group",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2568,8 +2568,8 @@
                 "kind": "sequencer",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2600,8 +2600,8 @@
                 "kind": "group",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,
@@ -2630,8 +2630,8 @@
                 },
                 "kind": "master",
                 "mixer": {
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "volume": 0,
                   "width": 0
@@ -2660,8 +2660,8 @@
                 "kind": "send",
                 "mixer": {
                   "mute": "active",
-                  "pan": 0.5,
-                  "postPan": 0.5,
+                  "pan": 0,
+                  "postPan": 0,
                   "postVolume": 0,
                   "solo": false,
                   "volume": 0,

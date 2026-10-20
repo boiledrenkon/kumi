@@ -74,10 +74,16 @@ local function mute_word(state)
   return "active"
 end
 
--- A parameter's value, or null when automation moves it (it follows the automation at the edit position).
-local function settable(parameter, places)
+-- A pan as Kumi's track kinds take it (-1 to 1, 0 the centre), and a width in percent: what a recipe sets again; null when
+-- automation moves it (it follows the automation at the edit position).
+local function pan_of(parameter)
   if parameter.is_automated then return json.null end
-  return round(parameter.value, places)
+  return round((parameter.value - 0.5) * 2, 4)
+end
+
+local function width_of(parameter)
+  if parameter.is_automated or not parameter.value_max or parameter.value_max == 0 then return json.null end
+  return round(parameter.value / parameter.value_max * 100, 2)
 end
 
 -- Where a digest goes on from: `g1.<epoch>.<phase>.<index>.<lines>.<values>`, phase 1 the tracks, 2 the patterns, 3 the
@@ -114,10 +120,10 @@ local function track_records(job, song, t, epoch, parents, budget, out)
   local key = "track#/" .. t
   local mixer = {
     volume = track.prefx_volume.is_automated and json.null or db(track.prefx_volume.value),
-    pan = settable(track.prefx_panning, 4),
-    width = settable(track.prefx_width, 4),
+    pan = pan_of(track.prefx_panning),
+    width = width_of(track.prefx_width),
     postVolume = track.postfx_volume.is_automated and json.null or db(track.postfx_volume.value),
-    postPan = settable(track.postfx_panning, 4),
+    postPan = pan_of(track.postfx_panning),
   }
   if kind ~= "master" then
     mixer.mute = mute_word(track.mute_state)

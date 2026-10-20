@@ -14,6 +14,7 @@ use crate::{
     },
     integrations::{
         none::no_access,
+        own_catchup::{CatchUpWords, Remembered, WatchTool, CLOSE_MS},
         own_changes::{Ending, Link, OwnPlan},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
@@ -68,6 +69,8 @@ pub struct OwnDaw {
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
     /// What Kumi can change in it, and how.
     pub changes: &'static super::own_changes::OwnChangeSet,
+    /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe.
+    pub catch_up: &'static CatchUpWords,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -124,7 +127,14 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     file: Rc<RefCell<Option<String>>>,
     /// Hosts started: one started again has lost its journal, so Kumi's changes before can't be undone through it.
     hosts: Cell<u32>,
+    /// M6: when the project's snapshot is kept again, and what catch-up told of it.
+    remembered: Rc<Remembered>,
+    /// The task that keeps the snapshot again as edits settle is running.
+    keeping: Cell<bool>,
 }
+
+/// How often the snapshot keeper looks whether it's time.
+const KEEPER_MS: u64 = 1_000;
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
     let link = Rc::new(Link {
@@ -145,7 +155,20 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         maybe_redone: RefCell::default(),
     });
     let context = &options.context;
-    let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
+    // A change of Kumi's (or its undo) is kept in the project's snapshot once things settle.
+    let remembered = Rc::new(Remembered::default());
+    let on_change: Option<Rc<dyn Fn(ChangeRecord)>> = {
+        let (remembered, on_change) = (Rc::downgrade(&remembered), context.on_change.clone());
+        Some(Rc::new(move |record: ChangeRecord| {
+            if let Some(remembered) = remembered.upgrade() {
+                remembered.kumi_changed();
+            }
+            if let Some(on_change) = &on_change {
+                on_change(record);
+            }
+        }))
+    };
+    let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     Rc::new(OwnIntegration::<S> {
         daw,
         options,
@@ -169,6 +192,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         tempo: link.tempo.clone(),
         file: link.file.clone(),
         hosts: Cell::new(0),
+        remembered,
+        keeping: Cell::new(false),
     })
 }
 
@@ -413,6 +438,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let back_at = self.back_at.clone();
         let (book, layout, book_epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let (look_when_free, look_again) = (self.look_when_free.clone(), self.options.context.on_look_again.clone());
+        let remembered = self.remembered.clone();
         let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
         let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
@@ -438,6 +464,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                         if connected.replace(false) {
                             on_connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
                         }
+                        // (what changes before it's back is told as changed while it was away)
+                        remembered.went_away();
                         // A DAW started again is another process: its project's identity is found afresh.
                         identity.borrow_mut().take();
                         last_epoch = None;
@@ -449,6 +477,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                         continue;
                     }
                 };
+                // The DAW's change counter: the project's snapshot is kept again once the edits settle.
+                remembered.noted(focus.get("changed"));
                 // Back after it went away: the session looks again, once the DAW has loaded what it opened.
                 if !connected.replace(true) {
                     back_at.set(Some(tokio::time::Instant::now()));
@@ -553,15 +583,70 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         });
     }
 
+    /// M6: keeps the project's snapshot again as the edits settle (`Remembered::due`), while the integration lasts.
+    fn keep_snapshots(&self) {
+        if self.keeping.replace(true) {
+            return;
+        }
+        let (remembered, endpoint, closed) = (self.remembered.clone(), self.endpoint.clone(), self.closed.clone());
+        let (connected, lifetime) = (self.connected.clone(), self.lifetime.clone());
+        tokio::task::spawn_local(async move {
+            while !closed.get() {
+                tokio::time::sleep(std::time::Duration::from_millis(KEEPER_MS)).await;
+                if closed.get() {
+                    break;
+                }
+                if !connected.get() || !remembered.due() {
+                    continue;
+                }
+                let Some(host) = endpoint.borrow().clone() else { continue };
+                remembered.clone().save(host, abort::any([lifetime.clone(), abort::timeout(CALL_MS)])).await;
+            }
+        });
+    }
+
+    /// M6, after a look at the project: catch-up for one it hasn't run for (another project, or the DAW back after it
+    /// went away), else the snapshot kept again when the last one is old.
+    fn remember_look(&self, identity: Option<&str>, name: &str) {
+        let Some(identity) = identity.filter(|identity| !identity.is_empty()) else { return };
+        let Some(host) = self.endpoint.borrow().clone() else { return };
+        let remembered = self.remembered.clone();
+        let signal = abort::any([self.lifetime.clone(), abort::timeout(60_000)]);
+        if remembered.should_catch_up(identity) {
+            let on_catch_up = self.options.context.on_catch_up.clone();
+            tokio::task::spawn_local(remembered.catch_up(
+                host,
+                identity.to_owned(),
+                name.to_owned(),
+                self.daw.catch_up,
+                on_catch_up,
+                signal,
+            ));
+        } else if remembered.stale() {
+            tokio::task::spawn_local(remembered.save(host, signal));
+        }
+    }
+
     /// The model's tools: the read, and the DAW's changes with their plan and undo.
     fn tools(&self) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = vec![self.read_tool()];
         tools.extend(self.changes.tools());
+        // M6: learning a routine the producer does by hand, for a recipe.
+        tools.push(Rc::new(WatchTool {
+            endpoint: self.endpoint.clone(),
+            words: self.daw.catch_up,
+            app: self.daw.profile.words.app,
+            on_watch: self.options.context.on_watch.clone(),
+        }));
         tools
     }
 
     fn instructions(&self) -> String {
-        format!("{} {}", self.daw.instructions, self.daw.changes.instructions)
+        let place = self.daw.profile.words.place;
+        format!(
+            "{} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
+            self.daw.instructions, self.daw.changes.instructions
+        )
     }
 
     fn read_tool(&self) -> Rc<dyn KernelTool> {
@@ -690,6 +775,11 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             context["pinned"] = self.book.borrow_mut().shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
+        // M6: what changed while Kumi wasn't looking, while this project stays open.
+        if let Some(since) = identity.as_deref().and_then(|identity| self.remembered.since(identity)) {
+            context["sinceLastTime"] = Value::Object(since);
+        }
+        self.remember_look(identity.as_deref(), &name);
         *self.identity.borrow_mut() = identity.clone();
         let tempo = ["/transport/tempo", "/transport/bpm", "/project/tempo", "/project/bpm"]
             .iter()
@@ -745,6 +835,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         let status = self.call("status", json!({}), signal).await?;
         self.set_connected(status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false))));
         self.watch_focus();
+        self.keep_snapshots();
         Ok(())
     }
     fn can_show(&self, kind: BodyKind) -> bool {
@@ -838,16 +929,27 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                     (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
                 }
                 self.identity.borrow_mut().take();
+                self.remembered.went_away();
                 Ok(self.no_access(Some(&refused.why)))
             }
             Err(error) if error.is_aborted() => Err(error),
             Err(_) => {
                 self.set_connected(false);
+                self.remembered.went_away();
                 Ok(self.no_access(None))
             }
         }
     }
     async fn close(&self) -> Result<(), RuntimeError> {
+        // The project as Kumi leaves it: what changes after is what the next catch-up tells (bounded, as Live's).
+        let host = self.endpoint.borrow().clone();
+        if let Some(host) = host.filter(|_| self.connected.get() && !self.closed.get()) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(CLOSE_MS),
+                self.remembered.clone().save(host, abort::timeout(CLOSE_MS)),
+            )
+            .await;
+        }
         self.closed.set(true);
         self.lifetime.cancel();
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {

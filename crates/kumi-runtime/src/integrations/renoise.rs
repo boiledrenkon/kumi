@@ -1,10 +1,12 @@
 //! Renoise, through Kumi's tool and host: its refs (positions, as Renoise numbers them, under the song's epoch), its
 //! read tool and its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
+use super::own_catchup::{as_read, CatchUpWords, Mixer, RecipeKinds};
 use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
+    describe::ProjectWords,
     presentation::{ToolActivity, ToolPresentation},
     refs::{moved_index, Moved, RefScheme, Shift},
     view::{BodyKind, BodyRequest, DawFocus, FocusBody, FocusItem, FocusSection, ItemKind, SectionKind, ViewKind, ViewPresentation},
@@ -31,7 +33,65 @@ pub const DAW: OwnDaw = OwnDaw {
     body_request,
     to_body,
     changes: &super::renoise_changes::CHANGES,
+    catch_up: &CATCH_UP,
 };
+
+/// What changed in a Renoise song, in Renoise's words: catch-up's lines, watch_me's changes and its draft recipe.
+pub const CATCH_UP: CatchUpWords = CatchUpWords {
+    words: ProjectWords {
+        kinds: &[("track", "tracks"), ("device", "devices"), ("pattern", "patterns"), ("instrument", "instruments")],
+        project: "song",
+        rank: &["song", "track", "device", "pattern", "instrument"],
+        opaque: &["device", "instrument"],
+    },
+    facts: song_facts,
+    recipe: RecipeKinds {
+        track_add: "track_add",
+        effect: "device",
+        effect_add: |made, _| {
+            let path = made.get("path").and_then(Value::as_str).filter(|path| !path.is_empty())?;
+            Some(("device_add", serde_json::json!({"path": path}).as_object().cloned().unwrap_or_default()))
+        },
+        effect_values: |values| {
+            let values: Vec<Value> = values.iter().map(|(name, value)| serde_json::json!({"param": name, "value": value})).collect();
+            ("device_params", serde_json::json!({"values": values}).as_object().cloned().unwrap_or_default())
+        },
+        mixer: &[
+            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read },
+            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read },
+            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read },
+            // (Renoise's mute states: active plays, muted and off don't)
+            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: |state| state.as_str().map(|state| Value::Bool(state != "active")) },
+            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read },
+        ],
+    },
+    watch_description: "Learn a routine the producer does by hand in Renoise: action start just before they do it (Kumi notes the song as it is; nothing in Renoise changes), then action stop when they say they're done. Stop gives what changed: tracks added (with their mixer and routing), devices added (with the parameters they moved after adding them), patterns' lines, instruments and settings changed, each with its track; and recipeSteps, a draft of the steps that would redo it in your change kinds, with $blanks for the tracks they worked on (the one they selected is $track). Save it at once with save_recipe from those steps, fixing the draft where it's off and leaving out anything clearly unrelated. Then say in a few words what the recipe does. The producer can ask you to change it.",
+};
+
+/// The song's own values that changed, as catch-up lines.
+fn song_facts(details: &[Value]) -> Vec<String> {
+    let text = |value: &Value| kumi_common::js::json::stringify(value);
+    let quoted = |value: &Value| format!("“{}”", value.as_str().unwrap_or(""));
+    let mut lines = vec![];
+    for detail in details {
+        let (from, to) = (&detail["from"], &detail["to"]);
+        match detail["what"].as_str().unwrap_or("") {
+            "bpm" => lines.push(format!("Tempo {} → {} BPM", text(from), text(to))),
+            "lpb" => lines.push(format!("Lines per beat {} → {}", text(from), text(to))),
+            "tpl" => lines.push(format!("Ticks per line {} → {}", text(from), text(to))),
+            "name" => lines.push(format!("Renamed the song {} → {}", quoted(from), quoted(to))),
+            "sequence.slots" => lines.push(format!("The pattern sequence has {} → {} slots", text(from), text(to))),
+            what if what.starts_with("sequence.") => lines.push("Changed the pattern sequence".into()),
+            _ => {}
+        }
+    }
+    // (more slots also changes the sequence's fingerprint: told once)
+    if lines.iter().any(|line| line.starts_with("The pattern sequence has")) {
+        lines.retain(|line| line != "Changed the pattern sequence");
+    }
+    lines.dedup();
+    lines
+}
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),
 /// with the track DSPs below it and the pattern matrix beside it when they're open; the selected track, pattern (or

@@ -476,7 +476,8 @@ impl Reads {
     ) {
         let fx_guid = reaper.fx_guid(fx);
         let renamed = reaper.fx_config(fx, "renamed_name").unwrap_or_default();
-        let name = if renamed.is_empty() { reaper.fx_name(fx) } else { renamed };
+        let plugin = reaper.fx_name(fx);
+        let name = if renamed.is_empty() { plugin.clone() } else { renamed };
         let count = reaper.fx_param_count(fx).max(0);
         let read = count.min(PARAMS_PER_FX);
         let mut print = Print::new();
@@ -511,6 +512,8 @@ impl Reads {
             "o": position,
             "p": parent,
             "f": {
+                // (what to add again to make it: the plug-in's own name, whatever the producer renamed it)
+                "plugin": rows::clip(&plugin),
                 "enabled": reaper.fx_enabled(fx),
                 "offline": reaper.fx_offline(fx),
                 "parameters": {"count": count, "parametersHash": if hashed { json!(print.hex()) } else { Value::Null }},

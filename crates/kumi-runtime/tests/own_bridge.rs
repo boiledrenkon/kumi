@@ -32,6 +32,14 @@ impl McpEndpoint for Host {
         Ok(serde_json::from_value(json!({"tools": []})).unwrap())
     }
     async fn call(&self, name: &str, args: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+        // (M6: catch-up, and keeping the project's snapshot, run beside the looks: a project first seen, unless a test
+        // scripts them; not counted among what the test asked)
+        if matches!(name, "catch_up" | "baseline_save") && !self.answers.borrow().iter().any(|(tool, _, _)| *tool == name) {
+            let answer = if name == "catch_up" { json!({"first": true}) } else { json!({"saved": false}) };
+            return Ok(
+                serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": false})).unwrap()
+            );
+        }
         self.asked.borrow_mut().push((name.into(), Value::Object(args)));
         let answers = self.answers.borrow();
         let (_, answer, error) = answers.iter().rev().find(|(tool, _, _)| *tool == name).cloned().expect("an answer for each tool asked");
