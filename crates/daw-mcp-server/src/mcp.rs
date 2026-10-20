@@ -189,6 +189,13 @@ pub fn tools(host: &Host) -> Value {
         });
         list[2]["inputSchema"]["properties"]["epoch"] = epoch.clone();
         list[5]["inputSchema"]["properties"]["epoch"] = epoch.clone();
+        // An API function that only reads, by name (kind call).
+        list[2]["inputSchema"]["properties"]["fn"] =
+            json!({"type": "string", "description": "For kind call: a REAPER API function that only reads, by name."});
+        list[2]["inputSchema"]["properties"]["args"] = json!({
+            "type": ["array", "object"],
+            "description": "For kind call: its arguments, in order or by the SDK's names; tracks, items, takes and envelopes as refs.",
+        });
         // (r-tracks) Saving tracks as a template: a file written, nothing in the project changed, so no change and no undo.
         if let Some(tools) = list.as_array_mut() {
             tools.push(json!({
@@ -247,6 +254,13 @@ pub fn tools(host: &Host) -> Value {
                 "title": "Show a device's editor",
                 "description": "Shows a plug-in's own editor window (or a *LFO's), or hides it with show false. Only when the producer asks to see it.",
                 "inputSchema": {"type": "object", "properties": own(json!({"show": {"type": "boolean"}})), "required": ["ref"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            }));
+            tools.push(json!({
+                "name": "show_status",
+                "title": "A line in Renoise's status bar",
+                "description": "Shows one line of text in Renoise's status bar (never a dialog), for a producer working in Renoise: what Kumi finished, or that it needs them. Not a change.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({"text": {"type": "string", "minLength": 1, "maxLength": 512}})), "required": ["text"], "additionalProperties": false},
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
             }));
             tools.push(json!({
@@ -545,7 +559,7 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     result(id, tool_result(answer, is_error))
                 }
                 // (M4 n-devices) Renoise's actions on a device.
-                "device_editor" | "preset_save" if host.daw() == Daw::Renoise => {
+                "device_editor" | "preset_save" | "show_status" if host.daw() == Daw::Renoise => {
                     let (answer, is_error) = host.renoise_action(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }

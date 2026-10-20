@@ -2003,9 +2003,12 @@ function M.api.add_track_to_group(index, group)
     end
     group = group + 1
   end
-  local grouped = tracks[group]
+  local grouped, member = tracks[group], tracks[group - 1]
+  -- (its output routing becomes the group's, and goes back on Renoise's undo: told each time, lab 2026-10-20)
+  local function routed() if member.output_routing_observable then M.fire(member.output_routing_observable) end end
   grouped.members = grouped.members + 1
-  M.record(function() grouped.members = grouped.members - 1 end, function() grouped.members = grouped.members + 1 end)
+  routed()
+  M.record(function() grouped.members = grouped.members - 1 routed() end, function() grouped.members = grouped.members + 1 routed() end)
 end
 
 -- The track leaves its group: it is moved to just before the group's tracks, by swaps; the tracks it passed keep their order.
@@ -2022,9 +2025,11 @@ function M.api.remove_track_from_group(index)
     M.api.swap_tracks_at(at - 1, at, true)
     at = at - 1
   end
-  local grouped = tracks[group]
+  local grouped, member = tracks[group], tracks[start]
+  local function routed() if member.output_routing_observable then M.fire(member.output_routing_observable) end end
   grouped.members = grouped.members - 1
-  M.record(function() grouped.members = grouped.members + 1 end, function() grouped.members = grouped.members - 1 end)
+  routed()
+  M.record(function() grouped.members = grouped.members + 1 routed() end, function() grouped.members = grouped.members - 1 routed() end)
 end
 
 function M.api.delete_track_at(index)

@@ -5,6 +5,7 @@ use serde_json::json;
 use super::templates;
 use super::tests_lab::*;
 use crate::reaper::fake::{self, FakeTrack};
+use crate::reaper::Reaper;
 
 /// The fake REAPER's actions for these tests: insert track and mute mark a change of REAPER's own (an undo point); unselect
 /// all doesn't. Each records the tracks selected as it runs.
@@ -185,6 +186,25 @@ fn a_track_template_goes_in_at_its_place_and_its_undo_takes_those_tracks_away() 
     // At the end by default.
     lab.make("track-template-insert", json!({"name": "Drums/Kit.RTrackTemplate"}), "Kumi: template (kt003)");
     assert_eq!(names()[4..], ["Kit Bus", "Kit Kick"]);
+}
+
+#[test]
+fn a_template_goes_in_at_the_end_whichever_track_the_producer_touched_last() {
+    // REAPER puts a template's tracks after the last touched track, not at the end (accept-reaper lab, 7.82: with the
+    // producer's last touched track in the middle, Kumi's insert was refused "elsewhere than asked").
+    let lab = Lab::new();
+    let _dir = templates();
+    fake::select_tracks(&[1]);
+    let (preview, made) = lab.make("track-template-insert", json!({"name": "Drums/Kit"}), "Kumi: template (kt011)");
+    assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb", "Kit Bus", "Kit Kick"]);
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, true, false, false, false, false]);
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    assert_eq!(reaper.last_touched_track().map(|t| reaper.track_name(t)).as_deref(), Some("Kick"), "the producer's last touched");
+    lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kt012)").unwrap();
+    // At a place: moved there from the end.
+    lab.make("track-template-insert", json!({"name": "Drums/Kit", "index": 3}), "Kumi: template (kt013)");
+    assert_eq!(names(), ["Drums", "Kick", "Kit Bus", "Kit Kick", "Snare", "Reverb"]);
 }
 
 #[test]

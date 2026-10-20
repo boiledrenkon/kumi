@@ -46,6 +46,8 @@ impl Lab {
             "change_restore" => self.changes.restore(&reaper, &self.reads, &params),
             "read" => self.reads.read(&reaper, &params),
             "fx_chain_save" => self.changes.fx_chain_save(&reaper, &self.reads, &params),
+            "undo_step_begin" => self.changes.step_begin(&reaper, &self.reads, &params),
+            "undo_step_end" => self.changes.step_end(&reaper, &self.reads, &params),
             other => panic!("{other}"),
         }
     }
@@ -340,7 +342,11 @@ fn a_take_fxs_pins_are_mapped_and_put_back() {
     let (preview, applied) = lab.make("fx-pins", json!({"ref": fx_ref("{T-FX}"), "pins": [{"pin": 1, "channels": [3]}]}));
     assert_eq!(preview["display"]["title"], "Pins of “ReaDelay” on take “kick.wav”: in 1 ← 3");
     assert_eq!(state(|s| s.tracks[1].items[0].takes[0].fx[0].pins.get(&(false, 0)).copied()), Some(4));
-    lab.undo("fx-pins", &preview, &applied).unwrap();
+    // REAPER doesn't notice a pin mapping by itself: without the nudge no point is made, and REAPER's undo then takes the
+    // producer's step before it (accept-reaper lab, 7.82).
+    assert_eq!(applied["undo"]["entry"], true, "the pins' write keeps a point of REAPER's undo");
+    let undone = lab.undo("fx-pins", &preview, &applied).unwrap();
+    assert_eq!(undone["undo"]["entry"], true, "and so does their undo");
     assert_eq!(state(|s| s.tracks[1].items[0].takes[0].fx[0].pins.get(&(false, 0)).copied()), Some(1));
 }
 
@@ -998,6 +1004,28 @@ fn what_reaper_clamps_is_read_back_and_said() {
     let (preview, applied) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.6}));
     assert_eq!(applied["undo"]["entry"], true, "a baseline makes no point by itself: the nudge makes one");
     assert!(preview["display"].get("note").is_none_or(|note| !note.as_str().unwrap_or_default().contains("doesn't keep")));
+}
+
+#[test]
+fn in_a_plan_a_write_reapers_undo_state_doesnt_hold_isnt_covered_by_the_plans_point() {
+    let lab = chains_lab();
+    state(|s| {
+        s.tracks[1].fx.push(reaeq("{EQ}"));
+        s.state_count += 1;
+    });
+    let step = lab.call("undo_step_begin", json!({"label": "Kumi: a plan (kcov9)"})).unwrap();
+    // A baseline with no source on and a ReaEQ band's type: REAPER's undo never takes them back (accept-reaper lab: a plan
+    // of either alone made no point, and REAPER's undo took the producer's step before it).
+    let (_, baseline) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.3}));
+    assert_eq!(baseline["undo"]["covered"], false);
+    let (_, band) = lab.make("fx-eq-band", json!({"ref": fx_ref("{EQ}"), "band": 1, "type": "notch"}));
+    assert_eq!(band["undo"]["covered"], false);
+    // An LFO turned on is in REAPER's state, and so is a baseline once a source is on: the plan's point takes them back.
+    let (_, lfo) = lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    assert_eq!(lfo["undo"]["covered"], true);
+    let (_, again) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.6}));
+    assert_eq!(again["undo"]["covered"], true);
+    lab.call("undo_step_end", json!({"stepId": step["stepId"]})).unwrap();
 }
 
 #[test]
@@ -1798,3 +1826,32 @@ fn an_fx_whose_track_reaper_replaced_is_never_read_through_the_old_track() {
 // (read by the state test)
 #[allow(dead_code)]
 fn unused(_: Display, _: FakeItem, _: FakeTake, _: FakePoint, _: FakeAutoItem) {}
+
+// ----- what HISTORY draws (m4-tui) -----
+
+#[test]
+fn parameter_moves_and_a_lanes_points_are_told_to_history_in_reapers_words() {
+    let lab = chains_lab();
+    state(|s| s.tracks[1].fx.push(reaeq("{K-EQ}")));
+    let input = json!({"ref": fx_ref("{K-EQ}"), "values": [{"param": 0, "value": "120 Hz"}, {"param": 5, "normalized": 0.75}]});
+    let (_, applied) = lab.make("fx-params", input);
+    let values = applied["display"]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_eq!((values[0]["name"].as_str(), values[0]["toText"].as_str()), (Some("Freq-Band 1"), Some("120.0 Hz")));
+    assert_eq!((values[1]["from"].as_f64(), values[1]["to"].as_f64(), values[1]["max"].as_f64()), (Some(0.5), Some(0.75), Some(1.0)));
+    assert!(values[1]["fromText"].is_string(), "what it showed before, too");
+    let (_, applied) = lab.make("fx-param", json!({"ref": fx_ref("{K-IN}"), "param": "Gain", "value": "-6 dB"}));
+    let moved = &applied["display"]["values"][0];
+    assert_eq!((moved["name"].as_str(), moved["toText"].as_str()), (Some("Gain"), Some("-6.0 dB")));
+    assert_eq!(moved["from"], 0.5);
+
+    let lab = envelope_lab();
+    let input = json!({"ref": KICK_VOLUME, "points": [{"position": 0.5, "value": -12}]});
+    let (_, applied) = lab.make("envelope-points-add", input);
+    let curve = &applied["display"]["curve"];
+    assert_eq!((curve["parameter"].as_str(), curve["min"].as_f64(), curve["max"].as_f64()), (Some("Volume"), Some(-60.0), Some(12.0)));
+    let (before, after) = (curve["before"].as_array().unwrap(), curve["after"].as_array().unwrap());
+    assert_eq!(after.len(), before.len() + 1);
+    let added = after.iter().find(|point| point[0] == 0.5).expect("the new point, at its time");
+    assert!((added[1].as_f64().unwrap() + 12.0).abs() < 0.01, "in dB, as the producer asked it: {added}");
+}

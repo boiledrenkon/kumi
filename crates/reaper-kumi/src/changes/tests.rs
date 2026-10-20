@@ -52,6 +52,7 @@ impl Lab {
             "cursor_set" => self.changes.cursor_set(&reaper, &self.reads, &params),
             "undo_step_begin" => self.changes.step_begin(&reaper, &self.reads, &params),
             "undo_step_end" => self.changes.step_end(&reaper, &self.reads, &params),
+            "read" => self.reads.read(&reaper, &params),
             other => panic!("{other}"),
         }
     }
@@ -554,6 +555,13 @@ fn a_sends_volume_pan_mute_and_mode_are_changed_and_put_back_exactly() {
         });
         let (preview, applied) = lab.make(kind, input, &format!("Kumi: {title} (ks{n}00)"));
         assert_eq!(preview["target"], json!({"ref": DRUMS_TO_REVERB, "kind": "send"}));
+        // (m4-tui) HISTORY's picture: the route, changed, with only the value that moved.
+        let route = &applied["display"]["route"];
+        assert_eq!(
+            (route["from"].as_str(), route["to"].as_str(), route["change"].as_str()),
+            (Some("Drums"), Some("Reverb"), Some("changed"))
+        );
+        assert_eq!(route["values"].as_array().map(Vec::len), Some(1), "{kind}: {route}");
         assert_eq!(preview["display"]["title"], title);
         assert_eq!(applied["undo"]["entry"], true);
         let changed = state(|s| {
@@ -623,6 +631,12 @@ fn adding_a_send_makes_it_with_its_settings_and_undo_removes_exactly_that_one() 
     let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}", "volumeDb": -9.0, "mode": "pre-fader"});
     let (preview, applied) = lab.make("send-add", input, "Kumi: Added send Kick → Reverb (ksa01)");
     assert_eq!(preview["display"]["title"], "Added send “Kick” → “Reverb”");
+    // (m4-tui) What HISTORY draws: the route's ends, made, with its volume and taps.
+    let route = &applied["display"]["route"];
+    assert_eq!((route["from"].as_str(), route["to"].as_str(), route["change"].as_str()), (Some("Kick"), Some("Reverb"), Some("made")));
+    let names: Vec<&str> = route["values"].as_array().unwrap().iter().filter_map(|value| value["name"].as_str()).collect();
+    assert_eq!(names[..3], ["Volume", "Pan", "Taps"]);
+    assert_eq!(route["values"][0]["toText"], "−9 dB");
     assert_eq!(applied["created"]["ref"], "r:send:{BBBB}:0:{DDDD}");
     assert_eq!(applied["created"]["kind"], "send");
     assert!(applied["created"]["stamp"].as_str().is_some_and(|stamp| !stamp.is_empty()), "Kumi's own send carries its mark");
@@ -1273,6 +1287,30 @@ fn snare_notes() -> Vec<(i32, f64, f64, i32, i32, bool)> {
     state(|s| {
         s.tracks[2].items[0].takes[0].notes.iter().map(|n| (n.pitch, n.start_ppq, n.end_ppq, n.velocity, n.channel, n.selected)).collect()
     })
+}
+
+#[test]
+fn notes_and_events_go_into_a_midi_take_with_nothing_in_it_yet() {
+    // REAPER's MIDI_CountEvts answers the take's total: 0 for a new, empty MIDI item (accept-reaper lab: Kumi refused it,
+    // "REAPER wouldn't give the take's MIDI").
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.clear();
+        s.tracks[2].items[0].takes[0].ccs.clear();
+        s.state_count += 1;
+    });
+    let notes = lab.call("read", json!({"kind": "note", "parent": SNARE_TAKE})).unwrap();
+    assert_eq!(notes["items"], json!([]));
+    let take = lab.call("read", json!({"ref": SNARE_TAKE})).unwrap();
+    assert_eq!((take["items"][0]["noteCount"].clone(), take["items"][0]["ccCount"].clone()), (json!(0), json!(0)));
+    let input = json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 1.0, "length": 0.5}]});
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 1 note in snare.mid take (kne01)");
+    assert_eq!(snare_notes().len(), 1);
+    lab.undo("notes-add", &preview, &applied, "Kumi: undo (kne02)").unwrap();
+    assert!(snare_notes().is_empty());
+    let input = json!({"ref": SNARE_TAKE, "events": [{"type": "cc", "start": 0.5, "controller": 1, "value": 64}]});
+    lab.make("midi-events-add", input, "Kumi: Wrote 1 MIDI event (kne03)");
+    assert_eq!(state(|s| s.tracks[2].items[0].takes[0].ccs.len()), 1);
 }
 
 #[test]

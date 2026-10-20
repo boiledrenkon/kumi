@@ -157,6 +157,9 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         undo_unanswered: RefCell::default(),
         in_plan: RefCell::default(),
         maybe_redone: RefCell::default(),
+        put_back_by_daw: RefCell::default(),
+        project: Rc::default(),
+        made_in: RefCell::default(),
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
@@ -171,7 +174,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         closed: Rc::new(Cell::new(false)),
         watching: Cell::new(false),
         selected: Rc::default(),
-        identity: Rc::default(),
+        identity: link.project.clone(),
         layout: link.layout.clone(),
         seen_in: link.seen_in.clone(),
         back_at: Rc::default(),
@@ -872,6 +875,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
             })
             .min();
         by_playing.into_iter().chain(by_kumi).min()
+    }
+    /// A line in the DAW's status bar (Renoise's, through the tool's show_status), where its profile says it has one.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        if !self.daw.profile.caps.status_line || self.closed.get() || !self.connected.get() {
+            return Ok(false);
+        }
+        Ok(self.call("show_status", json!({"text": text}), signal).await?.is_ok())
     }
     fn has_stop_live(&self) -> bool {
         true

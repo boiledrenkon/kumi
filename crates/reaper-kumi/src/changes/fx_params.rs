@@ -79,6 +79,27 @@ fn line(ctx: &Ctx, at: &FxAt, param: i32, normalized: f64) -> String {
     format!("{} → {}", rows::clip(&ctx.reaper.param_name(at.fx, param)), shown(ctx, &at_param(at, param), normalized))
 }
 
+/// Each parameter's move as HISTORY draws it (for the display only: no undo reads it): its name, where it was and is
+/// (normalized), and what the plug-in shows at each.
+fn moves(ctx: &Ctx, at: &FxAt, before: &Map<String, Value>, after: &Map<String, Value>) -> Vec<Value> {
+    after
+        .iter()
+        .filter_map(|(param, to)| {
+            let (index, to) = (param.parse::<i32>().ok()?, to.as_f64()?);
+            let from = before.get(param).and_then(Value::as_f64);
+            Some(json!({
+                "name": rows::clip(&ctx.reaper.param_name(at.fx, index)),
+                "from": from,
+                "to": to,
+                "min": 0.0,
+                "max": 1.0,
+                "fromText": from.map(|from| shown(ctx, &at_param(at, index), from)),
+                "toText": shown(ctx, &at_param(at, index), to),
+            }))
+        })
+        .collect()
+}
+
 fn lines(ctx: &Ctx, at: &FxAt, values: &Map<String, Value>) -> Vec<String> {
     values.iter().filter_map(|(param, value)| Some(line(ctx, at, param.parse().ok()?, value.as_f64()?))).collect()
 }
@@ -153,7 +174,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         write_back(ctx, &at, &now);
         return Err(failed(format!("the plug-in kept {} as it was; nothing is changed", kept.join(", "))));
     }
-    let display = json!({"title": title(ctx, &at, asks.len()), "lines": lines(ctx, &at, &after)});
+    let display = json!({"title": title(ctx, &at, asks.len()), "lines": lines(ctx, &at, &after), "values": moves(ctx, &at, &now, &after)});
     Ok(Applied { applied: record(ctx, &at, after), display, unwritten: todo.is_empty(), ..Default::default() })
 }
 

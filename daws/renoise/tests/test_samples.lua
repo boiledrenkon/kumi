@@ -238,6 +238,25 @@ test("samples: a sample file loads as a new sample at its place; Kumi's undo del
   eq(#instrument(1).samples, 4)
 end)
 
+test("samples: after Renoise's own undo and redo of a sample Kumi loaded, Kumi's undo deletes it; changed since: refused", function()
+  for _, changed in ipairs({ false, true }) do
+    local env, peer = setup()
+    local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 2 })
+    mock.song:undo()
+    eq(sample_names(1), "Kick,Snare,Hat")
+    mock.song:redo()
+    eq(sample_names(1), "Kick,Clap,Snare,Hat")
+    if changed then sample(1, 2).name = "Mine" end
+    local undone = restore(peer, "sample-load", record)
+    if changed then
+      failure(undone, "changed")
+    else
+      ok(undone.result, "the sample Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+      eq(sample_names(1), "Kick,Snare,Hat")
+    end
+  end
+end)
+
 test("samples: a sample's audio replaced by a file is kept and put back by the undo, its name and loop too", function()
   local env, peer = setup()
   local before = json.encode(sample(1, 1).buffer)

@@ -1376,8 +1376,14 @@ fn splitter_set(mut document: xml::Document, input: &Value, device: &Device) -> 
 
 // notepad-write
 
+/// A Notepad's lines; one empty paragraph is an empty Notepad (how Kumi clears one: see `write_paragraphs`).
 fn paragraphs_of(element: &Element) -> Vec<String> {
-    element.child("Paragraphs").map(|list| list.elements().filter_map(Element::text).collect()).unwrap_or_default()
+    let lines: Vec<String> =
+        element.child("Paragraphs").map(|list| list.elements().filter_map(Element::text).collect()).unwrap_or_default();
+    if lines.len() == 1 && lines[0].is_empty() {
+        return vec![];
+    }
+    lines
 }
 
 fn notepad_write(mut document: xml::Document, top: &str, input: &Value, device: &Device) -> Result<Edited, Refusal> {
@@ -1418,14 +1424,16 @@ fn notepad_write(mut document: xml::Document, top: &str, input: &Value, device: 
     })
 }
 
+/// The Notepad's lines written. No lines are one empty paragraph: Renoise 3.5.4 keeps the text it had when the preset data
+/// has no Paragraphs, or an empty one (lab, 2026-10-20), so leaving them out never cleared a Notepad.
 fn write_paragraphs(element: &mut Element, lines: &[String]) {
     if let Some(at) = position_of(element, "Paragraphs") {
         element.remove_element(at);
     }
-    if lines.is_empty() {
-        return;
-    }
     let mut list = Element::new("Paragraphs");
+    if lines.is_empty() {
+        list = list.with_child(Element::new("Paragraph"));
+    }
     for line in lines {
         list = list.with_child(Element::new("Paragraph").with_text(line));
     }
@@ -1968,8 +1976,26 @@ pub fn inside(text: &str, with_params: bool) -> Option<(&'static str, Value)> {
     (kind == NOTEPAD).then(|| ("text", Value::from(paragraphs_of(slot_).join("\n"))))
 }
 
-/// A container's devices as the DSP body's child nodes: names, on or off, plug-in or not, a container's own children,
-/// and `parallel` on the first device of a Splitter's second lane (where the view starts a new branch).
+/// A Splitter's lanes as FOCUS names them, by its type: "Low" and "High" for Frequency (its gains' names), "Mid" and
+/// "Side", or "Lane 1" and "Lane 2" in parallel. None for another device.
+fn lane_names(container: &Element, kind: &str) -> Option<Vec<&'static str>> {
+    (kind == SPLITTER).then(|| match split_word(container) {
+        "frequency" => vec!["Low", "High"],
+        "mid-side" => vec!["Mid", "Side"],
+        _ => vec!["Lane 1", "Lane 2"],
+    })
+}
+
+/// A container's lanes as FOCUS names them (a Splitter's), from its preset data; None for a Doofer or another device.
+pub fn lanes(text: &str) -> Option<Vec<&'static str>> {
+    let document = xml::parse(text).ok()?;
+    let slot_ = document.root.child("DeviceSlot")?;
+    lane_names(slot_, type_of(slot_, true))
+}
+
+/// A container's devices as the DSP body's child nodes: names, on or off, plug-in or not, a container's own children
+/// (and a Splitter's lanes' names), each Splitter's device's `lane` (from 1), and `parallel` on the first device of a
+/// Splitter's second lane.
 pub fn child_nodes(text: &str) -> Vec<Value> {
     fn nodes(container: &Element, kind: &str, at: &[i64]) -> Vec<Value> {
         let mut out = vec![];
@@ -1988,6 +2014,12 @@ pub fn child_nodes(text: &str) -> Vec<Value> {
                     "container": is_container(device.name()),
                     "childNodes": if is_container(device.name()) { Value::Array(nodes(device, device.name(), &place)) } else { json!([]) },
                 });
+                if kind == SPLITTER {
+                    node["lane"] = (lane + 1).into();
+                }
+                if let Some(names) = lane_names(device, device.name()) {
+                    node["lanes"] = names.into();
+                }
                 if lane == 1 && p == 0 {
                     node["parallel"] = true.into();
                 }
@@ -2111,14 +2143,15 @@ impl crate::host::Host {
         }
     }
 
-    /// `device_editor` / `preset_save`: Renoise's actions on a device (no step of its undo), sent on to the tool.
+    /// `device_editor` / `preset_save` / `show_status`: Renoise's actions on a device and its status bar line (no step of its
+    /// undo), sent on to the tool.
     pub(crate) async fn renoise_action(&self, method: &str, arguments: &Value) -> (Value, bool) {
         let pick = match crate::host::Pick::from_arguments(arguments) {
             Ok(pick) => pick,
             Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
         };
         let mut params = json!({});
-        for field in ["ref", "show", "name", "replace", "epoch", "layout"] {
+        for field in ["ref", "show", "name", "replace", "epoch", "layout", "text"] {
             if let Some(value) = arguments.get(field) {
                 params[field] = value.clone();
             }
@@ -2145,10 +2178,12 @@ impl crate::host::Host {
             let mut params = json!({"ref": reference});
             crate::changes::place(&mut params, epoch.as_deref(), layout);
             if let Ok(read) = self.call("preset_read", params, pick, READ_TIMEOUT).await {
-                let children = with_plugin_names(read.get("plugins"), || {
-                    child_nodes(read.get("presetData").and_then(Value::as_str).unwrap_or_default())
-                });
+                let data = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
+                let children = with_plugin_names(read.get("plugins"), || child_nodes(data));
                 answer["nodes"][i]["childNodes"] = Value::Array(children);
+                if let Some(names) = lanes(data) {
+                    answer["nodes"][i]["lanes"] = names.into();
+                }
             }
         }
         if too_big(answer) {

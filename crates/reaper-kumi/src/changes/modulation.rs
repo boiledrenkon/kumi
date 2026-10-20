@@ -309,17 +309,19 @@ pub fn preview(ctx: &Ctx, family: &Family, input: &Value) -> Done<Preview> {
     {
         notes.push("The parameter's modulation is turned on with it (it does nothing while off).");
     }
-    // REAPER's undo state holds a parameter's modulation only while a source of it is on (lab 7.82: no point is made).
-    let sourced = ["lfo.active", "acs.active", "plink.active"]
-        .iter()
-        .any(|k| ctx.reaper.fx_config(at.at.fx, &key(at.param, k)).is_some_and(|v| v.trim() == "1"));
-    if family.kind == "fx-param-mod" && !sourced {
+    if family.kind == "fx-param-mod" && !sourced(ctx, at.at.fx, at.param) {
         notes.push("With no LFO, audio control signal or link on, REAPER's undo doesn't keep this; Kumi's undo does.");
     }
     if !notes.is_empty() {
         display["note"] = notes.join(" ").into();
     }
     Ok(Preview { target: target(ctx, &at), prior: json!({"keys": keys, "state": now}), fence: json!({"state": now}), display })
+}
+
+/// Whether a source of the parameter's modulation is on: REAPER's undo state holds its modulation only then (lab 7.82: a
+/// write with none on makes no point).
+fn sourced(ctx: &Ctx, fx: Fx, param: i32) -> bool {
+    ["lfo.active", "acs.active", "plink.active"].iter().any(|k| ctx.reaper.fx_config(fx, &key(param, k)).is_some_and(|v| v.trim() == "1"))
 }
 
 fn write_all(ctx: &Ctx, fx: Fx, writes: &[(String, String)]) {
@@ -339,8 +341,13 @@ pub fn apply(ctx: &Ctx, family: &Family, input: &Value, fence: &Value) -> Done<A
     }
     let writes: Vec<(String, String)> = touched.into_iter().map(|t| (t.key, t.write)).collect();
     let unwritten = writes.iter().all(|(key, text)| now.get(key).is_some_and(|v| same_value(v, &Value::from(text.clone()))));
+    let sourced_before = sourced(ctx, at.at.fx, at.param);
     if !unwritten {
         write_all(ctx, at.at.fx, &writes);
+    }
+    // (MIDI learn is in REAPER's undo state whatever the modulation holds)
+    if family.kind != "fx-param-learn" && !sourced_before && !sourced(ctx, at.at.fx, at.param) {
+        ctx.unkept.set(true);
     }
     let after = state(ctx, at.at.fx, at.at.holder, &keys);
     if after.as_object().is_some_and(|a| a.values().all(Value::is_null)) {

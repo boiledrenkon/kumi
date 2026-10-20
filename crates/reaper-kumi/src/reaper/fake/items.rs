@@ -238,8 +238,16 @@ pub(super) unsafe extern "C" fn create_new_midi_item_in_proj(
         take.more.length = (end - start) * s.bpm / 60.0;
         let t = &mut s.tracks[at as usize];
         t.items.push(FakeItem::new(&item_id, start, end - start, vec![take]));
-        s.undo_dirty = true;
+        // (REAPER's undo doesn't notice an item made by this call: MarkTrackItemsDirty makes it, lab 7.82)
         item_ptr(at as usize, t.items.len() - 1)
+    })
+}
+
+pub(super) unsafe extern "C" fn mark_track_items_dirty(track: *mut MediaTrack, _item: *mut MediaItem) {
+    counted(|s| {
+        if track_of(s, track as u64).is_some() {
+            s.undo_dirty = true;
+        }
     })
 }
 
@@ -1338,6 +1346,7 @@ pub(super) fn lookup(name: &CStr) -> *mut c_void {
         b"GetMediaItemInfo_Value" => get_media_item_info_value as unsafe extern "C" fn(*mut MediaItem, *const c_char) -> f64,
         b"SetMediaItemInfo_Value" => set_media_item_info_value as unsafe extern "C" fn(*mut MediaItem, *const c_char, f64) -> bool,
         b"CreateNewMIDIItemInProj" => create_new_midi_item_in_proj as unsafe extern "C" fn(*mut MediaTrack, f64, f64, *const bool) -> *mut MediaItem,
+        b"MarkTrackItemsDirty" => mark_track_items_dirty as unsafe extern "C" fn(*mut MediaTrack, *mut MediaItem),
         b"AddMediaItemToTrack" => add_media_item_to_track as unsafe extern "C" fn(*mut MediaTrack) -> *mut MediaItem,
         b"DeleteTrackMediaItem" => delete_track_media_item as unsafe extern "C" fn(*mut MediaTrack, *mut MediaItem) -> bool,
         b"MoveMediaItemToTrack" => move_media_item_to_track as unsafe extern "C" fn(*mut MediaItem, *mut MediaTrack) -> bool,

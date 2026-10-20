@@ -13,7 +13,7 @@ use crate::rows;
 
 impl Reads {
     fn ctx<'a, 'r>(&'a self, reaper: &'a Reaper<'r>, proj: Project) -> Ctx<'a, 'r> {
-        Ctx { reaper, reads: self, proj }
+        Ctx { reaper, reads: self, proj, unkept: Default::default() }
     }
 
     /// `read {kind: "point", parent}`: a lane's points in order, in the envelope's units.

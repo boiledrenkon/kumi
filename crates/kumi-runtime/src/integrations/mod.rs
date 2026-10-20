@@ -8,6 +8,7 @@ pub mod own_changes;
 mod own_goal;
 mod own_groove;
 pub mod own_listening;
+pub mod own_pictures;
 pub mod own_views;
 pub mod reaper;
 pub mod reaper_changes;

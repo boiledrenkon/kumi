@@ -372,6 +372,8 @@ pub fn eq_band_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         band_write(ctx, at.fx, band, &now);
         return Err(failed("ReaEQ didn't take that band change; it is put back"));
     }
+    // (REAPER's undo state doesn't hold a band's type or switch, lab 7.82)
+    ctx.unkept.set(true);
     Ok(Applied { applied: after.clone(), display: json!({"title": band_title(ctx, &at, band, &after)}), unwritten, ..Default::default() })
 }
 

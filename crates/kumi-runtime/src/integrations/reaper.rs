@@ -27,7 +27,7 @@ pub const DAW: OwnDaw = OwnDaw {
     read_kinds: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call", "point", "autoitem"],
     project_kind: "project",
     fill_focus,
-    bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
+    bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing, BodyKind::Mixer],
     body_request,
     to_body,
     changes: &super::reaper_changes::CHANGES,
@@ -41,6 +41,7 @@ fn fill_focus(focus: &Value) -> DawFocus {
         Some("midi") => Some(view(ViewKind::NoteEditor, "MIDI editor")),
         Some("fx") => Some(view(ViewKind::DeviceChain, "FX chain")),
         Some("routing") => Some(view(ViewKind::Routing, "Routing")),
+        Some("mixer") => Some(view(ViewKind::Mixer, "Mixer")),
         _ => None,
     };
     let item = selected(&selection, "takeRef").or_else(|| selected(&selection, "itemRef")).map(|reference| FocusItem {
@@ -70,6 +71,8 @@ fn fill_focus(focus: &Value) -> DawFocus {
         main_view: Some(view(ViewKind::Timeline, "Arrange")),
         editor_view: editor,
         item,
+        // (a take's FX chain: FOCUS's tree is the take's, not the track's)
+        chain_ref: selected(&selection, "fxChainRef"),
         ..Default::default()
     }
 }
@@ -87,6 +90,14 @@ fn body_request(request: &BodyRequest) -> Option<JsonObject> {
             args
         }
         BodyRequest::Routing { track_ref } => body_args("routing", Some(track_ref)),
+        BodyRequest::Mixer { track_ref } => {
+            let mut args = body_args("mixer", None);
+            if let Some(track_ref) = track_ref {
+                args.insert("around".into(), track_ref.as_str().into());
+            }
+            args.insert("limit".into(), ARRANGE_LANES.into());
+            args
+        }
         _ => return None,
     })
 }
@@ -97,6 +108,7 @@ fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
         BodyRequest::Notes { item_ref } => FocusBody::Notes(own_views::notes(item_ref, body)),
         BodyRequest::Timeline => FocusBody::Timeline(own_views::timeline(body)),
         BodyRequest::Routing { track_ref } => FocusBody::Routing(own_views::routing(track_ref, body)),
+        BodyRequest::Mixer { .. } => FocusBody::Mixer(own_views::mixer(body)),
         _ => return None,
     })
 }
@@ -177,9 +189,11 @@ pub const VIEW: ViewPresentation = ViewPresentation {
         BodyKind::Notes => "MIDI",
         BodyKind::Timeline => "Arrange",
         BodyKind::Routing => "Routing",
+        BodyKind::Mixer => "Mixer",
         other => (ViewPresentation::NONE.heading)(other),
     },
     timeline_notes: true,
+    open_containers: true,
     ..ViewPresentation::NONE
 };
 

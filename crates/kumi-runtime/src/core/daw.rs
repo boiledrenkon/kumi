@@ -874,6 +874,7 @@ impl DawProfile {
         words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
         // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read. It listens (M5): parts rendered
         // offline and played out loud after (its scripts can't hear what it plays), a goal's rig, a sample's audio.
+        // (its status bar takes Kumi's line: the tool's show_status; REAPER's API has no status bar to write to)
         caps: Capabilities {
             device_tree: true,
             focus_stream: true,
@@ -883,6 +884,7 @@ impl DawProfile {
             goal_rig: true,
             audio_file: true,
             renders_to_listen: true,
+            status_line: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {

@@ -183,6 +183,14 @@ end
 
 
 M.MINUS, M.INFINITY = MINUS, INFINITY
+
+-- A value as Renoise writes it ("-6.021 dB", "-INF dB", "-0.5"), with the true minus sign before its numbers, as Kumi's titles
+-- write them.
+function M.minus_text(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("^%-([%d%.])", MINUS .. "%1"):gsub("([%s%(])%-([%d%.])", "%1" .. MINUS .. "%2")
+    :gsub("^%-([Ii][Nn][Ff])", MINUS .. "%1"):gsub("([%s%(])%-([Ii][Nn][Ff])", "%1" .. MINUS .. "%2"))
+end
 M.close, M.db_of, M.hex_of, M.rgb_of = close, db_of, hex_of, rgb_of
 M.need_text, M.need_object, M.context = need_text, need_object, context
 M.track_at, M.find, M.is_master, M.named, M.target, M.stage_of = track_at, find, is_master, named, target, stage_of
@@ -238,6 +246,16 @@ local function wanted_of(spec, loc, input)
   return spec.wanted(loc.object, input)
 end
 
+-- What HISTORY's picture needs that the title only says (a parameter's name and range): a kind's `shown(loc)`, into its
+-- display. For the display only: nothing restores from it.
+local function add_shown(spec, loc, display)
+  if not spec.shown then return end
+  local ok, extra = pcall(spec.shown, loc)
+  if ok and type(extra) == "table" then
+    for k, v in pairs(extra) do display[k] = v end
+  end
+end
+
 function M.prop_preview(song, env, spec, input)
   local loc = spec.locate(song, env, input)
   local now = spec.read(loc.object, input)
@@ -247,6 +265,7 @@ function M.prop_preview(song, env, spec, input)
   if not spec.undoable then display.note = NOT_UNDOABLE end
   -- (what the producer should know before it is made: columns hidden that hold notes)
   if spec.note then display.note = spec.note(loc, now, wanted) or display.note end
+  add_shown(spec, loc, display)
   local shown = wire(spec, now, env, loc)
   -- (the fence names what was located as well as its value: another track at the ref's place is not this one; and, where the
   -- value is a place, what the wanted value names)
@@ -296,6 +315,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   end
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
+  add_shown(spec, loc, display)
   return {
     applied = wire(spec, after, env, loc), journal_applied = after,
     display = display,
@@ -422,6 +442,18 @@ local function redoable(journal, entry)
   return journal.edits() <= entry.edits_at
 end
 
+-- (accept round 2) The change whose step is `desc`, when Renoise's redo put it back (told for certain) and nothing has moved it
+-- since: the journal still holds it, applied. Its restore may then find what it made where the change left it, though Renoise's
+-- undo and redo moved the epoch or the logs (each restore says what that allows, and checks what is there).
+function M.redone_entry(journal, desc)
+  if type(desc) ~= "string" or not journal then return nil end
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if entry.desc == desc then return entry.state == "applied" and entry.redone and entry or nil end
+  end
+  return nil
+end
+
 -- The events to tell Kumi of, once.
 function M.journal_take(journal)
   local events = journal.events
@@ -435,17 +467,26 @@ end
 
 -- An object that the change removed comes back (the producer's undo) or goes again (redo); one that the change made goes (undo)
 -- or comes back (redo). `type_` is what happened ("insert" or "remove") to the object at `at`.
-local function structural(journal, entry, type_, at, undoing, where)
+-- Renoise's redo makes again exactly what its undo of the change removed, and the list's place log sees another object come:
+-- with `linker` (the log the operation was just noted in: {mark = fn(), back = fn(mark, at)}), the redo's insert is linked back
+-- to the undo's remove, so the places kept before (Kumi's own record of the change among them) follow it again. What the
+-- object holds is each restore's to check, as ever.
+local function structural(journal, entry, type_, at, undoing, where, linker)
   local returns = (entry.shape == "deleted") == (type_ == "insert")
   if undoing and where == at then
     if returns and entry.state == "applied" then
       entry.state = "undone"
       stamp(journal, entry)
+      entry.redone = nil
       queue(journal, entry.desc, "undo")
+      entry.gone_mark = linker and entry.shape == "made" and linker.mark() or nil
       return true
     elseif not returns and entry.state == "undone" and redoable(journal, entry) then
       entry.state = "applied"
+      entry.redone = true
       queue(journal, entry.desc, "redo")
+      if linker and entry.gone_mark then linker.back(entry.gone_mark, at) end
+      entry.gone_mark = nil
       return true
     end
   end
@@ -468,7 +509,7 @@ local function shift_places(entry, type_, index)
   end
 end
 
-function M.journal_track_event(journal, type_, index, undoing, index2)
+function M.journal_track_event(journal, type_, index, undoing, index2, linker)
   if type_ == "swap" then
     -- (two tracks changed places: what is on them goes with them; a deleted track's place is where it will come back)
     for _, entry in ipairs(journal.entries) do
@@ -486,7 +527,7 @@ function M.journal_track_event(journal, type_, index, undoing, index2)
     if place and place.track then
       if entry.shape and place.device == nil then
         -- (an object that is a track itself: undone when it is made or removed again at its place)
-        if not structural(journal, entry, type_, index, undoing, place.track) then
+        if not structural(journal, entry, type_, index, undoing, place.track, linker) then
           if type_ == "insert" then
             if place.track >= index then place.track = place.track + 1 end
           elseif place.track > index then
@@ -506,13 +547,13 @@ end
 
 -- A device made, deleted or swapped on a track: the places of the devices the journal knows move with it, and a change that
 -- made or removed a device is told when the producer's undo or redo does it again.
-function M.journal_device_event(journal, track, type_, index, index2, undoing)
+function M.journal_device_event(journal, track, type_, index, index2, undoing, linker)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     local place = entry.place
     if place and place.device and place.track == track then
       local handled = false
-      if entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place.device) end
+      if entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place.device, linker) end
       if not handled then
         if type_ == "insert" then
           if place.device >= index then place.device = place.device + 1 end
@@ -618,12 +659,16 @@ local function check_slots(journal, song)
   if #candidates == 1 then
     candidates[1].entry.state = candidates[1].state
     if candidates[1].state == "undone" then stamp(journal, candidates[1].entry) end
+    candidates[1].entry.redone = candidates[1].how == "redo" or nil
+    candidates[1].entry.redo_patterns = #song.patterns
     queue(journal, candidates[1].entry.desc, candidates[1].how)
   end
 end
 
 -- After a producer's undo or redo: the journalled properties are read again and compared with what Kumi wrote and what it
 -- replaced.
+local check_read
+
 function M.journal_check(journal)
   local song = renoise.song()
   if not song then return end
@@ -642,9 +687,15 @@ function M.journal_check(journal)
       if entry.state == "applied" and same(sequence, entry.prior.sequence) and not same(sequence, entry.applied.sequence) then
         entry.state = "undone"
         stamp(journal, entry)
+        entry.redone = nil
         queue(journal, entry.desc, "undo")
       elseif entry.state == "undone" and same(sequence, entry.applied.sequence) and redoable(journal, entry) then
         entry.state = "applied"
+        entry.redone, entry.redo_patterns = true, #song.patterns
+        -- (the patterns it made are made again: their counts of changed lines start from here)
+        if entry.spec and entry.spec.redo_marks and journal.retouched_at then
+          for _, made in ipairs(entry.spec.redo_marks(entry)) do journal.retouched_at(made.mark, made.p) end
+        end
         queue(journal, entry.desc, "redo")
       end
     elseif entry.follows then
@@ -653,37 +704,70 @@ function M.journal_check(journal)
       if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
         entry.state = "undone"
         stamp(journal, entry)
+        entry.redone = nil
         queue(journal, entry.desc, "undo")
       elseif entry.state == "undone" and now == entry.applied.index and redoable(journal, entry) then
         entry.state = "applied"
+        entry.redone = true
         queue(journal, entry.desc, "redo")
       end
     elseif spec and spec.reread and not entry.shape then
-      local ok, now = pcall(function()
-        local object = spec.reread(song, entry.place)
-        if object == nil then return nil end
-        return spec.read(object, entry.applied)
-      end)
-      if ok and now ~= nil then
-        if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
-          entry.state = "undone"
-          stamp(journal, entry)
-          queue(journal, entry.desc, "undo")
-        elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
-          if spec.unsure_redo then
-            -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
-            -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
-            entry.state = "unsure"
-            queue(journal, entry.desc, "unsure")
-          else
-            entry.state = "applied"
-            queue(journal, entry.desc, "redo")
-          end
-        end
-      end
+      check_read(journal, song, entry)
     end
   end
   check_slots(journal, song)
+end
+
+-- An entry the journal reads again (its spec's `reread`, `read`, `same`): undone when it reads as before the change and not as
+-- the change left it, redone when it reads as the change left it again.
+check_read = function(journal, song, entry)
+  local spec = entry.spec
+  local ok, now = pcall(function()
+    local object = spec.reread(song, entry.place)
+    if object == nil then return nil end
+    return spec.read(object, entry.applied)
+  end)
+  if ok and now ~= nil then
+    if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
+      entry.state = "undone"
+      stamp(journal, entry)
+      entry.redone = nil
+      queue(journal, entry.desc, "undo")
+    elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
+      -- (what Kumi wrote is there again, from Renoise's redo: the lines' count of edits since Kumi's step starts again here,
+      -- so Kumi's undo isn't refused for the redo's own writes; an edit after it still is. Not where the redo is unsure:
+      -- lines the producer had and Renoise's undo brought back read the same as Kumi's, review MUST 10)
+      if journal.retouched and not spec.unsure_redo and type(entry.applied) == "table" then journal.retouched(entry.applied) end
+      if spec.unsure_redo then
+        -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
+        -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
+        entry.state = "unsure"
+        queue(journal, entry.desc, "unsure")
+      else
+        entry.state = "applied"
+        entry.redone = true
+        queue(journal, entry.desc, "redo")
+      end
+    end
+  end
+end
+
+-- (accept round 2) What Renoise tells no notifier of when its undo or redo changes it (what a Doofer, Splitter or Notepad holds:
+-- `spec.polled`) is read again now and then instead (the tool's timer, about once a second): at most `most` of the newest such
+-- entries, each one read of the device's preset data.
+function M.journal_poll(journal, most)
+  local song = renoise.song()
+  if not song then return 0 end
+  local read = 0
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if read >= (most or 8) then break end
+    if entry.spec and entry.spec.polled and entry.spec.reread and not entry.shape and (entry.state == "applied" or entry.state == "undone") then
+      check_read(journal, song, entry)
+      read = read + 1
+    end
+  end
+  return read
 end
 
 -- n-instruments: an operation on a list of instruments, or of what is in one (its samples, phrases, sets, chains, a set's or a
@@ -697,14 +781,14 @@ local function in_scope(place, scope)
   return true
 end
 
-function M.journal_list_event(journal, key, scope, type_, index, index2, undoing)
+function M.journal_list_event(journal, key, scope, type_, index, index2, undoing, linker)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     local place = entry.place
     if type(place) == "table" and type(place[key]) == "number" and in_scope(place, scope) then
       local own = place.of == key
       local handled = false
-      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key]) end
+      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key], linker) end
       if not handled then
         if type_ == "insert" then
           if place[key] >= index then place[key] = place[key] + 1 end
@@ -726,7 +810,7 @@ end
 function M.note_restored_at(journal, kind, place)
   for _, entry in ipairs(journal.entries) do
     if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
-      entry.state = "undone"
+      entry.state, entry.redone = "undone", nil
       stamp(journal, entry)
       return true
     end
@@ -740,7 +824,7 @@ function M.note_restored(journal, kind, place, applied, spec)
   for _, entry in ipairs(journal.entries) do
     if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and
       (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
-      entry.state = "undone"
+      entry.state, entry.redone = "undone", nil
       stamp(journal, entry)
       if entry.shape and place then entry.place = place end
       return

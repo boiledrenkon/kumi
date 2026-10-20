@@ -45,6 +45,13 @@ fn output_text(dst: i64, src: i64) -> String {
     format!("output {}", sends::span_text(first, count))
 }
 
+/// The output's ends as HISTORY's picture names them: the track, and the output ("output 3–4").
+fn ends(ctx: &Ctx, found: &Found) -> (String, String) {
+    let dst = ctx.reaper.send_value(found.track, HW, found.index, "I_DSTCHAN") as i64;
+    let src = ctx.reaper.send_value(found.track, HW, found.index, "I_SRCCHAN") as i64;
+    (name_of(ctx.reaper, found.track), output_text(dst, src))
+}
+
 fn label(ctx: &Ctx, found: &Found) -> String {
     let dst = ctx.reaper.send_value(found.track, HW, found.index, "I_DSTCHAN") as i64;
     let src = ctx.reaper.send_value(found.track, HW, found.index, "I_SRCCHAN") as i64;
@@ -123,8 +130,9 @@ fn for_restore(fault: Fault) -> Fault {
     }
 }
 
-/// All of an output's settings, as a state to compare and to make again.
-const STATE_KEYS: [(&str, &str); 10] = [
+/// All of an output's settings, as a state to compare and to make again. (Not `B_MONO`: on an output it reads back what was
+/// written but REAPER neither saves nor undoes it, lab 7.82; an output's mono is its `I_DSTCHAN`'s 1024 bit.)
+const STATE_KEYS: [(&str, &str); 9] = [
     ("D_VOL", "volume"),
     ("D_PAN", "pan"),
     ("B_MUTE", "mute"),
@@ -132,7 +140,6 @@ const STATE_KEYS: [(&str, &str); 10] = [
     ("I_SRCCHAN", "srcChan"),
     ("I_DSTCHAN", "dstChan"),
     ("B_PHASE", "phase"),
-    ("B_MONO", "mono"),
     ("I_AUTOMODE", "autoMode"),
     ("D_PANLAW", "panLaw"),
 ];
@@ -371,11 +378,17 @@ pub static PROPS: [Prop; 7] = [
     Prop {
         kind: "hw-out-mono",
         read: |reaper, track, index| state(reaper, track, index),
-        wanted: |_, _, _, input| {
+        // (the output's mono is its I_DSTCHAN's 1024 bit, as REAPER saves it)
+        wanted: |ctx, _, now, input| {
             let mono = input.get("mono").and_then(Value::as_bool).ok_or_else(|| bad("mono must be true or false"))?;
-            Ok(json!({"mono": if mono { 1.0 } else { 0.0 }}))
+            let dst = number(now, "dstChan") as i64;
+            let dst = if mono { dst | 1024 } else { dst & !1024 };
+            reaches(ctx, number(now, "srcChan") as i64, dst)?;
+            Ok(json!({"dstChan": dst as f64}))
         },
-        title: |route, to| format!("Hardware output {route} {}", if number(to, "mono") != 0.0 { "summed to mono" } else { "in stereo" }),
+        title: |route, to| {
+            format!("Hardware output {route} {}", if number(to, "dstChan") as i64 & 1024 != 0 { "summed to mono" } else { "in stereo" })
+        },
         noun: "mono",
     },
 ];
@@ -423,13 +436,20 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         }
     }
     let after = (prop.read)(reaper, found.track, found.index);
+    let (from, to) = ends(ctx, &found);
+    let drawn = sends::drawn_route(&from, &to, Some(&touched(&now, &wanted)), Some(&touched(&after, &wanted)));
     let mut applied = touched(&after, &wanted);
     applied["output"] = seal(reaper, &found);
     Ok(Applied {
         applied,
         created: None,
         material: None,
-        display: json!({"title": (prop.title)(&route, &wanted), "before": touched(&now, &wanted), "after": touched(&after, &wanted)}),
+        display: json!({
+            "title": (prop.title)(&route, &wanted),
+            "before": touched(&now, &wanted),
+            "after": touched(&after, &wanted),
+            "route": drawn,
+        }),
         unwritten: unchanged,
     })
 }
@@ -555,8 +575,10 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let found = Found { track: plan.track, id: plan.id.clone(), index };
     let mut applied = state(reaper, plan.track, index);
+    let (from, to) = ends(ctx, &found);
+    let display = json!({"title": add_title(ctx, &plan), "route": sends::drawn_route(&from, &to, None, Some(&applied))});
     applied["output"] = seal(reaper, &found);
-    Ok(Applied { applied, created: Some(created), material: None, display: json!({"title": add_title(ctx, &plan)}), ..Default::default() })
+    Ok(Applied { applied, created: Some(created), material: None, display, ..Default::default() })
 }
 
 pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -611,6 +633,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let now = state(reaper, found.track, found.index);
     let route = label(ctx, &found);
+    let (from, to) = ends(ctx, &found);
     let last = found.index == reaper.send_count(found.track, HW) - 1;
     let stamp = stamp_of(reaper, found.track, found.index);
     let lost = active_envelopes(reaper, found.track, found.index);
@@ -621,7 +644,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"removed": true}),
         created: None,
         material: Some(json!({"state": now, "stamp": stamp, "last": last, "lostEnvelopes": lost, "trackRef": refs::track_ref(&found.id)})),
-        display: json!({"title": format!("Removed hardware output {route}")}),
+        display: json!({"title": format!("Removed hardware output {route}"), "route": sends::drawn_route(&from, &to, Some(&now), None)}),
         ..Default::default()
     })
 }

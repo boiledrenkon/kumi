@@ -140,7 +140,7 @@ local function note_value(l, col) return mock.song:pattern(1):track(3):line(l):n
 T.instruments = {
   setup = setup, place = place, preview = preview, apply = apply, change = change, restore = restore, failure = failure, call = call,
   steps = steps, newest = newest, instrument = instrument, names = names, iref = iref, sref = sref, note_at = note_at, note_value = note_value,
-  send = send, wait = wait,
+  send = send, wait = wait, told = told,
 }
 
 -- instrument-rename
@@ -481,6 +481,81 @@ test("instruments: an .xrni, an .sfz and a sample file load into a new instrumen
   eq(instrument(5).name, "Clap")
   eq(instrument(5).samples[1].buffer.frames, 512)
   eq(mock.dialogs, 0)
+end)
+
+test("instruments: Renoise's empty instrument after a load into the last one is taken out again: a load at the end, into the last, a delete's undo", function()
+  local env, peer = setup()
+  local xrni = saved_instrument(peer, 2)
+  local record = change(peer, "instrument-load", { path = xrni, index = 4 })
+  eq(names(), "Drums,Bass synth,Pad,Bass synth", "no empty instrument after it")
+  ok(restore(peer, "instrument-load", record).result)
+  eq(names(), "Drums,Bass synth,Pad")
+  change(peer, "instrument-load", { path = xrni, ref = iref(place(peer), 3) })
+  eq(names(), "Drums,Bass synth,Bass synth", "loaded into Pad, the last, empty")
+  env, peer = setup()
+  record = change(peer, "instrument-delete", { ref = iref(place(peer), 3) })
+  eq(names(), "Drums,Bass synth")
+  ok(restore(peer, "instrument-delete", record).result)
+  eq(names(), "Drums,Bass synth,Pad")
+  H.no_dialogs()
+end)
+
+test("instruments: Renoise's undo and redo of an instrument loaded as the last one are told", function()
+  local env, peer = setup()
+  local xrni = saved_instrument(peer, 2)
+  change(peer, "instrument-load", { path = xrni, index = 4 }, "Kumi: load (k430)")
+  told(peer)
+  mock.song:undo()
+  eq(names(), "Drums,Bass synth,Pad")
+  local events = told(peer)
+  eq(#events, 1, "undone")
+  eq(events[1].data.how, "undo")
+  mock.song:redo()
+  eq(names(), "Drums,Bass synth,Pad,Bass synth")
+  events = told(peer)
+  eq(#events, 1, "redone")
+  eq(events[1].data.how, "redo")
+end)
+
+test("instruments: after Renoise's own undo and redo of an instrument Kumi added, duplicated or loaded, or a phrase it added, Kumi's undo takes it away; changed since: refused", function()
+  local cases = {
+    { "instrument-add", function(E) return { index = 4, name = "New" } end, "Drums,Bass synth,Pad" },
+    { "instrument-duplicate", function(E) return { ref = iref(E, 2) } end, "Drums,Bass synth,Pad" },
+    { "instrument-load", function(E, peer) return { path = saved_instrument(peer, 2), index = 1 } end, "Drums,Bass synth,Pad" },
+  }
+  for _, case in ipairs(cases) do
+    for _, changed in ipairs({ false, true }) do
+      local env, peer = setup()
+      local input = case[2](place(peer), peer)
+      local record, done = change(peer, case[1], input)
+      local made = done.created and done.created.ref
+      mock.song:undo()
+      eq(names(), "Drums,Bass synth,Pad", case[1] .. ": Renoise's undo")
+      mock.song:redo()
+      H.tick(2)
+      if changed then
+        -- (the producer adds a sample to it after the redo)
+        local i = tonumber(made:match(":(%d+)$"))
+        mock.song:instrument(i):insert_sample_at(1)
+      end
+      local undone = restore(peer, case[1], record)
+      if changed then
+        failure(undone, "changed")
+      else
+        ok(undone.result, case[1] .. ": what Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+        eq(names(), case[3], case[1])
+      end
+    end
+  end
+  -- a phrase
+  local env, peer = setup()
+  local record = change(peer, "phrase-add", { ref = iref(place(peer), 3), name = "Hook" })
+  mock.song:undo()
+  mock.song:redo()
+  H.tick(2)
+  ok(restore(peer, "phrase-add", record).result, "the phrase Renoise's redo made again is Kumi's")
+  eq(#instrument(3).phrases, 0)
+  H.no_dialogs()
 end)
 
 test("instruments: a load into an empty instrument, refused into one that isn't; a missing file or a kind Renoise won't load is bad-params", function()

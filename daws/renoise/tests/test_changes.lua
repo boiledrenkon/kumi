@@ -768,6 +768,10 @@ test("changes: a parameter is set by value or by text, kept in its range, and a 
   local ref = epoch .. ":param:3.2.1"
   local previewed, done, e, layout = simple_change(peer, "device-param", { ref = ref, value = 0.25 }, "Kumi: gain (kc01)")
   eq(previewed.display.title, "EQ 5 on Bass Gain 0.25")
+  -- (m4-tui) HISTORY's picture names the parameter and its range, in the preview and the apply
+  eq(previewed.display.parameter, "Gain")
+  eq(done.display.parameter, "Gain")
+  eq(done.display.max, mock.data.tracks[3].devices[2].params[1].max or 1)
   eq(mock.data.tracks[3].devices[2].params[1].value, 0.25)
   local undone = restore(peer, "device-param", { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo (kc02)", e, layout)
   ok(undone.result)
@@ -881,6 +885,47 @@ test("changes: a device is put in by its path or its name as one undo step, and 
   eq(paths_of(3), "Mixer,EQ 5,#Send")
   eq(steps(), 2)
   eq(newest(), "Kumi: undo add (ke02)")
+  H.no_dialogs()
+end)
+
+test("changes: after Renoise's own undo and redo of a track or a device Kumi made, Kumi's undo takes it away; one changed since stays", function()
+  local env, peer = device_song()
+  -- a track
+  local epoch, layout = place(peer)
+  local input = { type = "sequencer", name = "Lead", index = 3 }
+  local previewed = preview(peer, "track-add", input)
+  local done = apply(peer, "track-add", input, "Kumi: add (kr01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }
+  mock.song:undo()
+  mock.song:redo()
+  local undone = restore(peer, "track-add", record, "Kumi: undo (kr02)", done.result.epoch, done.result.layout)
+  ok(undone.result, "the track Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+  local names = {}
+  for k, track in ipairs(mock.data.tracks) do names[k] = track.name end
+  eq(table.concat(names, ","), "Kick,Hat,Bass,Pad,Master,Send 1,Send 2")
+  -- a device, and one the producer turned after the redo
+  for _, turned in ipairs({ false, true }) do
+    epoch, layout = place(peer)
+    local add = { ref = track_ref(epoch, 3), path = "Gainer", index = 3 }
+    local p = preview(peer, "device-add", add)
+    local d = apply(peer, "device-add", add, "Kumi: add (kr03)", p.fence, epoch, layout)
+    ok(d.result, json.encode(d.error or {}))
+    mock.song:undo()
+    eq(paths_of(3), "Mixer,EQ 5,#Send")
+    mock.song:redo()
+    eq(paths_of(3), "Mixer,EQ 5,Gainer,#Send")
+    if turned then devices_of(3)[3].params[1].value = 2 end
+    local back = restore(peer, "device-add", { target = p.target, prior = p.prior, applied = d.result.applied, created = d.result.created,
+      material = d.result.material }, "Kumi: undo (kr04)", d.result.epoch, d.result.layout)
+    if turned then
+      failure(back, "changed")
+      eq(paths_of(3), "Mixer,EQ 5,Gainer,#Send")
+    else
+      ok(back.result, "the device Renoise's redo made again is Kumi's: " .. json.encode(back.error or {}))
+      eq(paths_of(3), "Mixer,EQ 5,#Send")
+    end
+  end
   H.no_dialogs()
 end)
 
@@ -1726,6 +1771,31 @@ test("changes: a track before a group goes into it as its last, and comes back t
   H.no_dialogs()
 end)
 
+test("changes: the producer's undo and redo of a track put into the empty group just after it are told (it doesn't move)", function()
+  local env, peer = with_group()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3), group = track_ref(epoch, 4) }
+  local done = apply(peer, "track-group", input, "Kumi: group (kg21)", preview(peer, "track-group", input).fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass@Bus,Bus,Pad,Master,Send 1")
+  local function told_after(action)
+    H.tick(2)
+    H.events(peer, "undone_in_daw")
+    action()
+    H.tick(3)
+    drain(peer)
+    return H.events(peer, "undone_in_daw")
+  end
+  local told = told_after(function() mock.song:undo() end)
+  eq(layout_text(), "Kick,Hat,Bass,Bus,Pad,Master,Send 1")
+  eq(#told, 1, "undone")
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: group (kg21)")
+  told = told_after(function() mock.song:redo() end)
+  eq(#told, 1, "redone")
+  eq(told[1].data.how, "redo")
+end)
+
 test("changes: a track in a group comes out to just before its tracks, and goes back to its place among them", function()
   local env, peer = with_group()
   mock.song:add_track_to_group(1, 4)
@@ -1771,6 +1841,51 @@ end)
 
 local function seq_text() return table.concat(mock.data.sequence, ",") end
 local function seq_ref(epoch, s) return epoch .. ":seq:" .. s end
+
+test("changes: after Renoise's own undo and redo of a track move, a slot made or a slot deleted, Kumi's undo puts it back (of: the change's step)", function()
+  local env, peer = setup()
+  local function told() H.tick(3) drain(peer) H.events(peer, "undone_in_daw") end
+  local function undo_redo() told() mock.song:undo() told() mock.song:redo() told() end
+  -- a track move
+  local epoch, layout = place(peer)
+  local move = { ref = track_ref(epoch, 1), index = 3 }
+  local p1 = preview(peer, "track-move", move)
+  local d1 = apply(peer, "track-move", move, "Kumi: move (kw01)", p1.fence, epoch, layout)
+  undo_redo()
+  eq(layout_text(), "Hat,Bass,Kick,Pad,Master,Send 1")
+  local r1 = restore(peer, "track-move", { target = p1.target, prior = p1.prior, applied = d1.result.applied, material = d1.result.material },
+    "Kumi: undo (kw02)", d1.result.epoch, d1.result.layout, { of = "Kumi: move (kw01)" })
+  ok(r1.result, "the move Renoise's redo made again: " .. json.encode(r1.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  -- a slot made
+  epoch, layout = place(peer)
+  local p2 = preview(peer, "slot-insert", { index = 2 })
+  local d2 = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw03)", p2.fence, epoch, layout)
+  undo_redo()
+  eq(seq_text(), "1,4,2,1,3")
+  local r2 = restore(peer, "slot-insert", { target = p2.target, prior = p2.prior, applied = d2.result.applied, created = d2.result.created },
+    "Kumi: undo (kw04)", d2.result.epoch, d2.result.layout, { of = "Kumi: slot (kw03)" })
+  ok(r2.result, "the slot Renoise's redo made again: " .. json.encode(r2.error or {}))
+  eq(seq_text(), "1,2,1,3")
+  -- without the change's step name it is refused as before
+  epoch, layout = place(peer)
+  local d2b = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw05)", preview(peer, "slot-insert", { index = 2 }).fence, epoch, layout)
+  undo_redo()
+  failure(restore(peer, "slot-insert", { target = p2.target, prior = p2.prior, applied = d2b.result.applied, created = d2b.result.created },
+    "Kumi: undo (kw06)", d2b.result.epoch, d2b.result.layout), "stale")
+  -- a slot deleted
+  epoch, layout = place(peer)
+  local del = { ref = seq_ref(epoch, 3) }
+  local p3 = preview(peer, "slot-delete", del)
+  local d3 = apply(peer, "slot-delete", del, "Kumi: delete (kw07)", p3.fence, epoch, layout)
+  local deleted = seq_text()
+  undo_redo()
+  eq(seq_text(), deleted)
+  local r3 = restore(peer, "slot-delete", { target = p3.target, prior = p3.prior, applied = d3.result.applied, material = d3.result.material },
+    "Kumi: undo (kw08)", d3.result.epoch, d3.result.layout, { of = "Kumi: delete (kw07)" })
+  ok(r3.result, "the slot Renoise's redo deleted again: " .. json.encode(r3.error or {}))
+  H.no_dialogs()
+end)
 
 test("changes: a slot is made with a new pattern or an existing one, and removed again with the pattern it made", function()
   local env, peer = setup()
@@ -1990,6 +2105,7 @@ test("changes: a slot starts a section, is named, and loses it again", function(
   local undone = restore(peer, "slot-section", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo (kn92)", epoch, layout)
   ok(undone.result, json.encode(undone.error or {}))
   eq(mock.song.sequencer:sequence_is_start_of_section(3), false)
+  eq(mock.song.sequencer:sequence_section_name(3), "", "the name it kept hidden is the one it had (real Renoise kept “Drop”)")
   -- a rename keeps the start; clearing needs no name
   local p2 = preview(peer, "slot-section", { ref = ref, start = true })
   eq(p2.display.title, "Section at slot 3")

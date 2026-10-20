@@ -18,7 +18,7 @@ const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "s
 /// What the bridge answers for listening (M5).
 pub const LISTENING_METHODS: [&str; 8] =
     ["render_start", "capture_start", "listen_status", "listen_cancel", "audition", "audition_stop", "audio_file", "scratch"];
-const BODIES: [&str; 4] = ["arrange", "midi", "fx", "routing"];
+const BODIES: [&str; 5] = ["arrange", "midi", "fx", "routing", "mixer"];
 
 struct State {
     epoch: u32,

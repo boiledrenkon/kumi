@@ -29,9 +29,9 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Reaper => Kinds {
             read: &[
                 "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
-                "autoitem", "spans",
+                "autoitem", "call", "spans",
             ],
-            bodies: &["arrange", "midi", "fx", "routing"],
+            bodies: &["arrange", "midi", "fx", "routing", "mixer"],
             // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
             outside_undo: &[
                 "loop-repeat",
@@ -61,7 +61,7 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "chain",
                 "spans",
             ],
-            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp", "mixer"],
             outside_undo: &[
                 "track-mute",
                 "track-solo",
@@ -133,6 +133,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
     layout_arg(arguments, &mut params)?;
     hidden_arg(arguments, &mut params)?;
     grid_arg(arguments, &mut params)?;
+    call_args(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -150,6 +151,21 @@ fn grid_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), St
             }
             None => Err(format!("grid must be a whole number from 2 to {MAX_GRID}")),
         },
+    }
+}
+
+/// REAPER's read of an API function by name (`kind: call`): the function and its arguments, in order or by name.
+fn call_args(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    if let Some(name) = text_arg(arguments, "fn")? {
+        params.insert("fn".into(), name.into());
+    }
+    match arguments.get("args") {
+        None | Some(Value::Null) => Ok(()),
+        Some(args @ (Value::Array(_) | Value::Object(_))) => {
+            params.insert("args".into(), args.clone());
+            Ok(())
+        }
+        Some(_) => Err("args must be the function's arguments: a list in order, or an object by their names".into()),
     }
 }
 
@@ -328,6 +344,23 @@ mod tests {
         }
         assert!(read_params(&json!({"kind": "line", "hidden": "yes"})).is_err());
         assert!(body_params(&json!({"kind": "pattern", "hidden": 1}), Daw::Renoise).is_err());
+    }
+
+    #[test]
+    fn a_call_read_forwards_its_function_and_arguments() {
+        assert_eq!(
+            read_params(&json!({"kind": "call", "fn": "GetMediaTrackInfo_Value", "args": ["r:track:master", "D_VOL"]})).unwrap(),
+            json!({"kind": "call", "fn": "GetMediaTrackInfo_Value", "args": ["r:track:master", "D_VOL"]})
+        );
+        assert_eq!(
+            read_params(&json!({"kind": "call", "fn": "CountTracks", "args": {"proj": 0}})).unwrap(),
+            json!({"kind": "call", "fn": "CountTracks", "args": {"proj": 0}})
+        );
+        for bad in
+            [json!({"kind": "call", "fn": ""}), json!({"kind": "call", "fn": 3}), json!({"kind": "call", "fn": "CountTracks", "args": "0"})]
+        {
+            assert!(read_params(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

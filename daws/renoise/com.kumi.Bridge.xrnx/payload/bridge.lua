@@ -133,6 +133,9 @@ local function layout_now()
   return b.layout
 end
 
+-- How often the journal reads again what no notifier tells (a container's contents), and how many of those at most each time.
+M.POLL_MS, M.POLL_MOST = 1000, 8
+
 -- How many shifts of the track list the tool keeps to carry refs through.
 -- (a restore that puts a track back into a big group makes two swaps per member itself: 1024 covers groups of 500)
 M.SHIFT_HISTORY = 1024
@@ -616,6 +619,37 @@ recount = function(kind, token, owner, list, count)
   log.write("info", "the " .. kind .. " list was out of step: watched anew on its own")
 end
 
+-- What the journal links Renoise's redo of a change that made something back to its undo with (changes_base `structural`): a
+-- list's place log, or the track shifts.
+local function linker(log)
+  if not log then return nil end
+  return {
+    mark = function() return places.mark(log) end,
+    back = function(mark, at) places.back(log, mark, at) end,
+  }
+end
+local track_linker = {
+  mark = function() return b.layout end,
+  back = function(mark, at) refs.back(b.shifts, mark, at) end,
+}
+
+-- Renoise's undo or redo of a load that replaced an instrument in place (an .xrni load: Kumi's, the producer's) tells an
+-- insert next to it, then the other one's remove: insert@i, remove@i+1 undone; insert@i+1, remove@i redone (lab 2026-10-20).
+-- For what keeps an instrument's place (the places log, the journal) the slot keeps its instrument, as in Kumi's own load:
+-- the pair's remove is taken as the inserted one's. (The list of watched instruments takes the operations as told.)
+local function in_place(op)
+  local held = b.held_insert
+  b.held_insert = nil
+  local song = renoise.song()
+  if not (op and type(op.index) == "number" and song and song:is_undo_redoing()) then return op end
+  if op.type == "insert" then
+    b.held_insert = op.index
+  elseif op.type == "remove" and held and math.abs(op.index - held) == 1 then
+    return { type = "remove", index = held }
+  end
+  return op
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
@@ -631,6 +665,7 @@ local function on_structural(reason, kind, op, owner, token)
     end
   end
   bump_epoch(reason, true, BREAKS[kind])
+  local placed = op
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
   if kind == "devices" and token and token.dlog then
     places.note(token.dlog, op)
@@ -649,7 +684,8 @@ local function on_structural(reason, kind, op, owner, token)
       end
       if not r.insert and not r.remove then b.replacing = nil end
     end
-    if not own then places.note(b.ilog, op) end
+    placed = in_place(op)
+    if not own then places.note(b.ilog, placed) end
   elseif token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]] then
     places.note(token[INSTRUMENT_LOGS[kind]], op) -- (n-instruments)
   end
@@ -663,7 +699,10 @@ local function on_structural(reason, kind, op, owner, token)
   -- (n-instruments: the journal's places of instruments and what is in them move with the list's operations)
   if op and INSTRUMENT_JOURNAL[kind] then
     local scope = instrument_scope(kind, token)
-    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, op.type, op.index, op.index2, song:is_undo_redoing()) end
+    if scope then
+      changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, placed.type, placed.index, placed.index2, song:is_undo_redoing(),
+        linker(kind == "instruments" and b.ilog or (token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]])))
+    end
   end
   if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
@@ -672,7 +711,7 @@ local function on_structural(reason, kind, op, owner, token)
     -- (the journal's places are device places: they move, and a change that made or removed a device is told on the producer's undo)
     for track_index, candidate in ipairs(b.groups.tracks) do
       if candidate == token then
-        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing())
+        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing(), linker(token.dlog))
       end
     end
   end
@@ -747,7 +786,7 @@ local function on_tracks(op)
   b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
   local listed = true
-  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing())
+  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing(), nil, track_linker)
   if op.type == "insert" then
     listed = remember(b.groups.tracks, op.index)
     if type(op.index) == "number" and op.index >= 1 then
@@ -770,6 +809,7 @@ local function on_tracks(op)
 end
 
 local function flush_events()
+  b.held_insert = nil -- (an undo or redo is over by the next callback: its pairs with it)
   if not observers:attached() then return end
   local song = renoise.song()
   if not song then return end
@@ -791,6 +831,12 @@ local function flush_events()
   if b.undone then
     b.undone = false
     changes.journal_check(b.journal)
+  end
+  -- (what Renoise's undo changes inside a Doofer, a Splitter or a Notepad no notifier tells: read again about once a second)
+  local now_ms = M.now_ms()
+  if changes.journal_active(b.journal) and now_ms - (b.polled_ms or 0) >= M.POLL_MS then
+    b.polled_ms = now_ms
+    changes.journal_poll(b.journal, M.POLL_MOST)
   end
   for _, event in ipairs(changes.journal_take(b.journal)) do
     conns:event("undone_in_daw", { descs = json.array(event.descs), how = event.how, epoch = epoch() })
@@ -958,6 +1004,41 @@ local function phrase_token(i, ph)
   return token and token.phrases and token.phrases[ph] or nil
 end
 
+-- A pattern's or phrase's count of changed lines as a change kept it ("p12=40"), as the journal moved it on: Renoise's redo
+-- wrote that change's lines again (changes_base `journal_check`), so its count starts again from after the redo.
+local function counted_from(mark)
+  return type(mark) == "string" and b.retouch and b.retouch[mark] or mark
+end
+
+-- The journal's: a pattern a change made, made again by Renoise's redo at `p`: the change's count for it (`mark`) goes on from
+-- that pattern's own.
+local function retouched_at(mark, p)
+  local token = type(mark) == "string" and type(p) == "number" and b.groups and b.groups.patterns[p] or nil
+  if not (token and token.pid) then return end
+  b.retouch = b.retouch or {}
+  b.retouch[mark] = token.pid .. "=" .. token.touches
+end
+
+-- The journal's: a change Renoise's redo put back holds what Kumi wrote again; its counts (`touch`, and a copy's source's) now
+-- start from here.
+local function retouched(applied)
+  b.retouch = b.retouch or {}
+  for _, mark in ipairs({ applied.touch, type(applied.source) == "table" and applied.source.touch or nil }) do
+    local pid = type(mark) == "string" and mark:match("^(.*)=%d+$") or nil
+    local token
+    for _, candidate in ipairs(pid and b.groups and b.groups.patterns or {}) do
+      if candidate.pid == pid then token = candidate break end
+    end
+    for _, instrument in ipairs(pid and not token and b.groups and b.groups.instruments or {}) do
+      for _, phrase in ipairs(instrument.phrases or {}) do
+        if phrase.pid == pid then token = phrase break end
+      end
+      if token then break end
+    end
+    if token then b.retouch[mark] = pid .. "=" .. token.touches end
+  end
+end
+
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -989,6 +1070,7 @@ local place_env = {
   pattern_touched_since = function(p, mark)
     local token = b.groups and b.groups.patterns[p]
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1081,6 +1163,7 @@ local place_env = {
   phrase_touched_since = function(i, ph, mark)
     local token = phrase_token(i, ph)
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1240,6 +1323,15 @@ function handlers.project_save(params)
   return actions.project_save(params, change_env())
 end
 
+-- A line in Renoise's status bar (never a dialog), for a producer working there while Kumi finishes or needs them: one
+-- line of text, control characters as spaces. Not a change.
+function handlers.show_status(params)
+  local text = type(params) == "table" and params.text or nil
+  if type(text) ~= "string" or text == "" or #text > 512 then error({ code = "bad-params", message = "text: one line to show, at most 512 bytes" }, 0) end
+  renoise.app():show_status((text:gsub("%c", " ")))
+  return { shown = true }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
@@ -1381,7 +1473,8 @@ function M.handle(_, request)
       params, left = refs.relabel_surviving(params, epoch(), survives)
       -- (n-instruments: a restore that finds what it changed by its places, not by its refs, goes ahead in the same song though
       -- its refs went stale; it reads none of them, and any ref read still goes through refs.expect)
-      local by_place = request.method == "change_restore" and changes.restores_by_place(params.kind)
+      local by_place = request.method == "change_restore"
+        and (changes.restores_by_place(params.kind) or changes.redone_entry(b.journal, params.of) ~= nil)
       if type(from) == "string" and from ~= epoch() and (by_place or not left[from]) and survives(from, "song") then
         local copy = {}
         for k, v in pairs(params) do copy[k] = v end
@@ -1417,6 +1510,8 @@ function M.start(h, reloading)
   b = st.bridge
   b.journal = b.journal or changes.journal_new()
   b.journal.edits = function() return b.edits or 0 end
+  b.journal.retouched = retouched
+  b.journal.retouched_at = retouched_at
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,

@@ -7,6 +7,8 @@ pub(super) struct Beat {
     pub beat: f64,
     pub beats_per_bar: Option<f64>,
     pub tempo: f64,
+    /// The DAW's words for its time ("7/8", "LPB 4").
+    pub meter: Option<String>,
 }
 impl TuiApp {
     pub(super) fn read_tree(&self, again: bool) {
@@ -21,7 +23,8 @@ impl TuiApp {
             let Some(focus) = &state.focus else {
                 return;
             };
-            let Some(reference) = focus.track_ref.clone().filter(|s| !s.is_empty()) else {
+            // (the chain open, when it isn't the track's own: REAPER's take FX)
+            let Some(reference) = focus.chain_ref.clone().or_else(|| focus.track_ref.clone()).filter(|s| !s.is_empty()) else {
                 return;
             };
             let key = format!(
@@ -46,7 +49,7 @@ impl TuiApp {
             let again = {
                 let mut state = app.0.state.borrow_mut();
                 if let Ok(Some(FocusBody::Tree(tree))) = result {
-                    if state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&tree.track_ref) {
+                    if state.focus.as_ref().and_then(|f| f.chain_ref.as_ref().or(f.track_ref.as_ref())) == Some(&tree.track_ref) {
                         state.tree = Some(tree);
                         state.tree_revision += 1;
                     }
@@ -266,6 +269,9 @@ impl TuiApp {
             Touched::Routing if editor_kind(focus) == Some(ViewKind::Routing) => {
                 BodyRequest::Routing { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty())? }
             }
+            Touched::Mixer if main_kind(focus) == Some(ViewKind::Mixer) || editor_kind(focus) == Some(ViewKind::Mixer) => {
+                BodyRequest::Mixer { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty()) }
+            }
             _ => return None,
         };
         drop(state);
@@ -339,7 +345,10 @@ impl TuiApp {
         let state = self.0.state.borrow();
         let focus = state.focus.as_ref()?;
         let tree = state.tree.as_ref()?;
-        if state.connection != ConnectionState::Connected || focus.track.is_none() || Some(&tree.track_ref) != focus.track_ref.as_ref() {
+        if state.connection != ConnectionState::Connected
+            || focus.track.is_none()
+            || Some(&tree.track_ref) != focus.chain_ref.as_ref().or(focus.track_ref.as_ref())
+        {
             return None;
         }
         if (editor_kind(focus) != Some(ViewKind::DeviceChain) || state.touched != Some(Touched::Tree)) && state.tree_cursor.is_none() {
@@ -353,7 +362,8 @@ impl TuiApp {
             Some(rows) => rows,
             None => {
                 let [device, chain, device_ref] = key.clone();
-                let rows: Rc<[TreeRow]> = tree_rows(tree, &TreeFocus { device, chain, device_ref }).into();
+                let open_containers = crate::daw::view().open_containers;
+                let rows: Rc<[TreeRow]> = tree_rows(tree, &TreeFocus { device, chain, device_ref, open_containers }).into();
                 drop(state);
                 self.0.state.borrow_mut().tree_rows = Some((revision, key, rows.clone()));
                 rows
@@ -436,6 +446,7 @@ impl TuiApp {
             beat: beat + (now - transport.at).max(0.) * tempo / 60000.,
             tempo,
             beats_per_bar: transport.beats_per_bar.filter(|n| *n != 0.),
+            meter: transport.meter.clone(),
         })
     }
     pub(super) fn next_beat(&self) {
@@ -444,7 +455,17 @@ impl TuiApp {
         }
         if let Some(at) = self.beat_now(perf_now()).filter(|_| !self.0.state.borrow().closing) {
             let phase = at.beat - at.beat.floor();
-            let to_edge = (if phase < 0.25 { 0.25 - phase } else { 1. - phase }) * 60000. / at.tempo;
+            let beat_edge = if phase < 0.25 { 0.25 - phase } else { 1. - phase };
+            // (a bar that starts between beats, 7/8's, lights and dims on its own edges too)
+            let bar_edge = at.beats_per_bar.filter(|bar| *bar > 0. && bar.fract() != 0.).map_or(f64::INFINITY, |bar| {
+                let into = at.beat.rem_euclid(bar);
+                if into < 0.25 {
+                    0.25 - into
+                } else {
+                    bar - into
+                }
+            });
+            let to_edge = beat_edge.min(bar_edge) * 60000. / at.tempo;
             let weak = Rc::downgrade(&self.0);
             self.0.state.borrow_mut().beat_timer = Some(tokio::task::spawn_local(async move {
                 tokio::time::sleep(Duration::from_millis((to_edge.ceil() + 1.).max(4.) as u64)).await;
@@ -461,18 +482,18 @@ impl TuiApp {
     pub(super) fn beat_light(&self) -> Option<(String, Style)> {
         let at = self.beat_now(perf_now())?;
         let phase = at.beat - at.beat.floor();
-        let down = at.beats_per_bar.filter(|bar| bar.fract() == 0.).is_some_and(|bar| (at.beat + 1e-6).floor() % bar == 0.);
-        let color = if phase < 0.25 {
-            if down {
-                palette::BEAT
-            } else {
-                helpers::mix_rgb(palette::BEAT, palette::OFFBEAT, 0.25)
-            }
+        // The bar's first beat, wherever it falls: a bar of 3.5 beats (7/8) starts between quarter notes.
+        let down = at.beats_per_bar.filter(|bar| *bar > 0.).is_some_and(|bar| (at.beat + 1e-6).rem_euclid(bar) < 0.25);
+        let color = if down {
+            palette::BEAT
+        } else if phase < 0.25 {
+            helpers::mix_rgb(palette::BEAT, palette::OFFBEAT, 0.25)
         } else {
             palette::OFFBEAT
         };
         let tempo = if at.tempo.fract() == 0. { number::to_string(at.tempo) } else { number::to_fixed(at.tempo, 1) };
-        Some((format!("{tempo} BPM"), Style::fg(color)))
+        let meter = at.meter.map(|meter| format!(" · {meter}")).unwrap_or_default();
+        Some((format!("{tempo} BPM{meter}"), Style::fg(color)))
     }
 }
 

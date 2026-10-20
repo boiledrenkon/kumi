@@ -749,6 +749,8 @@ local envelope_spec = {
     }
   end,
   restore_input = function(restore) return { material = restore.material } end,
+  -- (HISTORY's picture: the parameter's name, and the pattern's lines its points run over)
+  shown = function(loc) return { parameter = loc.object.parameter.name, lines = loc.object.lines } end,
 }
 base.register(envelope_spec)
 

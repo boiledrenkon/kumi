@@ -112,6 +112,10 @@ async fn reapers_integration_reads_what_kumis_host_answers() {
             let arrange =
                 script.asked().into_iter().rev().find(|(method, params)| method == "focus_body" && params["kind"] == "arrange").unwrap();
             assert_eq!(arrange.1["around"].as_str(), Some(track.as_str()), "the page is centred on the selected track");
+            // (m4-tui) REAPER has no status bar Kumi can write to: nothing is asked.
+            assert!(!reaper.has_show_message());
+            assert!(!reaper.show_message("Kumi · done", Signal::new()).await.unwrap());
+            assert!(!script.asked().iter().any(|(method, _)| method == "show_status"));
             reaper.close().await.unwrap();
             simulator.stop();
         })
@@ -229,6 +233,11 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             assert_eq!(tree.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["EQ 5", "Doofer"]);
             assert_eq!(tree.devices[1].can_have_chains, Some(true), "a Doofer holds devices");
             assert!(renoise.can_show(BodyKind::Tracker) && !renoise.can_show(BodyKind::Timeline));
+            // (m4-tui) A line in Renoise's status bar, for a producer working there: through the host to the tool's show_status.
+            assert!(renoise.has_show_message());
+            assert!(renoise.show_message("Kumi · done · the bass is darker", Signal::new()).await.unwrap());
+            let shown = script.asked().into_iter().rev().find(|(method, _)| method == "show_status").expect("asked of the tool");
+            assert_eq!(shown.1["text"], "Kumi · done · the bass is darker");
 
             // A track inserted above Kick: the tool says so (`tracks`), the host passes it on, and track:1 follows Kick to
             // its new place; reads name the layout their refs are at.
@@ -411,7 +420,8 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             assert_eq!(script.track(3)["name"], json!("Track 3"));
 
             // The producer presses REAPER's undo on the plan: the bridge names its step, and HISTORY marks the plan's
-            // changes still standing as undone (the fader Kumi kept stays kept).
+            // changes as undone, the fader Kumi kept too (REAPER's undo reached past the producer's own edit back to before
+            // the plan, so Kumi's change is gone: accept-reaper).
             let plan_step = script.undo_history()[0].clone();
             simulator.emit("undone_in_daw", json!({"descs": [plan_step], "how": "undo"}));
             let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
@@ -423,7 +433,7 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             }
             assert_eq!(
                 (state_of("Added track “Pad”"), state_of("Renamed track “Pad” → “Pads”"), state_of("Track 1 volume -6 dB")),
-                (Some(ChangeState::Undone), Some(ChangeState::Undone), Some(ChangeState::Kept))
+                (Some(ChangeState::Undone), Some(ChangeState::Undone), Some(ChangeState::Undone))
             );
 
             // A value it already has: nothing to change, no step and no row.

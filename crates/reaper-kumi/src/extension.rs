@@ -914,7 +914,7 @@ mod tests {
             (&body["kind"], &body["epoch"], &body["routes"][0]["destRef"]),
             (&json!("routing"), &read["epoch"], &json!("r:track:{DDDD}"))
         );
-        assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "mixer"})).unwrap_err().0, "bad-params");
+        assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "console"})).unwrap_err().0, "bad-params");
     }
 
     fn focus_of(extension: &Extension) -> Value {

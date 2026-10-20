@@ -8,7 +8,7 @@ fn audio() -> DeviceTree {
     serde_json::from_value(json!({"trackRef":"1:track:3","devices":[fx("d0","Chorus-Ensemble"),fx("d1","Compressor"),{"ref":"d2","name":"Audio Effect Rack","className":"AudioEffectGroupDevice","canHaveChains":true,"chains":[{"ref":"c0","name":"Chain 1","devices":[fx("d2a","Saturator"),fx("d2b","EQ Eight")]},{"ref":"c1","name":"Chain 2","devices":[fx("d2c","Saturator"),fx("d2d","Utility")]}]},fx("d3","Gate")]})).unwrap()
 }
 fn focus(device: &str, chain: Option<&str>) -> TreeFocus {
-    TreeFocus { device: Some(device.into()), chain: chain.map(str::to_string), device_ref: None }
+    TreeFocus { device: Some(device.into()), chain: chain.map(str::to_string), device_ref: None, open_containers: false }
 }
 fn lines(tree: &DeviceTree, focus: &TreeFocus) -> Vec<String> {
     tree_rows(tree, focus)
