@@ -235,12 +235,14 @@ local function settings_restore(kind, song, env, restore, desc, what)
   watch_all(env, t, d, device)
   local ok, err = pcall(function() device.active_preset_data = material.presetData end)
   if not ok then fail("failed", "Renoise wouldn't take the settings back: " .. tostring(err)) end
-  -- (written settings leave no preset chosen: when the device played a preset whose settings these are, it plays it again,
-  -- in the same step; otherwise the written settings stay)
+  -- (written settings leave no preset chosen: when the device played a preset whose parameters these are, it plays it again,
+  -- in the same step; otherwise the written settings stay. A preset may differ in what isn't a parameter: EQ 5's "Init"
+  -- shows 18 dB of gain where a new EQ 5 shows 20, lab 2026-10-20)
   local preset = prior.preset
   if type(preset) == "number" and preset >= 1 and preset <= #device.presets then
+    local wanted = material_.device_state(device).state
     local chosen = pcall(function() device.active_preset = preset end)
-    if not chosen or M.print_of(device.active_preset_data) ~= prior.print then
+    if not chosen or material_.device_state(device).state ~= wanted then
       pcall(function() device.active_preset_data = material.presetData end)
     end
   end
