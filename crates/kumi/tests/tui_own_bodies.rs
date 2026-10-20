@@ -589,6 +589,25 @@ scene!(picture_params, DawId::Reaper, PICTURE_SHOTS, |h| {
     opened(&h, drawn("c1", "parameter", "ReaEQ 3 parameters on “Kick”", picture)).await;
 });
 
+// Renoise's one parameter, named with its range by the display; its automation, named too.
+scene!(picture_param, DawId::Renoise, PICTURE_SHOTS, |h| {
+    let before = json!({"value": 0.5, "valueString": "0.000 dB"});
+    let preview = json!({"display": {"parameter": "Gain", "min": 0.0, "max": 1.4125, "before": before}});
+    let applied = json!({"display": {"parameter": "Gain", "min": 0.0, "max": 1.4125, "before": before,
+        "after": {"value": 0.25, "valueString": "-6.021 dB"}}});
+    let picture = own_pictures::params(&answers(&preview, &applied));
+    opened(&h, drawn("c1", "parameter", "Gainer on Bass Gain -6.021 dB", picture)).await;
+});
+
+scene!(picture_automation, DawId::Renoise, PICTURE_SHOTS, |h| {
+    let point = |time: f64, value: f64| json!({"time": time, "value": value, "scaling": 0});
+    let preview = json!({"prior": {"exists": false}});
+    let applied = json!({"display": {"parameter": "Cutoff", "lines": 32},
+        "applied": {"exists": true, "playmode": "linear", "points": [point(1., 0.1), point(9., 0.8), point(17., 0.4), point(25., 1.0)]}});
+    let picture = own_pictures::curve(&answers(&preview, &applied));
+    opened(&h, drawn("c1", "parameter", "Automation of Filter Cutoff on “Bass” in “Drop”: 4 points, linear", picture)).await;
+});
+
 scene!(picture_routes, DawId::Reaper, PICTURE_SHOTS, |h| {
     let applied = json!({"display": {"route": {"from": "Drums", "to": "Reverb", "change": "changed", "values": [
         {"name": "Volume", "from": -12.0, "to": -6.0, "min": -60.0, "max": 12.0, "fromText": "−12 dB", "toText": "−6 dB"},
@@ -602,6 +621,14 @@ scene!(picture_zones, DawId::Renoise, PICTURE_SHOTS, |h| {
     let applied = json!({"display": {"after": {"noteRange": [60, 71], "velocityRange": [64, 127], "baseNote": 60}}});
     let picture = own_pictures::zone(&answers(&preview, &applied));
     opened(&h, drawn("c1", "parameter", "“Snare” keyzone: notes 60-71, velocity 64-127, base note 60", picture)).await;
+});
+
+// Only the keys moved: the velocities aren't claimed (a band across the keys), and aren't said.
+scene!(picture_zone_keys, DawId::Renoise, PICTURE_SHOTS, |h| {
+    let preview = json!({"display": {"before": {"noteRange": [48, 59]}}});
+    let applied = json!({"display": {"after": {"noteRange": [60, 71]}}});
+    let picture = own_pictures::zone(&answers(&preview, &applied));
+    opened(&h, drawn("c1", "parameter", "“Snare” keyzone: notes 60-71", picture)).await;
 });
 
 scene!(picture_items, DawId::Reaper, PICTURE_SHOTS, |h| {

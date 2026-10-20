@@ -44,7 +44,8 @@ pub fn scene_of(picture: &ChangePicture) -> Option<Scene> {
     }
 }
 
-/// Keyzones as boxes, keys across (an octave at least) and velocities up: where each was, ghosted, and where it is.
+/// Keyzones as boxes, keys across (an octave at least) and velocities up: where each was, ghosted, and where it is. A
+/// zone whose velocities aren't known (a change that didn't touch them) is a band across its keys, claiming none.
 fn zones_scene(before: &[PictureZone], after: &[PictureZone]) -> Option<Scene> {
     let all = || before.iter().chain(after);
     let (low, high) = all().fold((u8::MAX, 0), |(low, high), zone| (low.min(zone.notes[0]), high.max(zone.notes[1])));
@@ -56,9 +57,9 @@ fn zones_scene(before: &[PictureZone], after: &[PictureZone]) -> Option<Scene> {
     let low = (low - ((span - (high - low)) / 2.).floor()).max(0.);
     let rect = |zone: &PictureZone, color: Rgb, alpha: f64| Shape::Rect {
         x0: ((zone.notes[0] as f64 - low) / span).clamp(0., 1.),
-        y0: zone.velocities[0] as f64 / 128.,
+        y0: zone.velocities.map_or(0.4, |[low, _]| low as f64 / 128.),
         x1: ((zone.notes[1] as f64 + 1. - low) / span).clamp(0., 1.),
-        y1: (zone.velocities[1] as f64 + 1.) / 128.,
+        y1: zone.velocities.map_or(0.6, |[_, high]| (high as f64 + 1.) / 128.),
         color,
         alpha,
     };
@@ -351,7 +352,8 @@ mod tests {
 
     #[test]
     fn keyzones_draw_keys_across_and_velocities_up() {
-        let zone = |notes: [u8; 2], velocities: [u8; 2]| PictureZone { name: String::new(), notes, velocities, base: None };
+        let zone =
+            |notes: [u8; 2], velocities: [u8; 2]| PictureZone { name: String::new(), notes, velocities: Some(velocities), base: None };
         let scene = zones_scene(&[zone([48, 59], [0, 127])], &[zone([60, 71], [64, 127])]).unwrap();
         let [Shape::Rect { x0, color: was, .. }, Shape::Rect { x0: now_x0, y0, y1, color: now, .. }] = scene.shapes.as_slice() else {
             panic!("{:?}", scene.shapes)
@@ -360,6 +362,11 @@ mod tests {
         assert_eq!((*x0, *now_x0), (0., 0.5), "two octaves across, the new zone in the upper one");
         assert_eq!((*y0, *y1), (0.5, 1.), "the loud half");
         assert!(zones_scene(&[], &[]).is_none());
+        // Velocities the change didn't touch: a band across the keys, not the whole height.
+        let keys_only = PictureZone { name: String::new(), notes: [48, 59], velocities: None, base: None };
+        let scene = zones_scene(&[], &[keys_only]).unwrap();
+        let [Shape::Rect { y0, y1, .. }] = scene.shapes.as_slice() else { panic!() };
+        assert!(*y0 > 0. && *y1 < 1., "{y0}..{y1}");
     }
 
     #[test]

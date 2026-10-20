@@ -276,10 +276,17 @@ param_spec.reread = function(song, place)
 end
 -- The producer's undo moves a parameter: asked of its observable, once.
 param_spec.watch = function(env, loc) env.watch_param(loc.place.track, loc.place.device, loc.place.param) end
+-- (HISTORY's picture: the parameter's name and range, which the title only says)
+local function parameter_shown(loc)
+  local parameter = loc.object
+  return { parameter = parameter.name, min = parameter.value_min, max = parameter.value_max }
+end
+param_spec.shown = parameter_shown
 base.register(param_spec)
 
 -- (M4 n-devices: device-params, several parameters of one device, asks and checks them as device-param does)
 M.param_spec, M.parameter_number, M.points_at, M.receiver_check = param_spec, parameter_number, points_at, receiver_check
+M.parameter_shown = parameter_shown
 M.track_of_value, M.value_of_track = track_of_value, value_of_track
 
 

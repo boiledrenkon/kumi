@@ -1310,8 +1310,8 @@ fn daw_pictures() -> Vec<ChangeRecord> {
         },
         ChangeRecord {
             picture: Some(ChangePicture::Zones {
-                before: vec![PictureZone { name: String::new(), notes: [48, 59], velocities: [0, 127], base: Some(48) }],
-                after: vec![PictureZone { name: "Snare".into(), notes: [60, 71], velocities: [64, 127], base: None }],
+                before: vec![PictureZone { name: String::new(), notes: [48, 59], velocities: None, base: Some(48) }],
+                after: vec![PictureZone { name: "Snare".into(), notes: [60, 71], velocities: Some([64, 127]), base: None }],
                 values: vec![],
             }),
             ..change("c903", ChangeFamily::Parameter, "“Snare” keyzone: notes 60-71", ChangeState::Applied)

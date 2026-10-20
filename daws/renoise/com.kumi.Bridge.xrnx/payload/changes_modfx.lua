@@ -697,7 +697,7 @@ function M.param_kind(spec)
     kind = spec.kind, of = spec.of, noun = "parameter", undoable = true, by_place = true,
     read = function(parameter) return { value = parameter.value, valueString = parameter.value_string } end,
     wanted = device_param.wanted, write = device_param.write, same = device_param.same, title = device_param.title,
-    observables = function(parameter) return { parameter.value_observable } end,
+    observables = function(parameter) return { parameter.value_observable } end, shown = device_param.shown,
   }
   kind.locate = function(song, env, input)
     local n, objects, label, k

@@ -127,13 +127,15 @@ pub struct PictureRoute {
     pub values: Vec<PictureValue>,
 }
 
-/// One keyzone: the sample it plays (or none), its notes and velocities as `[low, high]`, and its base note.
+/// One keyzone: the sample it plays (or none), its notes and velocities as `[low, high]`, and its base note. Velocities
+/// a change didn't touch may be unknown: the zone is then drawn by its keys alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PictureZone {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub notes: [u8; 2],
-    pub velocities: [u8; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocities: Option<[u8; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<u8>,
 }
@@ -433,7 +435,7 @@ impl PictureZone {
         PictureZone {
             name: cut(&self.name, MAX_NAME),
             notes: range(self.notes),
-            velocities: range(self.velocities),
+            velocities: self.velocities.map(range),
             base: self.base.map(|n| n.min(127)),
         }
     }
@@ -778,13 +780,13 @@ mod tests {
         let ChangePicture::Items { before, after, .. } = items.bounded().unwrap() else { panic!() };
         assert!(before.is_empty(), "no length, no item");
         assert_eq!(after[0].fade_out, 2., "a fade is at most the item");
-        let zone = PictureZone { name: String::new(), notes: [60, 48], velocities: [200, 0], base: Some(130) };
+        let zone = PictureZone { name: String::new(), notes: [60, 48], velocities: Some([200, 0]), base: Some(130) };
         let ChangePicture::Zones { after, .. } =
             (ChangePicture::Zones { before: vec![], after: vec![zone], values: vec![] }).bounded().unwrap()
         else {
             panic!()
         };
-        assert_eq!((after[0].notes, after[0].velocities, after[0].base), ([48, 60], [0, 127], Some(127)));
+        assert_eq!((after[0].notes, after[0].velocities, after[0].base), ([48, 60], Some([0, 127]), Some(127)));
         let route = |from: &str| PictureRoute { from: from.into(), to: "Reverb".into(), change: RouteChange::Changed, values: vec![] };
         let ChangePicture::Routes { routes } =
             (ChangePicture::Routes { routes: (0..20).map(|_| route("Bass")).collect() }).bounded().unwrap()

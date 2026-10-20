@@ -238,6 +238,16 @@ local function wanted_of(spec, loc, input)
   return spec.wanted(loc.object, input)
 end
 
+-- What HISTORY's picture needs that the title only says (a parameter's name and range): a kind's `shown(loc)`, into its
+-- display. For the display only: nothing restores from it.
+local function add_shown(spec, loc, display)
+  if not spec.shown then return end
+  local ok, extra = pcall(spec.shown, loc)
+  if ok and type(extra) == "table" then
+    for k, v in pairs(extra) do display[k] = v end
+  end
+end
+
 function M.prop_preview(song, env, spec, input)
   local loc = spec.locate(song, env, input)
   local now = spec.read(loc.object, input)
@@ -247,6 +257,7 @@ function M.prop_preview(song, env, spec, input)
   if not spec.undoable then display.note = NOT_UNDOABLE end
   -- (what the producer should know before it is made: columns hidden that hold notes)
   if spec.note then display.note = spec.note(loc, now, wanted) or display.note end
+  add_shown(spec, loc, display)
   local shown = wire(spec, now, env, loc)
   -- (the fence names what was located as well as its value: another track at the ref's place is not this one; and, where the
   -- value is a place, what the wanted value names)
@@ -296,6 +307,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   end
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
+  add_shown(spec, loc, display)
   return {
     applied = wire(spec, after, env, loc), journal_applied = after,
     display = display,

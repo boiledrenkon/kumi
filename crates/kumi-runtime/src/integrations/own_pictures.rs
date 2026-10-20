@@ -114,7 +114,7 @@ pub fn lines(answers: &Answers) -> Option<ChangePicture> {
 
 /// A lane's points before and after: as the bridge drew them (`display.curve`: REAPER's envelopes, in their units), or a
 /// pattern's automation (Renoise: `points` of `{time, value}`, time in lines, value 0 to 1 of the parameter's range;
-/// none when it was deleted).
+/// none when it was deleted; the parameter named by `display.parameter`).
 pub fn curve(answers: &Answers) -> Option<ChangePicture> {
     let pairs = |points: &[Value]| -> Vec<[f64; 2]> {
         points
@@ -144,7 +144,7 @@ pub fn curve(answers: &Answers) -> Option<ChangePicture> {
     let side = |state: &Value| if state.get("exists") == Some(&Value::Bool(false)) { vec![] } else { pairs(list(state, "points")) };
     let (before, after) = (side(answers.prior()), side(answers.after()));
     (answers.after().get("points").is_some() || answers.after().get("exists").is_some()).then_some(ChangePicture::Automation {
-        parameter: String::new(),
+        parameter: answers.shown("parameter").as_str().unwrap_or_default().to_owned(),
         min: 0.,
         max: 1.,
         before,
@@ -160,13 +160,29 @@ fn moved_line(line: &str) -> Option<(String, String)> {
     Some((name.trim().to_owned(), shown.trim().to_owned()))
 }
 
-/// The parameters that moved, each in the DAW's words: as the bridge drew them (`display.values`: REAPER's), else what
-/// the preview showed of each (`display.before`, by name) and the apply's display lines ("Name → what it shows").
+/// The parameters that moved, each in the DAW's words: as the bridge drew them (`display.values`: REAPER's); one
+/// parameter the display names (`display.parameter`, its range `min`/`max`, and `before`/`after` as `{value,
+/// valueString}`: Renoise's device-param and its kin); else what the preview showed of each (`display.before`, by name)
+/// and the apply's display lines ("Name → what it shows").
 pub fn params(answers: &Answers) -> Option<ChangePicture> {
     let drawn: Vec<PictureValue> =
         list(answers.applied.get("display").unwrap_or(&Value::Null), "values").iter().filter_map(drawn_value).collect();
     if !drawn.is_empty() {
         return Some(ChangePicture::Values { values: drawn });
+    }
+    if let Some(name) = answers.shown("parameter").as_str() {
+        let (before, after) = (answers.shown_before(), answers.shown("after"));
+        let value = PictureValue {
+            name: name.to_owned(),
+            from: number(before, "value"),
+            to: number(after, "value"),
+            min: answers.shown("min").as_f64(),
+            max: answers.shown("max").as_f64(),
+            from_text: text(before, "valueString"),
+            to_text: text(after, "valueString"),
+            asked: None,
+        };
+        return Some(ChangePicture::Values { values: vec![value] });
     }
     let before = answers.shown_before();
     let values: Vec<PictureValue> = list(answers.applied.get("display").unwrap_or(&Value::Null), "lines")
@@ -206,19 +222,20 @@ pub fn route(answers: &Answers) -> Option<ChangePicture> {
 // ----- a keyzone -----
 
 /// A keyzone before and after (Renoise's): its notes, velocities and base note, as the preview and the apply showed the
-/// settings the change named; what it didn't name is drawn whole (all the keys, every velocity).
+/// settings the change named. What it didn't name it didn't change, and isn't claimed: velocities it didn't name are
+/// left unknown (the zone is drawn by its keys alone), and a change that named no keys draws its values alone.
 pub fn zone(answers: &Answers) -> Option<ChangePicture> {
-    let range = |state: &Value, key: &str, whole: [u8; 2]| -> [u8; 2] {
+    let range = |state: &Value, key: &str| -> Option<[u8; 2]> {
         let ends: Vec<u8> = list(state, key).iter().filter_map(Value::as_f64).map(|n| n.clamp(0., 127.) as u8).collect();
         match ends.as_slice() {
-            [low, high] => [*low.min(high), *low.max(high)],
-            _ => whole,
+            [low, high] => Some([*low.min(high), *low.max(high)]),
+            _ => None,
         }
     };
     let zone = |state: &Value| PictureZone {
         name: String::new(),
-        notes: range(state, "noteRange", [0, 119]),
-        velocities: range(state, "velocityRange", [0, 127]),
+        notes: range(state, "noteRange").unwrap_or([0, 119]),
+        velocities: range(state, "velocityRange"),
         base: number(state, "baseNote").map(|n| n.clamp(0., 127.) as u8),
     };
     let (before, after) = (answers.shown_before(), answers.shown("after"));
@@ -249,8 +266,13 @@ pub fn zone(answers: &Answers) -> Option<ChangePicture> {
             values.push(PictureValue { name: label.into(), from_text: Some(from), to_text: Some(to), ..Default::default() });
         }
     };
-    moved("Keys", span(was.notes, &name), span(now.notes, &name));
-    moved("Velocities", span(was.velocities, &|n| n.to_string()), span(now.velocities, &|n| n.to_string()));
+    let keys = range(after, "noteRange").is_some();
+    if keys {
+        moved("Keys", span(was.notes, &name), span(now.notes, &name));
+    }
+    if let (Some(from), Some(to)) = (was.velocities, now.velocities) {
+        moved("Velocities", span(from, &|n| n.to_string()), span(to, &|n| n.to_string()));
+    }
     if let (Some(from), Some(to)) = (was.base, now.base) {
         moved("Base note", name(from), name(to));
     }
@@ -259,6 +281,10 @@ pub fn zone(answers: &Answers) -> Option<ChangePicture> {
             .into_iter()
             .filter(|value| !["Note range", "Velocity range", "Base note"].contains(&value.name.as_str())),
     );
+    // (no keys named: where the zone sits isn't known, so only what moved is said)
+    if !keys {
+        return (!values.is_empty()).then_some(ChangePicture::Values { values });
+    }
     Some(ChangePicture::Zones { before: vec![was], after: vec![now], values })
 }
 
@@ -473,6 +499,10 @@ mod tests {
             panic!()
         };
         assert_eq!((min, max, before.len(), after), (0., 1., 0, vec![[1., 0.], [33., 1.]]));
+        // The parameter, as the display names it.
+        let named = json!({"display": {"parameter": "Gain"}, "applied": {"exists": true, "points": [{"time": 1, "value": 0.5}]}});
+        let Some(ChangePicture::Automation { parameter, .. }) = curve(&Answers { preview: &preview, applied: &named }) else { panic!() };
+        assert_eq!(parameter, "Gain");
     }
 
     #[test]
@@ -493,6 +523,14 @@ mod tests {
                 ("Dest.", None, Some("“Gain” of “Gainer” on “Pad”"))
             ]
         );
+        // One parameter the display names, with its range (Renoise's device-param).
+        let (preview, applied) = answers(
+            json!({"display": {"before": {"value": 0.5, "valueString": "0.000 dB"}}}),
+            json!({"display": {"parameter": "Gain", "min": 0.0, "max": 1.4125, "before": {"value": 0.5, "valueString": "0.000 dB"}, "after": {"value": 1.0, "valueString": "6.021 dB"}}}),
+        );
+        let Some(ChangePicture::Values { values }) = params(&Answers { preview: &preview, applied: &applied }) else { panic!() };
+        assert_eq!((values[0].name.as_str(), values[0].from, values[0].to, values[0].max), ("Gain", Some(0.5), Some(1.0), Some(1.4125)));
+        assert_eq!((values[0].from_text.as_deref(), values[0].to_text.as_deref()), (Some("0.000 dB"), Some("6.021 dB")));
         // REAPER's: drawn by the bridge, normalized with what the plug-in shows.
         let (preview, applied) = answers(
             json!({}),
@@ -526,7 +564,7 @@ mod tests {
         let Some(ChangePicture::Zones { before, after, values }) = zone(&Answers { preview: &preview, applied: &applied }) else {
             panic!()
         };
-        assert_eq!((before[0].notes, after[0].notes, after[0].velocities, after[0].base), ([36, 47], [48, 59], [0, 127], Some(48)));
+        assert_eq!((before[0].notes, after[0].notes, after[0].velocities, after[0].base), ([36, 47], [48, 59], None, Some(48)));
         let said: Vec<(&str, Option<&str>, Option<&str>)> =
             values.iter().map(|v| (v.name.as_str(), v.from_text.as_deref(), v.to_text.as_deref())).collect();
         assert_eq!(said, [("Keys", Some("C3–B3"), Some("C4–B4")), ("Base note", Some("C3"), Some("C4"))], "in FOCUS's names");

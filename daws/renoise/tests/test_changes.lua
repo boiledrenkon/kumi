@@ -768,6 +768,10 @@ test("changes: a parameter is set by value or by text, kept in its range, and a 
   local ref = epoch .. ":param:3.2.1"
   local previewed, done, e, layout = simple_change(peer, "device-param", { ref = ref, value = 0.25 }, "Kumi: gain (kc01)")
   eq(previewed.display.title, "EQ 5 on Bass Gain 0.25")
+  -- (m4-tui) HISTORY's picture names the parameter and its range, in the preview and the apply
+  eq(previewed.display.parameter, "Gain")
+  eq(done.display.parameter, "Gain")
+  eq(done.display.max, mock.data.tracks[3].devices[2].params[1].max or 1)
   eq(mock.data.tracks[3].devices[2].params[1].value, 0.25)
   local undone = restore(peer, "device-param", { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo (kc02)", e, layout)
   ok(undone.result)
