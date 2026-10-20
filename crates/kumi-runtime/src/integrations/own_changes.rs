@@ -971,7 +971,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 // What the DAW says it did, in its words, when it says (Renoise's actions: the notes, what was selected, the file).
                 let title = answer.pointer("/display/title").and_then(Value::as_str).unwrap_or(action.title).to_owned();
                 let mut text = json!({"done": title});
-                for field in ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved"] {
+                // (r-tracks) `saved`: the file a save wrote; (m4-r-fxenv) `file`, `count`: an FX chain saved.
+                for field in ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved", "file", "count"] {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }
@@ -1859,5 +1860,64 @@ mod tests {
             }
             assert!(set.kinds.iter().filter(|kind| kind.core).count() <= 8, "{app}: few tools on every request");
         }
+    }
+
+    // m4-r-fxenv
+    /// A host that answers every call as REAPER's bridge answers an FX chain save, keeping what it was asked.
+    struct Saver(RefCell<Vec<(String, JsonObject)>>);
+    #[async_trait(?Send)]
+    impl McpEndpoint for Saver {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Err(RuntimeError::plain("not listed"))
+        }
+        async fn call(&self, tool: &str, args: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            self.0.borrow_mut().push((tool.to_string(), args));
+            let answer = json!({"epoch": "e1", "file": "/r/FXChains/Lead.RfxChain", "name": "Lead", "count": 2, "replaced": false});
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}]})).unwrap())
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_fx_chain_save_asks_with_the_long_refs_and_says_where_the_file_went() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        let saver = Rc::new(Saver(RefCell::default()));
+        *plan.link().endpoint.borrow_mut() = Some(saver.clone());
+        let (track, fx) = {
+            let mut book = plan.link().book.borrow_mut();
+            (book.short_ref("r:track:{AAAA}"), book.short_ref("r:fx:{F1}"))
+        };
+        let save = plan.action_kind("fx_chain_save").unwrap();
+        let input = json!({"ref": track, "fxRefs": [fx], "name": "Lead"});
+        let done = plan.one_action(save, input.as_object().unwrap().clone(), Signal::new()).await;
+        assert!(!done.is_error, "{}", done.text);
+        {
+            let asked = saver.0.borrow();
+            assert_eq!(asked[0].0, "fx_chain_save");
+            assert_eq!((asked[0].1["ref"].clone(), asked[0].1["fxRefs"].clone()), (json!("r:track:{AAAA}"), json!(["r:fx:{F1}"])));
+        }
+        let told: Value = serde_json::from_str(&done.text).unwrap();
+        assert_eq!((told["file"].clone(), told["count"].clone()), (json!("/r/FXChains/Lead.RfxChain"), json!(2)));
+        // A short ref this turn doesn't know: nothing is asked.
+        let unknown = plan.one_action(save, json!({"ref": "track:99", "name": "x"}).as_object().unwrap().clone(), Signal::new()).await;
+        assert!(unknown.is_error && unknown.text.contains("isn't one of this turn's refs"), "{}", unknown.text);
+        assert_eq!(saver.0.borrow().len(), 1);
     }
 }

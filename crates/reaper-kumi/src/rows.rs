@@ -225,6 +225,7 @@ pub fn track_row(reaper: &Reaper, track: Track) -> Value {
         row["master"] = true.into();
     }
     add_track_state(reaper, track, master, &mut row);
+    crate::read::item_rows::razor_areas(reaper, track, &mut row);
     row
 }
 
@@ -454,7 +455,7 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
     let (position, length) = (reaper.item_value(item, "D_POSITION"), reaper.item_value(item, "D_LENGTH"));
     let start = reaper.quarter_notes_at(proj, position);
     let end = reaper.quarter_notes_at(proj, position + length);
-    json!({
+    let mut row = json!({
         "ref": refs::item_ref(&guid),
         "trackRef": reaper.item_track(item).map(|t| refs::track_ref(&track_id(reaper, t))),
         "position": seconds(position),
@@ -470,7 +471,9 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
         "lanePlays": lane_plays(reaper, item),
         "color": item_color(reaper, item, take),
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
-    })
+    });
+    crate::read::item_rows::item_details(reaper, item, &mut row);
+    row
 }
 
 /// The colour REAPER draws an item in: its active take's own, else the item's.

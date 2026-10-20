@@ -215,18 +215,7 @@ impl Reaper<'_> {
     }
 
     // ----- item selection -----
-
-    pub fn set_item_selected(&self, item: Item, selected: bool) {
-        if let Some(f) = self.api.SetMediaItemSelected() {
-            unsafe { f(item.0, selected) }
-        }
-    }
-
-    pub fn select_all_items(&self, proj: Project, selected: bool) {
-        if let Some(f) = self.api.SelectAllMediaItems() {
-            unsafe { f(proj.0, selected) }
-        }
-    }
+    // (`set_item_selected` and `select_all_items`: m4-r-items' in `reaper/items.rs`, the same calls)
 
     /// Every item of the project, track by track.
     pub fn all_items(&self, proj: Project) -> Vec<Item> {

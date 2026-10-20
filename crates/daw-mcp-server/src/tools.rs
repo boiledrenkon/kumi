@@ -27,10 +27,21 @@ pub struct Kinds {
 pub fn kinds(daw: Daw) -> Kinds {
     match daw {
         Daw::Reaper => Kinds {
-            read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
+            read: &[
+                "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
+                "autoitem",
+            ],
             bodies: &["arrange", "midi", "fx", "routing"],
             // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
-            outside_undo: &["loop-repeat", "project-notes", "project-info", "project-grid", "project-timebase"],
+            outside_undo: &[
+                "loop-repeat",
+                "fx-eq-band",
+                "automation-override",
+                "project-notes",
+                "project-info",
+                "project-grid",
+                "project-timebase",
+            ],
         },
         Daw::Renoise => Kinds {
             // (an instrument's modulation sets and sample FX chains: n-instruments)

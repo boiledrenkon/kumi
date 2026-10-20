@@ -738,6 +738,26 @@ impl crate::host::Host {
         }
     }
 
+    // m4-r-fxenv
+    /// `fx_chain_save` (REAPER): a chain saved as an FX chain file. A file, not the project: no step of the DAW's undo,
+    /// nothing to journal.
+    pub async fn fx_chain_save(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = json!({});
+        for field in ["ref", "input", "fxRefs", "name", "overwrite", "epoch"] {
+            if let Some(value) = arguments.get(field) {
+                params[field] = value.clone();
+            }
+        }
+        match self.call("fx_chain_save", params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// (r-tracks) A bridge method that writes no change (REAPER's saves): its arguments go on as they came, less the instance
     /// pick, and the bridge's answer comes back. Never asked again on a new connection (it writes a file).
     pub async fn passthrough(&self, method: &str, arguments: &Value) -> (Value, bool) {

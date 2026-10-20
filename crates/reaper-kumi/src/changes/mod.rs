@@ -8,18 +8,38 @@
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
 mod call;
+// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+mod chunks;
 mod folders;
 mod fx;
+mod glue;
+mod item_kinds;
+mod items;
+mod lanes;
 mod lua;
 mod marks;
+mod midi_events;
+pub(crate) use midi_events::{events_of as midi_events_of, row as midi_event_row};
 mod notes;
 mod pins;
 mod project;
 mod sends;
+mod take_marks;
+mod takes;
+mod transforms;
 pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;
+// m4-r-fxenv: FX in every chain, containers, parameter modulation, envelopes and automation items.
+mod containers;
+mod envelopes;
+pub(crate) use envelopes::{envelope_extras, item_rows, point_source};
+mod fx_more;
+mod fx_params;
+mod fxchain;
+mod fxkinds;
+mod modulation;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
 mod actions;
 mod groups;
@@ -160,9 +180,16 @@ enum Kind {
     RunLua,
     /// A REAPER API function that changes the project, called by name (only REAPER's undo takes it back).
     ApiCall,
+    // m4-r-fxenv
+    FxEnv(fxkinds::Kind),
+    /// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+    Items(item_kinds::Which),
 }
 
 fn kind(name: &str) -> Option<Kind> {
+    if let Some(kind) = item_kinds::kind(name) {
+        return Some(kind);
+    }
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
     }
@@ -177,6 +204,10 @@ fn kind(name: &str) -> Option<Kind> {
     }
     if let Some(prop) = marks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::MarkProp(prop));
+    }
+    // m4-r-fxenv
+    if let Some(kind) = fxkinds::kind(name) {
+        return Some(Kind::FxEnv(kind));
     }
     match name {
         "fx-add" => Some(Kind::Fx(fx::Which::Add)),
@@ -226,7 +257,12 @@ fn kind(name: &str) -> Option<Kind> {
 impl Kind {
     /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
     fn leaves_point(self) -> bool {
-        !matches!(self, Kind::LoopRepeat)
+        match self {
+            Kind::LoopRepeat => false,
+            // m4-r-fxenv
+            Kind::FxEnv(kind) => kind.leaves_point(),
+            _ => true,
+        }
     }
 
     /// (r-tracks) Whether REAPER alone decides whether it makes a point: an action marks what it changes itself, and its block
@@ -276,6 +312,8 @@ impl Kind {
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
+            Kind::FxEnv(kind) => kind.preview(ctx, input),
+            Kind::Items(which) => which.preview(ctx, input),
         }
     }
 
@@ -320,6 +358,8 @@ impl Kind {
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
+            Kind::FxEnv(kind) => kind.apply(ctx, input, fence),
+            Kind::Items(which) => which.apply(ctx, input, fence),
         }
     }
 
@@ -363,6 +403,8 @@ impl Kind {
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
+            Kind::FxEnv(kind) => kind.restore(ctx, restore),
+            Kind::Items(which) => which.restore(ctx, restore),
         }
     }
 }
@@ -580,6 +622,16 @@ impl Changes {
         Ok(json!({"epoch": reads.epoch(), "position": at, "positionBeats": reaper.quarter_notes_at(ctx.proj, at), "playing": playing}))
     }
 
+    // m4-r-fxenv
+    /// `fx_chain_save {ref, fxRefs?, name, input?, overwrite?}`: a chain saved as an FX chain file (a file, not the
+    /// project: no undo point).
+    pub fn fx_chain_save(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
+        let ctx = self.context(reaper, reads, params)?;
+        let mut saved = fx_more::chain_save(&ctx, params)?;
+        saved["epoch"] = reads.epoch().into();
+        Ok(saved)
+    }
+
     /// `undo_step_begin {label}`: one undo block around a plan's changes, which then open none of their own.
     pub fn step_begin(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
         let label = text(params, "label")?;
@@ -703,6 +755,19 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 
 #[cfg(test)]
 mod tests;
+// m4-r-fxenv
+#[cfg(test)]
+mod tests_fxenv;
+#[cfg(test)]
+mod tests_glue;
+#[cfg(test)]
+mod tests_items;
+#[cfg(test)]
+mod tests_lanes;
+#[cfg(test)]
+mod tests_midi;
+#[cfg(test)]
+mod tests_takes;
 // (r-tracks) M4's tests of its kinds and of M3's carried fixes.
 #[cfg(test)]
 mod tests_actions;
