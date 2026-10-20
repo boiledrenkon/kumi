@@ -7,6 +7,7 @@ use daw_bridge::files::ensure_secret;
 use daw_bridge::paths::BridgePaths;
 use daw_bridge::Daw;
 use daw_mcp_server::simulator::reaper::ReaperScript;
+use daw_mcp_server::simulator::renoise::RenoiseScript;
 use daw_mcp_server::simulator::Simulator;
 use serde_json::{json, Value};
 
@@ -172,4 +173,29 @@ async fn reapers_saves_go_to_the_bridge_by_name_and_are_no_change() {
     // Nothing is kept for undo.
     let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
     assert_eq!(released["released"], 0, "{released}");
+}
+
+#[tokio::test]
+async fn renoises_song_is_saved_through_the_same_tool_and_a_version_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let script = RenoiseScript::new();
+    let mut config = script.config_with_changes(secret, "/lab/Renoise");
+    config.discovery_dir = Some(paths.discovery());
+    let _simulator = Simulator::start(config).await.unwrap();
+    let mut session = Session::start(Daw::Renoise, home.path());
+    let (snapshot, is_error) = session.tool_full(1, "snapshot", json!({}), false).await;
+    assert!(!is_error, "{snapshot}");
+    let epoch = snapshot["epoch"].clone();
+    let (answer, is_error) = session.tool_full(2, "project_save", json!({"epoch": epoch}), false).await;
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/Renoise/Sim.xrns");
+    let (answer, is_error) = session.tool_full(3, "project_save", json!({"epoch": epoch, "version": true}), false).await;
+    assert!(is_error, "{answer}");
+    assert_eq!(answer["code"], "bad-params");
+    // REAPER's track templates are no tool of Renoise's.
+    let message = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "track_template_save", "arguments": {"trackRefs": ["track:1"], "name": "Kit", "epoch": epoch}}});
+    let answer = session.call_as(message, false).await;
+    assert_eq!(answer["error"]["code"], -32602, "{answer}");
 }

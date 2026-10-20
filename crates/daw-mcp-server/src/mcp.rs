@@ -159,6 +159,25 @@ pub fn tools(host: &Host) -> Value {
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
     ]);
+    // (r-tracks) Saving the project, in either DAW: a file written, nothing in the project changed, so no change and no
+    // undo. The bridge's `project_save`; Renoise refuses `version`.
+    let (save_title, save) = match daw {
+        Daw::Reaper => ("Save the REAPER project", "Saves the open REAPER project where it is, or as its next version (version: true). A project never saved is saved only under path, a .rpp inside the folder REAPER saves projects in, and never over a file."),
+        _ => ("Save the Renoise song", "Saves the open Renoise song where it is. A song never saved is saved only under path, and never over a file. (version is REAPER's: Renoise refuses it.)"),
+    };
+    if let Some(tools) = list.as_array_mut() {
+        tools.push(json!({
+            "name": "project_save",
+            "title": save_title,
+            "description": save,
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "version": {"type": "boolean"},
+                "path": {"type": "string"},
+                "epoch": {"type": "string", "description": "The epoch of the answer the project was read in: if the project open now is another, the save is refused as stale."},
+            })), "required": ["epoch"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        }));
+    }
     if daw == Daw::Reaper {
         // REAPER's refs are GUIDs, which a copy of the project in another tab shares: the epoch says which project they came from.
         let epoch = json!({
@@ -167,19 +186,8 @@ pub fn tools(host: &Host) -> Value {
         });
         list[2]["inputSchema"]["properties"]["epoch"] = epoch.clone();
         list[5]["inputSchema"]["properties"]["epoch"] = epoch.clone();
-        // (r-tracks) Saving: files written, nothing in the project changed, so no change and no undo.
+        // (r-tracks) Saving tracks as a template: a file written, nothing in the project changed, so no change and no undo.
         if let Some(tools) = list.as_array_mut() {
-            tools.push(json!({
-                "name": "project_save",
-                "title": "Save the REAPER project",
-                "description": "Saves the open REAPER project where it is, or as its next version (version: true). A project never saved is saved only under path, a .rpp inside the folder REAPER saves projects in, and never over a file.",
-                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
-                    "version": {"type": "boolean"},
-                    "path": {"type": "string"},
-                    "epoch": epoch.clone(),
-                })), "required": ["epoch"], "additionalProperties": false},
-                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
-            }));
             tools.push(json!({
                 "name": "track_template_save",
                 "title": "Save REAPER tracks as a template",
@@ -340,8 +348,8 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     };
                     result(id, tool_result(answer, is_error))
                 }
-                // (r-tracks) REAPER's saves.
-                "project_save" | "track_template_save" if host.daw() == Daw::Reaper => {
+                // (r-tracks) Saving: the project in either DAW, tracks as a template in REAPER.
+                "project_save" | "track_template_save" if name == "project_save" || host.daw() == Daw::Reaper => {
                     let (answer, is_error) = host.passthrough(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
