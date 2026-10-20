@@ -346,7 +346,17 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let lines = lines_row.get("lines").and_then(Value::as_u64).unwrap_or(64);
         let rows =
             self.rows(json!({"kind": "line", "parent": pattern, "track": track, "limit": 200}), 8, signal).await.map_err(error)??;
-        let (found, taken) = cells_of(&rows, lines, lpb);
+        let (mut found, taken) = cells_of(&rows, lines, lpb);
+        // A muted note column plays nothing: its notes aren't the part's (its cells still take their places).
+        let first = self
+            .link
+            .call("read", self.read_placed(json!({"kind": "line", "parent": pattern, "track": track, "limit": 1})), signal.clone())
+            .await;
+        let muted: Vec<u64> = match first {
+            Ok(Ok(page)) => page.get("mutedColumns").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).collect(),
+            _ => vec![],
+        };
+        found.retain(|(_, cell, _)| !muted.contains(&cell.col));
         let tracks = self.track_rows(signal).await.map_err(error)??;
         let track_name =
             tracks.iter().find(|row| self.same_part(&row.reference, &track)).map_or(format!("track {t}"), |row| format!("“{}”", row.name));

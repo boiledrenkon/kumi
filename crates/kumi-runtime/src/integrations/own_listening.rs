@@ -425,7 +425,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 
     /// A read's arguments placed as the model's read places them: the layout Renoise's track refs were made in, and the
     /// epoch a lasting ref (REAPER's) was read in.
-    fn read_placed(&self, mut args: Value) -> Value {
+    pub(super) fn read_placed(&self, mut args: Value) -> Value {
         let book = self.link.book.borrow();
         let object = args.as_object().cloned().unwrap_or_default();
         if let Some(layout) = self.link.layout.get().filter(|_| names_tracks(&book.scheme, &object)) {
