@@ -1647,3 +1647,41 @@ test("devices m4: changes made to devices before a chain replaced them are still
   eq(device_data(2, 3).active ~= false, true, "the EQ switched on again")
   mock.device_catalog, mock.device_slots = nil, nil
 end)
+
+test("devices m4: Renoise's own undo of a device chain is one step, told as such, and the producer's undo of Kumi's undo of it is told as a redo", function()
+  local env, peer = setup()
+  local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+  local function told()
+    call(peer, "ping")
+    local out = {}
+    for _, event in ipairs(peer.events or {}) do
+      if event.name == "undone_in_daw" then out[#out + 1] = event.data end
+    end
+    peer.events = {}
+    return out
+  end
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = file, replace = true }, "Kumi: chain (kc1)")
+  eq(steps(), 1, "one step: the devices taken off and the chain loaded")
+  told()
+  mock.api.undo()
+  H.tick(4)
+  eq(names_on(2), "EQ 5,Gainer", "one undo brings back the devices it replaced")
+  local events = told()
+  eq(#events, 1)
+  eq(events[1].how, "undo")
+  eq(events[1].descs[1], "Kumi: chain (kc1)")
+  ok(restore(peer, "device-chain-load", record).result.undo.entry == false, "back already")
+  -- Kumi's own undo is no event; the producer's undo of it brings the chain back, told as a redo.
+  local again = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = file, replace = true }, "Kumi: chain (kc2)")
+  told()
+  ok(restore(peer, "device-chain-load", again).result)
+  H.tick(2)
+  eq(#told(), 0)
+  mock.api.undo()
+  H.tick(4)
+  eq(names_on(2), "Compressor,EQ 10")
+  local redone = told()
+  eq(#redone, 1)
+  eq(redone[1].how, "redo")
+  eq(redone[1].descs[1], "Kumi: chain (kc2)")
+end)
