@@ -69,11 +69,11 @@ impl Spec {
         Spec { position: note.position, pitch: note.pitch, velocity: note.velocity, length_ticks: note.length_ticks, channel: note.channel }
     }
 
-    fn json(&self) -> Value {
+    pub(super) fn json(&self) -> Value {
         json!({"position": self.position.to_json(), "pitch": self.pitch, "velocity": self.velocity, "lengthTicks": self.length_ticks, "channel": self.channel})
     }
 
-    fn from_json(value: &Value) -> Option<Spec> {
+    pub(super) fn from_json(value: &Value) -> Option<Spec> {
         let p = value.get("position")?;
         let at = |key: &str| p.get(key).and_then(Value::as_u64).map(|n| n as u32);
         Some(Spec {
@@ -87,15 +87,15 @@ impl Spec {
 }
 
 /// A note row as read: the note and its row's node.
-struct Row {
-    note: Note,
-    node: Node,
+pub(super) struct Row {
+    pub(super) note: Note,
+    pub(super) node: Node,
 }
 
 /// The region a change is about, with its place and the beats to a bar, and the Event List shown for it.
-struct Shown {
-    region: Region,
-    beats_per_bar: u32,
+pub(super) struct Shown {
+    pub(super) region: Region,
+    pub(super) beats_per_bar: u32,
     open: ListOpen,
     columns: Vec<(String, usize)>,
 }
@@ -112,7 +112,7 @@ fn region(ctx: &mut Ctx, place: usize) -> Done<(Region, u32)> {
 }
 
 /// Shows the region's events: selects the region when it isn't, and shows the Event tab.
-fn show(ctx: &mut Ctx, place: usize) -> Done<Shown> {
+pub(super) fn show(ctx: &mut Ctx, place: usize) -> Done<Shown> {
     let (region, beats_per_bar) = region(ctx, place)?;
     if !region.selected {
         nudge::read(ctx.project.select_region(ctx.ax, place))?;
@@ -122,12 +122,12 @@ fn show(ctx: &mut Ctx, place: usize) -> Done<Shown> {
     Ok(Shown { region, beats_per_bar, open, columns })
 }
 
-fn hide(ctx: &mut Ctx, shown: Shown) {
+pub(super) fn hide(ctx: &mut Ctx, shown: Shown) {
     let _ = ctx.project.hide_list(ctx.ax, shown.open);
     ctx.project.forget();
 }
 
-fn rows(ctx: &mut Ctx, shown: &Shown) -> Done<Vec<Row>> {
+pub(super) fn rows(ctx: &mut Ctx, shown: &Shown) -> Done<Vec<Row>> {
     let (columns, table) = nudge::read(ctx.project.list_table(ctx.ax, "Event"))?;
     let strings = &ctx.project.strings;
     Ok(paths::rows(&table)
@@ -136,12 +136,12 @@ fn rows(ctx: &mut Ctx, shown: &Shown) -> Done<Vec<Row>> {
         .collect())
 }
 
-fn specs(list: &[Row]) -> Vec<Spec> {
+pub(super) fn specs(list: &[Row]) -> Vec<Spec> {
     list.iter().map(|row| Spec::of(&row.note)).collect()
 }
 
 /// The region's notes as one value, to fence a change with: their number and a hash of what they are.
-fn fence_of(notes: &[Spec]) -> Value {
+pub(super) fn fence_of(notes: &[Spec]) -> Value {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for note in notes {
         let p = note.position;
@@ -155,7 +155,7 @@ fn fence_of(notes: &[Spec]) -> Value {
 }
 
 /// The notes of `a` that `b` has no note for.
-fn difference(a: &[Spec], b: &[Spec]) -> Vec<Spec> {
+pub(super) fn difference(a: &[Spec], b: &[Spec]) -> Vec<Spec> {
     let mut left: Vec<Spec> = b.to_vec();
     a.iter()
         .filter(|note| match left.iter().position(|other| other == *note) {
@@ -425,7 +425,7 @@ fn plan(ctx: &mut Ctx, shown: &Shown, input: &Value, mode: Mode) -> Done<Plan> {
     Ok(Plan { before, remove, add })
 }
 
-fn label(region: &Region) -> String {
+pub(super) fn label(region: &Region) -> String {
     if region.name.is_empty() {
         "the region".into()
     } else {
@@ -478,7 +478,7 @@ pub fn preview(ctx: &mut Ctx, input: &Value, mode: Mode) -> Done<Preview> {
 
 /// Takes the notes in `remove` out of the region and puts the notes in `add` in; a note in both lists at the same
 /// place (a change) is set in its row instead. The region's notes after.
-fn write_notes(ctx: &mut Ctx, shown: &Shown, remove: &[Spec], add: &[Spec], in_place: bool) -> Done<Vec<Spec>> {
+pub(super) fn write_notes(ctx: &mut Ctx, shown: &Shown, remove: &[Spec], add: &[Spec], in_place: bool) -> Done<Vec<Spec>> {
     if in_place && remove.len() == add.len() {
         for (from, to) in remove.iter().zip(add) {
             if from == to {
@@ -521,6 +521,7 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value, mode: Mode) -> Done<Ap
         Ok(Applied {
             applied: json!({"added": added.iter().map(Spec::json).collect::<Vec<_>>(), "removed": removed.iter().map(Spec::json).collect::<Vec<_>>(), "notes": after.len()}),
             created: None,
+            target: None,
             material: None,
             display: json!({"title": title(mode.verb(), count, &label), "notes": after.len(), "written": shown_notes(&added)}),
             step: Some(mode.step()),

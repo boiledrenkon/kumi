@@ -122,7 +122,9 @@ fn main() {
         } else if let Some(asked) = step.get("restore") {
             let (params, answer) = preview.clone().expect("a preview before the restore");
             let done = applied.clone().expect("an apply before the restore");
-            let mut params = json!({"kind": params["kind"], "target": answer["target"], "prior": answer["prior"], "applied": done["applied"], "desc": asked["desc"], "epoch": project.epoch.to_string()});
+            // The target where the apply left it when the apply said (a region moved or renamed), as the host's journal keeps it.
+            let target = done.get("target").filter(|t| !t.is_null()).cloned().unwrap_or_else(|| answer["target"].clone());
+            let mut params = json!({"kind": params["kind"], "target": target, "prior": answer["prior"], "applied": done["applied"], "desc": asked["desc"], "epoch": project.epoch.to_string()});
             for key in ["created", "material"] {
                 if let Some(value) = done.get(key) {
                     params[key] = value.clone();

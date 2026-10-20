@@ -52,6 +52,16 @@ pub fn ensure(ax: &mut Ax) -> Done<()> {
     Err(busy("Logic Pro couldn't be brought in front (another app keeps it); nothing changed"))
 }
 
+/// Posts a chord to Logic, which must be in front for a modified key to land (the caller brings it there): `busy`
+/// when Logic lost the front meanwhile.
+pub fn post(ax: &mut Ax, chord: &crate::keys::Chord) -> Done<()> {
+    let active = nudge::wrote(ax.chord(&chord.helper_key(), &chord.mods()))?;
+    if !active {
+        return Err(busy("Logic Pro wasn't in front when the key was posted, so it didn't land; nothing changed"));
+    }
+    Ok(())
+}
+
 /// The menu bar item of the Edit menu: its path below the menu bar, found by its title in Logic's language.
 pub fn edit_menu(ax: &mut Ax, strings: &Strings) -> Result<String, AxError> {
     let bar = ax.tree(&Root::MenuBar, "", 1, 20, Some(&["title"]))?;

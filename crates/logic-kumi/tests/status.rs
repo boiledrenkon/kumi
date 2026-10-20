@@ -55,7 +55,8 @@ fn a_saved_project_is_identified_by_its_path_in_status_the_welcome_and_the_disco
             "transport_play",
             "cursor_set",
             "undo_step_begin",
-            "undo_step_end"
+            "undo_step_end",
+            "project_save"
         ])
     );
     assert_eq!(client.welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw"]));

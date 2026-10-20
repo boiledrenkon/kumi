@@ -9,11 +9,19 @@
 //! markers, events), so those answer `undo.entry: false` and are put back by value; and its titles carry no nonce,
 //! so the producer's own undo is named back to Kumi by [`undo::Watch`], which keeps Kumi's steps in order.
 
+mod command;
+mod cycle;
 mod front;
 mod fx;
+mod import;
 mod marks;
 mod notes;
 mod nudge;
+pub mod panel;
+mod quantize;
+mod regions;
+mod save;
+pub mod smf;
 mod structure;
 mod timeline;
 mod tracks;
@@ -24,6 +32,7 @@ use std::time::Instant;
 use serde_json::{json, Map, Value};
 
 use crate::ax::Ax;
+use crate::keys::KeyCommands;
 use crate::project::Project;
 use crate::queue::Answer;
 use crate::refs::{bad, failed, Fault, Ref};
@@ -62,8 +71,12 @@ pub struct Preview {
 }
 
 /// What an apply did, and what the undo watch keeps of it.
+#[derive(Default)]
 pub struct Applied {
     pub applied: Value,
+    /// Where the target is now, when the apply moved it (a region moved, resized or renamed moves the epoch): the
+    /// restore is asked for this ref.
+    pub target: Option<Value>,
     pub created: Option<Value>,
     pub material: Option<Value>,
     pub display: Value,
@@ -118,11 +131,20 @@ pub enum Kind {
     Tempo,
     Notes(notes::Mode),
     FxBypass,
+    KeyCommand,
+    RegionMove,
+    RegionResize,
+    RegionSplit,
+    RegionLoop,
+    RegionRename,
+    RegionDelete,
+    LoopRange,
+    NotesQuantize,
+    MidiImport,
 }
 
 /// The kinds Logic's bridge can't make yet, and why, so the refusal says so.
-const NOT_YET: [(&str, &str); 9] = [
-    ("loop-range", "the cycle locators have no field Accessibility can set"),
+const NOT_YET: [(&str, &str); 8] = [
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
     ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
     ("fx-delete", "the insert slot's pop-up menu can't be driven from outside"),
@@ -146,6 +168,16 @@ impl std::fmt::Debug for Kind {
             Kind::Tempo => f.write_str("Tempo"),
             Kind::Notes(mode) => write!(f, "Notes({mode:?})"),
             Kind::FxBypass => f.write_str("FxBypass"),
+            Kind::KeyCommand => f.write_str("KeyCommand"),
+            Kind::RegionMove => f.write_str("RegionMove"),
+            Kind::RegionResize => f.write_str("RegionResize"),
+            Kind::RegionSplit => f.write_str("RegionSplit"),
+            Kind::RegionLoop => f.write_str("RegionLoop"),
+            Kind::RegionRename => f.write_str("RegionRename"),
+            Kind::RegionDelete => f.write_str("RegionDelete"),
+            Kind::LoopRange => f.write_str("LoopRange"),
+            Kind::NotesQuantize => f.write_str("NotesQuantize"),
+            Kind::MidiImport => f.write_str("MidiImport"),
         }
     }
 }
@@ -166,12 +198,22 @@ pub fn kind(name: &str) -> Option<Kind> {
         "notes-change" => Some(Kind::Notes(notes::Mode::Change)),
         "notes-delete" => Some(Kind::Notes(notes::Mode::Delete)),
         "fx-bypass" => Some(Kind::FxBypass),
+        "key-command" => Some(Kind::KeyCommand),
+        "region-move" => Some(Kind::RegionMove),
+        "region-resize" => Some(Kind::RegionResize),
+        "region-split" => Some(Kind::RegionSplit),
+        "region-loop" => Some(Kind::RegionLoop),
+        "region-rename" => Some(Kind::RegionRename),
+        "region-delete" => Some(Kind::RegionDelete),
+        "loop-range" => Some(Kind::LoopRange),
+        "notes-quantize" => Some(Kind::NotesQuantize),
+        "midi-import" => Some(Kind::MidiImport),
         _ => None,
     }
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 16] = [
+pub const KINDS: [&str; 26] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -188,6 +230,16 @@ pub const KINDS: [&str; 16] = [
     "notes-change",
     "notes-delete",
     "fx-bypass",
+    "key-command",
+    "region-move",
+    "region-resize",
+    "region-split",
+    "region-loop",
+    "region-rename",
+    "region-delete",
+    "loop-range",
+    "notes-quantize",
+    "midi-import",
 ];
 
 impl Kind {
@@ -203,10 +255,20 @@ impl Kind {
             Kind::Tempo => timeline::tempo_preview(ctx, input),
             Kind::Notes(mode) => notes::preview(ctx, input, mode),
             Kind::FxBypass => fx::bypass_preview(ctx, input),
+            Kind::KeyCommand => unreachable!("previewed with the key command set"),
+            Kind::RegionMove => regions::move_preview(ctx, input),
+            Kind::RegionResize => regions::resize_preview(ctx, input),
+            Kind::RegionSplit => regions::split_preview(ctx, input),
+            Kind::RegionLoop => regions::loop_preview(ctx, input),
+            Kind::RegionRename => regions::rename_preview(ctx, input),
+            Kind::RegionDelete => regions::delete_preview(ctx, input),
+            Kind::LoopRange => cycle::preview(ctx, input),
+            Kind::NotesQuantize => quantize::preview(ctx, input),
+            Kind::MidiImport => import::preview(ctx, input),
         }
     }
 
-    fn apply(self, ctx: &mut Ctx, input: &Value, fence: &Value, desc: &str) -> Done<Applied> {
+    fn apply(self, ctx: &mut Ctx, keys: &KeyCommands, input: &Value, fence: &Value, desc: &str) -> Done<Applied> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_apply(ctx, prop, input, fence),
             Kind::TrackRename => tracks::rename_apply(ctx, input, fence),
@@ -218,10 +280,20 @@ impl Kind {
             Kind::Tempo => timeline::tempo_apply(ctx, input, fence),
             Kind::Notes(mode) => notes::apply(ctx, input, fence, mode),
             Kind::FxBypass => fx::bypass_apply(ctx, input, fence),
+            Kind::KeyCommand => unreachable!("applied with the key command set"),
+            Kind::RegionMove => regions::move_apply(ctx, input, fence),
+            Kind::RegionResize => regions::resize_apply(ctx, keys, input, fence),
+            Kind::RegionSplit => regions::split_apply(ctx, keys, input, fence),
+            Kind::RegionLoop => regions::loop_apply(ctx, input, fence),
+            Kind::RegionRename => regions::rename_apply(ctx, input, fence),
+            Kind::RegionDelete => regions::delete_apply(ctx, input, fence, desc),
+            Kind::LoopRange => cycle::apply(ctx, input, fence),
+            Kind::NotesQuantize => quantize::apply(ctx, input, fence),
+            Kind::MidiImport => import::apply(ctx, input, fence),
         }
     }
 
-    fn restore(self, ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Restored> {
+    fn restore(self, ctx: &mut Ctx, keys: &KeyCommands, watch: &mut Watch, restore: &Restore) -> Done<Restored> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_restore(ctx, prop, restore),
             Kind::TrackRename => tracks::rename_restore(ctx, restore),
@@ -233,17 +305,38 @@ impl Kind {
             Kind::Tempo => timeline::tempo_restore(ctx, restore),
             Kind::Notes(_) => notes::restore(ctx, restore),
             Kind::FxBypass => fx::bypass_restore(ctx, restore),
+            Kind::KeyCommand => Err((
+                "daw-only".into(),
+                "Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)".into(),
+            )),
+            Kind::RegionMove => regions::move_restore(ctx, restore),
+            Kind::RegionResize => regions::resize_restore(ctx, keys, restore),
+            Kind::RegionSplit => regions::split_restore(ctx, watch, restore),
+            Kind::RegionLoop => regions::loop_restore(ctx, restore),
+            Kind::RegionRename => regions::rename_restore(ctx, restore),
+            Kind::RegionDelete => regions::delete_restore(ctx, watch, restore),
+            Kind::LoopRange => cycle::restore(ctx, restore),
+            Kind::NotesQuantize => quantize::restore(ctx, watch, restore),
+            Kind::MidiImport => import::restore(ctx, watch, restore),
         }
     }
 }
 
-/// The change side's state across requests: the undo watch and the counted plan steps.
-#[derive(Default)]
+/// The change side's state across requests: the undo watch, the counted plan steps and the key command set.
 pub struct Changes {
     pub watch: Watch,
     steps: u64,
     /// A plan step left open by `undo_step_begin`: its label, when it began, and the changes applied in it so far.
     open_step: Option<(String, Instant, usize)>,
+    /// The key command set the bridge posts with: the producer's (the bridge loads it on attach), else the built-in
+    /// U.S. factory set (which a replay of a recorded scene uses too).
+    pub keys: KeyCommands,
+}
+
+impl Default for Changes {
+    fn default() -> Self {
+        Changes { watch: Watch::default(), steps: 0, open_step: None, keys: KeyCommands::embedded() }
+    }
 }
 
 /// A fault as the wire gives it, for a change: `changed` (the fence moved), `gone`, `uncertain`.
@@ -379,7 +472,10 @@ impl Changes {
     pub fn preview(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
         check_epoch(ctx, params)?;
         let kind = kind_of(params)?;
-        let preview = kind.preview(ctx, object(params, "input")?)?;
+        let preview = match kind {
+            Kind::KeyCommand => command::preview(self, ctx, object(params, "input")?)?,
+            other => other.preview(ctx, object(params, "input")?)?,
+        };
         Ok(json!({
             "epoch": ctx.project.epoch.to_string(),
             "target": preview.target,
@@ -394,16 +490,23 @@ impl Changes {
     pub fn apply(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
         check_epoch(ctx, params)?;
         let kind = kind_of(params)?;
+        if let Kind::KeyCommand = kind {
+            return command::apply(self, ctx, params);
+        }
         let (input, fence, desc) = (object(params, "input")?, object(params, "fence")?, text(params, "desc")?);
-        let applied = kind.apply(ctx, input, fence, desc)?;
+        let applied = kind.apply(ctx, &self.keys, input, fence, desc)?;
         if let Some((_, _, count)) = self.open_step.as_mut() {
             *count += 1;
         }
-        let key = change_key(text(params, "kind")?, &input["ref"]);
+        // The watch keys the step by the target where the apply left it (a moved region's new ref).
+        let key = change_key(text(params, "kind")?, applied.target.as_ref().map_or(&input["ref"], |target| &target["ref"]));
         let undo = self.watch.applied(ctx, desc, &key, applied.step, applied.probe);
         let mut answer = Map::new();
         answer.insert("epoch".into(), ctx.project.epoch.to_string().into());
         answer.insert("applied".into(), applied.applied);
+        if let Some(target) = applied.target {
+            answer.insert("target".into(), target);
+        }
         if let Some(created) = applied.created {
             answer.insert("created".into(), created);
         }
@@ -420,6 +523,9 @@ impl Changes {
     /// refs are from the change's own epoch, carried to where their tracks and regions stand now.
     pub fn restore(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
         let kind = kind_of(params)?;
+        if let Kind::KeyCommand = kind {
+            return command::restore();
+        }
         let desc = text(params, "desc")?;
         let target = object(params, "target")?;
         let key = change_key(text(params, "kind")?, &target["ref"]);
@@ -433,9 +539,15 @@ impl Changes {
             desc,
             key: key.clone(),
         };
-        let restored = kind.restore(ctx, &mut self.watch, &restore)?;
+        let restored = kind.restore(ctx, &self.keys, &mut self.watch, &restore)?;
         let undo = self.watch.restored(ctx, desc, &key, restored.undone_in_logic);
         Ok(json!({"epoch": ctx.project.epoch.to_string(), "restored": restored.restored, "display": restored.display, "undo": undo}))
+    }
+
+    /// `project_save {epoch, path?, version?}`: the project saved in place or as `path`; no change, no undo step.
+    pub fn project_save(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
+        check_epoch(ctx, params)?;
+        save::project_save(ctx, &self.keys, params)
     }
 
     /// `transport_stop`: Logic stops playing and recording (the emergency stop).
@@ -500,6 +612,7 @@ mod tests {
             assert!(kind(name).is_some(), "{name}");
         }
         assert!(kind("track-color").is_none());
+        assert!(kind("key-command").is_some());
         let refused = kind_of(&json!({"kind": "fx-add"})).unwrap_err();
         assert_eq!(refused.0, "bad-params");
         assert!(refused.1.contains("pop-up menu"), "{}", refused.1);

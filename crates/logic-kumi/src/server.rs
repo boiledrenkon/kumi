@@ -47,7 +47,7 @@ const WRITER_POLL: Duration = Duration::from_millis(50);
 
 /// The methods served: `ping`, `status` and `focus` answered from the last look and never waiting for Logic, the rest
 /// read or written through the helper on the run loop; and the events sent.
-pub const METHODS: [&str; 14] = [
+pub const METHODS: [&str; 15] = [
     "ping",
     "status",
     "focus",
@@ -62,11 +62,12 @@ pub const METHODS: [&str; 14] = [
     "cursor_set",
     "undo_step_begin",
     "undo_step_end",
+    "project_save",
 ];
 pub const EVENTS: [&str; 5] =
     [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];
 /// The methods the run loop answers.
-const QUEUED_METHODS: [&str; 11] = [
+const QUEUED_METHODS: [&str; 12] = [
     "read",
     "snapshot",
     "focus_body",
@@ -78,6 +79,7 @@ const QUEUED_METHODS: [&str; 11] = [
     "cursor_set",
     "undo_step_begin",
     "undo_step_end",
+    "project_save",
 ];
 /// How long a queued request waits for the run loop without a deadline of its own, and the most it may ask for.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -977,7 +979,8 @@ mod tests {
                 "transport_play",
                 "cursor_set",
                 "undo_step_begin",
-                "undo_step_end"
+                "undo_step_end",
+                "project_save"
             ])
         );
         assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw"]));

@@ -24,7 +24,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 19] = [
+const SCENES: [&str; 20] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -44,6 +44,7 @@ const SCENES: [&str; 19] = [
     "change-notes-delete",
     "change-fx-bypass",
     "change-plan",
+    "change-key-command",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -421,4 +422,38 @@ fn the_producers_own_undo_of_a_plan_of_four_changes_is_named_back() {
         (items[0]["name"].as_str(), items[0]["volumeDb"].as_f64(), items[0]["mute"].as_bool()),
         (Some("Vocal"), Some(0.0), Some(false))
     );
+}
+
+#[test]
+fn a_key_command_runs_as_an_action_with_a_row_only_when_logic_made_a_step_and_is_logics_own_to_undo() {
+    let replayed = replay("change-key-command");
+    let previews = of(&replayed, "change_preview");
+    // Select All: Logic's history took no step, so no row (REAPER's run_action shape).
+    assert_eq!(previews[0].result()["target"], json!({"kind": "action", "command": 766, "name": "Select All"}));
+    assert_eq!(previews[0].result()["display"]["title"], "Ran key command “Select All” (⌘A)");
+    let applies = of(&replayed, "change_apply");
+    let select_all = applies[0].result().clone();
+    assert_eq!((select_all["applied"]["changed"].as_bool(), select_all["display"]["unchanged"].as_bool()), (Some(false), Some(true)));
+    assert_eq!(select_all["undo"], json!({"desc": "Kumi: Ran key command “Select All” (k0001)", "entry": false}));
+    // Create Marker (Opt-apostrophe, the producer's own binding): a step, named by the Edit menu's validated title.
+    let marker = applies[1].result().clone();
+    assert_eq!(marker["applied"], json!({"command": 513, "name": "Create Marker", "key": "⌥'", "step": "Create Marker"}));
+    assert_eq!(
+        marker["undo"],
+        json!({"desc": "Kumi: Ran key command “Create Marker” (k0002)", "entry": true, "title": "Undo Create Marker"})
+    );
+    assert_eq!(of(&replayed, "read")[0].result()["items"].as_array().unwrap().len(), 2, "a second marker");
+    // A restore is Logic's own to do.
+    let refused = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(refused["error"]["code"], "daw-only");
+    // The producer's Cmd-Z after it is named back to Kumi by the watch.
+    let named: Vec<&Value> = replayed.events.iter().filter(|event| event["how"] == "undo").collect();
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0]["descs"], json!(["Kumi: Ran key command “Create Marker” (k0002)"]));
+    // What Kumi won't run, and what it doesn't know, is refused with the closest names.
+    let refusals: Vec<String> = previews[2..].iter().map(|step| step.replayed["error"]["message"].as_str().unwrap().to_string()).collect();
+    assert!(refusals[0].contains("no key command named “Save”"), "{}", refusals[0]);
+    assert!(refusals[1].contains("1 to 4999"), "{}", refusals[1]);
+    assert!(refusals[2].contains("“Split Regions/Events at Playhead Position”"), "{}", refusals[2]);
+    assert!(previews[2..].iter().all(|step| step.replayed["error"]["code"] == "bad-params"));
 }

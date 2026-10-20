@@ -15,6 +15,7 @@ pub mod changes;
 pub mod fixtures;
 pub mod focus;
 pub mod helper;
+pub mod keys;
 pub mod log;
 pub mod logic;
 pub mod mcu;

@@ -23,25 +23,49 @@ const KINDS: [(&str, &str); 3] =
     [("audio", "New Audio Track"), ("instrument", "New Software Instrument Track"), ("external", "New External MIDI Track")];
 
 /// Presses a menu item under the Track menu by its English title, or by Logic's translation of it.
-fn track_menu(ctx: &mut Ctx, item: &str) -> Done<String> {
-    let mut titles = vec![item.to_string()];
-    titles.extend(ctx.project.strings.candidates(item));
-    let mut menus = vec!["Track".to_string()];
-    menus.extend(ctx.project.strings.candidates("Track"));
+pub(crate) fn track_menu(ctx: &mut Ctx, item: &str) -> Done<String> {
+    menu_item(ctx, "Track", &[item])
+}
+
+/// Presses an item under the File menu (a submenu's item as `["Import", "MIDI File…"]`).
+pub(crate) fn file_menu(ctx: &mut Ctx, items: &[&str]) -> Done<String> {
+    menu_item(ctx, "File", items)
+}
+
+/// Presses an item under a menu bar menu by its English titles, or by Logic's translations of them (each title's
+/// candidates tried in turn, the menu's first).
+pub(crate) fn menu_item(ctx: &mut Ctx, menu: &str, items: &[&str]) -> Done<String> {
+    let mut menus = vec![menu.to_string()];
+    menus.extend(ctx.project.strings.candidates(menu));
+    let candidates: Vec<Vec<String>> = items
+        .iter()
+        .map(|item| {
+            let mut titles = vec![item.to_string()];
+            titles.extend(ctx.project.strings.candidates(item));
+            titles
+        })
+        .collect();
+    let mut paths: Vec<Vec<String>> = menus.into_iter().map(|menu| vec![menu]).collect();
+    for titles in &candidates {
+        paths = paths
+            .iter()
+            .flat_map(|path| titles.iter().map(move |title| path.iter().cloned().chain(std::iter::once(title.clone())).collect::<Vec<_>>()))
+            .collect();
+    }
     let mut last = None;
-    for menu in &menus {
-        for title in &titles {
-            match ctx.ax.menu(&[menu.as_str(), title.as_str()]) {
-                Ok(shown) => return Ok(shown),
-                Err(error) => last = Some(error),
-            }
+    for path in &paths {
+        let titles: Vec<&str> = path.iter().map(String::as_str).collect();
+        match ctx.ax.menu(&titles) {
+            Ok(shown) => return Ok(shown),
+            Err(error) => last = Some(error),
         }
     }
-    Err(last.map_or_else(|| failed(format!("Logic Pro's Track menu has no {item:?}")), |error| super::ax_fault(&error, false)))
+    Err(last
+        .map_or_else(|| failed(format!("Logic Pro's {menu} menu has no {}", items.join(" > "))), |error| super::ax_fault(&error, false)))
 }
 
 /// Selects a track by a click on its header (Logic in front first) and checks that it is the selected one.
-fn select(ctx: &mut Ctx, place: usize) -> Done<Vec<tracks::Found>> {
+pub(super) fn select(ctx: &mut Ctx, place: usize) -> Done<Vec<tracks::Found>> {
     front::ensure(ctx.ax)?;
     let all = nudge::read(tracks::headers(ctx))?;
     if all.get(place - 1).is_some_and(|f| f.header.selected) && all.iter().filter(|f| f.header.selected).count() == 1 {
@@ -178,6 +202,7 @@ pub fn add_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     Ok(Applied {
         applied: json!({"index": place, "name": name, "kind": plan.kind}),
         created: Some(json!({"ref": ref_text(ctx, "track", &[place]), "kind": "track"})),
+        target: None,
         material: None,
         display: json!({"title": format!("Added {} track {}", plan.kind, quoted(&name))}),
         step: Some("Create Track"),
@@ -272,6 +297,7 @@ pub fn delete_apply(ctx: &mut Ctx, input: &Value, fence: &Value, desc: &str) -> 
     Ok(Applied {
         applied: json!({"deleted": true}),
         created: None,
+        target: None,
         material: Some(json!({
             "name": header.name, "kind": kind, "index": found.place, "regions": regions,
             "volumeDb": header.volume_db.unwrap_or(0.0), "pan": (header.pan as f64 / crate::rows::PAN_CENTRE as f64 * 1000.0).round() / 1000.0,
