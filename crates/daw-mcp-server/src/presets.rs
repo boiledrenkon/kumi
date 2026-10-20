@@ -52,26 +52,35 @@ pub fn print_of(text: &str) -> String {
     format!("{a:08x}{b:08x}:{}", text.len())
 }
 
-/// Preset data with what moves by itself left out (parameter values, plug-in chunks), printed: as the tool's `shape_of`.
-pub fn shape_of(xml: &str) -> String {
-    let mut shape = String::with_capacity(xml.len());
-    let mut rest = xml;
-    // `<Value>…</Value>` with no tag inside becomes `<Value/>`.
-    while let Some(at) = rest.find("<Value>") {
-        shape.push_str(&rest[..at]);
-        let after = &rest[at + 7..];
+/// `<tag>…</tag>` with no tag inside becomes `<tag/>`, everywhere in `text`.
+fn blanked(text: &str, tag: &str) -> String {
+    let (open, close, empty) = (format!("<{tag}>"), format!("</{tag}>"), format!("<{tag}/>"));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&open) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + open.len()..];
         match after.find('<') {
-            Some(end) if after[end..].starts_with("</Value>") => {
-                shape.push_str("<Value/>");
-                rest = &after[end + 8..];
+            Some(end) if after[end..].starts_with(&close) => {
+                out.push_str(&empty);
+                rest = &after[end + close.len()..];
             }
             _ => {
-                shape.push_str("<Value>");
+                out.push_str(&open);
                 rest = after;
             }
         }
     }
-    shape.push_str(rest);
+    out.push_str(rest);
+    out
+}
+
+/// Preset data with what moves by itself left out, printed: as the tool's `shape_of`. Parameter values and plug-in chunks
+/// (automation, meta devices and macros move them), and the inner devices' `SelectedPresetIsModified` and `IsSelected`
+/// (Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the producer's
+/// clicks: lab, 2026-10-20).
+pub fn shape_of(xml: &str) -> String {
+    let shape = blanked(xml, "Value");
     // `<ParameterChunk>…</ParameterChunk>` (the first end after each start) becomes `<ParameterChunk/>`.
     let mut out = String::with_capacity(shape.len());
     let mut rest = shape.as_str();
@@ -90,7 +99,7 @@ pub fn shape_of(xml: &str) -> String {
         }
     }
     out.push_str(rest);
-    print_of(&out)
+    print_of(&blanked(&blanked(&out, "SelectedPresetIsModified"), "IsSelected"))
 }
 
 const DOOFER: &str = "DooferDevice";

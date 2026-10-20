@@ -50,7 +50,7 @@ fn prints_and_shapes_are_the_tools() {
     assert_eq!(print_of("abc"), "0b885c8b3025f862:3");
     assert_eq!(print_of(""), "0000150500000000:0");
     assert_eq!(print_of(SPLITTER), "f340bd8e46a1f501:5889");
-    assert_eq!(shape_of(SPLITTER), "38298bf49f05deb5:5518");
+    assert_eq!(shape_of(SPLITTER), "1d1f047e3dbda60f:5362");
     assert_eq!(
         shape_of("<a><Value>1.0</Value><ParameterChunk><![CDATA[xx]]></ParameterChunk><Value><b/></Value></a>"),
         "f1e1d47b13de377c:51"
@@ -58,6 +58,13 @@ fn prints_and_shapes_are_the_tools() {
     // Values and plug-in chunks move by themselves: the shape stays.
     let moved = DOOFER.replacen("<Value>50</Value>", "<Value>73.5</Value>", 1);
     assert_eq!(shape_of(&moved), shape_of(DOOFER));
+    // So do the inner devices' SelectedPresetIsModified (Renoise turns it true when it writes the container again) and
+    // IsSelected (the producer's clicks): lab, 2026-10-20.
+    let flipped = SPLITTER
+        .replace("<SelectedPresetIsModified>false</SelectedPresetIsModified>", "<SelectedPresetIsModified>true</SelectedPresetIsModified>");
+    let clicked = flipped.replacen("<IsSelected>false</IsSelected>", "<IsSelected>true</IsSelected>", 1);
+    assert_ne!(clicked, SPLITTER, "the fixture has both flags");
+    assert_eq!(shape_of(&clicked), shape_of(SPLITTER));
     assert_ne!(shape_of(&DOOFER.replacen("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)), shape_of(DOOFER));
 }
 

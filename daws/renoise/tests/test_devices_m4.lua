@@ -1250,3 +1250,21 @@ test("devices m4: device-params refuses a destination the producer re-aimed betw
   eq(steps(), before, "nothing written")
   eq(values(1, 2, 1, 3), "2/1/1")
 end)
+
+test("devices m4: a container's shape leaves out its inner devices' SelectedPresetIsModified and IsSelected, which Renoise flips by itself", function()
+  -- (lab 2026-10-20: Renoise turns an inner device's SelectedPresetIsModified true when it writes the container's data again,
+  -- so a made Splitter's undo refused after a splitter-set and its undo)
+  local _, peer = setup()
+  local data = device_data(3, 2)
+  local epoch, layout = place(peer)
+  local function read() return call(peer, "preset_read", { ref = epoch .. ":device:3.2", epoch = epoch, layout = layout }).result end
+  local first = read()
+  data.preset_data = first.presetData:gsub('<GainerDevice type="GainerDevice">', '<GainerDevice type="GainerDevice">\n          <SelectedPresetIsModified>false</SelectedPresetIsModified>\n          <IsSelected>false</IsSelected>', 1)
+  local flagged = read()
+  data.preset_data = flagged.presetData:gsub("<SelectedPresetIsModified>false<", "<SelectedPresetIsModified>true<", 1):gsub("<IsSelected>false<", "<IsSelected>true<", 1)
+  local flipped = read()
+  ok(flipped.presetData ~= flagged.presetData and flipped.print ~= flagged.print, "the data differs")
+  eq(flipped.shape, flagged.shape, "the shape doesn't")
+  data.preset_data = flipped.presetData:gsub("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)
+  ok(read().shape ~= flipped.shape, "a name still moves it")
+end)

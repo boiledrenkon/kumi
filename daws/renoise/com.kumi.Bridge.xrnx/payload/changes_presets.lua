@@ -38,10 +38,14 @@ function M.print_of(text)
 end
 
 -- Preset data with what moves by itself left out: parameter values (automation, meta devices and macros move them all the
--- time) and plug-in state chunks (which follow the plug-in's parameters). Two reads of a device nobody edited give the same
--- shape. (presets.rs `shape_of` is the same.)
+-- time), plug-in state chunks (which follow the plug-in's parameters), and the inner devices' SelectedPresetIsModified and
+-- IsSelected (Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the
+-- producer's clicks: lab, 2026-10-20). Two reads of a device nobody edited give the same shape. (presets.rs `shape_of` is
+-- the same.)
 function M.shape_of(xml)
   local shape = xml:gsub("<Value>[^<]*</Value>", "<Value/>"):gsub("<ParameterChunk>.-</ParameterChunk>", "<ParameterChunk/>")
+  shape = shape:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
+  shape = shape:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
   return M.print_of(shape)
 end
 
