@@ -477,7 +477,8 @@ impl Reads {
         let fx_guid = reaper.fx_guid(fx);
         let renamed = reaper.fx_config(fx, "renamed_name").unwrap_or_default();
         let plugin = reaper.fx_name(fx);
-        let name = if renamed.is_empty() { plugin.clone() } else { renamed };
+        // (as Kumi's titles name it: "ReaComp", not "VST: ReaComp (Cockos)")
+        let name = if renamed.is_empty() { crate::changes::short_name(&plugin) } else { renamed };
         let count = reaper.fx_param_count(fx).max(0);
         let read = count.min(PARAMS_PER_FX);
         let mut print = Print::new();
@@ -641,6 +642,8 @@ mod tests {
         );
         let drums = find(&records, "{AAAA}");
         assert_eq!((drums["k"].clone(), drums["n"].clone(), drums["o"].clone()), (json!("track"), json!("Drums"), json!(1)));
+        let eq = find(&records, "{FX-EQ}");
+        assert_eq!((eq["n"].clone(), eq["f"]["plugin"].clone()), (json!("ReaEQ"), json!("VST3: ReaEQ (Cockos)")), "named as the titles do");
         // Its volume follows its envelope, so the envelope's fingerprint stands for it.
         assert_eq!(drums["f"]["mixer"]["volume"], Value::Null);
         assert_eq!(drums["f"]["mixer"]["pan"], -0.25);

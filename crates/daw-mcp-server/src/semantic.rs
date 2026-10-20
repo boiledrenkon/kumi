@@ -338,7 +338,6 @@ fn made_of(record: &Record, children: &[&Record]) -> Map<String, Value> {
 /// watching, when there was one).
 pub fn diff(before: &Snapshot, after: &Snapshot, watching: bool, firsts: &HashMap<String, Record>) -> Diff {
     let mut out = Diff::default();
-    compare(&before.facts, &after.facts, &HashSet::new(), &mut out.project);
     let before_keys: HashMap<String, &Record> = before.records.iter().map(|r| (r.key(), r)).collect();
     let after_keys: HashMap<String, &Record> = after.records.iter().map(|r| (r.key(), r)).collect();
     // Kinds either side summed up are compared through their parents' facets only.
@@ -359,6 +358,8 @@ pub fn diff(before: &Snapshot, after: &Snapshot, watching: bool, firsts: &HashMa
             }
         }
     }
+    // The project's own values: a sum of a kind both sides list (the markers) is told by that kind's records.
+    compare(&before.facts, &after.facts, &skip, &mut out.project);
     // Parents first: a kind any of whose records has no parent.
     let top = |kind: &str| after.records.iter().chain(&before.records).any(|r| r.k == kind && r.p.is_none());
     kinds.sort_by_key(|kind| !top(kind));
@@ -568,6 +569,19 @@ mod tests {
         after.records.retain(|r| r.k != "item");
         after.bounded.insert("item".into(), json!("more than 5,000 items"));
         assert_eq!(said(&diff(&before, &after, false, &HashMap::new())), ["~track Drums (items.count, items.itemsHash)"]);
+    }
+
+    #[test]
+    fn a_projects_sum_of_a_kind_both_sides_list_is_told_by_its_records_only() {
+        let mut before = snapshot(vec![json!({"k": "marker", "id": "{M1}", "n": "Intro", "o": 0})]);
+        before.facts = json!({"markers": {"count": 1, "markersHash": "a"}}).as_object().unwrap().clone();
+        before.summaries.insert("marker".into(), json!("markers"));
+        let mut after = before.clone();
+        after.records.push(record(json!({"k": "marker", "id": "{M2}", "n": "Drop", "o": 1})));
+        after.facts = json!({"markers": {"count": 2, "markersHash": "b"}}).as_object().unwrap().clone();
+        let found = diff(&before, &after, false, &HashMap::new());
+        assert!(found.project.is_empty(), "{:?}", found.project);
+        assert_eq!(said(&found), ["+marker Drop"]);
     }
 
     #[test]

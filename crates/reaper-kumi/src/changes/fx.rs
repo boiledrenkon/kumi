@@ -28,7 +28,7 @@ pub enum Which {
 }
 
 /// A plug-in's name as a producer says it: without the format in front and the maker behind.
-fn short_name(name: &str) -> String {
+pub(crate) fn short_name(name: &str) -> String {
     let rest = match name.split_once(": ") {
         Some((format, rest)) if format.len() <= 6 && !format.contains(' ') => rest,
         _ => name,

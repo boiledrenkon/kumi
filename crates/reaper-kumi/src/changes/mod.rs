@@ -12,6 +12,8 @@ mod call;
 mod chunks;
 mod folders;
 mod fx;
+// (M6: the digest names FX as the titles do)
+pub(crate) use fx::short_name;
 mod glue;
 mod item_kinds;
 mod items;

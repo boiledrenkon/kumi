@@ -25,9 +25,10 @@ use std::{
 use tokio::time::Instant;
 
 /// The project's snapshot is kept again once the producer's (or Kumi's) edits have settled this long…
-const SETTLE: Duration = Duration::from_secs(3);
-/// …and no sooner than this after the last time, or fifty times as long as the last took (a big project's digest).
-const MOST_OFTEN: Duration = Duration::from_secs(30);
+const SETTLE: Duration = Duration::from_secs(2);
+/// …and no sooner than this after the last time, or fifty times as long as the last took (a big project's digest): a DAW
+/// quit soon after an edit then reads back what changed while it was away, not the edits made while Kumi watched.
+const MOST_OFTEN: Duration = Duration::from_secs(5);
 /// A look this long after the last snapshot keeps one again, whatever the counter says (Live's rule).
 const LOOK_STALE: Duration = Duration::from_secs(5 * 60);
 /// How long Kumi's close waits for the last snapshot.
