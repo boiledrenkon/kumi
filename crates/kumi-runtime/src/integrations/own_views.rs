@@ -442,15 +442,23 @@ pub fn selected(selection: &Value, key: &str) -> Option<String> {
     selection.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
-/// The transport a focus carries, for FOCUS's beat light: `at` is when it was read (performance time).
+/// The transport a focus carries, for FOCUS's beat light: `at` is when it was read (performance time). Its beats are the
+/// DAW's own (REAPER's quarter notes through its tempo map, Renoise's beats through its lines per beat), and its bar is
+/// the time signature where the playhead is (no 4/4 assumed): `meter` says it in the DAW's words.
 pub fn transport(focus: &Value, at: f64) -> Option<Transport> {
     let transport = focus.get("transport")?;
+    let signature = transport.get("timeSignature").and_then(Value::as_array).and_then(|parts| match parts.as_slice() {
+        [num, den] => Some(format!("{}/{}", num.as_i64()?, den.as_i64()?)),
+        _ => None,
+    });
+    let lpb = number(transport, "lpb").filter(|n| *n >= 1.).map(|n| format!("LPB {n}"));
     Some(Transport {
         playing: flag(transport, "playing"),
         tempo: number(transport, "tempo"),
         beat: number(transport, "beat"),
         at,
         beats_per_bar: number(transport, "beatsPerBar"),
+        meter: signature.or(lpb),
     })
 }
 

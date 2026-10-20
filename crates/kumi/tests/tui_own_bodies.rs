@@ -644,3 +644,22 @@ scene!(picture_settings, DawId::Renoise, PICTURE_SHOTS, |h| {
     let picture = own_pictures::settings(&answers(&preview, &applied));
     opened(&h, drawn("c1", "parameter", "“Pad” settings: volume −3 dB, transpose 12, loop forward", picture)).await;
 });
+
+// The transport in the DAW's words beside the tempo: REAPER's time signature where the playhead is (its tempo map's, no
+// 4/4 assumed), Renoise's lines per beat.
+case!(the_header_says_the_daws_time_beside_the_tempo, async {
+    use kumi_runtime::integrations::own_views;
+    for (daw, transport, said) in [
+        (DawId::Reaper, json!({"playing": true, "tempo": 96.0, "beat": 3.5, "beatsPerBar": 3.5, "timeSignature": [7, 8]}), "96 BPM · 7/8"),
+        (DawId::Renoise, json!({"playing": true, "tempo": 125.0, "beat": 8.0, "beatsPerBar": 4, "lpb": 4, "tpl": 6}), "125 BPM · LPB 4"),
+    ] {
+        work_with(daw);
+        let h = Harness::new(160, 40);
+        h.start().await;
+        h.connect();
+        let read = own_views::transport(&json!({"transport": transport}), kumi_common::time::perf_now()).unwrap();
+        h.emit(json!({"type": "transport", "transport": serde_json::to_value(read).unwrap()}));
+        shows(&h, said).await;
+        h.close().await;
+    }
+});

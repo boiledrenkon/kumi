@@ -351,6 +351,10 @@ pub struct Transport {
     pub at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beats_per_bar: Option<f64>,
+    /// The DAW's words for its time beside the tempo: REAPER's time signature where the playhead is ("7/8"), Renoise's
+    /// lines per beat ("LPB 4").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter: Option<String>,
 }
 
 /// The transport, as Live's integration has always sent it.
