@@ -269,6 +269,10 @@ pub struct Link<S: RefScheme> {
     /// Changes Kumi undid that the DAW's undo or redo may have put back (it can't say which step it took), by
     /// transaction: Unsure until the DAW's undo or redo, or Kumi's undo, settles them.
     pub maybe_redone: RefCell<std::collections::HashSet<String>>,
+    /// Changes the DAW's own undo or redo put back (a redo of the change, an undo of Kumi's undo step), by transaction: what
+    /// Kumi made may be a new object to the DAW's bridge since, so a refusal of Kumi's undo says that, not that it moved or
+    /// went (`undo_transaction`).
+    pub put_back_by_daw: RefCell<std::collections::HashSet<String>>,
 }
 
 /// How Kumi's undo of a change came to an end for good.
@@ -477,7 +481,10 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Err(_) => return Ok(Some(UndoResult::error(cant_reach_to_undo(self.link.words())))),
         };
         // (an answer settles whether the DAW redid it: the row now says what Kumi's undo found)
-        let settled = |link: &Link<S>| link.maybe_redone.borrow_mut().remove(&snapshot.transaction_id);
+        let settled = |link: &Link<S>| {
+            link.maybe_redone.borrow_mut().remove(&snapshot.transaction_id);
+            link.put_back_by_daw.borrow_mut().remove(&snapshot.transaction_id)
+        };
         let refused = match answer {
             Ok(done) if done.get("state").and_then(Value::as_str) == Some("undone") => {
                 settled(&self.link);
@@ -501,10 +508,19 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Err(refused) => refused,
         };
         let why = self.link.in_short_refs(&refused.why);
-        if matches!(refused.code.as_deref(), Some("changed" | "gone" | "stale" | "undone" | "daw-only" | "unknown")) {
-            settled(&self.link);
-        }
+        let put_back = matches!(refused.code.as_deref(), Some("changed" | "gone" | "stale" | "undone" | "daw-only" | "unknown"))
+            && settled(&self.link);
         let (state, note) = match refused.code.as_deref() {
+            // The DAW's own undo or redo put it back since: to its bridge that may be another object, or lines another hand
+            // wrote, so it refuses; it's there, and the DAW's undo is what takes it back now.
+            Some("changed" | "gone" | "stale") if put_back => (
+                ChangeState::Kept,
+                format!(
+                    "{} put it back with its own undo or redo, and Kumi can't tell it's still what Kumi made, so it left it as it is; {} can take it back.",
+                    words.app,
+                    self.link.words().vocab.own_undo
+                ),
+            ),
             Some("changed") => (ChangeState::Kept, format!("It changed in {} since, so Kumi left it as it is.", words.app)),
             Some("gone") => (ChangeState::Kept, format!("What it changed is gone from the {}, so there's nothing to undo.", words.place)),
             Some("stale") if self.link.book.borrow().scheme.positional() => (
@@ -703,6 +719,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             let settle = |link: &Link<S>| {
                 link.maybe_redone.borrow_mut().remove(&transaction);
                 link.undo_unanswered.borrow_mut().remove(&transaction);
+                link.put_back_by_daw.borrow_mut().remove(&transaction);
             };
             match state {
                 ChangeState::Applied | ChangeState::Unsure if undone.contains(&transaction) && !only_kumi => {
@@ -712,6 +729,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 // (Unsure: Kumi's undo of it was never answered, and the DAW's undo took that undo's step back)
                 ChangeState::Undone | ChangeState::Unsure if redone.contains(&transaction) => {
                     settle(self.link());
+                    self.link().put_back_by_daw.borrow_mut().insert(transaction.clone());
                     // Kumi may undo it again: with a fresh undo, not the one that answered before.
                     entry.borrow_mut().undo_key = None;
                     self.history.update(&entry, ChangeState::Applied, Some(format!("Put back with {}.", profile.words.app)));
@@ -719,6 +737,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 ChangeState::Undone if unsure.contains(&transaction) => {
                     settle(self.link());
                     self.link().maybe_redone.borrow_mut().insert(transaction.clone());
+                    self.link().put_back_by_daw.borrow_mut().insert(transaction.clone());
                     // (Kumi's undo of it reads back first, and writes only if what Kumi wrote is where it wrote it, untouched)
                     entry.borrow_mut().undo_key = None;
                     let note = format!("{} may have redone it; Kumi can't tell.", profile.words.app);
@@ -1485,6 +1504,7 @@ mod tests {
             undo_unanswered: RefCell::default(),
             in_plan: RefCell::default(),
             maybe_redone: RefCell::default(),
+            put_back_by_daw: RefCell::default(),
         });
         OwnPlan::new(link, None, None, None)
     }
@@ -1954,5 +1974,69 @@ mod tests {
         let unknown = plan.one_action(save, json!({"ref": "track:99", "name": "x"}).as_object().unwrap().clone(), Signal::new()).await;
         assert!(unknown.is_error && unknown.text.contains("isn't one of this turn's refs"), "{}", unknown.text);
         assert_eq!(saver.0.borrow().len(), 1);
+    }
+
+    /// A host whose bridge refuses every undo with this code.
+    struct Refuses(&'static str);
+    #[async_trait(?Send)]
+    impl McpEndpoint for Refuses {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Err(RuntimeError::plain("not listed"))
+        }
+        async fn call(&self, _: &str, _: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            let answer = json!({"error": "it isn't in the song any more", "code": self.0});
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": true})).unwrap())
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undo_refused_after_the_daws_own_redo_says_the_daw_put_it_back_not_that_it_went() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+                *plan.link().endpoint.borrow_mut() = Some(Rc::new(Refuses("gone")));
+                plan.link().connected.set(true);
+                let add = plan.change_kind("track_add").unwrap();
+                let row = |id: &str| plan.history.entries.borrow().get(id).map(|entry| entry.borrow().record.clone()).unwrap();
+                // Renoise's undo and redo of one track add (to its bridge, the redo made a new track); another never touched.
+                let redone = plan.remember(add, ChangeSummary::title("Added track “Pad”"), "t-redone", ChangeState::Applied, None);
+                let plain = plan.remember(add, ChangeSummary::title("Added track “Keys”"), "t-plain", ChangeState::Applied, None);
+                plan.undone_in_daw(&json!({"undone": ["t-redone"], "redone": []}));
+                plan.undone_in_daw(&json!({"undone": [], "redone": ["t-redone"]}));
+                for id in [&redone, &plain] {
+                    let input = json!({"change": id});
+                    crate::integrations::shared::undo::undo_change_with(&plan.history, input.as_object().unwrap(), Signal::new(), false)
+                        .await
+                        .unwrap();
+                }
+                let put_back = row(&redone);
+                assert_eq!(put_back.state, ChangeState::Kept);
+                let note = put_back.note.unwrap();
+                assert!(
+                    note.contains("Renoise put it back with its own undo or redo") && note.contains("Renoise's own undo (Cmd-Z"),
+                    "{note}"
+                );
+                assert!(row(&plain).note.unwrap().contains("is gone from the song"), "a change nothing put back still says it went");
+                assert!(!plan.link().put_back_by_daw.borrow().contains("t-redone"), "Kumi's undo settled it");
+            })
+            .await;
     }
 }
