@@ -119,6 +119,18 @@ fn an_empty_midi_item_is_made_on_a_track_and_undone_while_it_is_as_kumi_made_it(
 }
 
 #[test]
+fn an_empty_midi_item_keeps_a_point_of_reapers_undo() {
+    // REAPER's undo doesn't notice an item CreateNewMIDIItemInProj makes (accept-reaper lab: a plan of one item-add made
+    // no point, and REAPER's undo took the producer's step before it instead).
+    let lab = Lab::new();
+    let input = json!({"ref": KICK, "position": 10.0, "length": 2.0});
+    let preview = lab.preview("item-add", input.clone()).unwrap();
+    let applied = lab.apply_with("item-add", &input, &preview, "Kumi: add (k9)").unwrap();
+    assert_eq!(applied["undo"]["entry"], true);
+    assert_eq!(top().as_deref(), Some("Kumi: add (k9)"));
+}
+
+#[test]
 fn an_item_kumi_made_is_kept_once_the_producer_has_filled_it_unless_discarded() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("item-add", json!({"ref": KICK, "position": 10.0, "length": 2.0}));

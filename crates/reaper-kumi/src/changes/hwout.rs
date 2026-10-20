@@ -130,8 +130,9 @@ fn for_restore(fault: Fault) -> Fault {
     }
 }
 
-/// All of an output's settings, as a state to compare and to make again.
-const STATE_KEYS: [(&str, &str); 10] = [
+/// All of an output's settings, as a state to compare and to make again. (Not `B_MONO`: on an output it reads back what was
+/// written but REAPER neither saves nor undoes it, lab 7.82; an output's mono is its `I_DSTCHAN`'s 1024 bit.)
+const STATE_KEYS: [(&str, &str); 9] = [
     ("D_VOL", "volume"),
     ("D_PAN", "pan"),
     ("B_MUTE", "mute"),
@@ -139,7 +140,6 @@ const STATE_KEYS: [(&str, &str); 10] = [
     ("I_SRCCHAN", "srcChan"),
     ("I_DSTCHAN", "dstChan"),
     ("B_PHASE", "phase"),
-    ("B_MONO", "mono"),
     ("I_AUTOMODE", "autoMode"),
     ("D_PANLAW", "panLaw"),
 ];
@@ -378,11 +378,17 @@ pub static PROPS: [Prop; 7] = [
     Prop {
         kind: "hw-out-mono",
         read: |reaper, track, index| state(reaper, track, index),
-        wanted: |_, _, _, input| {
+        // (the output's mono is its I_DSTCHAN's 1024 bit, as REAPER saves it)
+        wanted: |ctx, _, now, input| {
             let mono = input.get("mono").and_then(Value::as_bool).ok_or_else(|| bad("mono must be true or false"))?;
-            Ok(json!({"mono": if mono { 1.0 } else { 0.0 }}))
+            let dst = number(now, "dstChan") as i64;
+            let dst = if mono { dst | 1024 } else { dst & !1024 };
+            reaches(ctx, number(now, "srcChan") as i64, dst)?;
+            Ok(json!({"dstChan": dst as f64}))
         },
-        title: |route, to| format!("Hardware output {route} {}", if number(to, "mono") != 0.0 { "summed to mono" } else { "in stereo" }),
+        title: |route, to| {
+            format!("Hardware output {route} {}", if number(to, "dstChan") as i64 & 1024 != 0 { "summed to mono" } else { "in stereo" })
+        },
         noun: "mono",
     },
 ];

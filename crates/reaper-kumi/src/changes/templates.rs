@@ -329,6 +329,36 @@ fn selection(ctx: &Ctx) -> (Vec<String>, bool) {
     (tracks, reaper.master_track(ctx.proj).is_some_and(|m| reaper.track_value(m, "I_SELECTED") != 0.0))
 }
 
+/// REAPER puts a template's tracks after the last touched track, not at the end (lab 7.82): the last track is made the last
+/// touched one first, so they come at the end; the producer's own (its GUID) is put back by `put_touched`.
+const SET_LAST_TOUCHED: i32 = 40914;
+
+fn touch_last(ctx: &Ctx) -> Option<String> {
+    let reaper = ctx.reaper;
+    let touched = reaper.last_touched_track().map(|t| reaper.track_guid(t));
+    if let Some(last) = reaper.track_at(ctx.proj, reaper.track_count(ctx.proj) - 1) {
+        select_only(ctx, Some(last));
+        reaper.run_action(SET_LAST_TOUCHED);
+    }
+    touched
+}
+
+fn put_touched(ctx: &Ctx, touched: &Option<String>) {
+    if let Some(track) = touched.as_deref().and_then(|guid| by_guid(ctx, guid)) {
+        select_only(ctx, Some(track));
+        ctx.reaper.run_action(SET_LAST_TOUCHED);
+    }
+}
+
+fn select_only(ctx: &Ctx, only: Option<Track>) {
+    let reaper = ctx.reaper;
+    for at in 0..reaper.track_count(ctx.proj) {
+        if let Some(t) = reaper.track_at(ctx.proj, at) {
+            reaper.set_track_selected(t, Some(t) == only);
+        }
+    }
+}
+
 fn put_selection(ctx: &Ctx, (tracks, master): &(Vec<String>, bool)) {
     let reaper = ctx.reaper;
     for at in 0..reaper.track_count(ctx.proj) {
@@ -374,7 +404,11 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let kept = selection(ctx);
     let before = guids(ctx);
-    if !reaper.open_project(&path.to_string_lossy()) {
+    let touched = touch_last(ctx);
+    let opened = reaper.open_project(&path.to_string_lossy());
+    put_touched(ctx, &touched);
+    if !opened {
+        put_selection(ctx, &kept);
         return Err(failed("this REAPER can't insert track templates"));
     }
     // The tracks REAPER made: those it didn't have, in its order (at the end).

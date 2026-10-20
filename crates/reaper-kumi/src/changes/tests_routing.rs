@@ -184,6 +184,20 @@ fn a_hardware_outputs_settings_are_changed_and_put_back_and_a_producer_change_af
 }
 
 #[test]
+fn an_outputs_mono_is_its_output_codes_mono_bit_which_reaper_keeps() {
+    // B_MONO on a hardware output reads back but REAPER neither saves nor undoes it (accept-reaper lab, 7.82: REAPER's undo
+    // took the step before Kumi's instead, and a reload loses it); the output's mono is I_DSTCHAN's 1024 bit.
+    let lab = Lab::new();
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-mono", json!({"ref": output, "mono": true}), "Kumi: x (km001)");
+    assert_eq!(kick_outputs()[0].dst_chan, 1024);
+    assert_eq!(lab.call("read", json!({"kind": "send", "parent": KICK})).unwrap()["items"][0]["mono"], true);
+    lab.undo("hw-out-mono", &preview, &made, "Kumi: undo (km002)").unwrap();
+    assert_eq!(kick_outputs()[0].dst_chan, 0);
+}
+
+#[test]
 fn an_output_moved_to_another_output_is_found_by_kumis_mark_to_undo() {
     let lab = Lab::new();
     state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);

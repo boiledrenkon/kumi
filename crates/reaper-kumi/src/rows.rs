@@ -680,7 +680,12 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
         "modeName": send_mode_name(mode),
         "channels": channels(reaper, track, category, index),
         "phaseInverted": reaper.send_value(track, category, index, "B_PHASE") != 0.0,
-        "mono": reaper.send_value(track, category, index, "B_MONO") != 0.0,
+        // (a hardware output's mono is its I_DSTCHAN's 1024 bit: B_MONO on one isn't kept by REAPER)
+        "mono": if category == 1 {
+            reaper.send_value(track, category, index, "I_DSTCHAN") as i64 & 1024 != 0
+        } else {
+            reaper.send_value(track, category, index, "B_MONO") != 0.0
+        },
         "automationMode": automation_mode_name(reaper.send_value(track, category, index, "I_AUTOMODE") as i64),
     });
     if category <= 0 {
@@ -724,6 +729,8 @@ pub fn marker_row(reaper: &Reaper, proj: Project, marker: &Marker) -> Value {
         "position": seconds(marker.start),
         "positionBeats": beats(marker.start),
         "color": custom_color(reaper, marker.color as f64),
+        // (the ruler lane it sits in, which marker-lane moves it to)
+        "lane": marker.lane,
     });
     if marker.is_region {
         row["end"] = seconds(marker.end).into();

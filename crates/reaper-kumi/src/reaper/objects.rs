@@ -717,11 +717,13 @@ impl Reaper<'_> {
     // ----- MIDI -----
 
     /// A take's note, CC and text/sysex event counts.
+    /// A MIDI take's notes, CC events and text/sysex events. (REAPER answers their total: 0 for a take with no MIDI in it
+    /// yet, which isn't a failure. Whether a take is MIDI at all is `take_is_midi`.)
     pub fn midi_counts(&self, take: Take) -> Option<(i32, i32, i32)> {
         let f = self.api.MIDI_CountEvts()?;
         let (mut notes, mut ccs, mut texts) = (0, 0, 0);
-        let ok = unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) } != 0;
-        ok.then_some((notes, ccs, texts))
+        unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) };
+        Some((notes, ccs, texts))
     }
 
     pub fn midi_note(&self, take: Take, index: i32) -> Option<MidiNote> {
