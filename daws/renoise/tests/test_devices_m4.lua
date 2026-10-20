@@ -1685,3 +1685,23 @@ test("devices m4: Renoise's own undo of a device chain is one step, told as such
   eq(redone[1].how, "redo")
   eq(redone[1].descs[1], "Kumi: chain (kc2)")
 end)
+
+test("devices m4: after Renoise's own undo and redo of a device chain, Kumi's undo still takes it off (the track holds exactly what it loaded)", function()
+  local env, peer = setup()
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  mock.api.undo()
+  H.tick(2)
+  mock.api.redo()
+  H.tick(2)
+  eq(names_on(2), "Compressor,EQ 10")
+  local back = restore(peer, "device-chain-load", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(names_on(2), "EQ 5,Gainer")
+  -- Not when the producer changed one of them since: then the devices aren't the ones Kumi loaded, and it says so.
+  local again = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  mock.api.undo()
+  mock.api.redo()
+  mock.song:track(2):device(2).is_active = false
+  H.tick(2)
+  failure(restore(peer, "device-chain-load", again), "gone")
+end)

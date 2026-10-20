@@ -193,6 +193,16 @@ local function replaced_back(track, replaced)
   return true
 end
 
+-- Whether the devices after the track's mixer are exactly those a chain load left (by kind, settings, name and bypass).
+local function loaded_again(track, states)
+  if type(states) ~= "table" or #states == 0 or #track.devices - 1 ~= #states then return false end
+  for j, was in ipairs(states) do
+    local now = material_.device_state(track:device(j + 1))
+    if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active then return false end
+  end
+  return true
+end
+
 local function chain_restore(song, env, restore, desc)
   local material, applied = restore.material, restore.applied
   if type(material) ~= "table" or type(material.track) ~= "number" or type(material.loaded) ~= "table" or type(applied) ~= "table" then
@@ -209,6 +219,12 @@ local function chain_restore(song, env, restore, desc)
     if d then found[#found + 1] = { d = d, j = j } else missing, why_missing = missing + 1, why_missing or why end
   end
   local replaced = material.replaced or {}
+  -- (Renoise's own undo and redo of the load take its devices off and make them again: the log sees them go, so none is
+  -- found by its place; the track holding exactly what Kumi loaded, device for device, is the chain again)
+  if missing > 0 and missing == #material.loaded and loaded_again(track, applied.states) then
+    found, missing = {}, 0
+    for j = 1, #material.loaded do found[j] = { d = j + 1, j = j } end
+  end
   if missing > 0 then
     if missing == #material.loaded and replaced_back(track, replaced) then
       return { restored = { count = 0 }, display = { title = string.format("%s is off %s already", name, track_name) }, undo = { desc = desc, entry = false }, unwritten = true }
