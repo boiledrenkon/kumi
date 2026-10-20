@@ -26,6 +26,9 @@ local MAX_VALUES = 256
 
 local function label_of(t, track, device) return presets.label_of(t, track, device) end
 
+-- A parameter's number as the key the records keep it under ("3").
+local function key_of(k) return string.format("%d", k) end
+
 local function title(device, t, track, count)
   return string.format("%s %d %s on %s", devices_.label(device), count, count == 1 and "parameter" or "parameters", q(base.named(t, track)))
 end
@@ -190,33 +193,34 @@ local function preview(song, env, input)
   local t, d, track, device, label, asks = locate(song, env, input)
   local touched, order = touched_of(asks)
   for _, prefix in ipairs(order) do check_destination(song, touched[prefix], t, d) end
-  local prior, fence = { params = {} }, { id = presets.identity(track, device), label = label, params = {}, wanted = {}, destinations = {} }
+  local prior_params, fenced, wanted, fenced_dests = {}, {}, {}, {}
   local lines, before, after, unchanged = {}, {}, {}, true
   for _, ask in ipairs(asks) do
-    local key, parameter = tostring(ask.k), ask.parameter
-    prior.params[key] = { value = parameter.value, valueString = parameter.value_string }
-    fence.params[key] = parameter.value
+    local key, parameter = key_of(ask.k), ask.parameter
+    prior_params[key] = { value = parameter.value, valueString = parameter.value_string }
+    fenced[key] = parameter.value
     before[parameter.name], after[parameter.name] = parameter.value_string, ask.wanted.valueString or ask.wanted.value
     lines[#lines + 1] = wanted_line(ask)
     if ask.how == "send" then
       -- (what the wanted number names now: the apply refuses it if that moved in between, as device-param does)
       local n = send_track(song, ask.wanted.value)
-      if n then fence.wanted[key] = refs.make(env.epoch(), "track", n) end
+      if n then wanted[key] = refs.make(env.epoch(), "track", n) end
     end
     if ask.how ~= "destination" and not param_spec.same({ value = parameter.value, valueString = parameter.value_string }, ask.wanted) then unchanged = false end
   end
   for _, prefix in ipairs(order) do
     local entry = touched[prefix]
-    fence.destinations[prefix] = entry.now
+    fenced_dests[prefix] = entry.now
     -- (the device the wanted numbers name, as a place: a device made before it in between moves the numbers)
     if entry.wanted.track >= 0 then
       local wt, wd = entry.wanted.track + 1, entry.wanted.effect + 1
-      fence.wanted[prefix] = { track = wt, dev = material_.device_place(env, wt, wd, song:track(wt):device(wd)) }
+      wanted[prefix] = { track = wt, dev = material_.device_place(env, wt, wd, song:track(wt):device(wd)) }
     end
     if not dest.same_numbers(entry.now, entry.wanted) then unchanged = false end
   end
   local display = { title = title(device, t, track, #asks), lines = lines, before = before, after = after, unchanged = unchanged or nil }
-  return { target = presets.target_of(t, d), prior = prior, fence = fence, display = display }
+  local fence = { id = presets.identity(track, device), label = label, params = fenced, wanted = wanted, destinations = fenced_dests }
+  return { target = presets.target_of(t, d), prior = { params = prior_params }, fence = fence, display = display }
 end
 
 local function apply(song, env, input, fence, desc)
@@ -229,7 +233,7 @@ local function apply(song, env, input, fence, desc)
   -- Everything is checked before anything is written: the values the preview read, what the wanted values name.
   local moved = {}
   for _, ask in ipairs(asks) do
-    local key = tostring(ask.k)
+    local key = key_of(ask.k)
     if fenced_params[key] == nil or not base.close(ask.parameter.value, fenced_params[key]) then moved[#moved + 1] = ask.parameter.name end
   end
   local touched, order = touched_of(asks)
@@ -241,7 +245,7 @@ local function apply(song, env, input, fence, desc)
     fail("changed", string.format("%s of %s changed since the preview", table.concat(moved, ", "), q(label)))
   end
   for _, ask in ipairs(asks) do
-    local key = tostring(ask.k)
+    local key = key_of(ask.k)
     if ask.how == "send" and fenced_wanted[key] ~= nil then
       local was = refs.expect(fenced_wanted[key], "track", 1, env.epoch())[1]
       if send_track(song, ask.wanted.value) ~= was then
@@ -262,14 +266,15 @@ local function apply(song, env, input, fence, desc)
   end
   -- What the restore needs, read before the write: the values and the places they name.
   local material = presets.keep(env, t, d, track, device)
-  material.prior, material.count = { params = {}, destinations = {} }, #asks
-  local journal_prior = { params = {} }
+  local kept_params, kept_dests, journal_params = {}, {}, {}
   for _, ask in ipairs(asks) do
-    local key = tostring(ask.k)
-    journal_prior.params[key] = ask.parameter.value
-    if ask.how ~= "destination" then material.prior.params[key] = kept_value(song, ask, ask.parameter) end
+    local key = key_of(ask.k)
+    journal_params[key] = ask.parameter.value
+    if ask.how ~= "destination" then kept_params[key] = kept_value(song, ask, ask.parameter) end
   end
-  for _, prefix in ipairs(order) do material.prior.destinations[prefix] = dest.place_of_numbers(song, env, touched[prefix].now) end
+  for _, prefix in ipairs(order) do kept_dests[prefix] = dest.place_of_numbers(song, env, touched[prefix].now) end
+  material.prior, material.count = { params = kept_params, destinations = kept_dests }, #asks
+  local journal_prior = { params = journal_params }
   -- One step: every value written in this callback.
   local todo = {}
   for _, ask in ipairs(asks) do
@@ -298,28 +303,28 @@ local function apply(song, env, input, fence, desc)
       if not dest.same_numbers(dest.numbers_of(touched[prefix].destination), touched[prefix].wanted) then kept[#kept + 1] = prefix .. "Track" end
     end
     if #kept > 0 then
-      for _, ask in ipairs(todo) do pcall(function() ask.parameter.value = journal_prior.params[tostring(ask.k)] end) end
+      for _, ask in ipairs(todo) do pcall(function() ask.parameter.value = journal_params[key_of(ask.k)] end) end
       for _, prefix in ipairs(dests_todo) do pcall(dest.write_numbers, touched[prefix].destination, touched[prefix].now) end
       fail("failed", string.format("Renoise kept %s of %s as they were; nothing is changed", table.concat(kept, ", "), q(label)))
     end
   end
   -- Read back in Renoise's words.
-  local applied, journal_applied, lines = { params = {}, destinations = {} }, { params = {} }, {}
+  local applied_params, applied_dests, applied_raw, lines = {}, {}, {}, {}
   for _, ask in ipairs(asks) do
-    local key = tostring(ask.k)
-    journal_applied.params[key] = ask.parameter.value
-    if ask.how ~= "destination" then applied.params[key] = kept_value(song, ask, ask.parameter) end
+    local key = key_of(ask.k)
+    applied_raw[key] = ask.parameter.value
+    if ask.how ~= "destination" then applied_params[key] = kept_value(song, ask, ask.parameter) end
     lines[#lines + 1] = line(song, ask.parameter, ask.how)
   end
   for _, prefix in ipairs(order) do
     local numbers = dest.numbers_of(touched[prefix].destination)
-    applied.destinations[prefix] = dest.place_of_numbers(song, env, numbers)
+    applied_dests[prefix] = dest.place_of_numbers(song, env, numbers)
     lines[#lines + 1] = prefix .. "→ " .. dest.target_words(song, numbers)
   end
   return {
-    applied = applied, material = material, target = presets.target_of(t, d),
+    applied = { params = applied_params, destinations = applied_dests }, material = material, target = presets.target_of(t, d),
     display = { title = title(device, t, track, #asks), lines = lines, unchanged = not written or nil },
-    undo = { desc = desc, entry = written }, prior = journal_prior, journal_applied = journal_applied, place = { track = t, device = d },
+    undo = { desc = desc, entry = written }, prior = journal_prior, journal_applied = { params = applied_raw }, place = { track = t, device = d },
   }
 end
 
