@@ -6,8 +6,8 @@
 
 
                  ██                          ▀▀                   NOW
-                 ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██                   ✓ Gainer on Bass Gain -6.021 dB
-                 ██▀█▄   ██  ██  ██  ██  ██  ██                   █──▏──── Gain 0.000 dB → -6.021…
+                 ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██                   ✓ Gainer on Bass Gain −6.021 dB
+                 ██▀█▄   ██  ██  ██  ██  ██  ██                   █──▏──── Gain 0.000 dB → −6.021…
                  ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀
 
                  ░▒▓████████████████████████▓▒░
@@ -16,8 +16,8 @@
 
                                Try                                HISTORY 1 ──────────────────────
                      “What's on this track?”                      ✓ Gainer on Bass Gain       undo
-                     “Set the tempo to 124”                         -6.021 dB
-               “Why might my low end sound muddy?”                  █─▏──── Gain 0.000 dB → -6.02…
+                     “Set the tempo to 124”                         −6.021 dB
+               “Why might my low end sound muddy?”                  █─▏──── Gain 0.000 dB → −6.02…
 
    Kumi keeps each song's conversations: /conversations goes …
 

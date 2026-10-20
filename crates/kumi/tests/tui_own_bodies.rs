@@ -633,7 +633,7 @@ scene!(picture_param, DawId::Renoise, PICTURE_SHOTS, |h| {
     let applied = json!({"display": {"parameter": "Gain", "min": 0.0, "max": 1.4125, "before": before,
         "after": {"value": 0.25, "valueString": "-6.021 dB"}}});
     let picture = own_pictures::params(&answers(&preview, &applied));
-    opened(&h, drawn("c1", "parameter", "Gainer on Bass Gain -6.021 dB", picture)).await;
+    opened(&h, drawn("c1", "parameter", "Gainer on Bass Gain −6.021 dB", picture)).await;
 });
 
 scene!(picture_automation, DawId::Renoise, PICTURE_SHOTS, |h| {

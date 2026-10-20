@@ -22,7 +22,7 @@
 
 
   Night Drive
-  ✓ Gainer on Bass Gain -6.021 dB                                         undo
+  ✓ Gainer on Bass Gain −6.021 dB                                         undo
 
 
    Ask Kumi about your song
