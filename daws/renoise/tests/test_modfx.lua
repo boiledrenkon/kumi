@@ -266,6 +266,20 @@ test("modfx: chain devices: added by name after the mixer, bypassed, moved, a pa
   failure(call(peer, "change_preview", { kind = "chaindevice-add", input = { ref = chain_ref(place(peer), 1, 1), path = "Nope" }, epoch = place(peer) }), "bad-params")
 end)
 
+test("places, chain device deleted × a device the producer made and deleted at its place since: it goes back after the mixer", function()
+  local env, peer, epoch = setup_modfx()
+  local chain = mock.song:instrument(1):sample_device_chain(1)
+  chain:insert_device_at("Audio/Effects/Native/Gainer", 3)
+  local deleted = change(peer, "chaindevice-delete", { ref = chaindevice_ref(place(peer), 1, 1, 2) })
+  chain:insert_device_at("Audio/Effects/Native/Delay", 2)
+  chain:delete_device_at(2)
+  local undone = restore(peer, "chaindevice-delete", deleted)
+  ok(undone.result, json.encode(undone.error or {}))
+  local devices = instrument(1).chains[1].devices
+  eq(devices[2].path, "Audio/Effects/Native/EQ 5")
+  eq(devices[3].path, "Audio/Effects/Native/Gainer")
+end)
+
 test("places, chain device × the producer's device made before it: Kumi's undo of its bypass follows it; deleted: gone", function()
   local env, peer, epoch = setup_modfx()
   local record = change(peer, "chaindevice-bypass", { ref = chaindevice_ref(epoch, 1, 1, 2), bypass = true })

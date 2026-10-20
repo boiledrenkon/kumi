@@ -465,7 +465,8 @@ local function device_in_list(spec)
     if not n then places_.follow_failed(why, which, nil) end
     local objects = places_.resolve(song, spec.owner, n)
     local owner = objects[spec.owner]
-    local at = env.list_after and env.list_after(spec.list, n[1], n[2], material.index, material.after, spec.first) or nil
+    -- (`first` here is the list's first object, which never moves: a chain's mixer at 1, before the first place a device goes)
+    local at = env.list_after and env.list_after(spec.list, n[1], n[2], material.index, material.after, spec.first and spec.first - 1) or nil
     if not at then fail("stale", string.format("the devices changed in a way Kumi couldn't follow since it deleted %s: nothing was put back", label)) end
     at = math.max(spec.first or 1, math.min(at or 1, #owner.devices + 1))
     if at <= #owner.devices and base.same_table(spec.back_print(owner:device(at)), spec.print_of_state(state)) then
