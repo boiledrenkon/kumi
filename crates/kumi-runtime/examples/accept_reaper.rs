@@ -1396,7 +1396,7 @@ async fn big(s: &Session, lab_dir: &Path, out: &mut Vec<Extra>) {
     );
     let started = Instant::now();
     let one = s.read(&json!({"ref": item})).await;
-    extra(out, "big: read one item", one.get("ref").is_some(), Some(started.elapsed().as_millis()), "");
+    extra(out, "big: read one item", one["items"][0].get("ref").is_some(), Some(started.elapsed().as_millis()), "");
     for (tool, input) in [
         ("track_volume", json!({"ref": t, "volumeDb": -5})),
         ("item_move", json!({"ref": item, "position": 30})),
