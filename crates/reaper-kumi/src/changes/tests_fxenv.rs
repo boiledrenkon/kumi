@@ -1774,6 +1774,27 @@ fn an_undo_is_refused_when_its_object_went() {
     assert_eq!(lab.undo("fx-container-add", &cp, &ca).unwrap_err().0, "gone");
 }
 
+#[test]
+fn an_fx_whose_track_reaper_replaced_is_never_read_through_the_old_track() {
+    // (7.82 lab, 2026-10-19: REAPER's undo and redo put tracks back as new objects while the extension's watch followed
+    // their FX; reading the old track's chain crashed REAPER)
+    let lab = chains_lab();
+    let last = state(|s| {
+        let last = s.tracks.len() - 1;
+        s.tracks[last].fx = vec![plugin("{LAST}", "VST: ReaComp (Cockos)")];
+        s.state_count += 1;
+        last
+    });
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let proj = reaper.current_project().unwrap().ptr;
+    assert!(lab.reads.fx_by_guid(&reaper, proj, "{LAST}").is_ok());
+    // The last track goes: the handle the registry kept is no track of REAPER's any more.
+    state(|s| s.tracks.truncate(last));
+    assert!(lab.reads.fx_by_guid(&reaper, proj, "{LAST}").is_err());
+    assert_eq!(state(|s| s.dead_handle_reads), 0, "no chain read through the track REAPER no longer has");
+}
+
 // (read by the state test)
 #[allow(dead_code)]
 fn unused(_: Display, _: FakeItem, _: FakeTake, _: FakePoint, _: FakeAutoItem) {}

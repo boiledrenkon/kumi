@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import sys
 import tomllib
 from pathlib import Path
@@ -26,6 +27,92 @@ release = vendor.release
 # Windows files carry no exec bits, so a bundle built there marks only .exe files executable.
 EXEC_BITS = os.name != "nt"
 
+# Libraries as each system's linker lays them out, cut down to what the release script reads: their exported names
+# and, by format, what REAPER's loader on that system cares about.
+
+def elf_library(machine=62, exports=("ReaperPluginEntry",), glibc=("2.2.5", "2.34")):
+    strings = bytearray(b"\0")
+    def name(text):
+        strings.extend(text.encode() + b"\0")
+        return len(strings) - len(text) - 1
+    symbols = [struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)]
+    symbols += [struct.pack("<IBBHQQ", name(export), 0x12, 0, 7, 0x1000, 8) for export in exports]
+    symbols.append(struct.pack("<IBBHQQ", name("memcpy"), 0x12, 0, 0, 0, 0))  # imported: not defined here
+    symbols.append(struct.pack("<IBBHQQ", name("hidden_helper"), 0x12, 2, 7, 0x1100, 8))  # hidden: not exported
+    libc = name("libc.so.6")
+    aux = b"".join(struct.pack("<IHHII", 0, 0, i + 2, name(f"GLIBC_{version}"), 16 if i + 1 < len(glibc) else 0)
+                   for i, version in enumerate(glibc))
+    needed = struct.pack("<HHIII", 1, len(glibc), libc, 16, 0) + aux
+    names = b"\0.dynstr\0.dynsym\0.gnu.version_r\0.shstrtab\0"
+    blobs = [bytes(strings), b"".join(symbols), needed, names]
+    offsets, at = [], 64
+    for blob in blobs:
+        offsets.append(at)
+        at += len(blob)
+    table = (at + 7) & ~7
+    header = b"\x7fELF\x02\x01\x01" + b"\0" * 9 + struct.pack("<HHIQQQIHHHHHH", 3, machine, 1, 0, 0, table, 0, 64, 0, 0, 64, 5, 4)
+    sections = [b"\0" * 64,
+                struct.pack("<IIQQQQIIQQ", 1, 3, 2, 0, offsets[0], len(blobs[0]), 0, 0, 1, 0),
+                struct.pack("<IIQQQQIIQQ", 9, 11, 2, 0, offsets[1], len(blobs[1]), 1, 1, 8, 24),
+                struct.pack("<IIQQQQIIQQ", 17, 0x6FFFFFFE, 2, 0, offsets[2], len(blobs[2]), 1, 1, 8, 0),
+                struct.pack("<IIQQQQIIQQ", 32, 3, 0, 0, offsets[3], len(blobs[3]), 0, 0, 1, 0)]
+    data = header + b"".join(blobs)
+    return data + b"\0" * (table - len(data)) + b"".join(sections)
+
+def macho_library(cpu=0x0100000C, exports=("ReaperPluginEntry",), install_name="@rpath/reaper_kumi.dylib", signed=True):
+    edges = [b"_" + export.encode() + b"\0" for export in exports]
+    root = 2 + sum(len(edge) + 1 for edge in edges)
+    trie = bytes([0, len(edges)]) + b"".join(edge + bytes([root + 4 * i]) for i, edge in enumerate(edges))
+    trie += b"".join(bytes([2, 0, 0x10, 0]) for _ in edges)  # each a terminal (flags 0, address 0x10), no children
+    name = install_name.encode() + b"\0"
+    name += b"\0" * (-len(name) % 8)
+    commands = [struct.pack("<IIIIII", 0xD, 24 + len(name), 24, 0, 0, 0) + name]
+    trie_at = 32 + sum(map(len, commands)) + 16 + (16 if signed else 0)
+    commands.append(struct.pack("<IIII", 0x80000033, 16, trie_at, len(trie)))
+    if signed:
+        commands.append(struct.pack("<IIII", 0x1D, 16, trie_at + len(trie), 16))
+    header = struct.pack("<IiIIIIII", 0xFEEDFACF, cpu, 0, 6, len(commands), sum(map(len, commands)), 0, 0)
+    return header + b"".join(commands) + trie + (b"\0" * 16 if signed else b"")
+
+def universal(*slices):
+    data = bytearray(struct.pack(">II", 0xCAFEBABE, len(slices)))
+    offset = 4096
+    entries, bodies = [], []
+    for piece in slices:
+        entries.append(struct.pack(">iIIII", struct.unpack_from("<i", piece, 4)[0], 0, offset, len(piece), 12))
+        bodies.append((offset, piece))
+        offset += (len(piece) + 4095) // 4096 * 4096
+    data += b"".join(entries)
+    for at, piece in bodies:
+        data += b"\0" * (at - len(data)) + piece
+    return bytes(data)
+
+def pe_library(machine=0x8664, exports=("ReaperPluginEntry",), imports=("KERNEL32.dll",), delayed=()):
+    base, raw = 0x1000, 0x200
+    blob = bytearray()
+    def put(data):
+        blob.extend(data)
+        return base + len(blob) - len(data)
+    names = [put(name.encode() + b"\0") for name in exports]
+    table = put(b"".join(struct.pack("<I", rva) for rva in names))
+    export_dir = put(struct.pack("<IIHHIIIIIII", 0, 0, 0, 0, 0, 1, len(exports), len(exports), 0, table, 0))
+    dlls = [put(name.encode() + b"\0") for name in imports]
+    import_dir = put(b"".join(struct.pack("<IIIII", 1, 0, 0, rva, 1) for rva in dlls) + b"\0" * 20)
+    late = [put(name.encode() + b"\0") for name in delayed]
+    delay_dir = put(b"".join(struct.pack("<IIIIIIII", 1, rva, 0, 0, 0, 0, 0, 0) for rva in late) + b"\0" * 32)
+    optional = bytearray(240)
+    struct.pack_into("<H", optional, 0, 0x20B)
+    struct.pack_into("<I", optional, 108, 16)
+    struct.pack_into("<II", optional, 112, export_dir, 40)
+    struct.pack_into("<II", optional, 120, import_dir, 20 * (len(imports) + 1))
+    if delayed:
+        struct.pack_into("<II", optional, 112 + 8 * 13, delay_dir, 32 * (len(delayed) + 1))
+    section = struct.pack("<8sIIIIIIHHI", b".rdata", len(blob), base, len(blob), raw, 0, 0, 0, 0, 0x40000040)
+    head = bytearray(b"MZ" + b"\0" * 0x3E)
+    struct.pack_into("<I", head, 0x3C, 0x40)
+    head += b"PE\0\0" + struct.pack("<HHIIIHH", machine, 1, 0, 0, 0, len(optional), 0x2022) + optional + section
+    return bytes(head) + b"\0" * (raw - len(head)) + bytes(blob)
+
 class NativeRelease(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(prefix="kumi-native-release-test-")
@@ -34,6 +121,9 @@ class NativeRelease(unittest.TestCase):
         self.binaries.mkdir()
         for name in release.BINARIES:
             (self.binaries / name).write_bytes(b"\x7fELF fixture " + name.encode())
+        # REAPER's extension as the Linux x64 bundle's job finishes it.
+        self.extension = self.root / "reaper_kumi.so"
+        self.extension.write_bytes(elf_library())
         self.source = {"commit": "a" * 40, "commitTimestamp": "2026-10-01T12:00:00+00:00", "dirty": True}
         self.builder = {"rustc": "rustc fixture", "cargo": "cargo fixture", "platform": "linux", "architecture": "x64",
             "runnerImage": "test", "runnerImageVersion": "test", "cargoLockSha256": "b" * 64, "workflowSha256": "c" * 64}
@@ -43,7 +133,7 @@ class NativeRelease(unittest.TestCase):
 
     def build(self, out):
         return release.build_release(release.ROOT, self.binaries, out, "x86_64-unknown-linux-gnu", self.source,
-                                     self.builder, "test fixture payload (not a compiled runtime)")
+                                     self.builder, "test fixture payload (not a compiled runtime)", reaper_extension=self.extension)
 
     def test_application_and_bridge_versions_match_all_release_inputs(self):
         root = release.ROOT
@@ -62,6 +152,12 @@ class NativeRelease(unittest.TestCase):
                 self.assertEqual(package["version"], version, package["name"])
         bridge = cargo_version("crates/ableton-mcp-server/Cargo.toml")
         self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)
+        # REAPER's extension and Renoise's tool: each version a release can bump, said once (and Renoise's manifest
+        # number agreeing with its version file).
+        reaper = cargo_version("crates/reaper-kumi/Cargo.toml")
+        self.assertRegex(reaper, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "reaper-kumi"), reaper)
+        self.assertEqual(release.renoise_tool(root)[1], re.search(r'return "([^"]+)"', (root / release.RENOISE_TOOL_SOURCE / "payload/version.lua").read_text())[1])
 
     def helper_source(self):
         source = self.root / "crates/kumi-runtime/src/integrations/ableton/hands/KumiHands.swift"
@@ -483,6 +579,205 @@ class NativeRelease(unittest.TestCase):
             vendor.vendor(self.willington_bundle(runtime), {"COPYING": b"Willington license fixture\n"}, "d" * 40, root=self.root)
         self.assertEqual(release.inventory(folder), before)
         self.assertEqual([path.name for path in folder.parent.iterdir()], ["willington"])
+
+    def library(self, data, name="library"):
+        path = self.root / name
+        path.write_bytes(data)
+        return path
+
+    def test_each_library_format_gives_its_architectures_exports_and_loader_facts(self):
+        elf = release.binary_facts(self.library(elf_library(183, glibc=("2.17", "2.34", "2.28"))))
+        self.assertEqual(elf, [{"arch": "arm64", "exports": {"ReaperPluginEntry"}, "glibc": (2, 34)}])
+        mac = release.binary_facts(self.library(universal(macho_library(0x01000007), macho_library(exports=("ReaperPluginEntry", "Other")))))
+        self.assertEqual([(piece["arch"], piece["exports"], piece["install_name"], piece["signed"]) for piece in mac],
+                         [("x86_64", {"ReaperPluginEntry"}, release.REAPER_INSTALL_NAME, True),
+                          ("arm64", {"ReaperPluginEntry", "Other"}, release.REAPER_INSTALL_NAME, True)])
+        pe = release.binary_facts(self.library(pe_library(imports=("KERNEL32.dll", "VCRUNTIME140.dll"), delayed=("bcrypt.dll",))))
+        self.assertEqual(pe, [{"arch": "x86_64", "exports": {"ReaperPluginEntry"}, "imports": {"kernel32.dll", "vcruntime140.dll", "bcrypt.dll"}}])
+        for junk in (b"#!/bin/sh\n", b"\x7fELF\x02\x01" + b"\0" * 10, b"MZ" + b"\0" * 62, b"\xca\xfe\xba\xbe\0\0\0\x01"):
+            with self.subTest(junk=junk), self.assertRaises(ValueError):
+                release.binary_facts(self.library(junk))
+
+    def test_the_extension_is_checked_as_each_systems_reaper_loads_it(self):
+        mac = universal(macho_library(0x01000007), macho_library())
+        for target, data in [("x86_64-unknown-linux-gnu", elf_library()), ("aarch64-unknown-linux-gnu", elf_library(183)),
+                             ("aarch64-apple-darwin", mac), ("x86_64-apple-darwin", mac),
+                             ("x86_64-pc-windows-msvc", pe_library()), ("aarch64-pc-windows-msvc", pe_library())]:
+            with self.subTest(target=target):
+                checked = release.check_extension(self.library(data, release.extension_name(target)), target)
+                self.assertEqual(checked["archs"], release.extension_archs(target))
+        built = "/Users/runner/work/kumi/kumi/target/x86_64-apple-darwin/release/deps/libreaper_kumi.dylib"
+        for target, data, said in [
+                # One architecture: a REAPER under Rosetta on an Apple silicon Mac wouldn't load it.
+                ("aarch64-apple-darwin", macho_library(), "holds arm64, not arm64, x86_64"),
+                ("aarch64-apple-darwin", universal(macho_library(0x01000007, signed=False), macho_library()), "(x86_64) isn't signed"),
+                ("x86_64-apple-darwin", universal(macho_library(0x01000007, install_name=built), macho_library()), f"names itself {built}"),
+                ("x86_64-unknown-linux-gnu", elf_library(exports=("SWELL_dllMain",)), "doesn't export ReaperPluginEntry"),
+                ("x86_64-unknown-linux-gnu", elf_library(glibc=("2.2.5", "2.38")), "needs glibc 2.38, newer than Kumi's 2.35"),
+                ("x86_64-unknown-linux-gnu", elf_library(183), "holds arm64, not x86_64"),
+                ("x86_64-pc-windows-msvc", pe_library(imports=("KERNEL32.dll", "VCRUNTIME140.dll", "api-ms-win-crt-runtime-l1-1-0.dll")),
+                 "needs the C runtime installed (api-ms-win-crt-runtime-l1-1-0.dll, vcruntime140.dll)"),
+                ("x86_64-pc-windows-msvc", pe_library(delayed=("ucrtbase.dll",)), "needs the C runtime installed (ucrtbase.dll)"),
+                # Windows on Arm gets the x64 build: REAPER's Arm build is ARM64EC, which loads x64 libraries.
+                ("aarch64-pc-windows-msvc", pe_library(machine=0xAA64), "holds arm64, not x86_64")]:
+            with self.subTest(said=said), self.assertRaisesRegex(ValueError, re.escape(said)):
+                release.check_extension(self.library(data, release.extension_name(target)), target)
+        # CI's REAPER job checks its one build of the runner's own architecture.
+        release.check_extension(self.library(macho_library(), "thin.dylib"), "aarch64-apple-darwin", ["arm64"])
+        with self.assertRaisesRegex(ValueError, "no REAPER extension is built for x86_64-unknown-linux-musl"):
+            release.extension_name("x86_64-unknown-linux-musl")
+
+    def test_the_extension_is_built_as_it_ships_on_each_system(self):
+        calls = []
+        def run(command, cwd=None, env=None, check=None):
+            calls.append((command[0], command[1:], (env or {}).get("RUSTFLAGS")))
+            if command[0] == "cargo":
+                folder, target = Path(command[command.index("--target-dir") + 1]), command[command.index("--target") + 1]
+                built = folder / target / "ci-release" / release.cargo_library(target)
+                built.parent.mkdir(parents=True, exist_ok=True)
+                built.write_bytes(target.encode())
+            elif command[0] == "lipo":
+                Path(command[command.index("-output") + 1]).write_bytes(b"universal")
+        target_dir = self.root / "target"
+        with patch.object(release.subprocess, "run", side_effect=run), patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target_dir)}):
+            os.environ.pop("RUSTFLAGS", None)
+            for target in ("x86_64-apple-darwin", "aarch64-pc-windows-msvc", "aarch64-unknown-linux-gnu"):
+                final, commands = release.build_extension(self.root, target, "ci-release", self.root / target)
+                self.assertEqual(final, self.root / target / release.extension_name(target))
+                self.assertEqual(len(commands), len(release.extension_builds(target)))
+        cargo = lambda target, folder: ("cargo", ["build", "--locked", "--profile", "ci-release", "--target", target, "-p", "reaper-kumi",
+                                                  "--target-dir", str(folder)])
+        mac = self.root / "x86_64-apple-darwin" / "reaper_kumi.dylib"
+        self.assertEqual([call[:2] for call in calls[:5]], [
+            cargo("aarch64-apple-darwin", target_dir), cargo("x86_64-apple-darwin", target_dir),
+            ("lipo", ["-create", "-output", str(mac), str(target_dir / "aarch64-apple-darwin/ci-release/libreaper_kumi.dylib"),
+                      str(target_dir / "x86_64-apple-darwin/ci-release/libreaper_kumi.dylib")]),
+            # The platform's strip, then a signature over what lipo and strip made.
+            ("strip", ["-x", str(mac)]), ("codesign", ["--force", "--sign", "-", str(mac)])])
+        # Windows, on either architecture: the x64 build, the C runtime linked in, in a target folder of its own.
+        self.assertEqual(calls[5], (*cargo("x86_64-pc-windows-msvc", target_dir / "crt-static"), "-C target-feature=+crt-static"))
+        self.assertEqual((self.root / "aarch64-pc-windows-msvc/reaper_kumi.dll").read_bytes(), b"x86_64-pc-windows-msvc")
+        self.assertEqual(calls[6:], [(*cargo("aarch64-unknown-linux-gnu", target_dir), None),
+                                     ("strip", ["--strip-unneeded", str(self.root / "aarch64-unknown-linux-gnu/reaper_kumi.so")], None)])
+        # Never a rustc strip (on macOS 27 it can leave a library dyld refuses): the platform's strip above instead.
+        profiles = tomllib.loads((release.ROOT / "Cargo.toml").read_text())["profile"]
+        for profile in ("dev", "release", "ci-release"):
+            self.assertEqual(profiles[profile]["package"]["reaper-kumi"]["strip"], "none", profile)
+
+    def test_the_bundle_carries_reapers_extension_and_renoises_tool_where_kumi_installs_them_from(self):
+        out = self.root / "release"
+        result = self.build(out)
+        tool = release.ROOT / release.RENOISE_TOOL_SOURCE
+        reaper = release.crate_version(release.ROOT, release.REAPER_CRATE)
+        renoise = re.search(r'return "([^"]+)"', (tool / "payload/version.lua").read_text())[1]
+        self.assertEqual((result["reaper"], result["renoise"]), (reaper, renoise))
+        with tarfile.open(out / result["bundle"]) as tar:
+            names = set(tar.getnames())
+            self.assertIn("daw-mcp-server", names)
+            self.assertEqual(tar.extractfile("daws/reaper/reaper_kumi.so").read(), self.extension.read_bytes())
+            if EXEC_BITS:
+                self.assertEqual(tar.getmember("daws/reaper/reaper_kumi.so").mode, 0o755)
+            self.assertEqual(tar.extractfile("daws/reaper/reaper_kumi.version").read(), f"{reaper}\n".encode())
+            files = release.inventory(tool)
+            prefix = "daws/renoise/com.kumi.Bridge.xrnx/"
+            self.assertEqual({name for name in names if name.startswith("daws/")},
+                             {"daws/reaper/reaper_kumi.so", "daws/reaper/reaper_kumi.version", *(prefix + name for name in files)})
+            for name in files:
+                self.assertEqual(tar.extractfile(prefix + name).read(), (tool / name).read_bytes(), name)
+            # `bridge` stays Live's, as every earlier Kumi and installer reads it: REAPER's and Renoise's are new keys.
+            for name in ("package.json", "kumi-install.json"):
+                metadata = json.load(tar.extractfile(name))
+                self.assertEqual((metadata["bridge"], metadata["reaper"], metadata["renoise"]), (result["bridge"], reaper, renoise), name)
+            # install.sh reads the first "version" in package.json as Kumi's.
+            versions = [line for line in tar.extractfile("package.json").read().decode().splitlines() if '"version"' in line]
+            self.assertEqual(versions, [f'  "version": "{result["kumi"]}",'])
+        self.assertEqual(json.loads((out / "kumi-release.json").read_text())["reaper"], reaper)
+
+    def test_a_bundle_carries_a_checked_extension_or_none_is_built(self):
+        with self.assertRaisesRegex(ValueError, "a bundle carries REAPER's extension"):
+            release.build_release(release.ROOT, self.binaries, self.root / "none", "x86_64-unknown-linux-gnu", self.source, self.builder, "fixture")
+        for name in release.BINARIES:
+            (self.binaries / (name + ".exe")).write_bytes(b"MZ fixture " + name.encode())
+        dll = self.library(pe_library(imports=("KERNEL32.dll", "VCRUNTIME140.dll")), "reaper_kumi.dll")
+        out = self.root / "windows"
+        with self.assertRaisesRegex(ValueError, "build it with \\+crt-static"):
+            release.build_release(release.ROOT, self.binaries, out, "x86_64-pc-windows-msvc", self.source, self.builder, "fixture",
+                                  reaper_extension=dll)
+        self.assertEqual(list(out.iterdir()), [])
+        dll.write_bytes(pe_library())
+        result = release.build_release(release.ROOT, self.binaries, out, "x86_64-pc-windows-msvc", self.source, self.builder, "fixture",
+                                       reaper_extension=dll)
+        with tarfile.open(out / result["bundle"]) as tar:
+            self.assertEqual(tar.extractfile("daws/reaper/reaper_kumi.dll").read(), dll.read_bytes())
+            self.assertIn("daw-mcp-server.exe", tar.getnames())
+
+    def test_the_aggregate_refuses_targets_whose_daw_bridges_differ(self):
+        spec = importlib.util.spec_from_file_location("migration_release", release.ROOT / "scripts/build-migration-release.py")
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        manifests = []
+        for target, reaper in (("x86_64-unknown-linux-gnu", "0.1.0"), ("aarch64-unknown-linux-gnu", "0.1.1")):
+            out = self.root / target
+            out.mkdir()
+            (out / "kumi.tar.gz").write_bytes(target.encode())
+            manifest = {"kumi": "1.20.0", "bundle": "kumi.tar.gz", "sha256": release.digest(out / "kumi.tar.gz"), "runtime": "rust-native",
+                        "target": target, "bridge": "1.0.93", "reaper": reaper, "renoise": "1.0.0"}
+            (out / "kumi-release.json").write_text(json.dumps(manifest))
+            manifests.append(out / "kumi-release.json")
+        with self.assertRaisesRegex(ValueError, "same Kumi, bridge, REAPER extension and Renoise tool versions"):
+            migration.build(manifests, self.root / "aggregate", "24.0.0")
+        same = json.loads(manifests[1].read_text())
+        manifests[1].write_text(json.dumps({**same, "reaper": "0.1.0"}))
+        self.assertEqual(migration.build(manifests, self.root / "aggregate", "24.0.0")["bridge"], "1.0.93")
+
+    def test_renoise_tool_ships_only_its_own_files_with_one_version(self):
+        root = self.root / "checkout"
+        tool = root / release.RENOISE_TOOL_SOURCE
+        shutil.copytree(release.ROOT / release.RENOISE_TOOL_SOURCE, tool)
+        release.renoise_tool(root)
+        manifest = (tool / "manifest.xml").read_text()
+        for extra, said in [("preferences.xml", "preferences.xml isn't one of the tool's own files"),
+                            ("bridge-reference.json", "bridge-reference.json isn't one of"),
+                            ("payload/.DS_Store", "payload/.DS_Store isn't one of"), ("payload/notes.txt", "payload/notes.txt isn't one of")]:
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, re.escape(said)):
+                (tool / extra).write_text("x")
+                try:
+                    release.renoise_tool(root)
+                finally:
+                    (tool / extra).unlink()
+        version = re.search(r"<Version>([^<]+)</Version>", manifest)[1]
+        for changed, said in [(manifest.replace(f"<Version>{version}</Version>", "<Version>9.99</Version>"), "manifest says Version 9.99"),
+                              (manifest.replace("<Id>com.kumi.Bridge</Id>", "<Id>com.other.Tool</Id>"), "names com.other.Tool"),
+                              (manifest.replace("<ApiVersion>6.2</ApiVersion>", "<ApiVersion>6.1</ApiVersion>"), "declares API 6.1")]:
+            with self.subTest(said=said), self.assertRaisesRegex(ValueError, re.escape(said)):
+                (tool / "manifest.xml").write_text(changed)
+                try:
+                    release.renoise_tool(root)
+                finally:
+                    (tool / "manifest.xml").write_text(manifest)
+        # Renoise compares the manifest's Version as a number: each later version is a larger one.
+        ordered = ["1.0.0", "1.0.1", "1.0.12", "1.1.0", "1.1.5", "1.12.0", "2.0.0", "2.10.15"]
+        numbers = [release.renoise_manifest_version(version) for version in ordered]
+        self.assertEqual(numbers[:4], ["1.00", "1.0001", "1.0012", "1.01"])
+        self.assertEqual([float(number) for number in numbers], sorted(float(number) for number in numbers))
+        self.assertEqual(len(set(map(float, numbers))), len(numbers))
+        for unfit in ("1.100.0", "1.0.100", "1.0", "v1.0.0"):
+            with self.subTest(unfit=unfit), self.assertRaises(ValueError):
+                release.renoise_manifest_version(unfit)
+
+    def test_the_reaper_sdks_notice_ships_with_the_extension(self):
+        # Every bundle carries REAPER's extension and THIRD_PARTY_NOTICES.md (see the bundle's test): the notice names the
+        # vendored SDK commit and its copyright, and gives its license word for word; the shim that repeats the SDK's
+        # declaration names that license too.
+        sdk = release.ROOT / release.REAPER_CRATE / "sdk"
+        notices = (release.ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        section = notices.split("\n## REAPER extension SDK (Cockos)", 1)[1].split("\n## ", 1)[0]
+        self.assertIn((sdk / "LICENSE").read_text(encoding="utf-8").strip(), section)
+        self.assertIn(re.search(r"commit ([0-9a-f]{40})", (sdk / "SOURCE.txt").read_text(encoding="utf-8"))[1], section)
+        self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", section)
+        self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", (sdk / "reaper_plugin.h").read_text(encoding="utf-8"))
+        self.assertIn("reaper-rs", section)
+        self.assertIn("../sdk/LICENSE", (release.ROOT / release.REAPER_CRATE / "shim/csurf.cpp").read_text(encoding="utf-8"))
 
     def test_every_packaged_document_rewrites_its_links(self):
         revision = "a" * 40

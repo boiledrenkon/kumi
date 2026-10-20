@@ -306,7 +306,8 @@ local function add_apply(song, env, input, fence, desc)
   }
 end
 
-local function add_restore(song, env, restore, desc)
+-- (the restore of a change that made a phrase: phrase-add, and phrase-load in changes_loaders.lua)
+local function remove_made(song, env, restore, desc, kind)
   local material = restore.material
   if type(material) ~= "table" or type(material.made) ~= "table" then bad("material: the phrase the change made") end
   local n, why, which = places_.follow(env, material.made)
@@ -321,9 +322,12 @@ local function add_restore(song, env, restore, desc)
   end
   song:describe_undo(desc)
   objects.instrument:delete_phrase_at(n[2])
-  base.note_restored_at(env.journal, "phrase-add", places_.journal_place("phrase", n))
+  base.note_restored_at(env.journal, kind, places_.journal_place("phrase", n))
   return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
 end
+M.phrase_print, M.remove_made = phrase_print, remove_made
+
+local function add_restore(song, env, restore, desc) return remove_made(song, env, restore, desc, "phrase-add") end
 
 base.register({ kind = "phrase-add", custom = true, shape = "made", by_place = true, preview = add_preview, apply = add_apply, restore = add_restore })
 

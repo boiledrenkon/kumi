@@ -24,6 +24,7 @@ local sequence_ = import("changes_sequence")
 local presets = import("changes_presets")
 local macros = import("changes_macros")
 import("changes_params")
+import("changes_loaders")
 
 local M = {}
 

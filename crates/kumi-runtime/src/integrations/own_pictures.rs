@@ -3,7 +3,7 @@
 //! `display`), in the DAW's own words. A tracker's lines, an envelope's or automation's points, the parameters that
 //! moved, a route between tracks, a keyzone, items on the timeline, and the settings that moved.
 use crate::core::{
-    contracts::{ChangePicture, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone, RouteChange},
+    contracts::{ChangePicture, DevicePlacement, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone, RouteChange},
     daw::DawProfile,
 };
 use serde_json::{Map, Value};
@@ -299,6 +299,15 @@ pub fn items(answers: &Answers) -> Option<ChangePicture> {
     Some(ChangePicture::Items { before: before.iter().filter_map(item).collect(), after: after.iter().filter_map(item).collect(), values })
 }
 
+// ----- a track's devices -----
+
+/// A track's devices after a chain was loaded onto it (Renoise's device-chain-load: `applied.devices`, by name), drawn as
+/// HISTORY draws where a device went.
+pub fn chain(answers: &Answers) -> Option<DevicePlacement> {
+    let devices: Vec<String> = list(answers.after(), "devices").iter().filter_map(Value::as_str).map(str::to_owned).collect();
+    (!devices.is_empty()).then(|| DevicePlacement { devices: Some(devices), ..Default::default() })
+}
+
 // ----- settings -----
 
 /// A number as a change says it: at most three places, without trailing zeros, with a true minus.
@@ -538,5 +547,10 @@ mod tests {
             values.iter().map(|v| (v.name.as_str(), v.from_text.as_deref(), v.to_text.as_deref())).collect();
         assert_eq!(said, [("Volume", Some("−6 dB"), Some("0 dB")), ("Loop", Some("off"), Some("forward"))], "the fine tune didn't move");
         assert_eq!((values[0].min, values[0].max), (Some(-60.), Some(12.)));
+        // A chain loaded onto a track: the track's devices now.
+        let (preview, applied) =
+            answers(json!({"prior": {"devices": 1}}), json!({"applied": {"count": 3, "devices": ["EQ 5", "Compressor", "Reverb"]}}));
+        let placement = chain(&Answers { preview: &preview, applied: &applied }).unwrap();
+        assert_eq!(placement.devices.as_deref(), Some(&["EQ 5".to_string(), "Compressor".into(), "Reverb".into()][..]));
     }
 }

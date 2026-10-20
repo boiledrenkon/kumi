@@ -1466,7 +1466,7 @@ function M.make_song(options)
     patterns_observable = simple_observable(),
     selected_track_index = 1, selected_instrument_index = 1, selected_pattern_index = 1, selected_sequence_index = 1,
     selected_line_index = 1, selected_note_column_index = 1, selected_effect_column_index = 0,
-    selected_sample_index = 0, selected_phrase_index = 0, selected_track_device_index = 0,
+    selected_sample_index = 0, selected_phrase_index = 0, selected_track_device_index = 0, selected_sample_modulation_set_index = 0,
     selected_phrase_line_index = 0, selection_in_pattern = M.NIL,
     selected_track_index_observable = simple_observable(), selected_instrument_index_observable = simple_observable(),
     selected_pattern_index_observable = simple_observable(), selected_sequence_index_observable = simple_observable(),
@@ -1569,6 +1569,79 @@ function M.make_song(options)
   song = object("renoise.Song", song_fields, song_getters, song_setters)
   d.song = song
   return song
+end
+
+-- M4 n-devices: renoise.app()'s library loaders, as Renoise 3.5.4 does them (lab 2026-10-20). A file that isn't of the kind
+-- shows a dialog (M.dialogs) and loads nothing. A device chain replaces every device after the selected track's mixer (from
+-- the last), puts in the chain's devices in order (their XML types at the top of the file), resets the mixer's values and
+-- selects the last device. A phrase replaces the selected phrase (one is made in an instrument with none; with none
+-- selected, the first). A modulation set replaces the selected set's devices and keeps its name.
+local CHAIN_PATHS = {
+  CompressorDevice = "Audio/Effects/Native/Compressor", Eq10Device = "Audio/Effects/Native/EQ 10", Eq5Device = "Audio/Effects/Native/EQ 5",
+  GainerDevice = "Audio/Effects/Native/Gainer", DelayDevice = "Audio/Effects/Native/Delay", LfoDevice = "Audio/Effects/Native/*LFO",
+}
+local MIXER_DEFAULTS = { Panning = 0.5, Volume = 1, Width = 0, ["Post Panning"] = 0.5, ["Post Volume"] = 1 }
+
+local function library_file(path, root)
+  local handle = io.open(path, "rb")
+  local text = handle and handle:read("*a")
+  if handle then handle:close() end
+  if not text or not text:find("<" .. root, 1, true) then
+    M.dialogs = (M.dialogs or 0) + 1
+    return nil
+  end
+  return text
+end
+
+function M.app_load_chain(path)
+  local text = library_file(path, "RenoiseDeviceChain")
+  if not text then return false end
+  local fields = M.data.song_fields
+  local track = M.song:track(fields.selected_track_index)
+  for d = #track.devices, 2, -1 do track:delete_device_at(d) end
+  local at = 2
+  for kind in text:gmatch('\n    <(%w+) type="%1">') do
+    track:insert_device_at(CHAIN_PATHS[kind] or ("Audio/Effects/Native/" .. kind:gsub("Device$", "")), at)
+    at = at + 1
+  end
+  local mixer = track:device(1)
+  for k = 1, #mixer.parameters do
+    local parameter = mixer:parameter(k)
+    if MIXER_DEFAULTS[parameter.name] then parameter.value = MIXER_DEFAULTS[parameter.name] end
+  end
+  fields.selected_track_device_index = #track.devices
+  return true
+end
+
+function M.app_load_phrase(path)
+  local text = library_file(path, "InstrumentPhrase")
+  if not text then return false end
+  local fields = M.data.song_fields
+  local instrument = M.song:instrument(fields.selected_instrument_index)
+  local k = fields.selected_phrase_index
+  if #instrument.phrases == 0 then
+    instrument:insert_phrase_at(1)
+    k = 1
+  elseif k < 1 then
+    k = 1
+  end
+  local phrase = instrument.phrases[k]
+  phrase.name = text:match("<Name>(.-)</Name>") or ""
+  phrase.number_of_lines = tonumber(text:match("<NumberOfLines>(%d+)</NumberOfLines>")) or 16
+  return true
+end
+
+function M.app_load_modset(path)
+  local text = library_file(path, "SampleModulationSet")
+  if not text then return false end
+  local fields = M.data.song_fields
+  local instrument = M.song:instrument(fields.selected_instrument_index)
+  local set = instrument.sample_modulation_sets[math.max(1, fields.selected_sample_modulation_set_index)]
+  for d = #set.devices, 1, -1 do set:delete_device_at(d) end
+  local n = 0
+  for _ in text:gmatch('type="Sample%w+ModulationDevice"') do n = n + 1 end
+  for d = 1, n do set:insert_device_at("Modulation/AHDSR", 1, d) end
+  return true
 end
 
 -- What the producer does. Each changes the data and fires what Renoise would.

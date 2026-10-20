@@ -73,7 +73,7 @@ pub struct OwnKind {
 
 /// What HISTORY draws of a change: a value moved within its span (a fader, a pan), a colour's swatches, or one picture
 /// per family of kinds (`own_pictures`): a tracker's lines, a lane's points, the parameters that moved, a route, a
-/// keyzone, items on the timeline, the settings that moved.
+/// keyzone, items on the timeline, the settings that moved, a track's chain of devices.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Picture {
     None,
@@ -86,6 +86,7 @@ pub enum Picture {
     Zone,
     Items,
     Settings,
+    Chain,
 }
 
 impl OwnKind {
@@ -143,6 +144,9 @@ impl OwnKind {
             Picture::Settings => super::own_pictures::settings(&answers),
             _ => None,
         };
+        if self.picture == Picture::Chain {
+            summary.devices = super::own_pictures::chain(&answers);
+        }
         let (prior, after) = (preview.get("prior"), applied.get("applied"));
         let (Some(prior), Some(after)) = (prior.filter(|v| v.is_object()), after.filter(|v| v.is_object())) else { return summary };
         match self.picture {

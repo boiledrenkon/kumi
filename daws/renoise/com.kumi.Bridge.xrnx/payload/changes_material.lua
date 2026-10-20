@@ -103,6 +103,26 @@ function M.device_now(song, env, t, place)
   return d
 end
 
+-- The device a record keeps (`kept` = {track, dev (device_place), label}), where it is now: on the track its `track` number
+-- was carried to (the layout), at its place followed through that track's device log. A gap in the log refuses `stale`, a
+-- device deleted `gone`, another one at its place `changed`; nothing is written then. Returns t, d, track, device.
+function M.device_by_place(song, env, kept, what)
+  if type(kept) ~= "table" or type(kept.track) ~= "number" or type(kept.dev) ~= "table" then base.bad("material: where the device was") end
+  local q = base.q
+  local label = type(kept.label) == "string" and kept.label or "the device"
+  local t = kept.track
+  if t < 1 or t > rows.track_count(song) then fail("gone", string.format("the track %s was on isn't in the song any more", q(label))) end
+  local track = song:track(t)
+  local d, why = M.device_now(song, env, t, kept.dev)
+  if not d then
+    if why == "gone" then fail("gone", string.format("%s was deleted from %s since", q(label), q(base.named(t, track)))) end
+    if why == "changed" then fail("changed", string.format("the device at %s's place on %s is another one now", q(label), q(base.named(t, track)))) end
+    fail("stale", string.format("the devices on %s changed in a way Kumi couldn't follow since %s, so it can't tell where %s is: nothing was written",
+      q(base.named(t, track)), what or "then", q(label)))
+  end
+  return t, d, track, track:device(d)
+end
+
 -- What was put back, and what could not be (a track or a device that is not the one the record was made for is left alone).
 function M.new_tally() return { set = 0, failed = 0, skipped = 0, unknown = 0 } end
 

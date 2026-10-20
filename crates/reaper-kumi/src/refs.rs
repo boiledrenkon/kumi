@@ -439,11 +439,15 @@ impl Registry {
             if self.fx_matches(reaper, proj, fx, guid) {
                 return Some(fx);
             }
-            // The chain was reordered: the same owner's chain is the first place it can have gone.
-            self.index_chain(reaper, fx.owner);
-            if let Some(&fx) = self.fx.get(guid) {
-                if self.fx_matches(reaper, proj, fx, guid) {
-                    return Some(fx);
+            // The chain was reordered: the same owner's chain is the first place it can have gone, while REAPER still has
+            // that owner. One REAPER replaced (its undo puts a track back as a new object) is never read: its chain is
+            // freed memory (a crash in the lab, 2026-10-19: REAPER's undo and redo of a change whose FX the watch followed).
+            if self.owner_valid(reaper, proj, fx.owner) {
+                self.index_chain(reaper, fx.owner);
+                if let Some(&fx) = self.fx.get(guid) {
+                    if self.fx_matches(reaper, proj, fx, guid) {
+                        return Some(fx);
+                    }
                 }
             }
         }
@@ -478,12 +482,15 @@ impl Registry {
         self.fx.get(guid).copied()
     }
 
-    fn fx_matches(&self, reaper: &Reaper, proj: Project, fx: Fx, guid: &str) -> bool {
-        let owner_valid = match fx.owner {
+    fn owner_valid(&self, reaper: &Reaper, proj: Project, owner: FxOwner) -> bool {
+        match owner {
             FxOwner::Track(track) => reaper.track_valid(proj, track),
             FxOwner::Take(take) => reaper.take_valid(proj, take),
-        };
-        owner_valid && reaper.fx_guid(fx) == guid
+        }
+    }
+
+    fn fx_matches(&self, reaper: &Reaper, proj: Project, fx: Fx, guid: &str) -> bool {
+        self.owner_valid(reaper, proj, fx.owner) && reaper.fx_guid(fx) == guid
     }
 
     /// Remembers every FX in an owner's chain, containers' children and a track's input chain included.
