@@ -11,11 +11,11 @@ use kumi_runtime::{
             ClipViewNote, ColorChange, ConnectionState, ConversationNow, ConversationSummary, DeviceNode, DevicePlacement, DeviceTree,
             DeviceType, DisconnectCause, Dynamics, EqBand, EqShape, FocusParameter, FocusTrack, HeardComparison, HeardEvent, KernelEvent,
             LessonAction, LibraryEvent, LibraryState, LibraryStatus, LiveDetail, LiveFocus, LiveTransport, LiveView, Locator, Memory,
-            MemoryEvent, MemoryNote, MemoryScope, MemoryView, MixLevels, MixSend, PictureValue, PinKind, PinnedNode, PinnedTime,
-            RecipeAction, RecipeEvent, SessionEvent, SessionSlot, SessionStatus, SessionStrip, SetAsk, SetChoice, SlotClip, SoundSpan,
-            StopReason, StructuralMove, TakeScore, TechniqueAction, TechniqueEvent, TechniqueSummary, Thumb, TrackChip, TrackKind,
-            TranscriptLine, TranscriptRole, TurnResult, TurnState, Usage, WaitFor, WatchedEvent, WatchedFrame, WebAction, WebEvent,
-            WebWhere, Where, WordsSource,
+            MemoryEvent, MemoryNote, MemoryScope, MemoryView, MixLevels, MixSend, PictureItem, PictureLine, PictureRoute, PictureValue,
+            PictureZone, PinKind, PinnedNode, PinnedTime, RecipeAction, RecipeEvent, RouteChange, SessionEvent, SessionSlot, SessionStatus,
+            SessionStrip, SetAsk, SetChoice, SlotClip, SoundSpan, StopReason, StructuralMove, TakeScore, TechniqueAction, TechniqueEvent,
+            TechniqueSummary, Thumb, TrackChip, TrackKind, TranscriptLine, TranscriptRole, TurnResult, TurnState, Usage, WaitFor,
+            WatchedEvent, WatchedFrame, WebAction, WebEvent, WebWhere, Where, WordsSource,
         },
         errors::FailureKind,
         goal::{Best, GoalPhase, GoalStatus},
@@ -889,6 +889,7 @@ fn device(r: &str, name: &str, class_name: &str, device_type: DeviceType) -> Dev
         device_type: Some(device_type),
         chains: None,
         role: None,
+        note: None,
     }
 }
 
@@ -923,6 +924,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
     let views = Views {
         device_trees: vec![
             DeviceTree {
+                owner: None,
                 track_ref: "7:track:0".into(),
                 devices: vec![
                     device("7:device:0:-1", "Arpeggiator", "MidiArpeggiator", DeviceType::MidiEffect),
@@ -938,10 +940,11 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                         device_type: None,
                         chains: None,
                         role: None,
+                        note: None,
                     },
                 ],
             },
-            DeviceTree { track_ref: "7:track:3".into(), devices: vec![] },
+            DeviceTree { track_ref: "7:track:3".into(), devices: vec![], owner: None },
         ],
         clip_views: vec![
             ClipView {
@@ -954,8 +957,16 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                     ClipViewNote { note: note(1.75, 43.0, 1.0, 64.0), selected: None },
                 ],
                 beats_per_bar: None,
+                lanes: vec![],
             },
-            ClipView { slot_ref: "7:clip_slot:1:0".into(), name: String::new(), length: 4.0, notes: vec![], beats_per_bar: None },
+            ClipView {
+                slot_ref: "7:clip_slot:1:0".into(),
+                name: String::new(),
+                length: 4.0,
+                notes: vec![],
+                beats_per_bar: None,
+                lanes: vec![],
+            },
         ],
         session_strips: vec![SessionStrip {
             track_ref: "7:track:0".into(),
@@ -1270,6 +1281,52 @@ fn full_changes() -> Vec<ChangeRecord> {
     ]
 }
 
+/// (m4-tui) REAPER's and Renoise's pictures: a tracker's lines, a route, a keyzone, items on the timeline. Pinned after the
+/// others, so their ids don't move.
+fn daw_pictures() -> Vec<ChangeRecord> {
+    vec![
+        ChangeRecord {
+            picture: Some(ChangePicture::Lines {
+                lines: vec![PictureLine { line: 9, before: "E-4 01 40 .. ..".into(), after: "OFF .. .. .. ..".into() }],
+                more: 3,
+            }),
+            ..change("c901", ChangeFamily::Clip, "Wrote 4 lines in “Drop” on “Bass”", ChangeState::Applied)
+        },
+        ChangeRecord {
+            picture: Some(ChangePicture::Routes {
+                routes: vec![PictureRoute {
+                    from: "Drums".into(),
+                    to: "Reverb".into(),
+                    change: RouteChange::Made,
+                    values: vec![PictureValue {
+                        name: "Volume".into(),
+                        to: Some(-6.0),
+                        to_text: Some("−6 dB".into()),
+                        ..Default::default()
+                    }],
+                }],
+            }),
+            ..change("c902", ChangeFamily::Mixer, "Added send “Drums” → “Reverb”", ChangeState::Applied)
+        },
+        ChangeRecord {
+            picture: Some(ChangePicture::Zones {
+                before: vec![PictureZone { name: String::new(), notes: [48, 59], velocities: [0, 127], base: Some(48) }],
+                after: vec![PictureZone { name: "Snare".into(), notes: [60, 71], velocities: [64, 127], base: None }],
+                values: vec![],
+            }),
+            ..change("c903", ChangeFamily::Parameter, "“Snare” keyzone: notes 60-71", ChangeState::Applied)
+        },
+        ChangeRecord {
+            picture: Some(ChangePicture::Items {
+                before: vec![PictureItem { name: "vox.wav".into(), start: 8.0, length: 4.0, fade_in: 0.0, fade_out: 0.0, muted: false }],
+                after: vec![PictureItem { name: "vox.wav".into(), start: 10.0, length: 4.0, fade_in: 0.05, fade_out: 0.5, muted: true }],
+                values: vec![],
+            }),
+            ..change("c904", ChangeFamily::Clip, "Moved “vox.wav” to bar 6", ChangeState::Applied)
+        },
+    ]
+}
+
 fn picture_kind(picture: &ChangePicture) -> &'static str {
     match picture {
         ChangePicture::Values { .. } => "values",
@@ -1278,20 +1335,30 @@ fn picture_kind(picture: &ChangePicture) -> &'static str {
         ChangePicture::Notes { .. } => "notes",
         ChangePicture::Automation { .. } => "automation",
         ChangePicture::Mix { .. } => "mix",
+        ChangePicture::Lines { .. } => "lines",
+        ChangePicture::Routes { .. } => "routes",
+        ChangePicture::Zones { .. } => "zones",
+        ChangePicture::Items { .. } => "items",
     }
 }
 
 #[test]
 fn change_records_of_every_family_state_and_picture_keep_their_wire_shape() {
     let mut records = full_changes();
-    let kinds: BTreeSet<&str> = records.iter().filter_map(|record| record.picture.as_ref()).map(picture_kind).collect();
-    assert_eq!(kinds, BTreeSet::from(["automation", "dynamics", "eq", "mix", "notes", "values"]), "every picture kind is pinned");
+    let daw = daw_pictures();
+    let kinds: BTreeSet<&str> = records.iter().chain(&daw).filter_map(|record| record.picture.as_ref()).map(picture_kind).collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from(["automation", "dynamics", "eq", "items", "lines", "mix", "notes", "routes", "values", "zones"]),
+        "every picture kind is pinned"
+    );
     for family in FAMILIES {
         for state in STATES {
             let id = format!("c{}", records.len() + 1);
             records.push(change(&id, family, "A change", state));
         }
     }
+    records.extend(daw);
     pinned::<Vec<ChangeRecord>>("change-records.json", &records);
 }
 

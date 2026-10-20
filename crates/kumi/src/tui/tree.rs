@@ -1,6 +1,6 @@
 //! The selected path open, other racks folded.
 use super::icons::{device_kind, role_kind, IconKind};
-use kumi_runtime::core::contracts::{ChainNode, DeviceNode, DeviceTree};
+use kumi_runtime::core::contracts::{ChainNode, DeviceForm, DeviceNode, DeviceTree};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeNode {
     Device,
@@ -23,6 +23,8 @@ pub struct TreeRow {
     pub role: TreeRole,
     pub trail: Vec<String>,
     pub siblings: Vec<String>,
+    /// What the DAW says of it beside its name: bypassed, offline, parallel.
+    pub note: Option<String>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct TreeFocus {
@@ -120,7 +122,13 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
             for (index, device) in devices.iter().enumerate() {
                 let last = index == devices.len() - 1;
                 let chains = device.chains.as_deref().unwrap_or_default();
+                // A container of a DAW of Kumi's own (REAPER's, Renoise's): its one unnamed chain is its devices, and the
+                // focused one shows its lanes open (nothing inside it can be selected on its own).
+                let own = device.role.is_some_and(|role| role.form == DeviceForm::Container);
+                let unnamed = own && chains.len() == 1 && chains[0].name.is_empty();
+                let focused = self.path.last() == Some(&device.r#ref);
                 let expanded = self.path.contains(&device.r#ref) && !chains.is_empty();
+                let shown = if unnamed { chains[0].devices.as_deref().unwrap_or_default().len() } else { chains.len() };
                 // What the DAW said it is, or what it says from the bridge's row.
                 let kind = device.role.map(role_kind).unwrap_or_else(|| device_kind(&device.row()));
                 self.rows.push(TreeRow {
@@ -129,21 +137,28 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
                     kind,
                     name: device.name.clone(),
                     prefix: format!("{lead}{}", if last { "└ " } else { "├ " }),
-                    count: (!chains.is_empty() && !expanded).then_some(chains.len()),
+                    count: (!chains.is_empty() && !expanded).then_some(shown),
                     role: self.role(&device.r#ref),
                     trail: trail.to_vec(),
                     siblings: devices.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, d)| d.name.clone()).collect(),
+                    note: device.note.clone(),
                 });
                 if expanded {
-                    self.chains(chains, &format!("{lead}{}", if last { "  " } else { "│ " }), &appended(trail, &[&device.name]), device);
+                    let lead = format!("{lead}{}", if last { "  " } else { "│ " });
+                    let trail = appended(trail, &[&device.name]);
+                    if unnamed {
+                        self.devices(chains[0].devices.as_deref().unwrap_or_default(), &lead, &trail);
+                    } else {
+                        self.chains(chains, &lead, &trail, device, own && focused);
+                    }
                 }
             }
         }
-        fn chains(&mut self, chains: &[ChainNode], lead: &str, trail: &[String], rack: &DeviceNode) {
+        fn chains(&mut self, chains: &[ChainNode], lead: &str, trail: &[String], rack: &DeviceNode, open: bool) {
             for (index, chain) in chains.iter().enumerate() {
                 let last = index == chains.len() - 1;
                 let devices = chain.devices.as_deref().unwrap_or_default();
-                let expanded = self.path.contains(&chain.r#ref) && !devices.is_empty();
+                let expanded = (open || self.path.contains(&chain.r#ref)) && !devices.is_empty();
                 self.rows.push(TreeRow {
                     r#ref: chain.r#ref.clone(),
                     node: TreeNode::Chain,
@@ -154,6 +169,7 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
                     role: self.role(&chain.r#ref),
                     trail: trail.to_vec(),
                     siblings: chains.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, c)| c.name.clone()).collect(),
+                    note: None,
                 });
                 if expanded {
                     self.devices(devices, &format!("{lead}{}", if last { "  " } else { "│ " }), &appended(trail, &[&chain.name]));

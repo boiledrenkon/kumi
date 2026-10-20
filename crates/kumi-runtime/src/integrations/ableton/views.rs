@@ -149,6 +149,7 @@ fn node(row: Value) -> DeviceNode {
                 .collect()
         }),
         role: None,
+        note: None,
     };
     node.role = Some(super::presentation::device_role(&node.row()));
     node
@@ -218,7 +219,7 @@ pub async fn device_tree(host: &dyn ViewHost, track_ref: &str, signal: Signal) -
             }
             level = next;
         }
-        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices }))
+        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices, owner: None }))
     }
     .await;
     match result {
@@ -413,6 +414,7 @@ pub async fn clip_view(host: &dyn ViewHost, slot_ref: &str, signal: Signal) -> R
                 })
                 .collect(),
             beats_per_bar: None,
+            lanes: vec![],
         }))
     }
     .await;

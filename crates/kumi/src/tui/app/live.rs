@@ -21,7 +21,8 @@ impl TuiApp {
             let Some(focus) = &state.focus else {
                 return;
             };
-            let Some(reference) = focus.track_ref.clone().filter(|s| !s.is_empty()) else {
+            // (the chain open, when it isn't the track's own: REAPER's take FX)
+            let Some(reference) = focus.chain_ref.clone().or_else(|| focus.track_ref.clone()).filter(|s| !s.is_empty()) else {
                 return;
             };
             let key = format!(
@@ -46,7 +47,7 @@ impl TuiApp {
             let again = {
                 let mut state = app.0.state.borrow_mut();
                 if let Ok(Some(FocusBody::Tree(tree))) = result {
-                    if state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&tree.track_ref) {
+                    if state.focus.as_ref().and_then(|f| f.chain_ref.as_ref().or(f.track_ref.as_ref())) == Some(&tree.track_ref) {
                         state.tree = Some(tree);
                         state.tree_revision += 1;
                     }
@@ -339,7 +340,10 @@ impl TuiApp {
         let state = self.0.state.borrow();
         let focus = state.focus.as_ref()?;
         let tree = state.tree.as_ref()?;
-        if state.connection != ConnectionState::Connected || focus.track.is_none() || Some(&tree.track_ref) != focus.track_ref.as_ref() {
+        if state.connection != ConnectionState::Connected
+            || focus.track.is_none()
+            || Some(&tree.track_ref) != focus.chain_ref.as_ref().or(focus.track_ref.as_ref())
+        {
             return None;
         }
         if (editor_kind(focus) != Some(ViewKind::DeviceChain) || state.touched != Some(Touched::Tree)) && state.tree_cursor.is_none() {

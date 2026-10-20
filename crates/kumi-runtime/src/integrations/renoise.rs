@@ -103,7 +103,25 @@ fn body_request(request: &BodyRequest) -> Option<JsonObject> {
 fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
     Some(match request {
         BodyRequest::Tree { track_ref } => FocusBody::Tree(own_views::tree(track_ref, body)),
-        BodyRequest::Tracker { .. } => FocusBody::Tracker(own_views::tracker(body)),
+        BodyRequest::Tracker { item_ref } => {
+            let mut grid = own_views::tracker(body);
+            // A phrase: the phrase editor's own words, and how it plays.
+            if item_ref.as_deref().and_then(|r| RenoiseRefs.kind_of(r)) == Some("phrase") || body.get("instrumentRef").is_some() {
+                grid.heading = Some("Phrase".into());
+                if let Some(lpb) = body.get("lpb").and_then(Value::as_f64) {
+                    grid.facts.push(format!("LPB {lpb}"));
+                }
+                match body.get("keyTracking").and_then(Value::as_str) {
+                    Some("none") => grid.facts.push("no key tracking".into()),
+                    Some(tracking) => grid.facts.push(format!("key tracking: {tracking}")),
+                    None => {}
+                }
+                if body.get("looping") == Some(&Value::Bool(true)) {
+                    grid.facts.push("loops".into());
+                }
+            }
+            FocusBody::Tracker(grid)
+        }
         BodyRequest::Matrix => FocusBody::Matrix(own_views::matrix(body)),
         BodyRequest::Keyzones { item_ref } => FocusBody::Keyzones(own_views::keyzones(item_ref, body)),
         _ => return None,

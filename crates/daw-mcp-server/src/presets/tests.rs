@@ -380,6 +380,15 @@ fn a_dsp_body_gets_each_containers_devices_as_branches_a_splitters_second_lane_s
     let lanes = child_nodes(SPLITTER);
     assert_eq!(lanes.len(), 2);
     assert!(lanes[0].get("parallel").is_none() && lanes[1]["parallel"] == true, "{lanes:?}");
+    // (m4-tui) Each device's lane, and the lanes' names by the Splitter's type.
+    assert_eq!((lanes[0]["lane"].clone(), lanes[1]["lane"].clone()), (json!(1), json!(2)));
+    assert_eq!(super::lanes(SPLITTER), Some(vec!["Low", "High"]), "the fixture splits by frequency");
+    let parallel = ok("splitter-set", json!({"type": "parallel"}), SPLITTER, "Splitter").document.to_xml();
+    assert_eq!(super::lanes(&parallel), Some(vec!["Lane 1", "Lane 2"]));
+    let mid_side = ok("splitter-set", json!({"type": "mid-side"}), SPLITTER, "Splitter").document.to_xml();
+    assert_eq!(super::lanes(&mid_side), Some(vec!["Mid", "Side"]));
+    assert_eq!(super::lanes(DOOFER), None);
+    assert!(nodes[2].get("lane").is_none(), "a Doofer's devices run in its one chain");
     assert!(child_nodes(NOTEPAD).is_empty());
 }
 

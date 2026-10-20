@@ -70,6 +70,8 @@ fn fill_focus(focus: &Value) -> DawFocus {
         main_view: Some(view(ViewKind::Timeline, "Arrange")),
         editor_view: editor,
         item,
+        // (a take's FX chain: FOCUS's tree is the take's, not the track's)
+        chain_ref: selected(&selection, "fxChainRef"),
         ..Default::default()
     }
 }

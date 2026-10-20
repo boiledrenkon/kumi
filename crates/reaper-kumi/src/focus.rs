@@ -102,8 +102,9 @@ pub(crate) fn fx_of_hit(reaper: &Reaper, proj: Project, hit: &FxHit) -> Option<F
     Some(Fx { owner, index: hit.fx })
 }
 
-/// The FX with the focus (`GetTouchedOrFocusedFX` mode 1): its ref and name.
-fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, String)> {
+/// The FX with the focus (`GetTouchedOrFocusedFX` mode 1): its ref and name, and its take's ref when it is a take's (the
+/// chain FOCUS's tree shows then).
+fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, String, Option<String>)> {
     let hit = reads.touched_fx(reaper, 1)?;
     // Parm 1 says the window is still open but something else has the focus.
     if hit.param & 1 != 0 {
@@ -115,7 +116,11 @@ fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, 
         return None;
     }
     reads.registry().note_fx(proj, &guid, fx);
-    Some((refs::fx_ref(&guid), rows::clip(&reaper.fx_name(fx))))
+    let chain = match fx.owner {
+        FxOwner::Take(take) => Some(refs::take_ref(&reaper.take_guid(take))),
+        FxOwner::Track(_) => None,
+    };
+    Some((refs::fx_ref(&guid), rows::clip(&reaper.fx_name(fx)), chain))
 }
 
 /// The track a floating routing and I/O window is about, when that window has the keyboard focus: REAPER titles it
@@ -150,9 +155,12 @@ fn touched_param(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<Value>
 fn add_fx(reads: &Reads, reaper: &Reaper, proj: Project, selection: &mut Value, focused: bool) {
     selection["fxRef"] = Value::Null;
     if focused {
-        if let Some((reference, name)) = focused_fx(reads, reaper, proj) {
+        if let Some((reference, name, chain)) = focused_fx(reads, reaper, proj) {
             selection["fxRef"] = reference.into();
             selection["fxName"] = name.into();
+            if let Some(chain) = chain {
+                selection["fxChainRef"] = chain.into();
+            }
         }
     }
     if let Some(param) = touched_param(reads, reaper, proj) {
@@ -216,9 +224,12 @@ impl Focus {
         add_cursor(reaper, proj, &mut selection);
         // The FX window is named when it is the view; the touched parameter is always.
         selection["fxRef"] = Value::Null;
-        if let Some((reference, name)) = focused_fx {
+        if let Some((reference, name, chain)) = focused_fx {
             selection["fxRef"] = reference.into();
             selection["fxName"] = name.into();
+            if let Some(chain) = chain {
+                selection["fxChainRef"] = chain.into();
+            }
         }
         if let Some(param) = touched_param(reads, reaper, proj) {
             selection["param"] = param;
@@ -294,6 +305,21 @@ mod tests {
         assert_eq!(value["selection"]["takeRef"], "r:take:{TAKE-1}");
         assert_eq!(value["selection"]["itemRef"], "r:item:{ITEM-1}");
         assert_eq!(value["selection"]["itemName"], "bass.mid");
+    }
+
+    #[test]
+    fn a_takes_focused_fx_names_the_takes_chain_for_focus_to_draw() {
+        let (reads, proj) = project();
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        fake::with(|s| s.tracks[1].items[1].takes[0].fx.push(FakeFx::new("{T-FX}", "VST: ReaDelay (Cockos)")));
+        fake::with(|s| s.focused_fx = Some((1, 1, 0, 0, 0)));
+        let value = Focus::default().poll(&reads, &reaper, proj, true);
+        assert_eq!(value["view"], "fx");
+        assert_eq!((&value["selection"]["fxRef"], &value["selection"]["fxChainRef"]), (&json!("r:fx:{T-FX}"), &json!("r:take:{TAKE-2}")));
+        // A track's FX names no chain: the track's is FOCUS's.
+        fake::with(|s| s.focused_fx = Some((0, -1, -1, 0, 0)));
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["selection"].get("fxChainRef"), None);
     }
 
     #[test]

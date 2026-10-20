@@ -123,7 +123,10 @@ impl TuiApp {
                 FocusBody::Routing(routing) => (BodyKind::Routing, self.draw_routing(screen, x, area.y + 2, width, routing, most)),
                 _ => (BodyKind::Routing, 0),
             };
-            screen.put(x + 5, area.y + 1, &heading(kind), &st::FAINT);
+            // (a tracker grid that isn't a pattern, Renoise's phrase, says its own word)
+            let named =
+                if let FocusBody::Tracker(TrackerGrid { heading: Some(word), .. }) = &own { Some(format!(" · {word}")) } else { None };
+            screen.put(x + 5, area.y + 1, &named.unwrap_or_else(|| heading(kind)), &st::FAINT);
             now_at = 4 + drawn;
         } else if let Some(timeline) = timeline {
             screen.put(x + 5, area.y + 1, &heading(BodyKind::Timeline), &st::FAINT);
@@ -236,7 +239,35 @@ impl TuiApp {
             &truncate(&if clip.notes.is_empty() { format!("{facts} · empty") } else { facts }, width),
             &st::FAINT,
         );
-        2 + picture_rows
+        // Its controller lanes (REAPER's CC lanes), a row each: the lane's values across the take, or in words.
+        let mut row = y + 2 + picture_rows;
+        const LANES_SHOWN: usize = 3;
+        for lane in clip.lanes.iter().take(LANES_SHOWN) {
+            let name = format!("{:<9}", truncate(&lane.name, 9));
+            let column = screen.put(x, row, &name, &st::DIM);
+            if self.0.graphics == Graphics::Words || clip.length <= 0. {
+                let (low, high) = lane.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])));
+                let points = lane.points.len();
+                let range =
+                    if points > 0 { format!(" · {}–{}", number::to_string(low), number::to_string(high)) } else { String::new() };
+                let said = format!("{points} {}{range}", if points == 1 { "point" } else { "points" });
+                screen.put(column + 1, row, &truncate(&said, (x + width - column - 1).max(1)), &st::FAINT);
+            } else {
+                screen.put(
+                    column + 1,
+                    row,
+                    &controller_line(lane, clip.length, (x + width - column - 1).clamp(4, 32) as usize),
+                    &st::ACCENT,
+                );
+            }
+            row += 1;
+        }
+        if clip.lanes.len() > LANES_SHOWN {
+            let more = clip.lanes.len() - LANES_SHOWN;
+            screen.put(x, row, &truncate(&format!("and {more} more {}", if more == 1 { "lane" } else { "lanes" }), width), &st::FAINT);
+            row += 1;
+        }
+        row - y
     }
     fn draw_grid(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &LauncherStrip) -> i32 {
         self.track_header(screen, x, y, width);
@@ -387,12 +418,15 @@ impl TuiApp {
     /// A tracker's pattern or phrase around its cursor: line numbers (beats brighter), then each track's cells, the
     /// focused track first, as many tracks as fit.
     fn draw_tracker(&self, screen: &mut Screen, x: i32, y: i32, width: i32, grid: &TrackerGrid, most: i32) -> i32 {
-        screen.put(
-            x,
-            y,
-            &truncate(&format!("{} · {} lines", if grid.name.is_empty() { "Pattern" } else { &grid.name }, grid.lines), width),
-            &st::TEXT,
+        let mut title = format!(
+            "{} · {} lines",
+            if grid.name.is_empty() { grid.heading.as_deref().unwrap_or("Pattern") } else { &grid.name },
+            grid.lines
         );
+        for fact in &grid.facts {
+            title.push_str(&format!(" · {fact}"));
+        }
+        screen.put(x, y, &truncate(&title, width), &st::TEXT);
         let focused = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.as_ref().map(|t| t.name.clone()));
         let mut order: Vec<&TrackerTrack> = grid.tracks.iter().collect();
         if let Some(at) = focused.and_then(|name| order.iter().position(|track| track.name == name)) {
@@ -555,7 +589,8 @@ impl TuiApp {
             row += 1;
         }
         let phrase_line = !map.phrases.is_empty();
-        let rows = map.zones.len().min((y + most - row - 1 - phrase_line as i32).max(0) as usize);
+        let macro_line = !map.macros.is_empty();
+        let rows = map.zones.len().min((y + most - row - 1 - phrase_line as i32 - macro_line as i32).max(0) as usize);
         for (k, zone) in map.zones.iter().take(rows).enumerate() {
             let notes = if zone.notes.0 == zone.notes.1 {
                 profile.note_name(zone.notes.0)
@@ -565,19 +600,38 @@ impl TuiApp {
             let velocities =
                 if zone.velocities == (0, 127) { String::new() } else { format!(" · vel {}–{}", zone.velocities.0, zone.velocities.1) };
             let off = if zone.note_off { " · note-off" } else { "" };
-            let line = format!("{} {notes:<9} {}{velocities}{off}", letter(k), zone.sample);
+            let group = zone.mute_group.map(|group| format!(" · mute group {group}")).unwrap_or_default();
+            let slice = if zone.slice { " · slice" } else { "" };
+            let line = format!("{} {notes:<9} {}{velocities}{off}{group}{slice}", letter(k), zone.sample);
             screen.put(x, row, &truncate(&line, width), &st::DIM);
             row += 1;
         }
-        let mut facts = vec![format!("{} {}", map.zones.len(), if map.zones.len() == 1 { "zone" } else { "zones" })];
+        let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut facts = vec![count(map.zones.len(), "zone", "zones")];
         if !map.macros.is_empty() {
-            facts.push(format!("{} macros", map.macros.len()));
+            facts.push(count(map.macros.len(), "macro", "macros"));
         }
         if !map.phrases.is_empty() {
-            facts.push(format!("{} {}", map.phrases.len(), if map.phrases.len() == 1 { "phrase" } else { "phrases" }));
+            facts.push(count(map.phrases.len(), "phrase", "phrases"));
+        }
+        if let Some(n) = map.modsets.filter(|n| *n > 0) {
+            facts.push(count(n, "modulation set", "modulation sets"));
+        }
+        if let Some(n) = map.chains.filter(|n| *n > 0) {
+            facts.push(count(n, "FX chain", "FX chains"));
         }
         screen.put(x, row, &truncate(&facts.join(" · "), width), &st::FAINT);
         row += 1;
+        // Its macros by name, with where each stands (Renoise's 0–100 %).
+        if !map.macros.is_empty() && row < y + most {
+            let shown: Vec<String> = map
+                .macros
+                .iter()
+                .map(|(name, value)| format!("{name} {}%", number::to_string(number::round((value * 100.).clamp(0., 100.)))))
+                .collect();
+            screen.put(x, row, &truncate(&format!("macros: {}", shown.join(" · ")), width), &st::FAINT);
+            row += 1;
+        }
         // The phrases, with their keys in the keymap (and the one program mode plays).
         if phrase_line && row < y + most {
             let shown: Vec<String> = map
@@ -702,7 +756,15 @@ impl TuiApp {
         self.hit(at, y, 1, |app| app.unpin());
     }
     fn draw_tree(&self, screen: &mut Screen, x: i32, y: i32, width: i32, rows: &[TreeRow], most: i32) -> i32 {
-        self.track_header(screen, x, y, width);
+        let track = self.track_header(screen, x, y, width);
+        // A chain that isn't the track's own (REAPER's take FX) says whose it is beside the track.
+        let owner = self.0.state.borrow().tree.as_ref().and_then(|tree| tree.owner.clone());
+        if let Some(owner) = owner {
+            let at = x + 3 + text_width(&truncate(&track.name, (width - 3).max(1)));
+            if at + 4 < x + width {
+                screen.put(at, y, &truncate(&format!(" · {owner}"), x + width - at), &st::DIM);
+            }
+        }
         let focused = rows.iter().any(|r| r.role == TreeRole::Focus);
         let cursor = self.0.state.borrow().tree_cursor;
         let keep = cursor
@@ -738,13 +800,17 @@ impl TuiApp {
                 st::DIM
             };
             let count = item.count.filter(|n| *n > 0).map(|n| format!(" ({n})")).unwrap_or_default();
-            let name = truncate(
-                &item.name,
-                (x + width - column - text_width(&count) - if label.is_empty() { 0 } else { text_width(label) + 1 }).max(1),
-            );
+            let note = item.note.as_ref().map(|note| format!(" · {note}")).unwrap_or_default();
+            let room = (x + width - column - text_width(&count) - if label.is_empty() { 0 } else { text_width(label) + 1 }).max(1);
+            let name = truncate(&item.name, room);
             column = screen.put(column, row, &name, &style);
             if !count.is_empty() {
-                screen.put(column, row, &count, &st::FAINT);
+                column = screen.put(column, row, &count, &st::FAINT);
+            }
+            // What the DAW says of it (bypassed, offline, parallel), where there's room.
+            let left = room - text_width(&name);
+            if !note.is_empty() && left > 4 {
+                screen.put(column, row, &truncate(&note, left), &st::FAINT);
             }
             if !label.is_empty() {
                 let at = x + width - text_width(label);

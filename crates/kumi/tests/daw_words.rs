@@ -199,6 +199,8 @@ case!(a_renoise_session_never_speaks_lives_words, async {
         cursor: Some(0),
         playing: None,
         lpb: Some(4.),
+        heading: None,
+        facts: vec![],
         tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells: vec!["C-4 01 .. .. ..".into()] }],
     };
     let focuses = vec![
@@ -321,3 +323,19 @@ case!(reapers_and_renoises_setup_never_speak_lives_words, async {
     let renoise = ["Renoise is open · restart needed", "Renoise 3 not found", "renoise.com", "chat without Renoise for now"];
     setup_states(DawId::Renoise).await.saw(&renoise.map(String::from)).assert_none("Renoise's setup");
 });
+
+/// REAPER's and Renoise's FOCUS bodies and change pictures (tui_own_bodies' goldens: each body, each family's picture in
+/// NOW and HISTORY, wide, narrow and plain) speak their DAW's words, never Live's.
+#[test]
+fn reapers_and_renoises_bodies_and_pictures_never_speak_lives_words() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/tui/daw");
+    let mut screens = 0;
+    for entry in std::fs::read_dir(&folder).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found = leaks(&text);
+        assert!(found.is_empty(), "{}: {found:?}", path.display());
+        screens += 1;
+    }
+    assert!(screens >= 50, "every scene's screens are read: {screens}");
+}
