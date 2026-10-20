@@ -12,6 +12,7 @@ import platform
 import posixpath
 import re
 import shutil
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -21,7 +22,29 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "ableton-mcp-native-release/v1"
 BRIDGE_BINARIES = ("ableton-mcp-server", "ableton-mcp-analysis-worker")
-BINARIES = ("kumi", *BRIDGE_BINARIES, "kumi-harness", "kumi-library-measure", "kumi-library-learner")
+# daw-mcp-server is Kumi's host for REAPER and Renoise: Kumi starts it from beside its own binary.
+BINARIES = ("kumi", *BRIDGE_BINARIES, "daw-mcp-server", "kumi-harness", "kumi-library-measure", "kumi-library-learner")
+# REAPER's extension and Renoise's tool, where Kumi installs them from (crates/kumi/src/daw/own.rs): daws/reaper and
+# daws/renoise in the bundle. REAPER loads `reaper_*` libraries from UserPlugins; a Renoise tool is a folder named for its
+# id. The extension's version is its crate's, in a file beside it.
+DAWS = "daws"
+REAPER_EXTENSION = "reaper_kumi"
+REAPER_CRATE = "crates/reaper-kumi"
+RENOISE_TOOL = "com.kumi.Bridge.xrnx"
+RENOISE_TOOL_SOURCE = "daws/renoise/com.kumi.Bridge.xrnx"
+RENOISE_TOOL_ID = "com.kumi.Bridge"
+RENOISE_API = "6.2"
+# What Kumi's installer or the DAW writes into a bridge's folder: never shipped (daw-bridge's NOT_PAYLOAD).
+NOT_PAYLOAD = ("bridge-reference.json", "preferences.xml")
+RENOISE_SUFFIXES = (".lua", ".xml", ".json")
+# The macOS extension's own name for itself; the linker's default would be the folder it was built in.
+REAPER_INSTALL_NAME = "@rpath/reaper_kumi.dylib"
+# The newest glibc the Linux extension may need: what Kumi's own Linux binaries need, built on the same Ubuntu 22.04
+# runners. A newer runner would quietly raise it, and REAPER on an older Linux would then refuse the extension.
+GLIBC_MOST = (2, 35)
+# The C runtime as Windows DLLs: REAPER's extension links it in (+crt-static), so a REAPER without the Visual C++
+# runtime installed loads it.
+WINDOWS_CRT = re.compile(r"(vcruntime\d+.*|msvcp\d+.*|msvcr\d+.*|ucrtbase.*|api-ms-win-crt-.*)\.dll", re.I)
 DOCUMENTS = [("crates/ableton-mcp-server/README.md", "README.md")] + [(f"docs/en/{name}.md", f"{name}.md") for name in (
     "USER_GUIDE", "USER_JOURNEYS", "OPERATIONS", "RECOVERY", "LIVE_SAFETY", "AUDIO_INTELLIGENCE",
     "REALTIME_CONTROL", "DELIVERY", "DEVELOPER_GUIDE", "TESTING", "IMPLEMENTATION_STATUS",
@@ -299,8 +322,328 @@ def stage_hands(root: Path, bundle: Path, target: str) -> None:
     copy(hands / name, destination)
     destination.chmod(0o755)
 
-def build_release(root: Path, binaries: Path, out: Path, target: str, source: dict, builder: dict, recipe: str, bridge_only=False) -> dict:
+# ── What a built library holds ───────────────────────────────────────────────────────────────────────────────────
+# Read here, the same way on every system, rather than with each system's tools (nm, objdump, dumpbin): each
+# architecture's exported names, and what REAPER's loader cares about on that system.
+
+MACHO_ARCHS = {0x01000007: "x86_64", 0x0100000C: "arm64"}
+ELF_ARCHS = {62: "x86_64", 183: "arm64"}
+PE_ARCHS = {0x8664: "x86_64", 0xAA64: "arm64", 0xA641: "arm64ec", 0x014C: "x86"}
+
+def uleb128(data: bytes, at: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        byte = data[at]
+        at += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            return value, at
+
+def c_string(data: bytes, at: int) -> str:
+    return data[at:data.index(b"\0", at)].decode("utf-8", "replace")
+
+def macho_exports(trie: bytes) -> set[str]:
+    """The names in a Mach-O export trie: each terminal node's path from the root."""
+    names, stack, seen = set(), [(0, "")], set()
+    while stack:
+        node, prefix = stack.pop()
+        if node in seen or node >= len(trie):
+            raise ValueError("the export trie loops or points outside itself")
+        seen.add(node)
+        terminal, at = uleb128(trie, node)
+        if terminal:
+            names.add(prefix)
+        at += terminal
+        children = trie[at]
+        at += 1
+        for _ in range(children):
+            end = trie.index(b"\0", at)
+            edge = trie[at:end].decode("utf-8", "replace")
+            child, at = uleb128(trie, end + 1)
+            stack.append((child, prefix + edge))
+    return names
+
+def macho_slice(data: bytes) -> dict:
+    if data[:4] != b"\xcf\xfa\xed\xfe":
+        raise ValueError("not a 64-bit little-endian Mach-O")
+    cputype, _, _, ncmds = struct.unpack_from("<iIII", data, 4)
+    facts = {"arch": MACHO_ARCHS.get(cputype & 0xFFFFFFFF, f"cpu {cputype & 0xFFFFFFFF:#x}"), "exports": set(),
+             "install_name": None, "signed": False}
+    trie = symtab = None
+    at = 32
+    for _ in range(ncmds):
+        command, size = struct.unpack_from("<II", data, at)
+        if command == 0xD:  # LC_ID_DYLIB
+            facts["install_name"] = c_string(data, at + struct.unpack_from("<I", data, at + 8)[0])
+        elif command == 0x1D:  # LC_CODE_SIGNATURE
+            facts["signed"] = True
+        elif command == 0x80000033:  # LC_DYLD_EXPORTS_TRIE
+            trie = struct.unpack_from("<II", data, at + 8)
+        elif command in (0x22, 0x80000022) and struct.unpack_from("<I", data, at + 44)[0]:  # LC_DYLD_INFO(_ONLY)
+            trie = struct.unpack_from("<II", data, at + 40)
+        elif command == 0x2:  # LC_SYMTAB
+            symtab = struct.unpack_from("<IIII", data, at + 8)
+        at += size
+    if trie:
+        names = macho_exports(data[trie[0]:trie[0] + trie[1]])
+    elif symtab:  # external, defined in a section, not a debugging entry
+        symbols, count, strings, _ = symtab
+        names = set()
+        for i in range(count):
+            name, kind = struct.unpack_from("<IB", data, symbols + 16 * i)
+            if kind & 0x01 and kind & 0x0E == 0x0E and not kind & 0xE0:
+                names.add(c_string(data, strings + name))
+    else:
+        names = set()
+    facts["exports"] = {name[1:] if name.startswith("_") else name for name in names}
+    return facts
+
+def macho_facts(data: bytes) -> list[dict]:
+    magic = struct.unpack_from(">I", data, 0)[0]
+    if magic not in (0xCAFEBABE, 0xCAFEBABF):
+        return [macho_slice(data)]
+    wide = magic == 0xCAFEBABF
+    slices = []
+    for i in range(struct.unpack_from(">I", data, 4)[0]):
+        if wide:
+            _, _, offset, size, _, _ = struct.unpack_from(">iIQQII", data, 8 + 32 * i)
+        else:
+            _, _, offset, size, _ = struct.unpack_from(">iIIII", data, 8 + 20 * i)
+        slices.append(macho_slice(data[offset:offset + size]))
+    return slices
+
+def elf_facts(data: bytes) -> list[dict]:
+    if data[4] != 2:
+        raise ValueError("not a 64-bit ELF")
+    endian = "<" if data[5] == 1 else ">"
+    machine = struct.unpack_from(endian + "H", data, 18)[0]
+    sections_at = struct.unpack_from(endian + "Q", data, 40)[0]
+    entry_size, count = struct.unpack_from(endian + "HH", data, 58)
+    # (name, type, flags, address, offset, size, link, info, alignment, entry size)
+    sections = [struct.unpack_from(endian + "IIQQQQIIQQ", data, sections_at + i * entry_size) for i in range(count)]
+    exports, glibc = set(), None
+    for _, kind, _, _, offset, size, link, info, _, entry in sections:
+        strings = sections[link][4] if link < len(sections) else 0
+        if kind == 11:  # SHT_DYNSYM: global or weak, defined, visible
+            for i in range(size // entry if entry else 0):
+                name, info_byte, other, section = struct.unpack_from(endian + "IBBH", data, offset + i * entry)
+                if name and section and info_byte >> 4 in (1, 2) and other & 3 in (0, 3):
+                    exports.add(c_string(data, strings + name))
+        elif kind == 0x6FFFFFFE:  # SHT_GNU_verneed: the versions each needed library must have
+            at = offset
+            for _ in range(info):
+                _, needed, _, aux, following = struct.unpack_from(endian + "HHIII", data, at)
+                here = at + aux
+                for _ in range(needed):
+                    _, _, _, name, step = struct.unpack_from(endian + "IHHII", data, here)
+                    version = re.fullmatch(r"GLIBC_(\d+(?:\.\d+)*)", c_string(data, strings + name))
+                    if version:
+                        glibc = max(glibc or (), tuple(map(int, version[1].split("."))))
+                    here += step
+                at += following
+    return [{"arch": ELF_ARCHS.get(machine, f"machine {machine}"), "exports": exports, "glibc": glibc}]
+
+def pe_facts(data: bytes) -> list[dict]:
+    header = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[header:header + 4] != b"PE\0\0":
+        raise ValueError("not a PE image")
+    machine, count, _, _, _, optional_size, _ = struct.unpack_from("<HHIIIHH", data, header + 4)
+    optional = header + 24
+    directories = optional + (112 if struct.unpack_from("<H", data, optional)[0] == 0x20B else 96)
+    listed = struct.unpack_from("<I", data, directories - 4)[0]
+    # (name, virtual size, virtual address, raw size, raw offset)
+    sections = [struct.unpack_from("<8sIIII", data, optional + optional_size + 40 * i) for i in range(count)]
+
+    def at(rva: int) -> int:
+        for _, virtual, address, raw_size, raw in sections:
+            if address <= rva < address + max(virtual, raw_size):
+                return rva - address + raw
+        raise ValueError(f"address {rva:#x} is in no section")
+
+    def directory(index: int) -> int:
+        return struct.unpack_from("<I", data, directories + 8 * index)[0] if index < listed else 0
+
+    exports, imports = set(), set()
+    if rva := directory(0):
+        names, table = struct.unpack_from("<I", data, at(rva) + 24)[0], struct.unpack_from("<I", data, at(rva) + 32)[0]
+        exports = {c_string(data, at(struct.unpack_from("<I", data, at(table) + 4 * i)[0])) for i in range(names)}
+    if rva := directory(1):  # IMAGE_IMPORT_DESCRIPTOR, until an empty one
+        entry = at(rva)
+        while any(struct.unpack_from("<IIIII", data, entry)):
+            imports.add(c_string(data, at(struct.unpack_from("<I", data, entry + 12)[0])).lower())
+            entry += 20
+    if rva := directory(13):  # delay-load descriptors
+        entry = at(rva)
+        while name := struct.unpack_from("<I", data, entry + 4)[0]:
+            imports.add(c_string(data, at(name)).lower())
+            entry += 32
+    return [{"arch": PE_ARCHS.get(machine, f"machine {machine:#x}"), "exports": exports, "imports": imports}]
+
+def binary_facts(path: Path) -> list[dict]:
+    """Each architecture a library holds (a universal Mach-O holds several), with its exported names and, by format,
+    its own name and signature (Mach-O), the newest glibc it needs (ELF), or the DLLs it imports (PE)."""
+    data = path.read_bytes()
+    try:
+        if data[:4] == b"\x7fELF":
+            return elf_facts(data)
+        if data[:2] == b"MZ":
+            return pe_facts(data)
+        if data[:4] in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+            return macho_facts(data)
+    except (struct.error, IndexError, ValueError) as error:
+        raise ValueError(f"{path.name} can't be read as a library: {error}") from None
+    raise ValueError(f"{path.name} isn't a Mach-O, ELF or PE library")
+
+# ── REAPER's extension and Renoise's tool ────────────────────────────────────────────────────────────────────────
+
+def system_of(target: str) -> str:
+    if target.endswith("-apple-darwin"):
+        return "macos"
+    if target.endswith("-pc-windows-msvc"):
+        return "windows"
+    if target.endswith("-unknown-linux-gnu"):
+        return "linux"
+    raise ValueError(f"no REAPER extension is built for {target}")
+
+def extension_name(target: str) -> str:
+    """The file REAPER loads on the target's system."""
+    return REAPER_EXTENSION + {"macos": ".dylib", "windows": ".dll", "linux": ".so"}[system_of(target)]
+
+def extension_builds(target: str) -> list[str]:
+    """What the target's bundle builds REAPER's extension for. On a Mac both architectures, in one file: REAPER may run
+    under Rosetta (x86_64) on an Apple silicon Mac whatever Kumi runs as. On Windows x64: REAPER for Windows on Arm is an
+    ARM64EC build, which loads x64 libraries, as an x64 REAPER under emulation does."""
+    system = system_of(target)
+    if system == "macos":
+        return ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+    if system == "windows":
+        return ["x86_64-pc-windows-msvc"]
+    return [target]
+
+def extension_archs(target: str) -> list[str]:
+    arch = {"aarch64": "arm64", "x86_64": "x86_64"}
+    return sorted(arch[build.split("-")[0]] for build in extension_builds(target))
+
+def check_extension(path: Path, target: str, archs: list[str] | None = None) -> dict:
+    """The extension as the target's REAPER loads it: the architectures the bundle promises (`archs`, else the target's
+    builds), each exporting ReaperPluginEntry; on macOS signed (Apple silicon runs no unsigned code) and named for itself,
+    not for the build folder; on Windows with the C runtime linked in; on Linux needing no newer glibc than Kumi does."""
+    system = system_of(target)
+    slices = binary_facts(path)
+    found, expected = sorted(piece["arch"] for piece in slices), sorted(archs or extension_archs(target))
+    if found != expected:
+        raise ValueError(f"{path.name} holds {', '.join(found)}, not {', '.join(expected)}")
+    for piece in slices:
+        where = f"{path.name} ({piece['arch']})"
+        if "ReaperPluginEntry" not in piece["exports"]:
+            raise ValueError(f"{where} doesn't export ReaperPluginEntry, so REAPER wouldn't load it")
+        if system == "macos" and not piece["signed"]:
+            raise ValueError(f"{where} isn't signed: macOS on Apple silicon refuses unsigned code")
+        if system == "macos" and piece["install_name"] != REAPER_INSTALL_NAME:
+            raise ValueError(f"{where} names itself {piece['install_name']}, not {REAPER_INSTALL_NAME}")
+        crt = sorted(name for name in piece.get("imports", ()) if WINDOWS_CRT.fullmatch(name))
+        if system == "windows" and crt:
+            raise ValueError(f"{where} needs the C runtime installed ({', '.join(crt)}): build it with +crt-static")
+        if system == "linux" and (piece.get("glibc") or ()) > GLIBC_MOST:
+            raise ValueError(f"{where} needs glibc {'.'.join(map(str, piece['glibc']))}, newer than Kumi's "
+                             f"{'.'.join(map(str, GLIBC_MOST))}: build it on the bundle's Ubuntu 22.04 runner")
+    return {"archs": found, "sha256": digest(path)}
+
+def crate_version(root: Path, crate: str) -> str:
+    return tomllib.loads((root / crate / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+
+def renoise_manifest_version(version: str) -> str:
+    """The tool manifest's <Version>, which Renoise reads as a number: major.minor patch as M.mmpp, the patch's
+    zeros left off (1.0.0 is 1.00, 1.2.3 is 1.0203), so each later version is a larger number."""
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError(f"the Renoise tool's version {version!r} isn't major.minor.patch")
+    major, minor, patch = map(int, version.split("."))
+    if minor > 99 or patch > 99:
+        raise ValueError(f"the Renoise tool's version {version} doesn't fit its manifest's number (minor and patch under 100)")
+    return f"{major}.{minor:02d}" + (f"{patch:02d}" if patch else "")
+
+def renoise_tool(root: Path) -> tuple[Path, str, dict[str, str]]:
+    """The tool's folder, version and files, checked: its manifest names its id and API, its version file and manifest
+    agree, and it holds only the tool's own files (no preferences or reference a Renoise or a Kumi wrote into it)."""
+    folder = root / RENOISE_TOOL_SOURCE
+    files = inventory(folder)
+    manifest = (folder / "manifest.xml").read_text(encoding="utf-8")
+    field = lambda name: (re.findall(rf"<{name}>\s*([^<]*?)\s*</{name}>", manifest) or [None])[0]
+    if field("Id") != RENOISE_TOOL_ID or folder.name != f"{RENOISE_TOOL_ID}.xrnx":
+        raise ValueError(f"the Renoise tool's manifest names {field('Id')}, not {RENOISE_TOOL_ID}: song tool_data is keyed by it")
+    if field("ApiVersion") != RENOISE_API:
+        raise ValueError(f"the Renoise tool declares API {field('ApiVersion')}, not {RENOISE_API} (Renoise 3.5)")
+    declared = re.search(r'return\s+"([^"]+)"', (folder / "payload/version.lua").read_text(encoding="utf-8"))
+    version = declared[1] if declared else ""
+    if field("Version") != renoise_manifest_version(version):
+        raise ValueError(f"the Renoise tool's manifest says Version {field('Version')}, and payload/version.lua {version} "
+                         f"(its manifest number is {renoise_manifest_version(version)})")
+    for name in files:
+        if name in NOT_PAYLOAD or any(part.startswith(".") for part in name.split("/")) or not name.endswith(RENOISE_SUFFIXES):
+            raise ValueError(f"{RENOISE_TOOL_SOURCE}/{name} isn't one of the tool's own files (Lua, XML, JSON)")
+    return folder, version, files
+
+def stage_daws(root: Path, bundle: Path, target: str, extension: Path) -> dict[str, str]:
+    """REAPER's extension (checked, with its version beside it) and Renoise's tool, into the bundle's daws folder;
+    their versions."""
+    reaper = bundle / DAWS / "reaper"
+    check_extension(extension, target)
+    copy(extension, reaper / extension_name(target))
+    (reaper / extension_name(target)).chmod(0o755)
+    version = crate_version(root, REAPER_CRATE)
+    (reaper / f"{REAPER_EXTENSION}.version").write_text(version + "\n", encoding="ascii")
+    folder, tool_version, files = renoise_tool(root)
+    for name in files:
+        copy(folder / name, bundle / DAWS / "renoise" / RENOISE_TOOL / name)
+    return {"reaper": version, "renoise": tool_version}
+
+def cargo_library(rust_target: str) -> str:
+    return {"macos": f"lib{REAPER_EXTENSION}.dylib", "windows": f"{REAPER_EXTENSION}.dll",
+            "linux": f"lib{REAPER_EXTENSION}.so"}[system_of(rust_target)]
+
+def build_extension(root: Path, target: str, profile: str, out: Path) -> tuple[Path, list[str]]:
+    """REAPER's extension for the target's bundle, finished as it ships, in `out`; the commands that built it.
+
+    Never stripped by rustc: on macOS 27 a rustc strip can misalign the library's LINKEDIT string pool, and dyld then
+    refuses it (Cargo.toml keeps reaper-kumi at strip = "none"). The platform's own strip runs afterwards instead. A Mac
+    gets one universal file, signed again after lipo and strip; Windows links the C runtime in.
+    """
+    profile_args = ["--release"] if profile == "release" else ["--profile", profile]
+    commands, built = [], []
+    for rust_target in extension_builds(target):
+        environment = dict(os.environ)
+        target_dir = Path(environment.get("CARGO_TARGET_DIR", root / "target"))
+        if system_of(rust_target) == "windows":
+            # In a target folder of its own: the flag changes every crate's build, and the workspace's has none.
+            environment["RUSTFLAGS"] = (environment.get("RUSTFLAGS", "") + " -C target-feature=+crt-static").strip()
+            target_dir = target_dir / "crt-static"
+        command = ["cargo", "build", "--locked", *profile_args, "--target", rust_target, "-p", "reaper-kumi",
+                   "--target-dir", str(target_dir)]
+        subprocess.run(command, cwd=root, env=environment, check=True)
+        commands.append(" ".join(command))
+        built.append(target_dir / rust_target / profile / cargo_library(rust_target))
     out.mkdir(parents=True, exist_ok=True)
+    final = out / extension_name(target)
+    final.unlink(missing_ok=True)
+    system = system_of(target)
+    if system == "macos":
+        subprocess.run(["lipo", "-create", "-output", str(final), *map(str, built)], check=True)
+        subprocess.run(["strip", "-x", str(final)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(final)], check=True)
+    else:
+        shutil.copyfile(built[0], final)
+        if system == "linux":
+            subprocess.run(["strip", "--strip-unneeded", str(final)], check=True)
+    return final, commands
+
+def build_release(root: Path, binaries: Path, out: Path, target: str, source: dict, builder: dict, recipe: str, bridge_only=False,
+                  reaper_extension: Path | None = None) -> dict:
+    """The target's bundle in `out` (or, `bridge_only`, the Ableton bridge's artifact alone). A bundle carries REAPER's
+    extension, built for it (`reaper_extension`), and Renoise's tool."""
+    out.mkdir(parents=True, exist_ok=True)
+    if not bridge_only and reaper_extension is None:
+        raise ValueError("a bundle carries REAPER's extension: build it (build_extension) or name it")
     extension = ".exe" if "windows" in target else ""
     timestamp = int(datetime.datetime.fromisoformat(source["commitTimestamp"]).timestamp())
     with tempfile.TemporaryDirectory(prefix="kumi-native-stage-", dir=out) as temp:
@@ -325,14 +668,16 @@ def build_release(root: Path, binaries: Path, out: Path, target: str, source: di
         for folder in ("remote-script", "live-extension"):
             shutil.copytree(package / folder, bundle / folder)
         stage_hands(root, bundle, target)
+        daws = stage_daws(root, bundle, target, reaper_extension)
         version = tomllib.loads((root / "crates/kumi/Cargo.toml").read_text())["package"]["version"]
-        metadata = {"name": "kumi", "version": version, "bridge": manifest["package"]["version"], "runtime": "rust-native", "target": target}
+        # `bridge` is Live's bridge, as every earlier Kumi reads it; REAPER's extension and Renoise's tool are new keys.
+        metadata = {"name": "kumi", "version": version, "bridge": manifest["package"]["version"], **daws, "runtime": "rust-native", "target": target}
         json_write(bundle / "package.json", metadata)
         # Existing JavaScript applications use this entry to return from an explicit rollback.
         # Normal installed launchers execute the root native binary directly.
         copy(root / "scripts/migration/kumi.mjs", bundle / "apps/kumi/bin/kumi.mjs")
         json_write(bundle / "apps/mcp-server/package.json", {"version": metadata["bridge"]})
-        json_write(bundle / "kumi-install.json", {"kumi": version, "bridge": metadata["bridge"], "runtime": "rust-native", "target": target})
+        json_write(bundle / "kumi-install.json", {"kumi": version, "bridge": metadata["bridge"], **daws, "runtime": "rust-native", "target": target})
         for name in ("LICENSE.md", "THIRD_PARTY_NOTICES.md", "README.md", "CHANGELOG.md"):
             copy(root / name, bundle / name)
         prepared = bundle / "bridge"
@@ -343,7 +688,7 @@ def build_release(root: Path, binaries: Path, out: Path, target: str, source: di
         bundle_name = f"kumi-{target}.tar.gz"
         archive_path = stage / bundle_name
         bundle_hash = archive(bundle, archive_path, "", timestamp)
-        release = {"kumi": version, "bundle": bundle_name, "sha256": bundle_hash, "runtime": "rust-native", "target": target, "bridge": metadata["bridge"]}
+        release = {"kumi": version, "bundle": bundle_name, "sha256": bundle_hash, "runtime": "rust-native", "target": target, "bridge": metadata["bridge"], **daws}
         os.replace(archive_path, out / bundle_name)
         json_write(out / "kumi-release.json", release)
         (out / "SHA256SUMS").write_text(f"{bundle_hash}  {bundle_name}\n", encoding="ascii")
@@ -357,10 +702,18 @@ def main() -> None:
     parser.add_argument("--bridge-only", action="store_true", help="build only the receipt-bound bridge artifact")
     parser.add_argument("--profile", default="release",
                         help="Cargo profile: release (the default, what's published) or ci-release (CI's quicker build)")
+    parser.add_argument("--reaper-extension", type=Path, help="REAPER's extension, already built for the target's bundle")
+    parser.add_argument("--check-extension", type=Path, metavar="LIBRARY",
+                        help="only check a built REAPER extension as the target's bundle would carry it, then stop")
+    parser.add_argument("--thin", action="store_true", help="with --check-extension: one build for the target's own architecture")
     args = parser.parse_args()
     target = args.target or re.search(r"^host: (.+)$", run(["rustc", "-vV"]), re.M)[1]
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", target):
         raise ValueError("invalid Rust target triple")
+    if args.check_extension:
+        archs = [{"aarch64": "arm64", "x86_64": "x86_64"}[target.split("-")[0]]] if args.thin else None
+        print(json.dumps(check_extension(args.check_extension, target, archs)))
+        return
     source = source_evidence(ROOT)
     if not re.fullmatch(r"[a-z][a-z0-9-]*", args.profile):
         raise ValueError("invalid Cargo profile name")
@@ -368,18 +721,24 @@ def main() -> None:
     command = ["cargo", "build", "--locked", *profile, "--target", target]
     command += ["-p", "ableton-mcp-server", "--bin", "ableton-mcp-server", "--bin", "ableton-mcp-analysis-worker"] if args.bridge_only else ["--workspace", "--bins"]
     recipe = " ".join(command)
+    out = args.out or ROOT / "release/native" / target
+    extension = args.reaper_extension
     if args.binaries_dir is None:
         subprocess.run(command, cwd=ROOT, check=True)
         binaries = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / target / args.profile
+        if not args.bridge_only and extension is None:
+            extension, _ = build_extension(ROOT, target, args.profile, Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "reaper-extension" / target)
     else:
         binaries = args.binaries_dir.resolve()
         recipe = "prebuilt binaries supplied with --binaries-dir; expected build: " + recipe
+        if not args.bridge_only and extension is None:
+            raise ValueError("with --binaries-dir, name REAPER's extension built for the bundle with --reaper-extension")
     builder = {"rustc": run(["rustc", "--version"]), "cargo": run(["cargo", "--version"]),
         "platform": {"Darwin": "darwin", "Windows": "win32"}.get(platform.system(), platform.system().lower()),
         "architecture": platform.machine(), "runnerImage": os.environ.get("ImageOS", "local"),
         "runnerImageVersion": os.environ.get("ImageVersion", "local"), "cargoLockSha256": digest(ROOT / "Cargo.lock"),
         "workflowSha256": digest(ROOT / ".github/workflows/installer.yml")}
-    result = build_release(ROOT, binaries, args.out or ROOT / "release/native" / target, target, source, builder, recipe, args.bridge_only)
+    result = build_release(ROOT, binaries, out, target, source, builder, recipe, args.bridge_only, extension)
     print(json.dumps({key: value for key, value in result.items() if key != "manifest"}, indent=2))
 
 if __name__ == "__main__":

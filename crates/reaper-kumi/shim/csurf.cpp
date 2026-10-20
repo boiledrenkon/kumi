@@ -3,7 +3,8 @@
 // nothing up in Preferences.
 //
 // IReaperControlSurface is declared here as reaper_plugin.h declares it (the header needs SWELL outside Windows).
-// build.rs checks that its virtual functions are the header's, in the header's order.
+// build.rs checks that its virtual functions are the header's, in the header's order. That declaration is Cockos'
+// (Copyright (C) 2006-2015, Cockos Incorporated), under the REAPER SDK's zlib license: ../sdk/LICENSE.
 
 #include <new>
 

@@ -38,7 +38,8 @@ fail-fast = false
 # What differs by platform: installing, launching and updating; the terminal and stdin; Hands; paths, files and child
 # processes; the store; and a few smoke tests. The Ableton bridge's install lifecycle runs in `ci` on Linux (in a
 # moment there) and on every platform in `extended` (minutes on Windows). For REAPER and Renoise: their bridges going
-# into the DAWs' own folders (own_providers), and Kumi's host on its loopback sockets to them (bridge, retire, credit).
+# into the DAWs' own folders (own_providers), Kumi's host on its loopback sockets to them (bridge, retire, credit), and
+# what each system decides for them (daw-bridge's system: a bridge's process, macOS's downloaded mark).
 # The extension REAPER loads is built, loaded and called through its C++ shim on every platform by CI's REAPER job.
 [profile.ci-os]
 default-filter = '''
