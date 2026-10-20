@@ -343,9 +343,14 @@ fn loop_wanted(ctx: &Ctx, input: &Value) -> Done<Value> {
 fn loop_title(ctx: &Ctx, state: &Value) -> String {
     let (start, end) = (number(state, "start"), number(state, "end"));
     if start == 0.0 && end == 0.0 {
-        "Loop cleared".into()
-    } else {
-        format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end))
+        return "Loop cleared".into();
+    }
+    // (m6-places) Whole bars as a producer counts them: from bar 9's start to bar 17's is bars 9–16.
+    let bar = |time: f64| ctx.reaper.bar_and_beat_at(ctx.proj, time).filter(|(_, beat)| beat.abs() < 0.005).map(|(measure, _)| measure + 1);
+    match (bar(start), bar(end)) {
+        (Some(first), Some(after)) if after == first + 1 => format!("Loop bar {first}"),
+        (Some(first), Some(after)) if after > first + 1 => format!("Loop bars {first}–{}", after - 1),
+        _ => format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end)),
     }
 }
 
@@ -455,6 +460,78 @@ pub fn repeat_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"on": prior}),
         display: json!({"title": format!("Repeat back {}", on_off(prior))}),
+        unwritten: now == prior,
+    })
+}
+
+// ----- the metronome (m6-places) -----
+
+/// The project's metronome options (`projmetroen`): 1 is the metronome on; the other bits are its count-in and recording
+/// options, which a switch leaves as they are.
+fn metronome_flags(ctx: &Ctx) -> Done<i64> {
+    ctx.reaper
+        .config_text("projmetroen")
+        .and_then(|text| text.trim().parse::<i64>().ok())
+        .ok_or_else(|| failed("this REAPER can't say whether its metronome is on"))
+}
+
+fn metronome_on(ctx: &Ctx) -> Done<bool> {
+    Ok(metronome_flags(ctx)? & 1 != 0)
+}
+
+/// Switches the metronome, then reads it back: REAPER keeps it in the project's settings, outside its undo history.
+fn set_metronome(ctx: &Ctx, on: bool) -> Done<()> {
+    let flags = metronome_flags(ctx)?;
+    let wanted = if on { flags | 1 } else { flags & !1 };
+    if ctx.reaper.set_config_text("projmetroen", &wanted.to_string()) == 0 {
+        return Err(failed("REAPER wouldn't switch its metronome"));
+    }
+    if metronome_on(ctx)? != on {
+        return Err(failed("REAPER kept its metronome as it was"));
+    }
+    Ok(())
+}
+
+pub fn metronome_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+    let on = wanted_repeat(input)?;
+    let now = json!({"on": metronome_on(ctx)?});
+    let mut display = json!({"title": format!("Metronome {}", on_off(on)), "before": now, "after": {"on": on}});
+    if now["on"] == on {
+        display["unchanged"] = true.into();
+    }
+    Ok(Preview { target: json!({"ref": null, "kind": "project"}), prior: now.clone(), fence: now, display })
+}
+
+pub fn metronome_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+    let on = wanted_repeat(input)?;
+    let now = metronome_on(ctx)?;
+    if now != (fence["on"] == true) {
+        return Err(changed("the metronome was switched since the preview"));
+    }
+    if now != on {
+        set_metronome(ctx, on)?;
+    }
+    Ok(Applied {
+        applied: json!({"on": on}),
+        created: None,
+        material: None,
+        display: json!({"title": format!("Metronome {}", on_off(on))}),
+        unwritten: now == on,
+    })
+}
+
+pub fn metronome_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
+    let (prior, applied) = (restore.prior["on"] == true, restore.applied["on"] == true);
+    let now = metronome_on(ctx)?;
+    if now != prior {
+        if !restore.discard && now != applied {
+            return Err(changed("the metronome has been switched in REAPER since Kumi switched it"));
+        }
+        set_metronome(ctx, prior)?;
+    }
+    Ok(Restored {
+        restored: json!({"on": prior}),
+        display: json!({"title": format!("Metronome back {}", on_off(prior))}),
         unwritten: now == prior,
     })
 }

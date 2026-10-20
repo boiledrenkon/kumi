@@ -364,3 +364,39 @@ async fn find_sounds_in_each_daw_holds_only_the_sounds_offered_there() {
         })
         .await;
 }
+
+/// Every step find_presets names for loading a DAW's presets is one of that DAW's change steps.
+#[test]
+fn find_presets_names_only_steps_the_daw_has_and_lives_text_stays() {
+    use kumi_runtime::integrations::{reaper_changes, renoise_changes};
+    let access = Rc::new(Learned { presets: vec![] });
+    let description = |profile: &DawProfile| {
+        let tools = library_tools_for(profile, access.clone(), LibraryToolsOptions::default());
+        tools.iter().find(|t| t.name() == "find_presets").map(|t| t.description().to_string()).unwrap()
+    };
+    for (profile, set, wanted) in [
+        (&DawProfile::REAPER, &reaper_changes::CHANGES, &["fx_chain_load", "track_template_insert", "fx_add", "fx_preset"][..]),
+        (
+            &DawProfile::RENOISE,
+            &renoise_changes::CHANGES,
+            &[
+                "instrument_load",
+                "device_add",
+                "device_preset_data",
+                "device_chain_load",
+                "phrase_load",
+                "modset_load",
+                "phrase_add",
+                "phrase_script",
+            ][..],
+        ),
+    ] {
+        let text = description(profile);
+        for step in wanted {
+            assert!(text.contains(step), "{:?} names {step}: {text}", profile.id);
+            assert!(set.kinds.iter().any(|kind| kind.tool == *step), "{step} is a step of {:?}", profile.id);
+        }
+    }
+    let live = description(&DawProfile::ABLETON);
+    assert!(live.contains("load_device takes as itemId") && !live.contains("device_preset_data") && !live.contains("fx_chain_load"));
+}

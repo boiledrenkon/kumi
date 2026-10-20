@@ -262,3 +262,55 @@ fn a_ruler_lane_added_and_then_taken_away_by_the_producer_is_gone_to_undo() {
     let again = lab.undo("project-grid", &preview, &made, "Kumi: undo (kg004)").unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
 }
+
+// ----- the metronome (m6-places) -----
+
+fn metronome_flags() -> String {
+    fake::extra(|e| e.config["projmetroen"].clone())
+}
+
+fn set_metronome_flags(flags: &str) {
+    fake::extra(|e| e.config.insert("projmetroen".into(), flags.into()));
+}
+
+#[test]
+fn the_metronome_is_switched_and_put_back_keeping_its_other_options() {
+    let lab = Lab::new();
+    let project = |lab: &Lab| lab.call("read", json!({"kind": "project"})).unwrap()["items"][0].clone();
+    assert_eq!(project(&lab)["metronome"], false);
+    // Count-in options set (2 and 4): a switch keeps them.
+    set_metronome_flags("6");
+    let (preview, made) = lab.make("metronome-switch", json!({"on": true}), "Kumi: x (km001)");
+    assert_eq!((preview["prior"].clone(), metronome_flags()), (json!({"on": false}), "7".to_string()));
+    assert_eq!(made["display"]["title"], "Metronome on");
+    assert_eq!(project(&lab)["metronome"], true, "the project row says it");
+    lab.undo("metronome-switch", &preview, &made, "Kumi: undo (km002)").unwrap();
+    assert_eq!(metronome_flags(), "6");
+    // Already on: nothing to write.
+    set_metronome_flags("1");
+    assert_eq!(lab.preview("metronome-switch", json!({"on": true})).unwrap()["display"]["unchanged"], true);
+    for wrong in [json!({}), json!({"on": "yes"})] {
+        assert_eq!(lab.preview("metronome-switch", wrong.clone()).unwrap_err().0, "bad-params", "{wrong}");
+    }
+}
+
+#[test]
+fn a_metronome_switched_by_the_producer_since_is_refused_or_back_already() {
+    let lab = Lab::new();
+    // Switched in REAPER after the preview: the apply is refused, nothing written.
+    let preview = lab.preview("metronome-switch", json!({"on": true})).unwrap();
+    set_metronome_flags("1");
+    assert_eq!(lab.apply("metronome-switch", &json!({"on": true}), &preview, "Kumi: x (km003)").unwrap_err().0, "changed");
+    assert_eq!(metronome_flags(), "1");
+    // Switched back off in REAPER after Kumi turned it on: back already, nothing written.
+    set_metronome_flags("0");
+    let (preview, made) = lab.make("metronome-switch", json!({"on": true}), "Kumi: x (km004)");
+    set_metronome_flags("0");
+    let again = lab.undo("metronome-switch", &preview, &made, "Kumi: undo (km005)").unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+    // The producer turned the count-in on since Kumi turned the metronome on: the undo turns it off and keeps theirs.
+    let (preview, made) = lab.make("metronome-switch", json!({"on": true}), "Kumi: x (km006)");
+    set_metronome_flags("9");
+    assert_eq!(lab.undo("metronome-switch", &preview, &made, "Kumi: undo (km007)").unwrap()["restored"], json!({"on": false}));
+    assert_eq!(metronome_flags(), "8");
+}

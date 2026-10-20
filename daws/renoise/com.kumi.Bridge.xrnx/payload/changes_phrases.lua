@@ -306,7 +306,8 @@ local function add_apply(song, env, input, fence, desc)
   }
 end
 
-local function add_restore(song, env, restore, desc)
+-- (the restore of a change that made a phrase: phrase-add, and phrase-load in changes_loaders.lua)
+local function remove_made(song, env, restore, desc, kind)
   local material = restore.material
   if type(material) ~= "table" or type(material.made) ~= "table" then bad("material: the phrase the change made") end
   local n, why, which = places_.follow(env, material.made)
@@ -321,9 +322,12 @@ local function add_restore(song, env, restore, desc)
   end
   song:describe_undo(desc)
   objects.instrument:delete_phrase_at(n[2])
-  base.note_restored_at(env.journal, "phrase-add", places_.journal_place("phrase", n))
+  base.note_restored_at(env.journal, kind, places_.journal_place("phrase", n))
   return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
 end
+M.phrase_print, M.remove_made = phrase_print, remove_made
+
+local function add_restore(song, env, restore, desc) return remove_made(song, env, restore, desc, "phrase-add") end
 
 base.register({ kind = "phrase-add", custom = true, shape = "made", by_place = true, preview = add_preview, apply = add_apply, restore = add_restore })
 
@@ -915,13 +919,19 @@ end
 
 local function script_plan(song, env, input)
   local n, objects, label = places_.locate(song, env, "phrase", input, "phrase-script")
-  if type(input.code) ~= "string" or input.code == "" then bad("code: the script's text (pattrns Lua, returning a pattern or cycle)") end
+  if type(input.code) ~= "string" or input.code == "" then bad("code (the script's text: pattrns Lua, returning a pattern or cycle) or path (a .lua phrase script file)") end
   if #input.code > M.MAX_SCRIPT_BYTES then bad("code is longer than 64 KB") end
   if input.commit ~= nil and type(input.commit) ~= "boolean" then bad("commit is true or false") end
-  return { n = n, label = label, phrase = objects.phrase, paragraphs = split_lines(input.code), state = script_state(objects.phrase), commit = input.commit ~= false }
+  -- (`codeName`: the name of the phrase script file Kumi's host read it from, M4 n-devices)
+  local name = type(input.codeName) == "string" and input.codeName ~= "" and input.codeName or nil
+  return { n = n, label = label, phrase = objects.phrase, paragraphs = split_lines(input.code), state = script_state(objects.phrase), commit = input.commit ~= false, name = name }
 end
 
-local function script_title(plan) return string.format("Wrote the script of %s (%d %s)", plan.label, #plan.paragraphs, #plan.paragraphs == 1 and "line" or "lines") end
+local function script_title(plan)
+  local lines = string.format("%d %s", #plan.paragraphs, #plan.paragraphs == 1 and "line" or "lines")
+  if plan.name then return string.format("Loaded the phrase script %s into %s (%s)", q(plan.name), plan.label, lines) end
+  return string.format("Wrote the script of %s (%s)", plan.label, lines)
+end
 
 base.register({
   kind = "phrase-script", custom = true, by_place = true,

@@ -2,18 +2,20 @@
 //! read tool and its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
 use super::own_catchup::{as_read, CatchUpWords, Mixer, RecipeKinds};
+use super::own_phrases::{bar_span, slots_spanning, track, OwnPhrases, PhraseLook, Phrased};
 use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
     describe::ProjectWords,
+    phrases::{Intent, Switch},
     presentation::{ToolActivity, ToolPresentation},
     refs::{moved_index, Moved, RefScheme, Shift},
     view::{BodyKind, BodyRequest, DawFocus, FocusBody, FocusItem, FocusSection, ItemKind, SectionKind, ViewKind, ViewPresentation},
 };
 use crate::mcp::client::BridgeDescriptor;
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions Renoise's turns carry (M7 brings the full instruction pack).
@@ -34,6 +36,7 @@ pub const DAW: OwnDaw = OwnDaw {
     to_body,
     changes: &super::renoise_changes::CHANGES,
     catch_up: &CATCH_UP,
+    phrases: &PHRASES,
 };
 
 /// What changed in a Renoise song, in Renoise's words: catch-up's lines, watch_me's changes and its draft recipe.
@@ -91,6 +94,48 @@ fn song_facts(details: &[Value]) -> Vec<String> {
     }
     lines.dedup();
     lines
+}
+
+/// Renoise's fixed phrases: the song's tempo, a track's mute and solo, the loop over whole slots of the sequence (with
+/// the pattern loop off) and the metronome. Renoise arms no tracks.
+const PHRASES: OwnPhrases = OwnPhrases { plan: phrase, loops_by_slot: true };
+
+fn phrase(intent: &Intent, look: &PhraseLook) -> Phrased {
+    let step = |tool: &str, input: Value| json!({"tool": tool, "input": input});
+    let pattern_loop = look.transport.pointer("/loop/pattern") == Some(&Value::Bool(true));
+    match intent {
+        Intent::Tempo { bpm } if *bpm < 32.0 => Phrased::Refused("Renoise's tempo goes from 32 to 999 BPM.".into()),
+        Intent::Tempo { bpm } => Phrased::Steps(vec![step("song_bpm", json!({"bpm": bpm}))]),
+        Intent::Track { switch: Switch::Arm, .. } => Phrased::Refused(
+            "Renoise doesn't arm tracks: it records notes into the selected track's pattern while edit mode is on (Esc).".into(),
+        ),
+        Intent::Track { track: pick, switch, on } => match track(pick, look) {
+            Some(reference) if *switch == Switch::Mute => Phrased::Steps(vec![step("track_mute", json!({"ref": reference, "mute": on}))]),
+            Some(reference) => Phrased::Steps(vec![step("track_solo", json!({"ref": reference, "solo": on}))]),
+            None => Phrased::Model,
+        },
+        // Renoise loops whole slots of the sequence: bars that start or end inside a pattern are the model's to work out.
+        Intent::Loop { from_bar, to_bar } => {
+            let per_bar = look.transport.get("beatsPerBar").and_then(Value::as_f64).unwrap_or(4.0);
+            let (start, end) = bar_span(*from_bar, *to_bar, per_bar);
+            let Some((first, last)) = look.slots.and_then(|slots| slots_spanning(slots, start, end)) else { return Phrased::Model };
+            let mut steps = Vec::new();
+            if pattern_loop {
+                steps.push(step("loop_pattern", json!({"on": false})));
+            }
+            steps.push(step("loop_range", json!({"first": first, "last": last})));
+            Phrased::Steps(steps)
+        }
+        Intent::LoopOff => {
+            let mut steps = Vec::new();
+            if pattern_loop {
+                steps.push(step("loop_pattern", json!({"on": false})));
+            }
+            steps.push(step("loop_range", json!({"first": 0, "last": 0})));
+            Phrased::Steps(steps)
+        }
+        Intent::Metronome { on } => Phrased::Steps(vec![step("metronome_switch", json!({"on": on}))]),
+    }
 }
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),
@@ -289,6 +334,60 @@ pub fn create_renoise_integration(options: OwnOptions) -> Rc<dyn Integration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// m6-places: each phrase's steps in a song as the look found it.
+    #[test]
+    fn a_phrase_is_renoises_own_change_its_loop_is_whole_slots_and_it_arms_no_tracks() {
+        use crate::core::phrases::{PhraseTrack, TrackPick};
+        use serde_json::json;
+        let tracks = [
+            PhraseTrack { reference: "track:1", name: "Kick", own: true, master: false },
+            PhraseTrack { reference: "track:2", name: "Master", own: false, master: true },
+            PhraseTrack { reference: "track:3", name: "Send 1", own: false, master: false },
+        ];
+        // Slots of 32, 64 and 32 lines at 4 lines a beat: 8, 16 and 8 beats.
+        let slots = [(0.0, 8.0), (8.0, 16.0), (24.0, 8.0)];
+        let plan = |intent: Intent, transport: Value| {
+            phrase(&intent, &PhraseLook { tracks: &tracks, project: &json!({}), transport: &transport, slots: Some(&slots) })
+        };
+        let steps = |intent: Intent, transport: Value| match plan(intent, transport) {
+            Phrased::Steps(steps) => Value::Array(steps),
+            other => panic!("{other:?}"),
+        };
+        let switch = |track: TrackPick, switch: Switch| Intent::Track { track, switch, on: false };
+        assert_eq!(steps(Intent::Tempo { bpm: 140.0 }, json!({})), json!([{"tool": "song_bpm", "input": {"bpm": 140.0}}]));
+        assert_eq!(
+            steps(switch(TrackPick::Name("send 1".into()), Switch::Mute), json!({})),
+            json!([{"tool": "track_mute", "input": {"ref": "track:3", "mute": false}}]),
+            "a send track by its name"
+        );
+        assert_eq!(
+            plan(switch(TrackPick::Position(2), Switch::Solo), json!({})),
+            Phrased::Model,
+            "sends and the master don't count by place"
+        );
+        assert!(
+            matches!(plan(switch(TrackPick::Name("kick".into()), Switch::Arm), json!({})), Phrased::Refused(why) if why.contains("edit mode"))
+        );
+        // Bars 3 to 6 at 4 beats a bar: beats 8 to 24, the second slot. The pattern loop on is turned off first.
+        assert_eq!(
+            steps(Intent::Loop { from_bar: 3, to_bar: 6 }, json!({"beatsPerBar": 4, "loop": {"pattern": true}})),
+            json!([{"tool": "loop_pattern", "input": {"on": false}}, {"tool": "loop_range", "input": {"first": 2, "last": 2}}])
+        );
+        // At 2 beats a bar, bars 1 to 16 are the whole sequence.
+        assert_eq!(
+            steps(Intent::Loop { from_bar: 1, to_bar: 16 }, json!({"beatsPerBar": 2})),
+            json!([{"tool": "loop_range", "input": {"first": 1, "last": 3}}])
+        );
+        assert_eq!(plan(Intent::Loop { from_bar: 2, to_bar: 3 }, json!({"beatsPerBar": 4})), Phrased::Model, "inside a pattern");
+        assert_eq!(steps(Intent::LoopOff, json!({})), json!([{"tool": "loop_range", "input": {"first": 0, "last": 0}}]));
+        assert_eq!(
+            steps(Intent::LoopOff, json!({"loop": {"pattern": true}})),
+            json!([{"tool": "loop_pattern", "input": {"on": false}}, {"tool": "loop_range", "input": {"first": 0, "last": 0}}])
+        );
+        assert_eq!(steps(Intent::Metronome { on: true }, json!({})), json!([{"tool": "metronome_switch", "input": {"on": true}}]));
+        assert!(matches!(plan(Intent::Tempo { bpm: 30.0 }, json!({})), Phrased::Refused(why) if why.contains("32")));
+    }
 
     #[test]
     fn a_track_inserted_moves_the_tracks_after_it_with_their_devices_and_parameters() {

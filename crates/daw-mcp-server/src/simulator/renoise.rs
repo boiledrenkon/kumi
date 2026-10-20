@@ -25,6 +25,8 @@ const METHODS: [&str; 5] = ["read", "snapshot", "focus", "focus_body", "digest"]
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
 const CHANGE_METHODS: [&str; 4] = ["change_preview", "change_apply", "change_restore", "project_save"];
+/// (m6-places) A line in the status bar, which a song made to be changed shows too.
+const STATUS_MESSAGE: &str = "status_message";
 
 struct Case {
     method: String,
@@ -57,9 +59,14 @@ struct State {
     /// The first epoch of the run the song is in: epochs moved only for devices keep the tracks, and the tool takes a
     /// track ref from any epoch of the run (`kept`).
     run_start: u32,
-    /// M6: what the producer changed by hand, for the digest: tracks renamed, the tempo.
+    /// M6: what the producer changed by hand, for the digest: tracks renamed (the tempo is the song's `bpm`).
     names: std::collections::HashMap<u64, String>,
-    bpm: Option<f64>,
+    /// (m6-places) What the fixed phrases change: the song's `bpm`, the sequence's `loop` {first, last}, the `patternLoop`,
+    /// the `metronome`, and each track's solo.
+    song: Value,
+    solo: std::collections::HashMap<u64, bool>,
+    /// The lines shown in the status bar, oldest first.
+    statuses: Vec<String>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -166,7 +173,9 @@ impl RenoiseScript {
                 undo: vec![],
                 run_start: VECTORS_EPOCH,
                 names: Default::default(),
-                bpm: None,
+                song: json!({"bpm": 128, "loop": {"first": 0, "last": 0}, "patternLoop": false, "metronome": false}),
+                solo: Default::default(),
+                statuses: vec![],
             })),
         }
     }
@@ -254,7 +263,7 @@ impl RenoiseScript {
 
     /// M6: the producer sets the tempo in Renoise.
     pub fn set_bpm(&self, bpm: f64) {
-        self.state.lock().unwrap().bpm = Some(bpm);
+        self.state.lock().unwrap().song["bpm"] = bpm.into();
     }
 
     /// M6: the digest the tool answered for the demo song, with what was changed since (each track's volume, mute, name and
@@ -290,9 +299,7 @@ impl RenoiseScript {
             out.push(record);
         }
         page["records"] = Value::Array(out);
-        if let Some(bpm) = state.bpm {
-            page["facts"]["bpm"] = json!(bpm);
-        }
+        page["facts"]["bpm"] = state.song["bpm"].clone();
         page
     }
 
@@ -340,6 +347,9 @@ impl RenoiseScript {
             value["epoch"] = epoch.to_string().into();
             value["layout"] = 0.into();
             return Ok(value);
+        }
+        if matches!(kind, "song-bpm" | "loop-range" | "loop-pattern" | "metronome-switch" | "track-solo") {
+            return Self::phrase_change(state, method, params);
         }
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
@@ -450,6 +460,120 @@ impl RenoiseScript {
         }
     }
 
+    /// (m6-places) What the fixed phrases change, as the tool makes it (contract §3b), each fenced by its value as the
+    /// preview saw it: the song's tempo (`song-bpm {bpm}`, a step of Renoise's undo); the sequence's loop (`loop-range
+    /// {first, last}`), the pattern loop (`loop-pattern {on}`), the metronome (`metronome-switch {on}`) and a track's solo
+    /// (`track-solo {ref, solo}`), none of them steps of Renoise's undo.
+    fn phrase_change(state: &mut State, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        let kind = params["kind"].as_str().unwrap_or_default();
+        let track = match kind {
+            "track-solo" => {
+                let reference = if method == "change_restore" { &params["target"]["ref"] } else { &params["input"]["ref"] };
+                let at = reference.as_str().and_then(|text| text.rsplit(':').next()).and_then(|n| n.parse::<u64>().ok());
+                Some(at.ok_or(bad("ref must be a track's ref"))?)
+            }
+            _ => None,
+        };
+        let field = match kind {
+            "song-bpm" => "bpm",
+            "loop-range" => "loop",
+            "loop-pattern" => "patternLoop",
+            "metronome-switch" => "metronome",
+            _ => "solo",
+        };
+        let wanted = match (method, kind) {
+            ("change_restore", _) => params["prior"][field].clone(),
+            (_, "song-bpm") => params["input"]["bpm"].clone(),
+            (_, "loop-range") => {
+                json!({"first": params["input"]["first"].as_u64().unwrap_or(0), "last": params["input"]["last"].as_u64().unwrap_or(0)})
+            }
+            (_, "track-solo") => params["input"]["solo"].clone(),
+            _ => params["input"]["on"].clone(),
+        };
+        if wanted.is_null() {
+            return Err(bad(&format!("{kind}: its input is missing")));
+        }
+        let now = match track {
+            Some(track) => json!(state.solo.get(&track).copied().unwrap_or(false)),
+            None => state.song[field].clone(),
+        };
+        let on_off = |value: &Value| if value == &Value::Bool(true) { "on" } else { "off" };
+        let title = match kind {
+            "song-bpm" => format!("Tempo {} BPM", wanted.as_f64().unwrap_or_default()),
+            "loop-range" if wanted["first"] == 0 => "Loop cleared".to_string(),
+            "loop-range" => format!("Loop slots {} to {}", wanted["first"], wanted["last"]),
+            "loop-pattern" => format!("Pattern loop {}", on_off(&wanted)),
+            "metronome-switch" => format!("Metronome {}", on_off(&wanted)),
+            _ if wanted == true => format!("Track {} soloed", track.unwrap_or(0)),
+            _ => format!("Track {} unsoloed", track.unwrap_or(0)),
+        };
+        let same = |a: &Value, b: &Value| a == b || (a.as_f64().is_some() && a.as_f64() == b.as_f64());
+        let write = |state: &mut State, value: &Value| match track {
+            Some(track) => {
+                state.solo.insert(track, value == &Value::Bool(true));
+            }
+            None => state.song[field] = value.clone(),
+        };
+        // Only the tempo is a step of Renoise's undo.
+        let entry = kind == "song-bpm";
+        let target = match track {
+            Some(_) => json!({"ref": params["input"]["ref"], "kind": "track"}),
+            None => json!({"ref": format!("{}:song:1", state.epoch), "kind": "song"}),
+        };
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        let mut value = match method {
+            "change_preview" => {
+                json!({"target": target, "prior": {field: now}, "fence": {field: now}, "display": {"title": title, "unchanged": same(&now, &wanted)}})
+            }
+            "change_apply" => {
+                if !same(&params["fence"][field], &now) {
+                    return Err(("changed".into(), format!("the song's {field} changed since the preview")));
+                }
+                write(state, &wanted);
+                if entry {
+                    state.undo.push(desc.clone());
+                }
+                let mut display = json!({"title": title});
+                if !entry {
+                    display["note"] = "Renoise's own undo won't take this back; Kumi can.".into();
+                }
+                json!({"applied": {field: wanted}, "display": display, "undo": {"desc": desc, "entry": entry}})
+            }
+            _ => {
+                if same(&now, &wanted) {
+                    json!({"restored": {field: wanted}, "display": {"title": format!("{title} (put back)"), "note": "It was back already: nothing was written."}})
+                } else if !same(&params["applied"][field], &now) && params["discard"] != true {
+                    return Err(("changed".into(), format!("the song's {field} changed in Renoise since Kumi set it")));
+                } else {
+                    write(state, &wanted);
+                    if entry {
+                        state.undo.push(desc);
+                    }
+                    json!({"restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}})
+                }
+            }
+        };
+        value["epoch"] = state.epoch.to_string().into();
+        value["layout"] = 0.into();
+        Ok(value)
+    }
+
+    /// (m6-places) What the fixed phrases left: the song's `bpm`, `loop`, `patternLoop` and `metronome`.
+    pub fn song(&self) -> Value {
+        self.state.lock().unwrap().song.clone()
+    }
+
+    /// A track's solo, as Kumi's changes left it.
+    pub fn solo(&self, track: u64) -> bool {
+        self.state.lock().unwrap().solo.get(&track).copied().unwrap_or(false)
+    }
+
+    /// The producer changes one of the song's settings in Renoise.
+    pub fn set_song(&self, field: &str, value: Value) {
+        self.state.lock().unwrap().song[field] = value;
+    }
+
     /// Every request the simulator answered, in order.
     pub fn asked(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().asked.clone()
@@ -465,17 +589,31 @@ impl RenoiseScript {
         SimulatorConfig::renoise(secret, resource).with_methods(&METHODS, self.respond())
     }
 
-    /// The same, and Kumi's changes are made in the song (`change`).
+    /// The same, and Kumi's changes are made in the song (`change`), and its lines shown in the status bar.
     pub fn config_with_changes(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        self.config(secret, resource).with_methods(&CHANGE_METHODS, self.respond())
+        self.config(secret, resource).with_methods(&CHANGE_METHODS, self.respond()).with_methods(&[STATUS_MESSAGE], self.respond())
+    }
+
+    /// The lines shown in Renoise's status bar, oldest first.
+    pub fn statuses(&self) -> Vec<String> {
+        self.state.lock().unwrap().statuses.clone()
     }
 
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
-        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) {
+        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) && method != STATUS_MESSAGE {
             return None;
         }
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
+        if method == STATUS_MESSAGE {
+            return Some(match params.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) {
+                Some(text) => {
+                    state.statuses.push(text.to_string());
+                    Ok(json!({"shown": true}))
+                }
+                None => Err(("bad-params".into(), "text must be a line of words".into())),
+            });
+        }
         if state.empty && state.load_during_look && method == "snapshot" {
             state.empty = false;
             state.load_during_look = false;

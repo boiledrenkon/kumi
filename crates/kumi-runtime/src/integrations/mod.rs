@@ -6,6 +6,7 @@ pub mod none;
 pub mod own_bridge;
 pub mod own_catchup;
 pub mod own_changes;
+pub mod own_phrases;
 pub mod own_views;
 pub mod reaper;
 pub mod reaper_changes;

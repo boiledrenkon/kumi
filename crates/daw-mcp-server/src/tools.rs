@@ -41,6 +41,8 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "project-info",
                 "project-grid",
                 "project-timebase",
+                // (m6-places) The metronome is a project setting REAPER keeps no history of.
+                "metronome-switch",
             ],
         },
         Daw::Renoise => Kinds {

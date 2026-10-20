@@ -79,7 +79,9 @@ local function setup(tracks, sends)
 end
 
 local function place(peer)
-  local focus = call(peer, "focus").result
+  local answer = call(peer, "focus")
+  local focus = answer.result
+  if not focus then error("focus: " .. json.encode(answer.error or {}), 2) end
   return focus.epoch, focus.layout
 end
 
@@ -1267,4 +1269,439 @@ test("devices m4: a container's shape leaves out its inner devices' SelectedPres
   eq(flipped.shape, flagged.shape, "the shape doesn't")
   data.preset_data = flipped.presetData:gsub("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)
   ok(read().shape ~= flipped.shape, "a name still moves it")
+end)
+
+-- Device identity (kumi-51 follow-up): the M3 device kinds' undos find their device by its place, so no device made,
+-- deleted or moved since on any track makes them stale.
+
+local COMPRESSOR = "Audio/Effects/Native/Compressor"
+
+local function names_on(t)
+  local out = {}
+  for d = 2, #mock.data.tracks[t].devices do out[#out + 1] = mock.data.tracks[t].devices[d].name end
+  return table.concat(out, ",")
+end
+
+-- What the producer does between Kumi's change and its undo; `t`, `d` say where Bass's devices are then.
+local DISRUPTIONS = {
+  { "a device made before it", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2) end },
+  { "the device before it deleted", function(song) song:track(2):delete_device_at(2) end },
+  { "a swap of it with its neighbour", function(song) song:track(2):swap_devices_at(2, 3) end },
+  { "a device made on another track", function(song) song:track(1):insert_device_at("Audio/Effects/Native/Delay", 2) end },
+  { "a track made before its track", function() mock.api.insert_track_at(1) end },
+  { "a device made after it", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Delay", #song:track(2).devices + 1) end },
+}
+
+-- Each disruption in a fresh song: `make(peer, epoch)` makes the change (on Bass's Gainer, 2.3), `check(where)` says it was
+-- undone, where `where(name)` finds a device on Bass by name now.
+local function through_disruptions(kind, make, check, skip)
+  for _, case in ipairs(DISRUPTIONS) do
+   if case[1] ~= skip then
+    local _, peer = setup()
+    mock.device_catalog = { [COMPRESSOR] = { { name = "Ratio", value = 4, min = 1, max = 20 } } }
+    local record = make(peer, place(peer))
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, kind, record)
+    ok(back.result, kind .. ", " .. case[1] .. ": " .. json.encode(back.error or {}))
+    local bass = mock.data.tracks[2].name == "Bass" and 2 or 3
+    check(function(name)
+      for d, data in ipairs(mock.data.tracks[bass].devices) do
+        if data.name == name then return data, d, bass end
+      end
+    end, case[1])
+    mock.device_catalog = nil
+   end
+  end
+end
+
+test("devices m4: Kumi's undo of a device bypass and a device parameter finds the device through every device change since", function()
+  through_disruptions("device-bypass", function(peer, epoch)
+    return change(peer, "device-bypass", { ref = epoch .. ":device:2.3", bypass = true })
+  end, function(where, case)
+    eq(where("Gainer").active ~= false, true, "bypass undone: " .. case)
+  end)
+  through_disruptions("device-param", function(peer, epoch)
+    return change(peer, "device-param", { ref = epoch .. ":param:2.3.1", value = 2 })
+  end, function(where, case)
+    eq(where("Gainer").params[1].value, 1, "gain back: " .. case)
+  end)
+  -- Found by its place, it is still fenced by its value: the producer's gain since refuses the undo.
+  local _, peer = setup()
+  local record = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2)
+  mock.song:track(2):device(4):parameter(1).value = 3
+  H.tick(2)
+  failure(restore(peer, "device-param", record), "changed")
+  eq(device_data(2, 4).params[1].value, 3)
+end)
+
+test("devices m4: Kumi's undo of a device added finds it through every device change since, and refuses it changed", function()
+  through_disruptions("device-add", function(peer, epoch)
+    return change(peer, "device-add", { ref = epoch .. ":track:2", path = COMPRESSOR, index = 3 })
+  end, function(where, case)
+    ok(where("Compressor") == nil, "the Compressor went: " .. case)
+    ok(where("Gainer") ~= nil, "the Gainer stays: " .. case)
+  end)
+  -- Its settings changed since: refused, unless discard.
+  local _, peer = setup()
+  mock.device_catalog = { [COMPRESSOR] = { { name = "Ratio", value = 4, min = 1, max = 20 } } }
+  local record = change(peer, "device-add", { ref = place(peer) .. ":track:2", path = COMPRESSOR, index = 3 })
+  mock.song:track(2):device(3):parameter(1).value = 8
+  H.tick(2)
+  failure(restore(peer, "device-add", record), "changed", "changed in Renoise")
+  eq(names_on(2), "EQ 5,Compressor,Gainer")
+  ok(restore(peer, "device-add", record, nil, { discard = true }).result)
+  eq(names_on(2), "EQ 5,Gainer")
+  mock.device_catalog = nil
+end)
+
+test("devices m4: Kumi's undo of a device deleted puts it back through every device change since, and the changes made to it before follow it", function()
+  through_disruptions("device-delete", function(peer, epoch)
+    return change(peer, "device-delete", { ref = epoch .. ":device:2.3" })
+  end, function(where, case)
+    ok(where("Gainer") ~= nil, "the Gainer is back: " .. case)
+  end, "a swap of it with its neighbour")
+  -- A parameter change before the delete: after Kumi puts the device back, that change's undo still finds it.
+  local _, peer = setup()
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = gainer().params }
+  local param = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  local deleted = change(peer, "device-delete", { ref = place(peer) .. ":device:2.3" })
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/EQ 5", 2)
+  H.tick(2)
+  ok(restore(peer, "device-delete", deleted).result)
+  local back = restore(peer, "device-param", param)
+  ok(back.result, json.encode(back.error or {}))
+  eq(device_data(2, 4).name, "Gainer")
+  eq(device_data(2, 4).params[1].value, 1)
+  mock.device_catalog = nil
+end)
+
+test("devices m4: Kumi's undo of a device moved puts it back after the device it followed, through every change since, and refuses it moved again", function()
+  local cases = {
+    { "a device made before both", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2) end, "EQ 5,Gainer,Gainer" },
+    { "a device made on another track", function(song) song:track(1):insert_device_at("Audio/Effects/Native/Gainer", 2) end, "EQ 5,Gainer" },
+    { "a track made before its track", function() mock.api.insert_track_at(1) end, "EQ 5,Gainer" },
+    { "a device made after both", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 4) end, "EQ 5,Gainer,Gainer" },
+  }
+  for _, case in ipairs(cases) do
+    local _, peer = setup()
+    local record = change(peer, "device-move", { ref = place(peer) .. ":device:2.2", index = 3 })
+    eq(names_on(2), "Gainer,EQ 5")
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, "device-move", record)
+    ok(back.result, case[1] .. ": " .. json.encode(back.error or {}))
+    local bass = mock.data.tracks[2].name == "Bass" and 2 or 3
+    eq(names_on(bass), case[3], case[1])
+  end
+  -- Moved back by the producer: back already. Moved elsewhere: refused, unless discard.
+  local _, peer = setup()
+  local record = change(peer, "device-move", { ref = place(peer) .. ":device:2.2", index = 3 })
+  mock.song:track(2):swap_devices_at(2, 3)
+  H.tick(2)
+  local again = restore(peer, "device-move", record)
+  ok(again.result and again.result.undo.entry == false, json.encode(again))
+  local _, peer2 = setup({ { name = "Kick" }, { name = "Bass", devices = { eq5(), gainer(), plain_gainer() } } })
+  local record2 = change(peer2, "device-move", { ref = place(peer2) .. ":device:2.2", index = 3 })
+  eq(names_on(2), "Gainer,EQ 5,Gainer")
+  mock.song:track(2):swap_devices_at(3, 4)
+  H.tick(2)
+  failure(restore(peer2, "device-move", record2), "changed", "moved")
+  ok(restore(peer2, "device-move", record2, nil, { discard = true }).result)
+  eq(names_on(2), "EQ 5,Gainer,Gainer")
+end)
+
+test("devices m4: preset data Kumi's host read from a preset file is titled by the preset's name", function()
+  local _, peer = setup()
+  local epoch, layout = place(peer)
+  local read = call(peer, "preset_read", { ref = epoch .. ":device:2.2", epoch = epoch, layout = layout }).result
+  local input = { ref = epoch .. ":device:2.2", presetData = read.presetData:gsub("<Gain0>%s*<Value>[^<]*</Value>", "<Gain0>\n      <Value>-4.0</Value>", 1), presetName = "Darker" }
+  local previewed = preview(peer, "device-preset-data", input)
+  eq(previewed.display.title, "Loaded the preset " .. Q1 .. "Darker" .. Q2 .. " into " .. Q1 .. "EQ 5 on Bass" .. Q2)
+  local record = change(peer, "device-preset-data", input)
+  eq(record.display.title, previewed.display.title)
+  failure(call(peer, "change_preview", { kind = "device-preset-data", input = { ref = epoch .. ":device:2.2" }, epoch = epoch, layout = layout }), "bad-params", "or path")
+end)
+
+-- Library loaders (kumi-51 follow-up): a device chain onto a track, a phrase and a modulation set into an instrument, from
+-- files Kumi's host checked (here: written in the test's folder).
+
+local CHAIN = '<?xml version="1.0" encoding="UTF-8"?>\n<RenoiseDeviceChain doc_version="21">\n  <Devices>\n    <CompressorDevice type="CompressorDevice">\n'
+  .. '      <IsMaximized>true</IsMaximized>\n    </CompressorDevice>\n    <Eq10Device type="Eq10Device">\n    </Eq10Device>\n  </Devices>\n</RenoiseDeviceChain>\n'
+local PHRASE = '<?xml version="1.0" encoding="UTF-8"?>\n<InstrumentPhrase doc_version="1">\n  <Name>Rock 05 (16ths)</Name>\n  <NumberOfLines>64</NumberOfLines>\n</InstrumentPhrase>\n'
+local MODSET = '<?xml version="1.0" encoding="UTF-8"?>\n<SampleModulationSet doc_version="2">\n  <Devices>\n'
+  .. '    <SampleAhdsrModulationDevice type="SampleAhdsrModulationDevice">\n    </SampleAhdsrModulationDevice>\n'
+  .. '    <SampleLfoModulationDevice type="SampleLfoModulationDevice">\n    </SampleLfoModulationDevice>\n  </Devices>\n</SampleModulationSet>\n'
+
+local function library_file(env, name, text)
+  local path = env.dir .. "/" .. name
+  local handle = assert(io.open(path, "wb"))
+  handle:write(text)
+  handle:close()
+  return path
+end
+
+local function mixer_volume(t) return mock.data.tracks[t].devices[1].params[2].value end
+
+test("devices m4: a device chain is loaded onto a track in one step, the track's volume and pan kept, and Kumi's undo takes it off", function()
+  local env, peer = setup()
+  local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+  mock.data.tracks[1].devices[1].params[2].value = 0.5
+  mock.data.song_fields.selected_track_index = 3
+  local input = { trackRef = place(peer) .. ":track:1", file = file, fileName = "Bright Vox" }
+  local previewed = preview(peer, "device-chain-load", input)
+  eq(previewed.display.title, "Loaded the device chain " .. Q1 .. "Bright Vox" .. Q2 .. " onto " .. Q1 .. "Kick" .. Q2 .. " (2 devices)")
+  eq(steps(), 0)
+  local record = change(peer, "device-chain-load", input, "Kumi: chain (k1)")
+  eq(names_on(1), "Compressor,EQ 10")
+  eq(steps(), 1, "one step")
+  eq(mixer_volume(1), 0.5, "the volume as it was (Renoise's load resets it)")
+  eq(mock.data.song_fields.selected_track_index, 3, "the selection as it was")
+  eq(record.display.title, "Loaded the device chain " .. Q1 .. "Bright Vox" .. Q2 .. " onto " .. Q1 .. "Kick" .. Q2 .. " (2 devices)")
+  local back = restore(peer, "device-chain-load", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(names_on(1), "")
+  eq(mixer_volume(1), 0.5)
+  eq(back.result.display.title, "Took the device chain " .. Q1 .. "Bright Vox" .. Q2 .. " off " .. Q1 .. "Kick" .. Q2)
+  -- What the host didn't check: a path, a file that isn't there, a file of another kind.
+  local epoch, layout = place(peer)
+  local function asked(given) return call(peer, "change_preview", { kind = "device-chain-load", input = given, epoch = epoch, layout = layout }) end
+  failure(asked({ trackRef = epoch .. ":track:1", path = file }), "bad-params", "host")
+  failure(asked({ trackRef = epoch .. ":track:1", file = env.dir .. "/Missing.xrnt" }), "failed", "isn't there")
+  failure(asked({ trackRef = epoch .. ":track:1", file = library_file(env, "Not.xrnt", PHRASE) }), "bad-params", "isn't a device chain")
+end)
+
+test("devices m4: a device chain replaces a track's devices only when asked, and Kumi's undo puts them back with their settings", function()
+  local env, peer = setup()
+  local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = gainer().params, ["Audio/Effects/Native/EQ 5"] = eq5().params }
+  mock.device_slots = { ["Audio/Effects/Native/Gainer"] = { slot = "GainerDevice" }, ["Audio/Effects/Native/EQ 5"] = { slot = "Eq5Device" } }
+  mock.data.tracks[2].devices[3].params[1].value = 2
+  local epoch, layout = place(peer)
+  local refused = call(peer, "change_preview", { kind = "device-chain-load", input = { trackRef = epoch .. ":track:2", file = file }, epoch = epoch, layout = layout })
+  failure(refused, "bad-params", "replace: true")
+  local input = { trackRef = epoch .. ":track:2", file = file, fileName = "Bright Vox", replace = true }
+  local record = change(peer, "device-chain-load", input)
+  eq(names_on(2), "Compressor,EQ 10")
+  ok(record.display.title:find("in place of its 2 devices", 1, true), record.display.title)
+  local back = restore(peer, "device-chain-load", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(names_on(2), "EQ 5,Gainer")
+  eq(device_data(2, 3).params[1].value, 2, "the Gainer's gain as it was")
+  ok(back.result.display.title:find("put back its 2 devices", 1, true), back.result.display.title)
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: a device chain's load refuses a track whose devices changed since the preview, and its undo one whose loaded devices changed", function()
+  local env, peer = setup()
+  local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+  local input = { trackRef = place(peer) .. ":track:2", file = file, replace = true }
+  local previewed, epoch, layout = preview(peer, "device-chain-load", input)
+  mock.song:track(2):device(3):parameter(1).value = 3
+  local before = steps()
+  failure(apply(peer, "device-chain-load", input, previewed, "Kumi: chain (k1)", epoch, layout), "changed", "devices changed")
+  eq(steps(), before)
+  eq(names_on(2), "EQ 5,Gainer")
+  -- Its undo: a loaded device changed since refuses, unless discard; nothing else counts.
+  local record = change(peer, "device-chain-load", input)
+  mock.song:track(2):device(2).is_active = false
+  H.tick(2)
+  failure(restore(peer, "device-chain-load", record), "changed", "Compressor")
+  ok(restore(peer, "device-chain-load", record, nil, { discard = true }).result)
+  eq(names_on(2), "EQ 5,Gainer")
+end)
+
+test("devices m4: Kumi's undo of a device chain finds its devices through the device and track changes since, and sees Renoise's own undo", function()
+  for _, case in ipairs({
+    { "a device made before them", function(song) song:track(1):insert_device_at("Audio/Effects/Native/Delay", 2) end, "Delay" },
+    { "a swap of the two", function(song) song:track(1):swap_devices_at(2, 3) end, "" },
+    { "a device made on another track", function(song) song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2) end, "" },
+    { "a track made before it", function() mock.api.insert_track_at(1) end, "" },
+  }) do
+    local env, peer = setup()
+    local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+    local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:1", file = file })
+    case[2](mock.song)
+    H.tick(2)
+    local back = restore(peer, "device-chain-load", record)
+    ok(back.result, case[1] .. ": " .. json.encode(back.error or {}))
+    local kick = mock.data.tracks[1].name == "Kick" and 1 or 2
+    eq(names_on(kick), case[3], case[1])
+  end
+  local env, peer = setup()
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  mock.api.undo()
+  H.tick(2)
+  eq(names_on(2), "EQ 5,Gainer")
+  local back = restore(peer, "device-chain-load", record)
+  ok(back.result and back.result.undo.entry == false, json.encode(back))
+end)
+
+test("devices m4: a phrase file is loaded as a new phrase at its place, the selection kept, and Kumi's undo takes it out", function()
+  local env, peer = setup()
+  local file = library_file(env, "Rock 05.xrnz", PHRASE)
+  local instrument = mock.data.instruments[1]
+  local epoch = place(peer)
+  local first = change(peer, "phrase-load", { ref = epoch .. ":instrument:1", file = file, fileName = "Rock 05" })
+  eq(#instrument.phrases, 1)
+  eq(instrument.phrases[1].name, "Rock 05 (16ths)")
+  eq(instrument.phrases[1].lines, 64)
+  eq(steps(), 1)
+  -- Before another phrase: the one there moves up; the producer's selection follows it.
+  instrument.phrases[1].name = "Mine"
+  mock.data.song_fields.selected_phrase_index = 1
+  local second = change(peer, "phrase-load", { ref = place(peer) .. ":instrument:1", file = file, index = 1 })
+  eq(instrument.phrases[1].name, "Rock 05 (16ths)")
+  eq(instrument.phrases[2].name, "Mine")
+  eq(mock.data.song_fields.selected_phrase_index, 2, "the selected phrase is still Mine")
+  ok(second.display.title:find("Loaded the phrase", 1, true), second.display.title)
+  local back = restore(peer, "phrase-load", second)
+  ok(back.result, json.encode(back.error or {}))
+  eq(#instrument.phrases, 1)
+  eq(instrument.phrases[1].name, "Mine")
+  -- The first one's undo finds it (Mine now) and refuses it: it was renamed since.
+  failure(restore(peer, "phrase-load", first), "changed")
+  eq(#instrument.phrases, 1)
+end)
+
+test("devices m4: a modulation set file is loaded as a new set named after it, and Kumi's undo takes it out unless a sample uses it", function()
+  local env, peer = setup()
+  local file = library_file(env, "Autopaned.xrno", MODSET)
+  local instrument = mock.data.instruments[1]
+  local count = #instrument.sets
+  local record = change(peer, "modset-load", { ref = place(peer) .. ":instrument:1", file = file, fileName = "Autopaned" })
+  eq(#instrument.sets, count + 1)
+  eq(instrument.sets[count + 1].name, "Autopaned")
+  eq(#instrument.sets[count + 1].devices, 2)
+  eq(instrument.sets[1].name, "Set 01", "the set there is untouched")
+  eq(steps(), 1)
+  ok(record.display.title:find("(2 devices)", 1, true), record.display.title)
+  local back = restore(peer, "modset-load", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(#instrument.sets, count)
+  -- With a name; a device taken out of it since refuses the undo, unless discard.
+  local named = change(peer, "modset-load", { ref = place(peer) .. ":instrument:1", file = file, name = "Wide" })
+  eq(instrument.sets[count + 1].name, "Wide")
+  mock.song:instrument(1).sample_modulation_sets[count + 1]:delete_device_at(1)
+  H.tick(2)
+  failure(restore(peer, "modset-load", named), "changed")
+  eq(#instrument.sets, count + 1)
+  ok(restore(peer, "modset-load", named, nil, { discard = true }).result)
+  eq(#instrument.sets, count)
+  local epoch, layout = place(peer)
+  failure(call(peer, "change_preview", { kind = "modset-load", input = { ref = epoch .. ":instrument:1", file = file, name = "a\nb" }, epoch = epoch, layout = layout }), "bad-params", "one line")
+end)
+
+test("devices m4: Kumi's undo of a loaded phrase or modulation set finds it through the phrases, sets and instruments made since", function()
+  local cases = {
+    { "phrase-load", "a phrase made before it", function() mock.song:instrument(1):insert_phrase_at(1) end },
+    { "phrase-load", "an instrument made before it", function() mock.song:insert_instrument_at(1) end },
+    { "modset-load", "a set made before it", function() mock.song:instrument(1):insert_sample_modulation_set_at(1) end },
+    { "modset-load", "an instrument made before it", function() mock.song:insert_instrument_at(1) end },
+  }
+  for _, case in ipairs(cases) do
+    local env, peer = setup()
+    local file = case[1] == "phrase-load" and library_file(env, "Rock 05.xrnz", PHRASE) or library_file(env, "Autopaned.xrno", MODSET)
+    local record = change(peer, case[1], { ref = place(peer) .. ":instrument:1", file = file, fileName = "Loaded" })
+    case[3]()
+    H.tick(2)
+    local back = restore(peer, case[1], record)
+    ok(back.result, case[2] .. ": " .. json.encode(back.error or {}))
+    for _, instrument in ipairs(mock.data.instruments) do
+      for _, phrase in ipairs(instrument.phrases) do ok(phrase.name ~= "Rock 05 (16ths)", case[2] .. ": the loaded phrase went") end
+      for _, set in ipairs(instrument.sets) do ok(set.name ~= "Loaded", case[2] .. ": the loaded set went") end
+    end
+  end
+end)
+
+test("devices m4: a phrase script Kumi's host read from a library file is titled by the file's name", function()
+  local _, peer = setup()
+  mock.song:instrument(1):insert_phrase_at(1)
+  local epoch, layout = place(peer)
+  local input = { ref = epoch .. ":phrase:1.1", code = 'return cycle("c4 e4 g4")', codeName = "Arp" }
+  local previewed = preview(peer, "phrase-script", input)
+  ok(previewed.display.title:find("Loaded the phrase script " .. Q1 .. "Arp" .. Q2 .. " into ", 1, true), previewed.display.title)
+  local record = change(peer, "phrase-script", input)
+  ok(record.display.title:find("(1 line)", 1, true), record.display.title)
+  failure(call(peer, "change_preview", { kind = "phrase-script", input = { ref = epoch .. ":phrase:1.1" }, epoch = epoch, layout = layout }), "bad-params", "or path")
+end)
+
+test("devices m4: changes made to devices before a chain replaced them are still undone after Kumi's undo of the chain puts them back", function()
+  local env, peer = setup()
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = gainer().params, ["Audio/Effects/Native/EQ 5"] = eq5().params }
+  mock.device_slots = { ["Audio/Effects/Native/Gainer"] = { slot = "GainerDevice" }, ["Audio/Effects/Native/EQ 5"] = { slot = "Eq5Device" } }
+  local param = change(peer, "device-param", { ref = place(peer) .. ":param:2.3.1", value = 2 })
+  local bypass = change(peer, "device-bypass", { ref = place(peer) .. ":device:2.2", bypass = true })
+  local chain = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  ok(restore(peer, "device-chain-load", chain).result)
+  eq(names_on(2), "EQ 5,Gainer")
+  -- A device made before them since: the earlier changes' undos still find each.
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2)
+  H.tick(2)
+  local back = restore(peer, "device-param", param)
+  ok(back.result, json.encode(back.error or {}))
+  eq(device_data(2, 4).params[1].value, 1, "the Gainer's gain as before the change")
+  local back2 = restore(peer, "device-bypass", bypass)
+  ok(back2.result, json.encode(back2.error or {}))
+  eq(device_data(2, 3).active ~= false, true, "the EQ switched on again")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: Renoise's own undo of a device chain is one step, told as such, and the producer's undo of Kumi's undo of it is told as a redo", function()
+  local env, peer = setup()
+  local file = library_file(env, "Bright Vox.xrnt", CHAIN)
+  local function told()
+    call(peer, "ping")
+    local out = {}
+    for _, event in ipairs(peer.events or {}) do
+      if event.name == "undone_in_daw" then out[#out + 1] = event.data end
+    end
+    peer.events = {}
+    return out
+  end
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = file, replace = true }, "Kumi: chain (kc1)")
+  eq(steps(), 1, "one step: the devices taken off and the chain loaded")
+  told()
+  mock.api.undo()
+  H.tick(4)
+  eq(names_on(2), "EQ 5,Gainer", "one undo brings back the devices it replaced")
+  local events = told()
+  eq(#events, 1)
+  eq(events[1].how, "undo")
+  eq(events[1].descs[1], "Kumi: chain (kc1)")
+  ok(restore(peer, "device-chain-load", record).result.undo.entry == false, "back already")
+  -- Kumi's own undo is no event; the producer's undo of it brings the chain back, told as a redo.
+  local again = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = file, replace = true }, "Kumi: chain (kc2)")
+  told()
+  ok(restore(peer, "device-chain-load", again).result)
+  H.tick(2)
+  eq(#told(), 0)
+  mock.api.undo()
+  H.tick(4)
+  eq(names_on(2), "Compressor,EQ 10")
+  local redone = told()
+  eq(#redone, 1)
+  eq(redone[1].how, "redo")
+  eq(redone[1].descs[1], "Kumi: chain (kc2)")
+end)
+
+test("devices m4: after Renoise's own undo and redo of a device chain, Kumi's undo still takes it off (the track holds exactly what it loaded)", function()
+  local env, peer = setup()
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  mock.api.undo()
+  H.tick(2)
+  mock.api.redo()
+  H.tick(2)
+  eq(names_on(2), "Compressor,EQ 10")
+  local back = restore(peer, "device-chain-load", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(names_on(2), "EQ 5,Gainer")
+  -- Not when the producer changed one of them since: then the devices aren't the ones Kumi loaded, and it says so.
+  local again = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:2", file = library_file(env, "Bright Vox.xrnt", CHAIN), replace = true })
+  mock.api.undo()
+  mock.api.redo()
+  mock.song:track(2):device(2).is_active = false
+  H.tick(2)
+  failure(restore(peer, "device-chain-load", again), "gone")
 end)

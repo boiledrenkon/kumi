@@ -39,8 +39,14 @@ pub struct Extra {
 
 impl Default for Extra {
     fn default() -> Self {
-        let config =
-            [("panmode", "3"), ("panlaw", "1"), ("itemtimelock", "1"), ("tempoenvtimelock", "1"), ("defsavepath", "/lab/Projects")];
+        let config = [
+            ("panmode", "3"),
+            ("panlaw", "1"),
+            ("itemtimelock", "1"),
+            ("tempoenvtimelock", "1"),
+            ("defsavepath", "/lab/Projects"),
+            ("projmetroen", "0"),
+        ];
         let project_info = [("RULER_LANE_COUNT", 2.0), ("RULER_LANE_DEFAULT:0", 1.0), ("RULER_LANE_DEFAULT:1", 2.0)];
         let actions = [
             (1007, "Transport: Play"),

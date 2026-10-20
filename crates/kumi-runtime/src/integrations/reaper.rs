@@ -2,18 +2,20 @@
 //! its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
 use super::own_catchup::{as_read, CatchUpWords, Mixer, RecipeKinds};
+use super::own_phrases::{bar_span, track, OwnPhrases, PhraseLook, Phrased};
 use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
     describe::ProjectWords,
+    phrases::{Intent, Switch},
     presentation::{ToolActivity, ToolPresentation},
     refs::{Moved, RefScheme, Shift},
     view::{BodyKind, BodyRequest, DawFocus, FocusBody, FocusItem, FocusParameter, ItemKind, ViewKind, ViewPresentation},
 };
 use crate::mcp::client::BridgeDescriptor;
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions REAPER's turns carry (M7 brings the full instruction pack).
@@ -34,6 +36,7 @@ pub const DAW: OwnDaw = OwnDaw {
     to_body,
     changes: &super::reaper_changes::CHANGES,
     catch_up: &CATCH_UP,
+    phrases: &PHRASES,
 };
 
 /// What changed in a REAPER project, in REAPER's words: catch-up's lines, watch_me's changes and its draft recipe.
@@ -90,6 +93,47 @@ fn project_facts(details: &[Value]) -> Vec<String> {
     }
     lines.dedup();
     lines
+}
+
+/// REAPER's fixed phrases: the tempo of a project without a tempo map, a track's mute, solo and arm, the loop (its range
+/// and repeat) and the metronome.
+const PHRASES: OwnPhrases = OwnPhrases { plan: phrase, loops_by_slot: false };
+
+fn phrase(intent: &Intent, look: &PhraseLook) -> Phrased {
+    let step = |tool: &str, input: Value| json!({"tool": tool, "input": input});
+    // Tempo or time signature markers: which one a tempo means, and how long a bar is, depend on where. The model asks.
+    let mapped = look.project.get("tempoMarkers").and_then(Value::as_u64).is_some_and(|markers| markers > 0);
+    match intent {
+        Intent::Tempo { bpm } if *bpm > 960.0 => Phrased::Refused("REAPER's tempo goes up to 960 BPM.".into()),
+        Intent::Tempo { .. } if mapped => Phrased::Model,
+        Intent::Tempo { bpm } => Phrased::Steps(vec![step("tempo_set", json!({"bpm": bpm}))]),
+        Intent::Track { track: pick, switch, on } => match track(pick, look) {
+            Some(reference) => Phrased::Steps(vec![match switch {
+                Switch::Mute => step("track_mute", json!({"ref": reference, "mute": on})),
+                Switch::Solo => step("track_solo", json!({"ref": reference, "solo": on})),
+                Switch::Arm => step("track_arm", json!({"ref": reference, "arm": on})),
+            }]),
+            None => Phrased::Model,
+        },
+        Intent::Loop { .. } if mapped => Phrased::Model,
+        Intent::Loop { from_bar, to_bar } => {
+            // A bar in quarter notes, from the time signature: 4/4 is 4, 6/8 is 3.
+            let signature = look.project.get("timeSignature").and_then(Value::as_array);
+            let bar = match signature.map(|s| (s.first().and_then(Value::as_f64), s.get(1).and_then(Value::as_f64))) {
+                Some((Some(num), Some(den))) if num > 0.0 && den > 0.0 => num * 4.0 / den,
+                _ => 4.0,
+            };
+            let (start, end) = bar_span(*from_bar, *to_bar, bar);
+            let mut steps = vec![step("loop_range", json!({"startBeats": start, "endBeats": end}))];
+            let repeating = [look.transport, look.project].iter().any(|row| row.pointer("/loop/on") == Some(&Value::Bool(true)));
+            if !repeating {
+                steps.push(step("loop_repeat", json!({"on": true})));
+            }
+            Phrased::Steps(steps)
+        }
+        Intent::LoopOff => Phrased::Steps(vec![step("loop_repeat", json!({"on": false}))]),
+        Intent::Metronome { on } => Phrased::Steps(vec![step("metronome_switch", json!({"on": on}))]),
+    }
 }
 
 /// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's
@@ -268,6 +312,52 @@ mod tests {
             refs.refs_in("r:send:{A1}:0:{B2}, r:send:{A1}:1:hw3 and r:marker:{C3}"),
             ["r:send:{A1}:0:{B2}", "r:send:{A1}:1:hw3", "r:marker:{C3}"]
         );
+    }
+
+    /// m6-places: each phrase's steps in a project as the look found it.
+    #[test]
+    fn a_phrase_is_reapers_own_change_and_a_tempo_map_leaves_tempo_and_loops_to_the_model() {
+        use crate::core::phrases::{PhraseTrack, TrackPick};
+        let tracks = [
+            PhraseTrack { reference: "track:1", name: "MASTER", own: false, master: true },
+            PhraseTrack { reference: "track:2", name: "Drums", own: true, master: false },
+            PhraseTrack { reference: "track:3", name: "Vox", own: true, master: false },
+        ];
+        let plan = |intent: Intent, project: Value, transport: Value| {
+            phrase(&intent, &PhraseLook { tracks: &tracks, project: &project, transport: &transport, slots: None })
+        };
+        let steps = |intent: Intent, project: Value| match plan(intent, project, json!({})) {
+            Phrased::Steps(steps) => Value::Array(steps),
+            other => panic!("{other:?}"),
+        };
+        let pick = |track: TrackPick, switch: Switch| Intent::Track { track, switch, on: true };
+        assert_eq!(steps(Intent::Tempo { bpm: 124.0 }, json!({})), json!([{"tool": "tempo_set", "input": {"bpm": 124.0}}]));
+        assert_eq!(
+            steps(pick(TrackPick::Name("vox".into()), Switch::Arm), json!({})),
+            json!([{"tool": "track_arm", "input": {"ref": "track:3", "arm": true}}])
+        );
+        assert_eq!(
+            steps(pick(TrackPick::Position(1), Switch::Solo), json!({})),
+            json!([{"tool": "track_solo", "input": {"ref": "track:2", "solo": true}}]),
+            "the master doesn't count by place"
+        );
+        assert_eq!(plan(pick(TrackPick::Name("master".into()), Switch::Mute), json!({}), json!({})), Phrased::Model);
+        // Bars 9 to 16 in 6/8: three quarter notes a bar. Repeat already on: the range alone.
+        assert_eq!(
+            steps(Intent::Loop { from_bar: 9, to_bar: 16 }, json!({"timeSignature": [6, 8], "loop": {"on": true}})),
+            json!([{"tool": "loop_range", "input": {"startBeats": 24.0, "endBeats": 48.0}}])
+        );
+        assert_eq!(
+            steps(Intent::Loop { from_bar: 1, to_bar: 4 }, json!({"timeSignature": [4, 4]})),
+            json!([{"tool": "loop_range", "input": {"startBeats": 0.0, "endBeats": 16.0}}, {"tool": "loop_repeat", "input": {"on": true}}])
+        );
+        assert_eq!(steps(Intent::LoopOff, json!({})), json!([{"tool": "loop_repeat", "input": {"on": false}}]));
+        assert_eq!(steps(Intent::Metronome { on: false }, json!({})), json!([{"tool": "metronome_switch", "input": {"on": false}}]));
+        // A tempo map: which tempo, and how long a bar is, depend on where.
+        let mapped = json!({"tempoMarkers": 2, "timeSignature": [4, 4]});
+        assert_eq!(plan(Intent::Tempo { bpm: 124.0 }, mapped.clone(), json!({})), Phrased::Model);
+        assert_eq!(plan(Intent::Loop { from_bar: 1, to_bar: 2 }, mapped, json!({})), Phrased::Model);
+        assert!(matches!(plan(Intent::Tempo { bpm: 990.0 }, json!({}), json!({})), Phrased::Refused(why) if why.contains("960")));
     }
 
     #[test]

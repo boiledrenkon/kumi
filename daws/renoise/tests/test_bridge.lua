@@ -209,7 +209,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,digest")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,status_message,digest")
   eq(table.concat(welcome.events, ","), "project,tracks,selection,transport,undone_in_daw")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()
@@ -355,6 +355,28 @@ test("bridge: requests after auth", function()
   eq(reply.ok, false)
   eq(reply.error.code, "deadline")
   ok(not retired(peer))
+  no_dialogs()
+end)
+
+-- (m6-places) A line in the status bar for a producer who isn't looking at Kumi: one line, cut to 200 characters, never a
+-- dialog; no words, no line.
+test("bridge: a status message is one line in Renoise's status bar", function()
+  local env = setup()
+  local peer = connect(env)
+  local before = #mock.statuses
+  local reply = request(peer, "status_message", { text = "Kumi \u{b7} done \u{b7} the bass is darker\nsecond line" })
+  eq(reply.ok, true)
+  eq(reply.result.shown, true)
+  eq(#mock.statuses, before + 1)
+  eq(mock.statuses[#mock.statuses], "Kumi \u{b7} done \u{b7} the bass is darker second line")
+  request(peer, "status_message", { text = string.rep("a", 300) })
+  eq(#mock.statuses[#mock.statuses], 200 + 3, "200 characters and an ellipsis")
+  for _, wrong in ipairs({ {}, { text = "" }, { text = "   " }, { text = 3 } }) do
+    reply = request(peer, "status_message", wrong)
+    eq(reply.ok, false)
+    eq(reply.error.code, "bad-params")
+  end
+  eq(#mock.statuses, before + 2)
   no_dialogs()
 end)
 

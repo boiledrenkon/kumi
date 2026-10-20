@@ -276,6 +276,15 @@ impl Reaper<'_> {
         (found > 0).then_some(value)
     }
 
+    /// Sets a value the project carries for an extension; false when this REAPER can't. It marks nothing changed and makes no
+    /// undo point (7.82 lab): REAPER writes it into the file with the producer's next save.
+    pub fn set_project_ext_state(&self, proj: Project, section: &str, key: &str, value: &str) -> bool {
+        let (section, key, value) = (cstring(section), cstring(key), cstring(value));
+        let Some(f) = self.api.SetProjExtState() else { return false };
+        unsafe { f(proj.0, section.as_ptr(), key.as_ptr(), value.as_ptr()) };
+        true
+    }
+
     /// How many entries the undo history holds (REAPER 7.79): one after a project is loaded, more with each edit.
     pub fn undo_entries(&self, proj: Project) -> Option<i32> {
         self.api.Undo_GetNumEntries().map(|f| unsafe { f(proj.0) })

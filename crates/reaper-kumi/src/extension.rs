@@ -564,6 +564,7 @@ impl Extension {
         if let Some(info) = info.as_ref().filter(|_| settled) {
             self.reads.note_project(info.ptr);
             self.reads.project_id(&reaper, info.ptr, info);
+            self.reads.keep_project_id(&reaper, info.ptr, info);
         }
         if (changed && !first) || replaced {
             self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
@@ -1081,6 +1082,42 @@ mod tests {
         assert_eq!(ask_with(&extension, &tx, "snapshot", json!({})).unwrap()["project"]["id"], OWN_ID);
     }
 
+    /// m6-places: the id a saved project is named by goes into it, so its place holds through a Save As (as Live's Sets
+    /// do); a project made from a template gets its own over the template's at its first save, and an unsaved one none.
+    #[test]
+    fn a_saved_projects_path_id_is_written_into_it_and_a_save_as_keeps_it() {
+        let (extension, tx, _, _) = setup();
+        let stored = || fake::with(|s| s.project_ext.get(&("kumi".to_string(), "project".to_string())).cloned());
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let song = crate::read::path_id("/lab/Projects/Song.rpp");
+        assert_eq!(stored().as_deref(), Some(song.as_str()), "written into the project");
+        assert_eq!(project_id(&extension, &tx), song.as_str());
+        fake::with(|s| s.project = Some(("/lab/Projects/Song v2.rpp".into(), "Song v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), song.as_str(), "a Save As is the same place");
+        // An id of its own is never written over.
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(stored().as_deref(), Some(OWN_ID));
+        // From a template: nothing while unsaved; at the first save, the project's own over the template's.
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!((project_id(&extension, &tx), stored().as_deref()), (Value::Null, Some(TEMPLATE_ID)));
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix.rpp".into(), "Mix.rpp".into())));
+        extension.tick(Driver::Timer);
+        let mix = crate::read::path_id("/lab/Projects/Mix.rpp");
+        assert_eq!((project_id(&extension, &tx), stored()), (Value::String(mix.clone()), Some(mix.clone())));
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix v2.rpp".into(), "Mix v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), mix.as_str());
+        // An unsaved project with none: none written.
+        fake::reset();
+        extension.tick(Driver::Timer);
+        assert_eq!((project_id(&extension, &tx), stored()), (Value::Null, None));
+    }
+
     #[test]
     fn opening_the_template_file_itself_is_the_templates_own_place() {
         let (extension, tx, _, _) = setup();
@@ -1283,8 +1320,10 @@ mod tests {
         extension.tick(Driver::Timer);
         assert_eq!(epoch_and_identity(&extension, &tx), unsaved);
         assert_eq!(project_id(&extension, &tx), crate::read::path_id("/lab/Projects/Mix.rpp"), "still not the template's id: its path's");
-        // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks.
+        // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks. (The
+        // file carries the template's id: the fake keeps one project's values, so the opened file's are set here.)
         project_with_history("/lab/Projects/Template copy.rpp", 1);
+        set_id(Some(TEMPLATE_ID));
         extension.tick(Driver::Timer);
         assert_ne!(epoch_and_identity(&extension, &tx), unsaved);
         assert_eq!(project_id(&extension, &tx), TEMPLATE_ID, "a copy of a file shares its place");

@@ -621,6 +621,17 @@ impl crate::host::Host {
             return (json!({"error": "input must be an object", "code": "bad-params"}), true);
         };
         let layout = arguments.get("layout").and_then(Value::as_u64);
+        // (M4 n-devices: a device's preset data from an .xrdp file in Renoise's library is read here; the tool writes it as
+        // preset data given in full)
+        let read;
+        let input = match crate::library_files::with_file(self.daw(), &kind, input, &crate::library_files::library_roots()) {
+            Some(Ok(with_data)) => {
+                read = with_data;
+                &read
+            }
+            Some(Err(refusal)) => return (crate::presets::refusal_answer(&refusal), true),
+            None => input,
+        };
         // (M4 n-devices: the Doofer, Splitter and Notepad edits are made here from the device's preset data, and an
         // instrument's macro mappings added or removed from its file)
         if crate::presets::host_makes(self.daw(), &kind, input) {
