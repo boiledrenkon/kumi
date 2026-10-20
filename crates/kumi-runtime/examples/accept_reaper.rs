@@ -1379,10 +1379,29 @@ async fn big(s: &Session, lab_dir: &Path, out: &mut Vec<Extra>) {
         Some(started.elapsed().as_millis()),
         format!("{} tracks listed", context["tracks"].as_array().map_or(0, Vec::len)),
     );
+    // (a page at a time, as Kumi reads: the host fits each page into the frame)
     let started = Instant::now();
-    let page = s.read(&json!({"kind": "track", "limit": 200})).await;
-    let rows = page["items"].as_array().cloned().unwrap_or_default();
-    extra(out, "big: read 200 track rows", rows.len() == 200, Some(started.elapsed().as_millis()), format!("{} rows", rows.len()));
+    let (mut rows, mut pages, mut cursor) = (Vec::new(), 0, None::<String>);
+    loop {
+        let mut args = json!({"kind": "track", "limit": 200});
+        if let Some(cursor) = &cursor {
+            args["cursor"] = cursor.as_str().into();
+        }
+        let page = s.read(&args).await;
+        pages += 1;
+        rows.extend(page["items"].as_array().cloned().unwrap_or_default());
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() || pages > 20 {
+            break;
+        }
+    }
+    extra(
+        out,
+        "big: read every track row",
+        rows.len() >= 200,
+        Some(started.elapsed().as_millis()),
+        format!("{} rows in {pages} pages", rows.len()),
+    );
     let t = rows.get(100).and_then(|r| r["ref"].as_str()).unwrap_or_default().to_owned();
     let started = Instant::now();
     let items = s.read(&json!({"kind": "item", "parent": t})).await;
