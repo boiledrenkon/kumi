@@ -105,7 +105,8 @@ async fn the_read_methods_on_the_wire() {
             "transport_play",
             "cursor_set",
             "undo_step_begin",
-            "undo_step_end"
+            "undo_step_end",
+            "project_save"
         ]
     );
     assert_eq!(client.welcome().events, ["project", "transport", "tracks", "selection", "undone_in_daw"]);
