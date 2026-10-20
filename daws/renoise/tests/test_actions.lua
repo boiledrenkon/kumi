@@ -94,6 +94,7 @@ test("actions: project_save writes the song's own file, or saves it as a new .xr
   mock.data.song_fields.file_name = dir .. "/mine.xrns"
   local saved = K.call(peer, "project_save", {}).result
   eq(saved.saved, dir .. "/mine.xrns")
+  eq(saved.dirty, false)
   eq(saved.display.title, "Saved the song")
   eq(mock.saves[#mock.saves], dir .. "/mine.xrns")
   local same = K.call(peer, "project_save", { path = dir .. "/mine.xrns" }).result
@@ -113,6 +114,7 @@ test("actions: project_save writes the song's own file, or saves it as a new .xr
   K.failure(K.call(peer, "project_save", { path = dir .. "/mine.xrns" }), "bad-params") -- there already: never written over
   local new = K.call(peer, "project_save", { path = dir .. "/new.xrns" }).result
   eq(new.saved, dir .. "/new.xrns")
+  eq(new.dirty, false)
   eq(new.display.title, "Saved the song as \226\128\156new.xrns\226\128\157")
   eq(mock.data.song_fields.file_name, dir .. "/new.xrns")
   -- another song open since the request's epoch: stale, nothing saved

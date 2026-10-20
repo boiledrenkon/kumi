@@ -225,3 +225,100 @@ test("track solo: a solo of two tracks made in Renoise comes back as one solo, t
   note_has(undone.result.display, "Renoise lets a script solo one track at a time: \226\128\156Kick\226\128\157 plays but isn't shown soloed.")
   H.no_dialogs()
 end)
+
+-- Deleting a soloed track (M4 n-song): its solo ends with it, and the delete's undo brings the solo and every mute back where
+-- nothing changed since.
+
+local function delete(peer, E, t)
+  return K.change(peer, "track-delete", { ref = K.ref(E, "track", t) }, "Kumi: delete (kd" .. t .. ")")
+end
+
+test("track solo: deleting the soloed track ends its solo; its undo brings the track, the solo and every track's mute back", function()
+  local _, peer = K.setup(nil, song())
+  local E = K.place(peer)
+  mock.ops.solo(1, true)
+  mock.ops.mute_track(3, MUTED) -- Bass muted during Kick's solo
+  mock.ops.mute_track(2, ACTIVE) -- Hat heard along with it
+  eq(states(), "Kick=A* Hat=A Bass=M Pad=O Send 1=O")
+  local previewed = K.preview(peer, "track-delete", { ref = K.ref(E, "track", 1) })
+  note_has(previewed.display, "It's soloed: deleting it ends the solo")
+  local record = delete(peer, E, 1)
+  eq(states(), "Hat=A Bass=A Pad=A Send 1=A")
+  note_has(record.result.display, "Its solo ended with it.")
+  note_has(record.result.display, "Renoise turned \226\128\156Bass\226\128\157, \226\128\156Pad\226\128\157 and \226\128\156Send 1\226\128\157 back on (\226\128\156Bass\226\128\157 muted before).")
+  local undone = K.restore(peer, record)
+  ok(undone.result, "restored")
+  eq(states(), "Kick=A* Hat=A Bass=M Pad=O Send 1=O")
+  note_has(undone.result.display, "Its solo is back, and every track's mute is as it was (\226\128\156Bass\226\128\157 muted again).")
+  H.no_dialogs()
+end)
+
+test("track solo: a mute changed after a soloed track's delete leaves every solo and mute as they are on its undo, and says so", function()
+  local _, peer = K.setup(nil, song())
+  local E = K.place(peer)
+  mock.ops.solo(1, true)
+  mock.ops.mute_track(3, MUTED)
+  local record = delete(peer, E, 1)
+  mock.ops.mute_track(1, MUTED) -- the producer mutes Hat since
+  local undone = K.restore(peer, record)
+  ok(undone.result, "the track comes back")
+  eq(states(), "Kick=A Hat=M Bass=A Pad=A Send 1=A", "no solo written, the producer's mute kept")
+  note_has(undone.result.display, "It was soloed when it was deleted, but \226\128\156Hat\226\128\157's mute or solo changed since: Kumi left every track's solo and mute as they are (discard puts them back).")
+  -- the same with discard: the solo and the mutes from before the delete
+  local _, peer2 = K.setup(nil, song())
+  local E2 = K.place(peer2)
+  mock.ops.solo(1, true)
+  mock.ops.mute_track(3, MUTED)
+  local again = delete(peer2, E2, 1)
+  mock.ops.mute_track(1, MUTED)
+  local forced = K.restore(peer2, again, nil, { discard = true })
+  ok(forced.result, "discard")
+  eq(states(), "Kick=A* Hat=O Bass=M Pad=O Send 1=O")
+  H.no_dialogs()
+end)
+
+test("track solo: a track deleted while another was soloed comes back as Renoise makes it then, not Off for a solo that ended", function()
+  local _, peer = K.setup(nil, song())
+  local E = K.place(peer)
+  mock.ops.solo(1, true)
+  eq(states(), "Kick=A* Hat=O Bass=O Pad=O Send 1=O")
+  local record = delete(peer, E, 2) -- Hat, Off only by Kick's solo
+  mock.ops.solo(1, false) -- the solo ends
+  ok(K.restore(peer, record).result)
+  eq(states(), "Kick=A Hat=A Bass=A Pad=A Send 1=A", "Hat plays: the solo that turned it Off is over")
+  -- while a solo is on, it comes back Off with it
+  local _, peer2 = K.setup(nil, song())
+  local E2 = K.place(peer2)
+  mock.ops.solo(1, true)
+  local again = delete(peer2, E2, 2)
+  ok(K.restore(peer2, again).result)
+  eq(states(), "Kick=A* Hat=O Bass=O Pad=O Send 1=O")
+  H.no_dialogs()
+end)
+
+test("track solo: a group's track deleted from the group's solo comes back in it, and the group's own solo is found again", function()
+  local _, peer = K.setup(nil, song(true))
+  local E = K.place(peer)
+  mock.ops.solo(3, true) -- Drums, with Kick and Hat
+  eq(states(), "Kick=A* Hat=A* Drums=A* Bass=O Pad=O Send 1=O")
+  local record = delete(peer, E, 2)
+  ok(K.restore(peer, record).result)
+  eq(states(), "Kick=A* Hat=A* Drums=A* Bass=O Pad=O Send 1=O")
+  H.no_dialogs()
+end)
+
+test("track solo: tracks made or deleted between a soloed track's delete and its undo are followed", function()
+  local _, peer = K.setup(nil, song())
+  local E = K.place(peer)
+  mock.ops.solo(2, true) -- Hat
+  mock.ops.mute_track(3, MUTED)
+  local record = delete(peer, E, 2)
+  eq(states(), "Kick=A Bass=A Pad=A Send 1=A")
+  mock.ops.insert_track(1, { name = "New" })
+  mock.ops.remove_track(4) -- Pad
+  local undone = K.restore(peer, record)
+  ok(undone.result, "restored")
+  eq(states(), "New=O Kick=O Hat=A* Bass=M Send 1=O")
+  note_has(undone.result.display, "A track deleted since isn't in it.")
+  H.no_dialogs()
+end)
