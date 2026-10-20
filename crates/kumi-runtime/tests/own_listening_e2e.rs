@@ -664,3 +664,51 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reaper_measures_sounds_lays_out_the_form_and_tunes_a_reaeq_on_scratch_copies() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let eq = script.add_fx("r:track:{T0002}", "ReaEQ");
+            // (each render done at its first status: a search renders many)
+            script.listening().set_steps(0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let mut said = vec![];
+            let sound = tool(&observed, "sound")
+                .execute(object(json!({"tracks": ["Track 2"], "from_beat": 0, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!sound.is_error, "{}", sound.text);
+            said.push(sound.text);
+            let form = tool(&observed, "form").execute(object(json!({"from_beat": 0, "beats": 16})), Signal::new()).await.unwrap();
+            assert!(!form.is_error, "{}", form.text);
+            said.push(form.text);
+            let judge = tool(&observed, "judge");
+            let start = judge
+                .execute(
+                    object(json!({"goal": {"loudness": -14, "problems": false}, "track": "Track 2", "from_beat": 0, "beats": 2})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            let tuned = tool(&observed, "tune")
+                .execute(object(json!({"device": eq, "how": "search", "knobs": ["Gain-Band 2", "Gain-Band 3"]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!tuned.is_error, "{}", tuned.text);
+            assert!(script.listening().renders().iter().any(|render| render["sources"].to_string().contains("r:track:{C")), "copies heard");
+            assert_eq!(script.listening().scratch_copies(), 0, "the copies are gone after the search");
+            said.push(tuned.text);
+            said.extend(told.borrow().iter().cloned());
+            assert_ours(&said);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
