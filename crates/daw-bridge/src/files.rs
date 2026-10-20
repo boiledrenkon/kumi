@@ -226,7 +226,7 @@ pub fn prune_discovery(dir: &Path, daw: Daw) -> usize {
     scan_discovery(dir, daw).into_iter().filter(|found| !found.alive && std::fs::remove_file(&found.path).is_ok()).count()
 }
 
-/// Whether `pid` runs as this user (another user's process can't be the bridge Kumi set up).
+/// Whether `pid` runs as this user (another user's process can't be the bridge Kumi set up), the same on every system.
 pub fn process_alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else { return false };
     if pid <= 0 {
@@ -234,7 +234,11 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        unsafe { libc::kill(pid, 0) == 0 }
+        let answer = match unsafe { libc::kill(pid, 0) } {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)),
+        };
+        alive(Answer::Unix(answer))
     }
     #[cfg(windows)]
     {
@@ -246,19 +250,38 @@ pub fn process_alive(pid: u32) -> bool {
                 fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
                 fn GetLastError() -> u32;
             }
+            // PROCESS_QUERY_LIMITED_INFORMATION, which this user gets for its own processes, elevated ones too.
             let handle = OpenProcess(0x1000, 0, pid as u32);
             if handle.is_null() {
-                return GetLastError() == 5;
+                return alive(Answer::Windows(Err(GetLastError())));
             }
             let mut code = 0;
-            let success = GetExitCodeProcess(handle, &mut code) != 0;
+            let answered = GetExitCodeProcess(handle, &mut code) != 0;
+            let error = GetLastError();
             CloseHandle(handle);
-            success && code == 259
+            alive(Answer::Windows(if answered { Ok(code) } else { Err(error) }))
         }
     }
     #[cfg(not(any(unix, windows)))]
     {
         false
+    }
+}
+
+/// What a system said about a pid: Unix's kill(pid, 0), with errno when it failed; Windows's OpenProcess, with its error
+/// when it failed, else the process's exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Unix(Result<(), i32>),
+    Windows(Result<u32, u32>),
+}
+
+/// Running, and this user's: kill succeeds (EPERM is another user's process, ESRCH none), or the process opens and
+/// still runs (STILL_ACTIVE). ERROR_ACCESS_DENIED is another user's process on Windows, as EPERM is on Unix: not alive.
+fn alive(answer: Answer) -> bool {
+    match answer {
+        Answer::Unix(said) => said.is_ok(),
+        Answer::Windows(said) => said == Ok(259),
     }
 }
 
@@ -329,6 +352,25 @@ mod tests {
         let found = scan_discovery(dir.path(), Daw::Renoise);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].discovery.as_ref().unwrap(), &long, "a file named by the cut text is trusted");
+    }
+
+    #[test]
+    fn another_users_process_counts_as_not_running_on_every_system() {
+        // What each system answers, read the same way: before, Windows took ERROR_ACCESS_DENIED for running.
+        const EPERM: i32 = 1;
+        const ESRCH: i32 = 3;
+        for (answer, running) in [
+            (Answer::Unix(Ok(())), true),
+            (Answer::Unix(Err(EPERM)), false),
+            (Answer::Unix(Err(ESRCH)), false),
+            (Answer::Windows(Ok(259)), true),
+            (Answer::Windows(Ok(0)), false),
+            (Answer::Windows(Err(5)), false),
+            (Answer::Windows(Err(87)), false),
+        ] {
+            assert_eq!(alive(answer), running, "{answer:?}");
+        }
+        // Each system's own answers: tests/system.rs, which macOS and Windows run too.
     }
 
     #[test]

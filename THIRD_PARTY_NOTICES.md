@@ -62,6 +62,39 @@ Attribution 4.0 International. The dataset can be found at:
 https://zenodo.org/record/5578807#.YnRm5vPMKDU
 ```
 
+## REAPER extension SDK (Cockos), zlib License
+
+REAPER's extension (`reaper_kumi`, in each bundle's `daws/reaper/`) is built against two headers from Cockos' REAPER
+extension SDK, vendored unmodified in `crates/reaper-kumi/sdk/`: `reaper_plugin.h` and `reaper_plugin_functions.h`
+from https://github.com/justinfrankel/reaper-sdk at commit c0eafe87863b2bf69c5c822760f1b32a753b211b ("sdk 7.82").
+Copyright (C) 2006-2015, Cockos Incorporated (`reaper_plugin.h`), and Copyright 2006 and later, Cockos Incorporated
+(`reaper_plugin_functions.h`). The extension's table of REAPER's functions is generated from them when it's built
+(`crates/reaper-kumi/build.rs`), and `crates/reaper-kumi/shim/csurf.cpp` repeats the SDK's `IReaperControlSurface`
+declaration.
+
+The extension was written with reaper-rs (https://github.com/helgoboss/reaper-rs, MIT License) as a reference; it
+carries none of reaper-rs's code.
+
+The SDK's license (`crates/reaper-kumi/sdk/LICENSE`):
+
+```text
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
 ## Apache License, Version 2.0
 
 ```text
