@@ -109,14 +109,17 @@ function M.slot_beats()
 end
 
 -- The option `grid`: Renoise has no text for a value it isn't set to, and setting each point and putting it back is an undo step
--- that marks the song modified (measured, 3.5.4), so a row answers only its current point, and says so.
+-- that marks the song modified (measured, 3.5.4), so a row answers only its current point, and says so. A stepped parameter
+-- (`value_quantum` above 0: a switch, a filter type) says how many values it has (`steps`), which reads without writing.
 function M.grid_of(params)
   local grid = params.grid
   if grid == nil or grid == json.null then return nil end
   integer(grid, "grid", 2, 64)
-  return function(row)
+  return function(row, parameter)
     row.grid = array({ array({ row.value, row.valueString }) })
     row.gridShort = true
+    local quantum = parameter and parameter.value_quantum or 0
+    if quantum > 0 and row.max > row.min then row.steps = math.floor((row.max - row.min) / quantum + 0.5) + 1 end
     return row
   end
 end

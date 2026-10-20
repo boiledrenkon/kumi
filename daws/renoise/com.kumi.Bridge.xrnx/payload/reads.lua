@@ -164,7 +164,7 @@ local function one(params, epoch)
       and n[3] <= #song:track(n[1]):device(n[2]).parameters)
     row = param_row(song, epoch, n[1], n[2], n[3])
     local with_grid = reads_listening.grid_of(params)
-    if with_grid then row = with_grid(row) end
+    if with_grid then row = with_grid(row, song:track(n[1]):device(n[2]):parameter(n[3])) end
   end
   return { items = array({ row }), epoch = epoch }
 end
@@ -223,8 +223,9 @@ function M.read(job, params, epoch)
     if t > track_count(song) or d > #song:track(t).devices then fail("bad-params", "no such device") end
     local with_grid = reads_listening.grid_of(params)
     return page(job, epoch, params, #song:track(t):device(d).parameters, function(k)
-      local row = param_row(the_song(), epoch, t, d, k)
-      return with_grid and with_grid(row) or row
+      local live = the_song()
+      local row = param_row(live, epoch, t, d, k)
+      return with_grid and with_grid(row, live:track(t):device(d):parameter(k)) or row
     end)
   elseif kind == "spans" then
     return reads_listening.spans(job, params, epoch, page)

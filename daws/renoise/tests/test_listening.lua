@@ -875,6 +875,16 @@ test("listening: read param with grid answers only the current point, gridShort 
   end
   local one = result(call(peer, "read", { ref = epoch .. ":param:1.1.2", grid = 49 }))
   eq(one.items[1].gridShort, true)
+  eq(one.items[1].steps, nil, "a continuous parameter has no steps")
+  -- a stepped parameter says how many values it has (a switch: 2), read without writing
+  mock.ops.insert_device(1, { name = "Filter", path = "Audio/Effects/Native/Filter", params = {
+    { name = "Type", value = 3, min = 0, max = 19, quantum = 1 }, { name = "Cutoff", value = 127, min = 0, max = 127 },
+    { name = "Line Sync", value = 0, min = 0, max = 1, quantum = 1 } } })
+  epoch = place(peer)
+  local filter = result(call(peer, "read", { kind = "param", parent = epoch .. ":device:1.2", grid = 2 }), "stepped grid")
+  eq(filter.items[1].steps, 20)
+  eq(filter.items[2].steps, nil)
+  eq(filter.items[3].steps, 2)
   failure(call(peer, "read", { kind = "param", parent = epoch .. ":device:1.1", grid = 1 }), "bad-params")
   failure(call(peer, "read", { kind = "track", grid = 49 }), "bad-params", "grid is an option of kind param")
   eq(#mock.data.undo.stack, 0, "nothing written")

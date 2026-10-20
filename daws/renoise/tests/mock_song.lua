@@ -278,6 +278,7 @@ local function parameter(data, set)
   local proxy = object("renoise.DeviceParameter", {
     name = data.name, name_observable = data.name_observable or M.observable(),
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
+    value_quantum = data.quantum or 0,
     value_observable = data.value_observable or M.observable(),
     value_string_observable = M.observable(),
     is_automated = data.automated == true,
