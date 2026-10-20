@@ -165,6 +165,9 @@ const VIEW_WORDS: [&str; 20] = [
     "LANEHEIGHT",
 ];
 
+/// A track's lane-recording settings as REAPER first writes them.
+const DEFAULT_LANEREC: &str = "LANEREC -1 -1 -1 0";
+
 /// A plug-in's block in an FX chain: what it holds is the plug-in's own data, its parameters among it; those are its FX
 /// signature's (less what moves by itself), so the block's lines aren't hashed.
 const PLUGIN_WORDS: [&str; 7] = ["<VST", "<AU", "<JS", "<CLAP", "<LV2", "<DX", "<VIDEO_EFFECT"];
@@ -181,8 +184,27 @@ pub(super) fn content_hash(chunk: &str) -> String {
         }
     };
     let (mut depth, mut plugin, mut input_chain) = (0i32, None::<i32>, None::<i32>);
-    for line in chunk.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    let lines: Vec<&str> = chunk.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let mut skip_to = 0;
+    for (at, &line) in lines.iter().enumerate() {
+        if at < skip_to {
+            continue;
+        }
         let first = line.split_whitespace().next().unwrap_or_default();
+        // REAPER writes a track anew after its own undo or redo: a track the API made then gains its lane-recording
+        // defaults and an FX chain block with nothing in it (7.82 lab, 2026-10-19). Neither is the producer's.
+        if line == DEFAULT_LANEREC {
+            continue;
+        }
+        if first == "<FXCHAIN" {
+            let end = lines[at + 1..].iter().position(|l| *l == ">" || l.starts_with('<')).map(|n| at + 1 + n);
+            if let Some(end) = end.filter(|end| lines[*end] == ">") {
+                if lines[at + 1..end].iter().all(|l| VIEW_WORDS.contains(&l.split_whitespace().next().unwrap_or_default())) {
+                    skip_to = end + 1;
+                    continue;
+                }
+            }
+        }
         if line == ">" {
             if plugin == Some(depth) {
                 plugin = None;
