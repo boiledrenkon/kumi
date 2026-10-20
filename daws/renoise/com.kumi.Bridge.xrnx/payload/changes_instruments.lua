@@ -541,7 +541,7 @@ local function delete_write(song, env, input, fence, desc, notes)
     fail("failed", string.format("%s holds %.0f MB, more than Kumi can keep to put it back, so it won't delete it", q(label), bytes / 1048576))
   end
   -- (saved first: if Renoise can't save it, nothing is deleted)
-  local file = os.tmpname(".xrni")
+  local file = places_.temp_file(".xrni")
   local saved = with_selected(song, i, function() return renoise.app():save_instrument(file) end)
   if not saved or not io.exists(file) then
     fail("failed", "Renoise wouldn't save " .. q(label) .. " to keep it, so Kumi didn't delete it")
@@ -985,11 +985,13 @@ function M.save(params, env)
   local n, objects, label = places_.locate(song, env, "instrument", input, "instrument_save")
   local path = input.path
   if type(path) ~= "string" or path == "" or path:find("[%c]") or not absolute(path) then bad("path: the absolute path of the .xrni file to write") end
-  if not path:lower():match("%.xrni$") then path = path .. ".xrni" end
+  local exact = path:lower():match("%.xrni$") ~= nil
+  if not exact then path = path .. ".xrni" end
   local folder = path:match("^(.*)[/\\][^/\\]+$")
   if not folder or not io.exists(folder) then bad("there's no folder " .. tostring(folder) .. " to save into") end
-  if io.exists(path) and input.overwrite ~= true then
-    bad(string.format("there's a file at %s already: Kumi replaces it only when you say so (overwrite: true)", path))
+  -- (a file there is the producer's: replaced only when asked, and only when the path given is that file's own)
+  if io.exists(path) and (input.overwrite ~= true or not exact) then
+    bad(string.format("there's a file at %s already: Kumi replaces it only when you give that exact path and overwrite: true", path))
   end
   local bytes = samples_bytes(objects.instrument)
   if bytes > M.MAX_INSTRUMENT_BYTES then

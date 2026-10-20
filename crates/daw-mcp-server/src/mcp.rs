@@ -267,7 +267,7 @@ pub fn tools(host: &Host) -> Value {
             {
                 "name": "instrument_save",
                 "title": "Save a Renoise instrument",
-                "description": "Saves an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless overwrite: true. Not a change: no undo.",
+                "description": "Saves an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless path names that file exactly and overwrite: true. Not a change: no undo.",
                 "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                     "instrumentRef": {"type": "string", "description": "The instrument."},
                     "ref": {"type": "string", "description": "The instrument (as instrumentRef)."},

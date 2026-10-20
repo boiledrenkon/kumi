@@ -517,7 +517,7 @@ local function load_apply(song, env, input, fence, desc)
     -- (kept first: if Renoise can't save it, nothing is replaced)
     local kept = { name = sample.name, loopStart = sample.loop_start, loopEnd = sample.loop_end, loop = LOOPS.get(sample.loop_mode) }
     if sample.sample_buffer.has_sample_data then
-      kept.file = os.tmpname(".flac")
+      kept.file = places_.temp_file(".flac")
       if not sample.sample_buffer:save_as(kept.file, "flac") or not io.exists(kept.file) then
         fail("failed", "Renoise wouldn't save the audio of " .. plan.label .. " to keep it, so Kumi didn't replace it")
       end
@@ -637,7 +637,7 @@ local function delete_apply(song, env, input, fence, desc)
   local material = sample_settings(env, n, sample)
   material.index, material.print = n[2], M.buffer_print(sample.sample_buffer)
   if sample.sample_buffer.has_sample_data then
-    material.file = os.tmpname(".flac")
+    material.file = places_.temp_file(".flac")
     if not sample.sample_buffer:save_as(material.file, "flac") or not io.exists(material.file) then
       fail("failed", "Renoise wouldn't save the audio of " .. label .. " to keep it, so Kumi didn't delete it")
     end
