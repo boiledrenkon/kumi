@@ -51,6 +51,8 @@ struct State {
     scratch: HashMap<String, Vec<ScratchCopy>>,
     previews: Vec<Value>,
     playing: Option<String>,
+    /// When what plays ends by itself (a preview plays its length, then stops, as REAPER's and Renoise's do).
+    playing_until: Option<std::time::Instant>,
     /// What each render asked, in order.
     renders: Vec<Value>,
     /// Times a job put back what it changed (done, failed or cancelled).
@@ -132,6 +134,7 @@ impl SimListening {
                 scratch: HashMap::new(),
                 previews: vec![],
                 playing: None,
+                playing_until: None,
                 renders: vec![],
                 restored: 0,
                 fail_next: None,
@@ -451,7 +454,8 @@ impl SimListening {
         let mut notes = std::mem::take(&mut state.next_notes);
         // A render stops what Kumi plays out loud, as each bridge says (REAPER closes its audio device to render; Renoise's
         // audition is the song playing, which a render stops).
-        if state.playing.take().is_some() {
+        let still = state.playing_until.take().is_some_and(|until| std::time::Instant::now() < until);
+        if state.playing.take().is_some() && still {
             notes.insert(
                 0,
                 match state.daw {
@@ -595,6 +599,7 @@ impl SimListening {
         }
         state.previews.push(params.clone());
         state.playing = Some(id.clone());
+        state.playing_until = Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds.clamp(0., 3600.)));
         let mut answer = json!({"previewId": id, "playing": true, "seconds": seconds});
         match state.daw {
             Daw::Reaper => answer["via"] = "preview".into(),

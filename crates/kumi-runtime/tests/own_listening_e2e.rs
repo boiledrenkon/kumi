@@ -195,6 +195,30 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_listen_after_kumis_last_one_ended_by_itself_says_nothing_was_stopped() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let half_a_second = HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(1.), ..Default::default() };
+            reaper.hear(&half_a_second, Signal::new()).await.unwrap().unwrap();
+            // Its half second played out (and Kumi's second of slack): the next render stops nothing.
+            tokio::time::sleep(std::time::Duration::from_millis(1700)).await;
+            let heard = reaper.hear(&half_a_second, Signal::new()).await.unwrap().unwrap();
+            let stopped = "The audition playing was stopped";
+            assert!(!told.borrow().iter().any(|title| title.starts_with(stopped)), "{:?}", told.borrow());
+            assert!(!heard[0].note.clone().unwrap_or_default().contains(stopped), "{heard:?}");
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_listen_stopped_part_way_stops_its_render_and_reaper_is_put_back() {
     tokio::task::LocalSet::new()
         .run_until(async {

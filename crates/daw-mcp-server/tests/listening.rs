@@ -217,6 +217,28 @@ async fn a_file_plays_out_loud_once_and_stops_when_asked() {
 }
 
 #[tokio::test]
+async fn a_render_stops_what_still_plays_out_loud_and_says_so_but_not_a_play_that_ended() {
+    let script = ReaperScript::new(3, 0);
+    let mut lab = Lab::reaper(&script).await;
+    let file = lab.home.path().join("take.wav");
+    daw_mcp_server::simulator::listening::write_noise(&file, 3., 0.3, 1).unwrap();
+    let render = json!({"sources": [{"id": "mix", "what": "master"}], "range": two_bars(), "epoch": "sim-1"});
+    let stopped = "The audition playing was stopped";
+    let (playing, _) = lab.tool("audition", json!({"file": file, "seconds": 2})).await;
+    assert_eq!(playing["playing"], true, "{playing}");
+    let (job, _) = lab.tool("render", render.clone()).await;
+    let done = lab.wait(&job).await;
+    assert!(done["notes"].as_array().is_some_and(|notes| notes.iter().any(|note| note.as_str().unwrap().starts_with(stopped))), "{done}");
+    // A play of a fifth of a second is over by the next render: nothing was stopped.
+    let (playing, _) = lab.tool("audition", json!({"file": file, "seconds": 0.2})).await;
+    assert_eq!(playing["playing"], true, "{playing}");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (job, _) = lab.tool("render", render).await;
+    let done = lab.wait(&job).await;
+    assert!(!done.to_string().contains(stopped), "{done}");
+}
+
+#[tokio::test]
 async fn an_items_audio_is_its_source_file_and_a_midi_item_says_it_has_none() {
     let script = ReaperScript::new(3, 0);
     script.listening().set_silent_ref("r:item:{I-T0002}");

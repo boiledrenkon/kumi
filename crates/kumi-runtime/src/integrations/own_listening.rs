@@ -752,8 +752,8 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let pre_roll = self.beats_per_bar.get().min(window.from).max(0.);
         let args = json!({"sources": sources, "range": {"fromBeat": window.from, "beats": window.beats}, "preRollBeats": pre_roll});
         // Kumi's own listen still playing out loud: the render stops it, which a run says once (each listen of a judged
-        // run or a goal stops the last one).
-        let own_playing = self.played.borrow().back().is_some_and(|(_, to)| *to > chrono::Utc::now().timestamp_millis());
+        // run or a goal stops the last one). (A second's slack: the DAW started it a moment before Kumi heard so.)
+        let own_playing = self.played.borrow().back().is_some_and(|(_, to)| *to + 1000 > chrono::Utc::now().timestamp_millis());
         let started = match self.ask("render", args, signal.clone()).await? {
             Ok(started) => started,
             Err(refused) => return Ok(Err(refused.why)),
@@ -819,6 +819,8 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             Ok(Ok(answer)) => {
                 let playing = answer.get("playing") == Some(&Value::Bool(true));
                 if playing {
+                    // (as long as the DAW says it plays it)
+                    let seconds = answer.get("seconds").and_then(Value::as_f64).filter(|s| s.is_finite()).unwrap_or(seconds);
                     let now = chrono::Utc::now().timestamp_millis();
                     let mut played = self.played.borrow_mut();
                     played.push_back((now, now + (seconds * 1000.) as i64));
