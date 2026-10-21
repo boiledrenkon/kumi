@@ -593,7 +593,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(changed(format!("the hardware output {} has been changed in REAPER since Kumi added it", label(ctx, &found))));
     }
     // Its envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
-    let drawn = active_envelopes(ctx.reaper, found.track, found.index);
+    let drawn = drawn_envelopes(ctx.reaper, found.track, found.index);
     if !restore.discard && drawn > 0 {
         return Err(changed(format!(
             "the hardware output {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
@@ -613,13 +613,13 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 
 // ----- removing one -----
 
-/// The output's volume, pan and mute envelopes that are on: REAPER drops them with it, and undo makes the output again
-/// without them.
-fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
+/// The output's volume, pan and mute envelopes that are on or hold points (one bypassed is still drawn): REAPER drops
+/// them with it, and undo makes the output again without them.
+fn drawn_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
     ["<VOLENV", "<PANENV", "<MUTEENV"]
         .into_iter()
         .filter_map(|chunk| reaper.send_envelope_in(track, HW, index, chunk))
-        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE") || reaper.envelope_point_count(*envelope) > 0)
         .count()
 }
 
@@ -628,7 +628,7 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, reference)?;
     let now = state(ctx.reaper, found.track, found.index);
     let mut display = json!({"title": format!("Removed hardware output {}", label(ctx, &found)), "before": now});
-    let envelopes = active_envelopes(ctx.reaper, found.track, found.index);
+    let envelopes = drawn_envelopes(ctx.reaper, found.track, found.index);
     if envelopes > 0 {
         display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
     }
@@ -644,7 +644,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let (from, to) = ends(ctx, &found);
     let last = found.index == reaper.send_count(found.track, HW) - 1;
     let stamp = stamp_of(reaper, found.track, found.index);
-    let lost = active_envelopes(reaper, found.track, found.index);
+    let lost = drawn_envelopes(reaper, found.track, found.index);
     if !reaper.remove_send(found.track, HW, found.index) {
         return Err(failed("REAPER wouldn't remove the hardware output"));
     }
