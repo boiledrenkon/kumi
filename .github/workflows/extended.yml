@@ -42,9 +42,11 @@ jobs:
           - { os: ubuntu-24.04, label: Linux, part: 3, parts: 3 }
           - { os: macos-15, label: macOS, part: 1, parts: 2 }
           - { os: macos-15, label: macOS, part: 2, parts: 2 }
-          - { os: windows-2025, label: Windows, part: 1, parts: 3 }
-          - { os: windows-2025, label: Windows, part: 2, parts: 3 }
-          - { os: windows-2025, label: Windows, part: 3, parts: 3 }
+          # (Windows runs the slowest: three shards took 12, 18 and 20 minutes, the last at its limit)
+          - { os: windows-2025, label: Windows, part: 1, parts: 4 }
+          - { os: windows-2025, label: Windows, part: 2, parts: 4 }
+          - { os: windows-2025, label: Windows, part: 3, parts: 4 }
+          - { os: windows-2025, label: Windows, part: 4, parts: 4 }
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
     steps:
