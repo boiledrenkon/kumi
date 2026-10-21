@@ -390,13 +390,18 @@ function M.print_of(text)
   return string.format("%08x%08x:%d", a, b, #text)
 end
 
--- Preset data as it reads, values and all, with the inner devices' SelectedPresetIsModified and IsSelected left out (they move
--- by themselves: Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the
--- producer's clicks, lab 2026-10-20): what the journal compares to tell Renoise's undo and redo of a Doofer's, a Splitter's or
--- a Notepad's contents.
+-- Preset data as it reads, values and all, with what moves by itself left out: the inner devices' SelectedPresetIsModified and
+-- IsSelected (Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the
+-- producer's clicks, lab 2026-10-20), and the view (a device folded or not, a Doofer's devices shown, the chain a Splitter
+-- shows or monitors, where a plug-in's editor sits): what the journal compares to tell Renoise's undo and redo of a Doofer's,
+-- a Splitter's or a Notepad's contents, and what a change's fence of them holds.
+M.VIEW_STATE = { "IsMaximized", "ShowDevices", "CurrentlyVisibleChain", "MonitorVisibleChain", "PluginEditorWindowPosition" }
 function M.content_of(xml)
   local content = xml:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
   content = content:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
+  for _, tag in ipairs(M.VIEW_STATE) do
+    content = content:gsub("<" .. tag .. ">[^<]*</" .. tag .. ">", "<" .. tag .. "/>")
+  end
   return M.print_of(content)
 end
 
