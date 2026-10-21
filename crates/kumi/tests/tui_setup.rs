@@ -990,3 +990,45 @@ case!(a_first_run_whose_daw_is_chosen_here_goes_on_with_its_setup, async {
     assert_eq!(live.calls(), ["open?", "install", "start", "connect"]);
     h.close().await;
 });
+
+case!(an_own_daws_setup_hands_the_session_its_bridge_and_reconnects_it, async {
+    // Review K1: once setup has put REAPER's extension in (its receipt is written), connecting hands the session the
+    // bridge's reference and reconnects it, as Live's setup does, so the session connects without a restart.
+    use kumi::daw::DawProvider;
+    use kumi_runtime::core::contracts::SessionController;
+    let home = tempfile::tempdir().unwrap();
+    let kumi_home = home.path().join(".kumi");
+    let env = kumi_runtime::system::Env::from([
+        ("HOME".into(), home.path().display().to_string()),
+        ("KUMI_HOME".into(), kumi_home.display().to_string()),
+        ("KUMI_REAPER_RESOURCE_DIR".into(), home.path().join("REAPER").display().to_string()),
+    ]);
+    let bridge: Rc<RefCell<Option<String>>> = Rc::default();
+    let control = Rc::new(Control::default());
+    let controller: Rc<RefCell<Option<std::rc::Weak<dyn SessionController>>>> = Rc::default();
+    let as_controller: Rc<dyn SessionController> = control.clone();
+    *controller.borrow_mut() = Some(Rc::downgrade(&as_controller));
+    let setup = kumi::daw::own::REAPER.setup(&env, bridge.clone(), false, controller.clone());
+    // The extension in place: its receipt says where its reference is.
+    let paths = daw_bridge::paths::BridgePaths::new(&kumi_home, daw_bridge::Daw::Reaper);
+    std::fs::create_dir_all(paths.receipt().parent().unwrap()).unwrap();
+    let reference = home.path().join("REAPER/UserPlugins/kumi-bridge-reference.json").display().to_string();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: home.path().join("REAPER/UserPlugins/reaper_kumi.dylib").display().to_string(),
+        reference: reference.clone(),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    std::fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    setup.connect().await;
+    assert_eq!(bridge.borrow().as_deref(), Some(reference.as_str()), "the session finds REAPER through the bridge now");
+    assert!(control.calls.borrow().contains(&"reconnect".to_string()), "and reconnects: {:?}", control.calls.borrow());
+    drop(as_controller);
+});
