@@ -149,6 +149,27 @@ test("phrases: a phrase made at or before the program, and Kumi's undo of a dele
   eq(bass.phrase_program, 1)
 end)
 
+test("phrases: Kumi's undo of a phrase it made puts the program back on its phrase when Renoise's delete moved it off", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  bass:insert_phrase_at(3).name = "P3"
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  mock.data.undo.stack = {}
+  local function playing() return bass:phrase(bass.phrase_program).name end
+  local added = change(peer, "phrase-add", { ref = iref(place(peer), 2), name = "New" })
+  eq(#bass.phrases, 4)
+  eq(playing(), "P2")
+  -- (Renoise moves the program as it deletes the phrase above it: 2, delete 4 -> 3, measured)
+  mock.program_after_delete = function(program, ph) if program == 2 and ph == 4 then return 3 end end
+  local undone = restore(peer, "phrase-add", added)
+  mock.program_after_delete = nil
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#bass.phrases, 3)
+  eq(playing(), "P2", "the program plays the phrase it played")
+end)
+
 test("phrases: a new phrase's loop is checked against the 32 lines Renoise makes it with (#361 N-N4)", function()
   local env, peer = setup()
   local record, done = change(peer, "phrase-add", { ref = iref(place(peer), 2), loopEnd = 24 })

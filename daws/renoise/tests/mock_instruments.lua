@@ -1435,6 +1435,11 @@ function M.instrument_proxy(i)
     elseif program > ph then
       write(instrument, "phrase_program", program - 1)
     end
+    -- (a test's Renoise that moves the program as it was also seen to, off its phrase: program 2, delete 4 -> 3, lab 2026-10-21)
+    if M.program_after_delete then
+      local moved = M.program_after_delete(program, ph, #instrument.phrases)
+      if moved then write(instrument, "phrase_program", moved) end
+    end
   end
   fields.can_insert_phrase_mapping_at = function(_, m) return m >= 1 and m <= #instrument.mappings + 1 end
   fields.insert_phrase_mapping_at = function(_, m, phrase_proxy)
