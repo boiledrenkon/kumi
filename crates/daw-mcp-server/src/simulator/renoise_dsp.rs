@@ -128,6 +128,13 @@ impl Chains {
         Some(chain.len() as u64)
     }
 
+    /// A device the producer puts at a place in a track's chain (from 1; TrackVolPan is 1).
+    pub fn insert(&mut self, track: u64, at: u64, path: &str) {
+        let made = device(path).expect("a device the simulator knows");
+        let chain = self.tracks.entry(track).or_insert_with(|| vec![device("TrackVolPan").unwrap()]);
+        chain.insert(((at.max(2) - 1) as usize).min(chain.len()), made);
+    }
+
     /// A parameter's value now, by its device's place and its name.
     pub fn value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
         let device = self.tracks.get(&track)?.get(at.checked_sub(1)? as usize)?;

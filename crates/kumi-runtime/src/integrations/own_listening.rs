@@ -966,6 +966,12 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 }
 
+/// The device a parameter's ref is of, where refs are ids (REAPER's `r:param:{FX GUID}:{index}` is of `r:fx:{FX GUID}`).
+pub(super) fn device_of_param(reference: &str) -> Option<String> {
+    let (guid, _) = reference.strip_prefix("r:param:")?.rsplit_once(':')?;
+    Some(format!("r:fx:{guid}"))
+}
+
 /// One knob's change: the device as it is now with the knob's number (a knob's own ref can be from before a search's copies
 /// moved Renoise's refs), or the knob's ref where it has no number.
 fn knob_change(device: &str, knob: &str, field: &str, raw: f64) -> Value {

@@ -384,7 +384,7 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
         .run_until(async {
             let home = tempfile::tempdir().unwrap();
             let script = ReaperScript::new(3, 0);
-            script.add_fx("r:track:{T0002}", "ReaEQ");
+            let eq = script.add_fx("r:track:{T0002}", "ReaEQ");
             let simulator = reaper_lab(&script, home.path(), |_| {}).await;
             let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
             reaper.start(Signal::new()).await.unwrap();
@@ -437,9 +437,16 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
             let second = script.listening().kept();
             assert_eq!(second.len(), 1, "the last best went: {second:?}");
             assert_ne!(second[0].0, first[0].0, "a fresh copy is kept");
-            // The winner settles on the track itself, as one change (REAPER's fx-params).
+            // The producer put an FX first on the track meanwhile: the winner still lands on the ReaEQ, found by its id, as
+            // one change (REAPER's fx-params).
+            script.insert_fx_first("r:track:{T0002}", "Volume Adjustment");
             assert_eq!(rig.settle(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), None);
             assert_eq!(script.fx_param("r:track:{T0002}", "ReaEQ", "Gain-Band 2"), Some(0.7));
+            assert_eq!(
+                script.fx_param("r:track:{T0002}", "Volume Adjustment", "Adjustment (dB)"),
+                Some(0.52),
+                "the FX now first is untouched"
+            );
             let applied: Vec<Value> = script
                 .asked()
                 .into_iter()
@@ -448,6 +455,12 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
                 .collect();
             assert_eq!(applied.len(), 1, "{applied:?}");
             assert_eq!(applied[0]["kind"], "fx-params");
+            // The ReaEQ gone: nothing is set or kept, and why is said.
+            script.remove_fx(&eq);
+            let refused = rig.settle(&slots[0].name, &knobs, &[0.4], Signal::new()).await.unwrap();
+            assert!(refused.as_deref().is_some_and(|why| why.contains("moved or went")), "{refused:?}");
+            let kept = rig.keep_best(&slots[0].name, &knobs, &[0.4], Signal::new()).await.unwrap();
+            assert!(kept.contains("moved or went"), "{kept}");
             rig.close().await.unwrap();
             assert_eq!(script.listening().scratch_copies(), 0, "the copies are gone");
             assert_eq!(script.listening().kept().len(), 1, "the best stays a track of the project's");
@@ -503,12 +516,18 @@ async fn a_renoise_goal_settles_its_winner_as_one_device_params_change_that_kumi
                 .collect();
             assert_eq!(applied.len(), 2, "the settle and the safety Maximizer's Boost at 0 dB: {applied:?}");
             assert_eq!(applied[0]["values"], json!([{"param": 2, "value": 6.0}]), "{applied:?}");
-            rig.close().await.unwrap();
             // Kumi's undo takes the settle back as a new step.
             let observed = renoise.observe(Signal::new(), None).await.unwrap();
             let undo = tool(&observed, "undo_change").execute(object(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(!undo.is_error && undo.text.contains("EQ 10 1 parameter"), "{}", undo.text);
             assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(0.));
+            // The producer puts a device before the EQ: Renoise's refs are places, so the knobs' device isn't where it was
+            // and nothing is set.
+            script.insert_device(4, 2, "Gainer");
+            let refused = rig.settle(&slots[0].name, &knobs, &[-3.], Signal::new()).await.unwrap();
+            assert!(refused.as_deref().is_some_and(|why| why.contains("moved or went")), "{refused:?}");
+            assert_eq!(script.device_value(4, eq + 1, "Gain 2 (63 Hz)"), Some(0.), "the EQ, now one further, is untouched");
+            rig.close().await.unwrap();
             assert_ours(&told.borrow());
             renoise.close().await.unwrap();
             simulator.stop();

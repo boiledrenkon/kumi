@@ -341,6 +341,27 @@ impl ReaperScript {
         reference
     }
 
+    /// An FX the producer puts first on a track's chain: its ref.
+    pub fn insert_fx_first(&self, track: &str, name: &str) -> String {
+        let reference = self.add_fx(track, name);
+        let mut state = self.state.lock().unwrap();
+        if let Some(chain) = state.fx.get_mut(track) {
+            let fx = chain.pop().expect("the FX just added");
+            chain.insert(0, fx);
+        }
+        reference
+    }
+
+    /// The producer deletes an FX (its ref).
+    pub fn remove_fx(&self, reference: &str) {
+        let mut state = self.state.lock().unwrap();
+        let guid = reference.strip_prefix("r:fx:").unwrap_or(reference).to_owned();
+        for chain in state.fx.values_mut() {
+            chain.retain(|fx| fx.guid != guid);
+        }
+        state.changed += 1;
+    }
+
     /// An input FX the producer puts on a track (on the master, a monitoring FX): its ref.
     pub fn add_input_fx(&self, track: &str, name: &str) -> String {
         let reference = self.add_fx(track, name);
