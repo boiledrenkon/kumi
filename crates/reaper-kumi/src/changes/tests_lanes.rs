@@ -114,6 +114,25 @@ fn undoing_a_move_finds_its_lane_by_the_items_on_it_after_a_lane_went_in_above()
 }
 
 #[test]
+fn a_lane_names_undo_goes_through_another_lanes_rename_and_an_empty_lane_dropped_below() {
+    let lab = lanes_lab();
+    let names = || state(|s| s.tracks[1].lane_names.clone());
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 0, "name": "Lead"}));
+    // The producer renames the other lane.
+    state(|s| s.tracks[1].lane_names[1] = "Old".into());
+    lab.undo("lane-name", &preview, &applied).unwrap();
+    assert_eq!(names(), ["1", "Old"]);
+    // REAPER drops the empty lane below the one Kumi named.
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 0, "name": "Lead"}));
+    state(|s| {
+        s.tracks[1].lane_names.truncate(1);
+        s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 1.0);
+    });
+    lab.undo("lane-name", &preview, &applied).unwrap();
+    assert_eq!(names(), ["1"]);
+}
+
+#[test]
 fn undoing_lanes_off_leaves_the_track_once_the_producer_added_an_item_while_they_were_off_unless_told_to_discard() {
     let lab = lanes_lab();
     let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
