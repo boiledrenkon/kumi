@@ -264,6 +264,28 @@ test("phrases: a script written while the producer changes the song during the c
   eq(phrase(2, 1).script.paragraphs[1], "-- a phrase script", "the producer's script is back")
 end)
 
+test("phrases: after Renoise's undo of a script Kumi wrote (its text back, uncommitted), Kumi's undo commits it so the old script plays (#361 N-S8)", function()
+  local env, peer = setup()
+  local code = "return cycle(\"c4 e4\")"
+  local previewed, epoch, layout = preview(peer, "phrase-script", { ref = pref(place(peer), 2, 1), code = code })
+  local id = I.send(peer, "change_apply", { kind = "phrase-script", input = { ref = pref(epoch, 2, 1), code = code }, fence = previewed.fence, desc = "Kumi: script (k630)", epoch = epoch, layout = layout })
+  mock.advance(60)
+  mock.compile_scripts()
+  local done = I.wait(peer, id)
+  ok(done.result, json.encode(done.error or {}))
+  mock.song:undo()
+  H.tick(2)
+  local script = phrase(2, 1).script
+  eq(script.paragraphs[1], "-- a phrase script", "Renoise's undo brought the text back")
+  local record = { target = done.result.target, prior = previewed.prior, applied = done.result.applied, epoch = done.result.epoch, layout = done.result.layout }
+  local undone = restore(peer, "phrase-script", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(undone.result.undo.entry, true, "a step of its own")
+  mock.compile_scripts()
+  eq(script.committed[1], "-- a phrase script", "what plays is the old script")
+  ok(undone.result.display.note:find("committed it", 1, true), undone.result.display.note)
+end)
+
 test("phrases: a script rendered to lines; Kumi's undo puts the lines it had back", function()
   local env, peer = setup()
   local p = mock.song:instrument(2):phrase(1)

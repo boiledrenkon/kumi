@@ -1052,6 +1052,16 @@ base.register({
     local phrase = objects.phrase
     local now = script_state(phrase)
     if now.mode == prior.mode and same_paragraphs(now.paragraphs, prior.paragraphs) then
+      -- (Renoise's own undo puts the text back uncommitted, lab: the player keeps Kumi's script until it is committed)
+      if (phrase.script.pending_changes or 0) > 0 then
+        song:describe_undo(desc)
+        phrase.script:commit()
+        base.note_restored(env.journal, "phrase-script", places_.journal_place("phrase", n), { mode = applied.mode, paragraphs = applied.paragraphs }, base.KINDS["phrase-script"])
+        return {
+          restored = { done = true }, undo = { desc = desc, entry = true },
+          display = { title = label .. "'s script put back", note = "Its text was back (Renoise's undo), but not committed, so Kumi's script still played: Kumi committed it." },
+        }
+      end
       return { restored = { done = true }, display = { title = label .. "'s script is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     if not restore.discard and (now.mode ~= applied.mode or not same_paragraphs(now.paragraphs, applied.paragraphs)) then

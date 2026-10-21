@@ -694,8 +694,9 @@ local function script_object(phrase)
       script.pending = script.pending + 1
       M.fire(obs(script, "paragraphs"))
       local new = copy(value)
-      M.record(function() script.paragraphs = copy(old); M.fire(obs(script, "paragraphs")) end,
-        function() script.paragraphs = copy(new); M.fire(obs(script, "paragraphs")) end)
+      -- (Renoise's undo and redo put the text back uncommitted: the player keeps what was committed, lab "pending 2")
+      M.record(function() script.paragraphs = copy(old); script.pending = script.pending + 1; M.fire(obs(script, "paragraphs")) end,
+        function() script.paragraphs = copy(new); script.pending = script.pending + 1; M.fire(obs(script, "paragraphs")) end)
     end,
   })
 end
