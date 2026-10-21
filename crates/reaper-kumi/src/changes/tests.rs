@@ -2191,6 +2191,29 @@ fn a_send_ref_read_before_the_producer_removed_one_and_added_one_is_refused_at_t
 }
 
 #[test]
+fn a_send_ref_read_before_kumi_set_that_sends_automation_mode_or_showed_its_envelope_still_names_it() {
+    let lab = Lab::new();
+    // (REAPER hands out each send's volume envelope, hidden and off until shown)
+    state(|s| {
+        let mut envelope = fake::FakeEnvelope::for_send("Send Volume: Reverb", 0, "<VOLENV", 0);
+        envelope.active = false;
+        envelope.visible = false;
+        envelope.pts = Some(vec![]);
+        s.tracks[1].envelopes.push(envelope);
+    });
+    let (first, _) = two_sends();
+    // Kumi's own writes to the first send outside the send kinds: its automation mode, its volume envelope shown.
+    let (preview, applied) = lab.make("send-automation-mode", json!({"ref": first, "mode": "touch"}), "Kumi: x (km001)");
+    let (shown_preview, shown) = lab.make("envelope-show", json!({"sendRef": first, "name": "volume"}), "Kumi: x (km002)");
+    // The ref read before both still names that send, for a change and for both undos.
+    assert_eq!(mute_through(&lab, &first), None);
+    assert!(state(|s| s.tracks[1].sends[0].mute && !s.tracks[1].sends[1].mute));
+    lab.undo("envelope-show", &shown_preview, &shown, "Kumi: undo (km003)").unwrap();
+    lab.undo("send-automation-mode", &preview, &applied, "Kumi: undo (km004)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends[0].extra.get("I_AUTOMODE").copied().unwrap_or(-1.0)), -1.0);
+}
+
+#[test]
 fn a_send_ref_read_before_the_producer_changed_the_other_send_to_that_track_is_refused() {
     let lab = Lab::new();
     let (first, _) = two_sends();

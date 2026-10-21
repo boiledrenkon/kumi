@@ -906,6 +906,22 @@ fn shown_of(ctx: &Ctx, input: &Value) -> Done<Shown> {
     }
 }
 
+/// A write to an envelope, noted for the sends between two tracks when it is one of a send's: whether it is on is part of
+/// what a ref to one of several sends between the same tracks carries (`sends::noting_writes`).
+fn writing<T>(ctx: &Ctx, at: &EnvAt, write: impl FnOnce() -> T) -> T {
+    let reaper = ctx.reaper;
+    let send = match at.owner {
+        EnvOwner::Track(track) => (0..reaper.send_count(track, 0)).find_map(|index| {
+            SEND_ENVELOPES.iter().any(|(_, chunk)| reaper.send_envelope(track, index, chunk) == Some(at.envelope)).then_some((track, index))
+        }),
+        EnvOwner::Take(_) => None,
+    };
+    match send {
+        Some((track, index)) => super::sends::noting_writes(reaper, track, index, write),
+        None => write(),
+    }
+}
+
 /// The flags a show asks for: shown and on unless said otherwise; armed only when given.
 fn wanted_flags(input: &Value) -> Done<(Option<bool>, Option<bool>, Option<bool>)> {
     let flag = |key: &str| -> Done<Option<bool>> {
@@ -1136,7 +1152,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let unwritten = created.is_none()
         && [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().all(|(k, v)| v.is_none_or(|v| before[*k] == v));
     if !unwritten {
-        set_flags(reaper, at.envelope, flags);
+        writing(ctx, &at, || set_flags(reaper, at.envelope, flags));
     }
     let after = flags_of(reaper, at.envelope);
     if [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().any(|(k, v)| v.is_some_and(|v| after[*k] != v)) {
@@ -1184,15 +1200,19 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let mut display = json!({"title": format!("{label} put back as it was")});
     if restore.prior["exists"] == true {
         let chunk = restore.prior["chunk"].as_str().ok_or_else(|| bad("prior.chunk"))?;
-        reaper.set_env_chunk(at.envelope, chunk);
-        mark_envelope(reaper, at.envelope);
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, chunk);
+            mark_envelope(reaper, at.envelope);
+        });
         if !same_env(&env_state(ctx, at.envelope), &restore.prior["state"]) {
             return Err(("uncertain".into(), format!("REAPER didn't put {label} back exactly: read it")));
         }
     } else {
         let chunk = reaper.env_chunk(at.envelope).ok_or_else(|| failed("REAPER wouldn't give the envelope's state"))?;
-        reaper.set_env_chunk(at.envelope, &emptied(&chunk));
-        mark_envelope(reaper, at.envelope);
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, &emptied(&chunk));
+            mark_envelope(reaper, at.envelope);
+        });
         let flags = flags_of(reaper, at.envelope);
         if flags["visible"] == true || flags["active"] == true {
             return Err(failed(format!("REAPER kept {label}")));
@@ -1872,8 +1892,9 @@ pub fn send_mode_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied>
         return Err(changed(format!("the automation mode of send {route} changed since the preview")));
     }
     if now != wanted
-        && (!ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
-            || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
+        && (!super::sends::noting_writes(ctx.reaper, track, index, || {
+            ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
+        }) || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
     {
         return Err(failed(format!("REAPER kept the automation mode of send {route}")));
     }
@@ -1893,7 +1914,7 @@ pub fn send_mode_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if !restore.discard && now != applied {
             return Err(changed(format!("the automation mode of send {route} has been changed in REAPER since Kumi set it")));
         }
-        if !ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64)
+        if !super::sends::noting_writes(ctx.reaper, track, index, || ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64))
             || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != prior
         {
             return Err(failed(format!("REAPER kept the automation mode of send {route}")));

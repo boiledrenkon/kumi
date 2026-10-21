@@ -179,6 +179,17 @@ fn note_written(reaper: &Reaper, owner: Track, receiver: Track, before: String) 
     });
 }
 
+/// Runs a write Kumi makes to send `index` of `owner` elsewhere (its automation mode, its envelopes shown or hidden) and
+/// notes what it did to the sends between the two tracks, as this module's own writes are: a ref to one of several
+/// sends between them, read before, still names its send after.
+pub(super) fn noting_writes<T>(reaper: &Reaper, owner: Track, index: i32, write: impl FnOnce() -> T) -> T {
+    let Some(receiver) = reaper.send_peer(owner, 0, index) else { return write() };
+    let before = pair_seen(reaper, owner, receiver);
+    let done = write();
+    note_written(reaper, owner, receiver, before);
+    done
+}
+
 /// Whether a ref to one of the sends from `owner` to `receiver` still names the send it was read as: those sends are as the ref
 /// saw them (`seen`), or as Kumi's own writes made them since. A ref to one of two or more without `seen` names none.
 pub(crate) fn seen_holds(reaper: &Reaper, owner: Track, receiver: Track, seen: Option<&str>) -> bool {
