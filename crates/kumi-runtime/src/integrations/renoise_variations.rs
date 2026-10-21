@@ -12,7 +12,7 @@ use crate::core::{
     contracts::{JsonObject, KernelTool, Reach, Render, ToolResult},
     errors::RuntimeError,
     refs::RefScheme,
-    variations::{roll, seed_of, Bounds, Material, Purpose, Take, TakeSet, TakeState, DIRECTIONS},
+    variations::{roll, seed_of, Bounds, Material, Purpose, Take, TakeSet, TakeState, Verdict, DIRECTIONS},
 };
 use async_trait::async_trait;
 use kumi_common::abort::Signal;
@@ -113,6 +113,8 @@ struct Recipe {
     ops: Vec<Op>,
     lines: Option<Vec<Value>>,
     from: Option<usize>,
+    /// Kumi picked its direction (the model left it): one that can't pass gives way to another direction.
+    picked: bool,
 }
 
 impl Recipe {
@@ -131,7 +133,7 @@ impl Recipe {
             return Err("each take needs ops, lines or from".into());
         }
         let direction = value.get("direction").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        Ok(Recipe { direction, ops, lines, from })
+        Ok(Recipe { direction, ops, lines, from, picked: false })
     }
 
     /// A recipe Kumi picks for a direction the model left to it.
@@ -147,7 +149,7 @@ impl Recipe {
             "moved ghosts" => vec![op(json!({"op": "ghosts", "amount": 0.8})), op(json!({"op": "fill", "amount": 0.15}))],
             _ => vec![op(json!({"op": "octave", "amount": 0.4, "up": true}))],
         };
-        Recipe { direction: direction.into(), ops, lines: None, from: None }
+        Recipe { direction: direction.into(), ops, lines: None, from: None, picked: true }
     }
 }
 
@@ -458,9 +460,10 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         let mut refs = BTreeMap::new();
         let mut written = BTreeMap::new();
         let mut skipped = Vec::new();
+        let mut used: Vec<String> = recipes.iter().map(|recipe| recipe.direction.clone()).collect();
         for recipe in recipes {
             let number = set.next_number();
-            let drawn = match self.draw(&set, number, &recipe, &bounds) {
+            let (drawn, recipe) = match self.draw_picking(&set, number, &recipe, &mut used, &bounds) {
                 Ok(drawn) => drawn,
                 Err(why) => {
                     skipped.push(format!("V{number} ({}) wasn't made: {why}", direction_of(&recipe)));
@@ -512,6 +515,34 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         Ok(reply)
     }
 
+    /// Draws take `number` by its recipe; one whose direction Kumi picked and that can't pass gives way to the next direction
+    /// no take of the request has (`used`). The take and the recipe that made it.
+    fn draw_picking(
+        &self,
+        set: &Set,
+        number: usize,
+        recipe: &Recipe,
+        used: &mut Vec<String>,
+        bounds: &Bounds,
+    ) -> Result<(Drawn, Recipe), String> {
+        let first = self.draw(set, number, recipe, bounds);
+        if first.is_ok() || !recipe.picked {
+            return first.map(|drawn| (drawn, recipe.clone()));
+        }
+        let mut last = first.map(|drawn| (drawn, recipe.clone()));
+        let free: Vec<&str> = DIRECTIONS.iter().copied().filter(|direction| !used.iter().any(|u| u == direction)).collect();
+        for direction in free {
+            used.push(direction.to_string());
+            let mut other = Recipe::of_direction(direction);
+            other.from = recipe.from;
+            last = self.draw(set, number, &other, bounds).map(|drawn| (drawn, other));
+            if last.is_ok() {
+                break;
+            }
+        }
+        last
+    }
+
     /// Draws take `number` by its recipe and checks it (re-rolling a drawn one): what it is and what was done.
     /// (A changed take is checked against its old self too: a change must change it.)
     fn draw(&self, set: &Set, number: usize, recipe: &Recipe, bounds: &Bounds) -> Result<Drawn, String> {
@@ -537,7 +568,14 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         // (written lines are what they are: one try; operators draw again from another seed)
         let tries = if recipe.ops.is_empty() { 1 } else { TRIES };
         let said: RefCell<Vec<String>> = RefCell::default();
-        let rolled = roll(set.seed, number, tries, source, &others, bounds, |seed| {
+        // (a try too close to the source or a take draws bolder next time, one too far milder)
+        let factor = std::cell::Cell::new(1.0f64);
+        let rolled = roll(set.seed, number, tries, source, &others, bounds, |seed, before| {
+            match before {
+                Some(Verdict::NearSource(_) | Verdict::NearTake(..)) => factor.set(factor.get() * 1.35),
+                Some(Verdict::FarFromSource(_)) => factor.set(factor.get() * 0.7),
+                _ => {}
+            }
             let mut take = match &recipe.lines {
                 Some(lines) => {
                     let mut written = Lines::from_cells(lines, offset, base.length, base.lpb)?;
@@ -552,7 +590,7 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
                 words.push("lines as written".to_string());
             }
             for op in &recipe.ops {
-                if let Some(done) = op.apply(&mut take, source.unwrap_or(&base), &mut rng) {
+                if let Some(done) = op.scaled(factor.get()).apply(&mut take, source.unwrap_or(&base), &mut rng) {
                     words.push(done);
                 }
             }
@@ -686,7 +724,7 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             if recipe.from.is_none() && set.source.material.is_none() {
                 recipe.from = Some(number);
             }
-            let drawn = match self.draw(&set, number, &recipe, &bounds) {
+            let (drawn, recipe) = match self.draw_picking(&set, number, &recipe, &mut used, &bounds) {
                 Ok(drawn) => drawn,
                 Err(why) => {
                     skipped.push(format!("V{number} wasn't changed: {why}"));

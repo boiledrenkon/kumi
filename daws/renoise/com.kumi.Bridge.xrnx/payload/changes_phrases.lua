@@ -592,9 +592,11 @@ end
 base.register({ kind = "phrase-delete", custom = true, shape = "deleted", by_place = true, preview = delete_preview, apply = delete_apply, restore = delete_restore })
 
 -- phrases-drop {refs: phrases of one instrument} (M7: the variations not kept, in one undo step): several phrases deleted in one
--- step, each kept (its settings, lines and column names) to put back. A phrase in use is refused (keys mapped, playing a script,
--- the instrument's program, or named by a 0Z command): phrase_delete keeps those. Each delete takes its own mark of the phrases'
--- log, so Kumi's undo puts each back after the phrase that was before it, wherever the producer's edits moved that one.
+-- step, each kept (its settings, lines and column names, and whether it was the instrument's program) to put back. A phrase in
+-- use otherwise is refused (keys mapped, playing a script, or named by a 0Z command): phrase_delete keeps those. Each delete takes
+-- its own mark of the phrases' log, so Kumi's undo puts each back after the phrase that was before it, wherever the producer's
+-- edits moved that one. (Renoise 3.5.4 plays new instruments' phrases by program, and moves the program off a phrase it deletes:
+-- lab 2026-10-21.)
 
 M.MAX_DROPPED = 64
 
@@ -616,9 +618,6 @@ local function drop_plan(song, env, input)
     local phrase = item.phrase
     if phrase.mapping then bad(item.label .. " is mapped to keys: delete it with phrase_delete, which keeps its keys") end
     if phrase.playback_mode == renoise.InstrumentPhrase.PLAY_SCRIPT then bad(item.label .. " plays a script: delete it with phrase_delete, which keeps it") end
-    if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == item.n[2] then
-      bad(item.label .. " is the instrument's program: delete it with phrase_delete")
-    end
   end
   return instrument_at, items
 end
@@ -668,7 +667,8 @@ local function drops_apply(song, env, input, fence, desc)
   for k, item in ipairs(items) do
     local lines, cost = read_lines(item.phrase)
     writes = writes + cost
-    kept[k] = { index = item.n[2], settings = settings_of(item.phrase), lines = lines, columns = columns_of(item.phrase), logs = env.logs_of and env.logs_of("phrase", item.n) or nil }
+    kept[k] = { index = item.n[2], settings = settings_of(item.phrase), lines = lines, columns = columns_of(item.phrase), logs = env.logs_of and env.logs_of("phrase", item.n) or nil,
+      program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == item.n[2]) or nil }
   end
   if writes > M.MAX_WRITES then fail("failed", "those phrases hold more lines than Kumi puts back in one step: drop fewer at once") end
   local title = drop_title(items)
@@ -678,8 +678,10 @@ local function drops_apply(song, env, input, fence, desc)
     instrument:delete_phrase_at(items[k].n[2])
     kept[k].after = env.list_mark and env.list_mark("phrases", i) or nil
   end
+  -- (the program Renoise moved it to: unless the producer chooses another since, Kumi's undo plays the one it was again)
+  local program_after = instrument.phrase_program
   return {
-    applied = { deleted = true, count = #items }, material = { instrument = places_.place_of(env, "instrument", { i }), phrases = kept },
+    applied = { deleted = true, count = #items }, material = { instrument = places_.place_of(env, "instrument", { i }), phrases = kept, programAfter = program_after },
     target = places_.target_of(env, "instrument", { i }), display = { title = title, note = DROP_NOTE }, undo = { desc = desc, entry = true },
     -- (the journal tells Renoise's undo of it by the first phrase coming back: its undo puts them back from the first up)
     prior = { deleted = false }, place = places_.journal_place("phrase", { i, items[1].n[2] }), shape = "deleted",
@@ -726,6 +728,7 @@ local function drops_restore(song, env, restore, desc)
     end
   end
   song:describe_undo(desc)
+  local program_at
   -- (from the first up: each place follows the ones put back before it through the log)
   for _, saved in ipairs(material.phrases) do
     local at = env.list_after("phrases", n[1], nil, saved.index, saved.after)
@@ -738,6 +741,16 @@ local function drops_restore(song, env, restore, desc)
     if env.back then env.back("phrases", n[1], nil, saved.after, at) end
     if env.adopt and saved.logs then env.adopt("phrase", { n[1], at }, saved.logs) end
     base.note_restored_at(env.journal, "phrases-drop", places_.journal_place("phrase", { n[1], at }))
+    if saved.program then program_at = at end
+  end
+  if program_at then
+    pcall(function()
+      local program = instrument.phrase_program
+      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE
+        and (program == 0 or program > #instrument.phrases or (material.programAfter ~= nil and program == material.programAfter)) then
+        instrument.phrase_program = program_at
+      end
+    end)
   end
   return { restored = { done = true }, display = { title = title }, undo = { desc = desc, entry = true } }
 end

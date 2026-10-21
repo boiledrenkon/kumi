@@ -149,8 +149,8 @@ pub struct Rolled<M> {
     pub verdict: Verdict,
 }
 
-/// Draws a take up to `tries` times (each from its own seed) until one passes `check`; a draw that can't pass because
-/// nothing in it is random stops at once. Answers the first that passes, else the last made with why it failed.
+/// Draws a take up to `tries` times (each from its own seed, told why the try before failed, so it can draw bolder or milder)
+/// until one passes `check`. Answers the first that passes, else the last made with why it failed.
 pub fn roll<M: Material>(
     set_seed: u64,
     number: usize,
@@ -158,13 +158,14 @@ pub fn roll<M: Material>(
     source: Option<&M>,
     others: &[(usize, &M)],
     bounds: &Bounds,
-    mut draw: impl FnMut(u64) -> Result<M, String>,
+    mut draw: impl FnMut(u64, Option<&Verdict>) -> Result<M, String>,
 ) -> Rolled<M> {
     let mut last = Rolled { take: None, seed: 0, tries: 0, verdict: Verdict::Failed("nothing was drawn".into()) };
     for attempt in 0..tries.max(1) {
         let seed = seed_of(set_seed, number, attempt);
+        let before = (attempt > 0).then(|| last.verdict.clone());
         last.tries = attempt + 1;
-        match draw(seed) {
+        match draw(seed, before.as_ref()) {
             Ok(take) => {
                 let verdict = check(&take, source, others, bounds);
                 let fine = verdict.is_fine();
@@ -370,14 +371,18 @@ mod tests {
     fn a_draw_re_rolls_until_a_take_passes_and_says_why_when_none_does() {
         let source = Dots(vec![0, 4, 8, 12]);
         let mut calls = 0;
-        let rolled = roll(42, 1, 8, Some(&source), &[], &Bounds::default(), |_| {
+        let mut told = Vec::new();
+        let rolled = roll(42, 1, 8, Some(&source), &[], &Bounds::default(), |_, before| {
+            told.push(before.cloned());
             calls += 1;
             Ok(if calls < 3 { source.clone() } else { Dots(vec![0, 4, 8, 13]) })
         });
         assert_eq!(rolled.tries, 3);
         assert!(rolled.verdict.is_fine());
         assert_eq!(rolled.take, Some(Dots(vec![0, 4, 8, 13])));
-        let never = roll(42, 1, 4, Some(&source), &[], &Bounds::default(), |_| Ok(source.clone()));
+        assert_eq!(told[0], None, "the first try is told nothing");
+        assert!(matches!(told[1], Some(Verdict::NearSource(_))), "the next is told why the one before failed: {told:?}");
+        let never = roll(42, 1, 4, Some(&source), &[], &Bounds::default(), |_, _| Ok(source.clone()));
         assert_eq!(never.tries, 4);
         assert!(matches!(never.verdict, Verdict::NearSource(_)), "{:?}", never.verdict);
         assert!(never.verdict.words().contains("near-copy of the source"));

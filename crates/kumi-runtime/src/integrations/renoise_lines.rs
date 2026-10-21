@@ -428,6 +428,24 @@ impl Op {
         })
     }
 
+    /// The same operator, `factor` times as much of it (an amount stays within 0 to 1; a speed or a transpose is as it was).
+    pub fn scaled(&self, factor: f64) -> Op {
+        let more = |amount: &f64| (amount * factor).clamp(0.05, 1.);
+        match self {
+            Op::Shuffle { amount, bar } => Op::Shuffle { amount: more(amount), bar: *bar },
+            Op::Retrig { amount, faster } => Op::Retrig { amount: more(amount), faster: *faster },
+            Op::Reverse { amount } => Op::Reverse { amount: more(amount) },
+            Op::Ghosts { amount } => Op::Ghosts { amount: more(amount) },
+            Op::Thin { amount } => Op::Thin { amount: more(amount) },
+            Op::Fill { amount, volume } => Op::Fill { amount: more(amount), volume: *volume },
+            Op::Accent { amount } => Op::Accent { amount: more(amount) },
+            Op::Octave { amount, up } => Op::Octave { amount: more(amount), up: *up },
+            Op::Swing { amount } => Op::Swing { amount: more(amount) },
+            Op::Offsets { amount } => Op::Offsets { amount: more(amount) },
+            Op::Transpose { .. } | Op::Speed { .. } => self.clone(),
+        }
+    }
+
     /// Applies itself to `lines` (whose source is `source`, for what the source uses): what it did in a few words, or None
     /// when it found nothing to do.
     pub fn apply(&self, lines: &mut Lines, source: &Lines, rng: &mut Rng) -> Option<String> {

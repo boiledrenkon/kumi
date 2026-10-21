@@ -130,6 +130,7 @@ local TAKE = {
 local function variation_input(E, extra)
   local input = { pattern = K.ref(E, "seq", 2), track = K.ref(E, "track", 1), first = 0, last = 7, content = TAKE, name = "V1 \194\183 B", section = "Variations of B" }
   for k, v in pairs(extra or {}) do input[k] = v end
+  if input.section == false then input.section = nil end
   return input
 end
 
@@ -330,6 +331,21 @@ test("variations: Renoise's undo of a phrase drop leaves Kumi's undo nothing to 
   failure(call(peer, "change_preview", { kind = "phrases-drop", input = { refs = { pref(E2, 2, 3) } }, epoch = E2 }), "bad-params")
 end)
 
+test("variations: a dropped phrase that was the instrument's program plays as the program again after Kumi's undo", function()
+  local _, peer, bass = four_phrases()
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  mock.data.undo.stack = {}
+  local E = place(peer)
+  local record = change(peer, "phrases-drop", { refs = { pref(E, 2, 2), pref(E, 2, 4) } })
+  eq(phrase_names(bass), "P1,P3")
+  ok(bass.phrase_program ~= 2 or bass:phrase(2).name ~= "P2", "Renoise moved the program off it")
+  local undone = restore(peer, "phrases-drop", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(phrase_names(bass), "P1,P2,P3,P4")
+  eq(bass.phrase_program, 2, "P2 is the program again")
+end)
+
 test("variations: a phrase drop's apply refuses `changed` when a phrase changed after its preview (the fence)", function()
   local _, peer, bass = four_phrases()
   local epoch, layout = place(peer)
@@ -377,4 +393,23 @@ test("variations: where gives the place of what a ref names now (a slot's patter
   local again = K.call(peer, "read", { kind = "where", items = { { pattern = pattern.place } } })
   eq(again.result.items[1].number, 2)
   eq(table.concat(again.result.items[1].slots, ","), "4")
+end)
+
+test("variations: a kept variation that took the section of one dropped before it is still Kumi's to undo; its mutes are the producer's", function()
+  local _, peer = seq_setup()
+  local first = K.change(peer, "slot-variation", variation_input((K.place(peer))))
+  local second = K.change(peer, "slot-variation", variation_input((K.place(peer)), { section = false, content = { { line = 0, notes = { { col = 1, note = "C-4" } } } } }))
+  eq(seq(), "1,2,1,3,4,5")
+  local E = K.place(peer)
+  K.change(peer, "slots-drop", { refs = { K.ref(E, "seq", 5) } })
+  eq(sections(), "2:Break 5:Variations of B", "the section passed on to the second variation")
+  local undone = K.restore(peer, second)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(seq(), "1,2,1,3")
+  -- (a track the producer muted in a variation's slot keeps it there)
+  local _, peer2 = seq_setup()
+  local made = K.change(peer2, "slot-variation", variation_input((K.place(peer2))))
+  mock.ops.mute_slot(1, 5, true)
+  K.failure(K.restore(peer2, made), "changed")
+  ok(first)
 end)

@@ -274,8 +274,10 @@ local function made_restore(kind, words)
   -- What the producer made of them since stays: Kumi takes back only slots and patterns as the clone left them.
   for i, made in ipairs(applied.made) do
     local s = first + i - 1
-    if not restore.discard and not same_state(state_of(song, s), made.state) then
-      fail("changed", string.format("slot %d's mutes or section changed in Renoise since Kumi %s", s, words.did))
+    local now_state = state_of(song, s)
+    local same = words.mutes_only and same_list(now_state.mutes, made.state.mutes) or (not words.mutes_only and same_state(now_state, made.state))
+    if not restore.discard and not same then
+      fail("changed", string.format("slot %d's %s changed in Renoise since Kumi %s", s, words.mutes_only and "mutes" or "mutes or section", words.did))
     end
     if made.pattern then
       local why = pattern_changed(song, env, now[s], made.pattern)
@@ -718,8 +720,10 @@ local function variation_columns_back(song, env, restore)
   if t and t <= rows.track_count(song) then cells.lower_columns(song, t, song:track(t), applied.priorColumns, applied.columns) end
 end
 
+-- (a variation's section may move to it from a variation dropped before it, as Renoise passes a section on: its mutes are what
+-- Kumi keeps from the producer's edits; a section start goes with the slot, and the next slot keeps its own)
 local variation_restore = made_restore("slot-variation", {
-  what = "made the variation's slot", did = "made it", after = variation_columns_back,
+  what = "made the variation's slot", did = "made it", after = variation_columns_back, mutes_only = true,
   title = function() return "Removed the variation's slot (put back)" end,
 })
 
