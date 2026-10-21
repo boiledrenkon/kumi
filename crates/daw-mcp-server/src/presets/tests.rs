@@ -550,3 +550,15 @@ fn kumis_undo_of_a_device_delete_puts_its_mappings_back_in_their_order() {
     let deleted = ok("doofer-device-delete", json!({"at": [1]}), &mapped, "Doofer");
     assert_eq!(written(undone("doofer-device-delete", &deleted, &deleted.document.to_xml(), "Doofer", false)), mapped);
 }
+
+#[test]
+fn a_notepads_text_takes_no_control_characters_but_tabs_and_new_lines() {
+    for text in ["bell\u{7}", "nul\u{0}here", "escape \u{1b}[0m", "stray\rreturn"] {
+        assert!(
+            matches!(refused("notepad-write", json!({"text": text}), NOTEPAD, "Notepad"), Refusal::Bad(m) if m.contains("control")),
+            "{text:?}"
+        );
+    }
+    let written = ok("notepad-write", json!({"text": "Kick:\ttune to F\r\nBass: sidechain"}), NOTEPAD, "Notepad");
+    assert_eq!(written.applied["paragraphs"], json!(["Kick:\ttune to F", "Bass: sidechain"]));
+}

@@ -1426,6 +1426,10 @@ fn notepad_write(mut document: xml::Document, top: &str, input: &Value, device: 
     }
     let lines: Vec<String> =
         if text.is_empty() { vec![] } else { text.split('\n').map(|l| l.trim_end_matches('\r').to_string()).collect() };
+    // (XML 1.0 takes no control characters but tab and the line breaks, and what Renoise does with them is unmeasured)
+    if lines.iter().any(|line| line.chars().any(|c| c.is_control() && c != '\t')) {
+        return bad("text: no control characters but tabs and new lines");
+    }
     let at = int_list(input.get("at"), "at")?;
     let (locus, title) = match &at {
         None if top == NOTEPAD => (None, format!("Wrote the Notepad on {}", device.track)),
