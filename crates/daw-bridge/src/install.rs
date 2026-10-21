@@ -78,10 +78,65 @@ pub fn arch_fits(extension: &Path, app_archs: &[Arch]) -> bool {
     ours.is_empty() || app_archs.is_empty() || ours.iter().any(|arch| app_archs.contains(arch))
 }
 
+/// Why the REAPER Kumi would put its extension in can't load it (a 32-bit REAPER on Windows can't load the x64 DLL),
+/// in words; None when it can, or either side's architecture isn't known. Install refuses then, rather than say the
+/// extension is in a REAPER that will never load it.
+pub fn unloadable(extension: &Path, install: &ReaperInstall) -> Option<String> {
+    if arch_fits(extension, &install.archs) {
+        return None;
+    }
+    let names = |archs: &[Arch]| {
+        let words: Vec<&str> = archs
+            .iter()
+            .map(|arch| match arch {
+                Arch::X86_64 => "x64",
+                Arch::Arm64 => "ARM64",
+                Arch::Arm64ec => "ARM64EC",
+                Arch::X86 => "32-bit x86",
+                Arch::Arm => "32-bit ARM",
+                Arch::Other => "another architecture",
+            })
+            .collect();
+        words.join(" and ")
+    };
+    let app = install.app.as_ref().map(|app| format!(" ({})", app.display())).unwrap_or_default();
+    Some(format!(
+        "this REAPER{app} is {}, and Kumi's extension is {}, which it can't load",
+        names(&install.archs),
+        names(&crate::detect::binary_archs(extension))
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::detect::{RenoisePrefs, ResourceFrom, Version};
+
+    #[test]
+    fn a_reaper_that_cant_load_the_extension_is_said_before_it_goes_in() {
+        let root = tempfile::tempdir().unwrap();
+        // A PE header for x64, as the Windows extension has.
+        let mut pe = vec![0u8; 0x200];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        let extension = root.path().join("reaper_kumi.dll");
+        std::fs::write(&extension, &pe).unwrap();
+        let reaper = |archs: Vec<Arch>| ReaperInstall {
+            app: Some(root.path().join("REAPER").join("reaper.exe")),
+            version: None,
+            archs,
+            resource: root.path().join("REAPER"),
+            resource_from: ResourceFrom::Portable,
+            opened: true,
+        };
+        let said = unloadable(&extension, &reaper(vec![Arch::X86])).expect("a 32-bit REAPER can't load it");
+        assert!(said.contains("is 32-bit x86, and Kumi's extension is x64, which it can't load"), "{said}");
+        assert!(said.contains("reaper.exe"), "{said}");
+        assert_eq!(unloadable(&extension, &reaper(vec![Arch::X86_64])), None);
+        assert_eq!(unloadable(&extension, &reaper(vec![])), None, "an app whose architecture isn't known");
+    }
 
     #[test]
     fn targets_need_the_folder_the_daw_makes() {

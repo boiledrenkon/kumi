@@ -15,7 +15,7 @@ use daw_bridge::{
     detect::{self, Os},
     doctor::{self, Bundled, Level},
     files,
-    install::{reaper_extension_name, reaper_target, renoise_target, renoise_targets, TargetError, RENOISE_TOOL_FOLDER},
+    install::{reaper_extension_name, reaper_target, renoise_target, renoise_targets, unloadable, TargetError, RENOISE_TOOL_FOLDER},
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
 };
@@ -211,7 +211,17 @@ impl Own {
         let source = self
             .bundled_source()
             .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?;
-        self.put(Lifecycle::new(&kumi_home(env), self.target(env)?).with_elsewhere(self.elsewhere(env)), &source, false)
+        let target = self.target(env)?;
+        // A REAPER that can't load it (a 32-bit one, say) is said, and nothing goes in.
+        if self.daw == Daw::Reaper {
+            let installs = detected(env, detect::detect_reaper);
+            if let Some(why) =
+                installs.iter().find(|install| install.opened).or(installs.first()).and_then(|install| unloadable(&source, install))
+            {
+                return Err(why);
+            }
+        }
+        self.put(Lifecycle::new(&kumi_home(env), target).with_elsewhere(self.elsewhere(env)), &source, false)
     }
 
     /// Puts `source` at the lifecycle's target, and in each copy of Kumi's it follows (`rollback`: recorded as one): a
