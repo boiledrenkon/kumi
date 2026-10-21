@@ -2630,3 +2630,33 @@ test("changes: soloing a track that reads soloed only along with its group's sol
   local previewed = preview(peer, "track-solo", { ref = track_ref(epoch, 1), solo = true })
   ok((previewed.display.note or ""):find("exclusive", 1, true), "it says what ends: " .. tostring(previewed.display.note))
 end)
+
+test("changes: Kumi's undo of a track it made refuses once the producer automated it or set its levels, and discard removes it", function()
+  local env, peer = setup()
+  local function made()
+    local epoch, layout = place(peer)
+    local input = { type = "sequencer", name = "Lead", index = 3 }
+    local previewed = preview(peer, "track-add", input)
+    local done = apply(peer, "track-add", input, "Kumi: add track (kt11)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    return { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }, done
+  end
+  -- (only its volume automated in one pattern: no lines, so `is_empty` reads true)
+  local record, done = made()
+  local automation = mock.song:pattern(1):track(3):create_automation(mock.song:track(3):device(1):parameter(5))
+  automation.points = { { time = 1, value = 0.2, scaling = 0 }, { time = 9, value = 0.8, scaling = 0 } }
+  H.tick(2)
+  eq(mock.song:pattern(1):track(3).is_empty, true)
+  failure(restore(peer, "track-add", record, "Kumi: undo add (kt12)", done.result.epoch, done.result.layout), "changed")
+  eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1", "their automated track stays")
+  local forced = restore(peer, "track-add", record, "Kumi: undo add (kt13)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  -- (its fader set, nothing else)
+  record, done = made()
+  mock.song:track(3):device(1):parameter(5).value = 0.5
+  H.tick(2)
+  failure(restore(peer, "track-add", record, "Kumi: undo add (kt14)", done.result.epoch, done.result.layout), "changed")
+  eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1")
+  H.no_dialogs()
+end)

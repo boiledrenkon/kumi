@@ -25,13 +25,28 @@ local function signature(index, track)
   return { name = base.track_id(track), kind = rows.track_type(track), devices = math.max(#track.devices - 1, 0), index = index }
 end
 
--- A track holds nothing of anyone's: no device but its mixer, no lines, and (a group) no members.
-local function untouched(song, index, track)
+-- A track's levels: its mixer device's parameters (volume, pan and width, before and after its devices).
+local function levels_of(track)
+  local mixer, levels = track:device(1), {}
+  for k = 1, #mixer.parameters do levels[k] = mixer:parameter(k).value end
+  return levels
+end
+
+-- A track holds nothing of anyone's: no device but its mixer, its levels as Kumi made it (`levels`, when the record kept them),
+-- no lines and no automation (which `is_empty` doesn't count), and (a group) no members.
+local function untouched(song, index, track, levels)
   if #track.devices > 1 then return false end
   if is_group(track) and #track.members > 0 then return false end
+  if type(levels) == "table" then
+    local now = levels_of(track)
+    if #now ~= #levels then return false end
+    for k, value in ipairs(levels) do
+      if type(value) ~= "number" or math.abs(now[k] - value) > 1e-6 then return false end
+    end
+  end
   for p = 1, #song.patterns do
     local pattern_track = song:pattern(p):track(index)
-    if not pattern_track.is_alias and not pattern_track.is_empty then return false end
+    if not pattern_track.is_alias and (not pattern_track.is_empty or #pattern_track.automation > 0) then return false end
   end
   return true
 end
@@ -114,7 +129,7 @@ local function add_apply(song, env, input, fence, desc)
   if plan.name and plan.name ~= "" then track.name = plan.name end
   if plan.color then track.color = plan.color end
   local parents = rows.group_parents(song)
-  local applied = { index = plan.index, kind = rows.track_type(track), name = track.name, id = base.track_id(track) }
+  local applied = { index = plan.index, kind = rows.track_type(track), name = track.name, id = base.track_id(track), levels = levels_of(track) }
   if parents[plan.index] then applied.group = parents[plan.index] end
   local title = string.format("Added %s %s", kind_word(applied.kind), q(track_label(plan.index, track)))
   return {
@@ -140,8 +155,8 @@ local function add_restore(song, env, restore, desc)
   if is_group(track) and #track.members > 0 then
     fail("changed", "tracks were put in the group " .. track_label(index, track) .. " since: Kumi won't delete them")
   end
-  if not restore.discard and not untouched(song, index, track) then
-    fail("changed", track_label(index, track) .. " has devices or lines in it since Kumi made it")
+  if not restore.discard and not untouched(song, index, track, applied.levels) then
+    fail("changed", track_label(index, track) .. " has devices, lines, automation or levels of its own since Kumi made it")
   end
   song:describe_undo(desc)
   song:delete_track_at(index)
