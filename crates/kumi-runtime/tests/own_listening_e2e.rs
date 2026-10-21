@@ -1012,6 +1012,48 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         .await;
 }
 
+/// (#361 review K26) A goal's slot is its track by REAPER's GUID, not by a name that moves: a track inserted above an
+/// unnamed "Track 2" makes it "Track 3", and the winner still settles on the track the goal searched.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_settles_on_its_own_track_when_reapers_unnamed_track_names_shift() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_fx("r:track:{T0002}", "ReaEQ");
+            script.add_fx("r:track:{T0003}", "ReaEQ");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate { track: "Track 2".into(), clip: None, label: None, mix: None }],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let rig = reaper.goal(&request, Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name == "Gain-Band 2").cloned().collect();
+            // A track inserted above: REAPER numbers the unnamed tracks again.
+            script.set_track(2, "name", json!("Track 3"));
+            script.set_track(3, "name", json!("Track 2"));
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), None);
+            assert_eq!(script.fx_param("r:track:{T0002}", "ReaEQ", "Gain-Band 2"), Some(0.7), "the track the goal searched");
+            assert_eq!(script.fx_param("r:track:{T0003}", "ReaEQ", "Gain-Band 2"), Some(0.5), "the one now called Track 2 is untouched");
+            rig.close().await.unwrap();
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 review K25) A plug-in limiter Kumi doesn't know, last on the master: the gain FX a quieter round adds goes before
 /// it, so turning up never goes past its ceiling.
 #[tokio::test(flavor = "current_thread")]

@@ -352,9 +352,14 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         }
     }
 
-    /// A slot's track now: found by its name (a track inserted or deleted moves Renoise's refs), else by the ref it had.
+    /// A slot's track now: by the ref it had where refs are identities (REAPER's GUIDs: a track inserted above an unnamed
+    /// "Track 2" renames it, never its GUID), else found by its name (a track inserted or deleted moves Renoise's refs),
+    /// else by the ref it had.
     async fn track_now(&self, slot: &str, signal: &Signal) -> Option<String> {
         let stored = self.slots.borrow().iter().find(|found| found.info.name == slot).map(|found| found.track.clone())?;
+        if !self.renderer.link.book.borrow().scheme.positional() {
+            return Some(stored);
+        }
         match self.renderer.resolve(slot, signal).await {
             Ok(Ok((reference, _))) => Some(reference),
             _ => Some(stored),
