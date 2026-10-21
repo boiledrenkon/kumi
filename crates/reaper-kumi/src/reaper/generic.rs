@@ -225,6 +225,15 @@ impl<'h> Call<'h> {
         Ok(self.slot(name, Slot::Double(b), true, p))
     }
 
+    /// A value a GetSet… function writes back when it gets and reads when it sets (GetSet_LoopTimeRange's start and end):
+    /// the caller's, which a call that sets must give (REAPER would set it to 0 otherwise).
+    pub fn out_double_set(&mut self, k: Option<usize>, name: &str, k_set: Option<usize>, set: &str) -> Result<*mut f64, String> {
+        if self.boolean(k_set, set, true)? && self.arg(k, name).is_none() {
+            return Err(format!("args: {name} is what the call sets when {set} is true: give it"));
+        }
+        self.out_double(k, name)
+    }
+
     pub fn out_bool(&mut self, k: Option<usize>, name: &str) -> Result<*mut bool, String> {
         let mut b = Box::new(self.boolean(k, name, true)?);
         let p = &mut *b as *mut bool;

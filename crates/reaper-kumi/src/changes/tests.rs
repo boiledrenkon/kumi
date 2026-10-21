@@ -3681,6 +3681,28 @@ fn a_number_reaper_also_reads_as_a_pointer_cant_be_given_to_the_generic_call() {
 }
 
 #[test]
+fn the_generic_time_selection_sets_the_start_and_end_it_is_given() {
+    // GetSet_LoopTimeRange2's start and end are what it writes back when it gets, and what it reads when it sets: a set
+    // took neither from the caller and made the time selection 0–0.
+    let lab = Lab::new();
+    state(|s| s.time_selection = (1.0, 3.0));
+    let read = call_read(
+        &lab,
+        json!({"kind": "call", "fn": "GetSet_LoopTimeRange2", "args": {"isSet": false, "isLoop": false, "allowautoseek": false}}),
+    )
+    .unwrap();
+    assert_eq!((&read["out"]["startOut"], &read["out"]["endOut"]), (&json!(1.0), &json!(3.0)));
+    let set = json!({"fn": "GetSet_LoopTimeRange2", "args": {"isSet": true, "isLoop": false, "startOut": 2.0, "endOut": 4.5, "allowautoseek": false}});
+    lab.make("api-call", set, "Kumi: Called GetSet_LoopTimeRange2 (kts01)");
+    assert_eq!(state(|s| s.time_selection), (2.0, 4.5));
+    // A set that leaves either out is refused before REAPER is called.
+    let half = json!({"kind": "api-call", "input": {"fn": "GetSet_LoopTimeRange2", "args": {"isSet": true, "isLoop": false, "startOut": 1.0, "allowautoseek": false}}});
+    let (_, message) = lab.call("change_preview", half).unwrap_err();
+    assert!(message.contains("endOut"), "{message}");
+    assert_eq!(state(|s| s.time_selection), (2.0, 4.5));
+}
+
+#[test]
 fn binary_data_with_its_size_and_arrays_reaper_fills_cant_be_passed_to_the_generic_call() {
     use crate::reaper::generic::{function, uncallable};
     for (name, why) in [
