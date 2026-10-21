@@ -117,6 +117,7 @@ async fn a_restarted_reaper_is_compared_before_its_snapshot_is_kept_again() {
     lab.script.set_volume(2, -3.0);
     let refused = lab.ok("baseline_save").await;
     assert_eq!(refused["saved"], false, "{refused}");
+    assert_eq!(refused["compared"], false, "Kumi waits for its next catch-up: {refused}");
     let caught = lab.ok("catch_up").await;
     assert_eq!(said(&caught), ["~track Track 2 (mixer.volume)"], "{caught}");
     assert_eq!(lab.ok("baseline_save").await["saved"], true);

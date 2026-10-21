@@ -371,6 +371,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         // A host started again has a new journal: Kumi's changes before it can't be undone through it.
         if self.hosts.replace(self.hosts.get() + 1) > 0 {
             self.changes.retire_all(Ending::Restart);
+            self.remembered.host_restarted();
         }
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch, pins) = (self.book.clone(), self.layout.clone(), self.epoch.clone(), self.pins.clone());

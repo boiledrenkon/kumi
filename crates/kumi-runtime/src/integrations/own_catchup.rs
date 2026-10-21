@@ -152,6 +152,12 @@ pub struct Remembered {
     saving: Cell<bool>,
     /// The host can't compare (its bridge has no digest): nothing more is asked of it.
     unsupported: Cell<bool>,
+    /// The host wouldn't keep the snapshot of the project open now before comparing it (another tab, another run of the
+    /// DAW, or the host started again): nothing is kept until catch-up runs at the next look.
+    uncompared: Cell<bool>,
+    /// Kumi's host started again while the session went on: its next catch-up compares, and tells nothing (what changed
+    /// meanwhile, Kumi's changes among it, the looks saw), unless the DAW went away too.
+    quiet: Cell<bool>,
     /// When the snapshot was last kept, how long that took, and the DAW's change counter then.
     saved_at: Cell<Option<Instant>>,
     took_ms: Cell<u64>,
@@ -171,7 +177,17 @@ impl Remembered {
     /// Whether catch-up should run for the open project: it hasn't for this one (or the DAW went away since), nor is it
     /// running.
     pub fn should_catch_up(&self, identity: &str) -> bool {
-        !self.unsupported.get() && !self.running.get() && (self.away.get() || self.caught.borrow().as_deref() != Some(identity))
+        !self.unsupported.get()
+            && !self.running.get()
+            && (self.away.get() || self.uncompared.get() || self.caught.borrow().as_deref() != Some(identity))
+    }
+
+    /// Kumi's host started again: it has compared nothing yet, so it keeps no snapshot before the next catch-up.
+    pub fn host_restarted(&self) {
+        if self.caught.borrow().is_some() {
+            self.uncompared.set(true);
+            self.quiet.set(true);
+        }
     }
 
     /// The DAW is gone (it quit, or its bridge did): what changes before it's back is told as changed while it was away.
@@ -200,7 +216,7 @@ impl Remembered {
     /// Whether to keep the snapshot again now: catch-up has run for the open project, something changed since and has
     /// settled, and the last time was long enough ago.
     pub fn due(&self) -> bool {
-        if self.caught.borrow().is_none() || self.unsupported.get() || self.saving.get() || self.running.get() {
+        if self.caught.borrow().is_none() || self.unsupported.get() || self.uncompared.get() || self.saving.get() || self.running.get() {
             return false;
         }
         let Some(moved) = self.moved_at.get() else { return false };
@@ -212,26 +228,32 @@ impl Remembered {
     pub fn stale(&self) -> bool {
         self.caught.borrow().is_some()
             && !self.unsupported.get()
+            && !self.uncompared.get()
             && !self.saving.get()
             && !self.running.get()
             && self.saved_at.get().is_none_or(|at| at.elapsed() >= LOOK_STALE)
     }
 
     /// Keeps the open project's snapshot again through the host. Refused by the host until it has compared the project
-    /// (it says so): nothing changes here then.
+    /// (it says so): nothing is asked again until catch-up has run. A refusal still read the whole project, so the next
+    /// try waits as long as after a kept one.
     pub async fn save(self: Rc<Self>, host: Rc<dyn McpEndpoint>, signal: Signal) {
         if self.saving.replace(true) {
             return;
         }
         let began = Instant::now();
         let answer = host.call("baseline_save", JsonObject::new(), signal).await.ok().map(|result| answer_of(&result));
-        if let Some(Ok(answer)) = answer.filter(|answer| matches!(answer, Ok(a) if a.get("saved") == Some(&Value::Bool(true)))) {
+        if let Some(Ok(answer)) = answer {
             self.saved_at.set(Some(Instant::now()));
-            self.took_ms.set(answer.get("ms").and_then(Value::as_u64).unwrap_or(0));
-            *self.saved_counter.borrow_mut() = answer.get("changed").cloned();
-            // (what changed while it was kept is kept next time)
-            if self.moved_at.get().is_some_and(|moved| moved <= began) {
-                self.moved_at.set(None);
+            self.took_ms.set(answer.get("ms").and_then(Value::as_u64).unwrap_or(began.elapsed().as_millis() as u64));
+            if answer.get("saved") == Some(&Value::Bool(true)) {
+                *self.saved_counter.borrow_mut() = answer.get("changed").cloned();
+                // (what changed while it was kept is kept next time)
+                if self.moved_at.get().is_some_and(|moved| moved <= began) {
+                    self.moved_at.set(None);
+                }
+            } else if answer.get("compared") == Some(&Value::Bool(false)) {
+                self.uncompared.set(true);
             }
         }
         self.saving.set(false);
@@ -253,6 +275,7 @@ impl Remembered {
             return;
         }
         let after_reconnect = self.away.replace(false);
+        let quiet = self.quiet.replace(false);
         let answer = host.call("catch_up", JsonObject::new(), signal).await.ok().map(|result| answer_of(&result));
         self.running.set(false);
         let answer = match answer {
@@ -263,15 +286,20 @@ impl Remembered {
             }
             _ => {
                 self.away.set(after_reconnect);
+                self.quiet.set(quiet);
                 return;
             }
         };
         *self.caught.borrow_mut() = Some(identity.clone());
+        self.uncompared.set(false);
         let again = !self.seen.borrow_mut().insert(identity.clone());
-        *self.context.borrow_mut() = None;
         self.saved_at.set(Some(Instant::now()));
         self.took_ms.set(answer.get("ms").and_then(Value::as_u64).unwrap_or(0));
         self.moved_at.set(None);
+        if quiet && !after_reconnect {
+            return;
+        }
+        *self.context.borrow_mut() = None;
         let Some(described) = caught_up(&answer, words) else { return };
         // (back to a project seen in this run, unchanged: a tab switched back to, nothing to say)
         if again && described.lines.is_empty() && !after_reconnect {
@@ -879,6 +907,108 @@ mod tests {
         let draft = draft(&answer, &WORDS).unwrap();
         assert_eq!(draft["steps"][0]["input"]["ref"], "$track");
         assert_eq!(draft["steps"][1]["input"]["ref"], "$keys");
+    }
+
+    /// A host that answers catch_up and baseline_save as the test says, and remembers what it was asked.
+    struct Told {
+        catch_up: RefCell<Value>,
+        save: RefCell<Value>,
+        asked: RefCell<Vec<String>>,
+    }
+    #[async_trait(?Send)]
+    impl McpEndpoint for Told {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Ok(serde_json::from_value(json!({"tools": []})).unwrap())
+        }
+        async fn call(&self, name: &str, _: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            self.asked.borrow_mut().push(name.into());
+            let answer = if name == "catch_up" { self.catch_up.borrow().clone() } else { self.save.borrow().clone() };
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": false})).unwrap())
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    fn answers(catch_up: Value, save: Value) -> Rc<Told> {
+        Rc::new(Told { catch_up: RefCell::new(catch_up), save: RefCell::new(save), asked: RefCell::default() })
+    }
+
+    const REFUSED: &str = r#"{"saved": false, "compared": false, "why": "not compared yet: catch_up first"}"#;
+
+    /// The keeper's loop for a minute: each second, the snapshot is kept when it's due. How many times it was asked.
+    async fn keep_for_a_minute(remembered: &Rc<Remembered>, host: &Rc<Told>) -> usize {
+        let before = host.asked.borrow().len();
+        for _ in 0..60 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            if remembered.due() {
+                remembered.clone().save(host.clone(), Signal::new()).await;
+            }
+        }
+        host.asked.borrow()[before..].iter().filter(|name| *name == "baseline_save").count()
+    }
+
+    /// (#361 review K15) A save the host refuses (another tab, not compared yet) isn't asked again each second, each a
+    /// whole project's digest: the next look's catch-up compares it, and then it's kept again.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_refused_save_waits_for_the_next_catch_up() {
+        let host = answers(json!({"first": true}), serde_json::from_str(REFUSED).unwrap());
+        let remembered = Rc::new(Remembered::default());
+        remembered.clone().catch_up(host.clone(), "A".into(), "Song".into(), &WORDS, None, Signal::new()).await;
+        assert!(!remembered.should_catch_up("A"));
+        remembered.kumi_changed();
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 1, "{:?}", host.asked.borrow());
+        assert!(remembered.should_catch_up("B"), "the project open now is compared at the next look");
+        remembered.clone().catch_up(host.clone(), "B".into(), "Other".into(), &WORDS, None, Signal::new()).await;
+        *host.save.borrow_mut() = json!({"saved": true, "ms": 20});
+        remembered.kumi_changed();
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 1);
+        assert!(!remembered.due(), "kept: nothing changed since");
+    }
+
+    /// (#361 review K15) Kumi's host started again compares the project before it keeps a snapshot: the next look's
+    /// catch-up, which tells nothing (the session went on), and the snapshots are kept again after it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_restarted_host_is_caught_up_quietly_before_snapshots_are_kept_again() {
+        let host = answers(json!({"first": true}), serde_json::from_str(REFUSED).unwrap());
+        let remembered = Rc::new(Remembered::default());
+        let told = Rc::new(RefCell::new(vec![]));
+        let tell: Rc<dyn Fn(CatchUp)> = {
+            let told = told.clone();
+            Rc::new(move |caught: CatchUp| told.borrow_mut().push(caught.lines))
+        };
+        remembered.clone().catch_up(host.clone(), "A".into(), "Song".into(), &WORDS, Some(tell.clone()), Signal::new()).await;
+        remembered.host_restarted();
+        assert!(remembered.should_catch_up("A"));
+        remembered.kumi_changed();
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 0, "nothing kept before the host compares");
+        *host.catch_up.borrow_mut() = json!({"changes": [{"change": "added", "kind": "FX", "item": {"name": "ReaComp", "order": 0}}]});
+        remembered.clone().catch_up(host.clone(), "A".into(), "Song".into(), &WORDS, Some(tell.clone()), Signal::new()).await;
+        assert!(told.borrow().is_empty(), "Kumi's own change isn't news: {:?}", told.borrow());
+        assert_eq!(remembered.since("A"), None);
+        *host.save.borrow_mut() = json!({"saved": true, "ms": 20});
+        remembered.kumi_changed();
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 1);
+        // The DAW went away too: what changed meanwhile is told.
+        remembered.went_away();
+        remembered.host_restarted();
+        remembered.clone().catch_up(host.clone(), "A".into(), "Song".into(), &WORDS, Some(tell), Signal::new()).await;
+        assert_eq!(*told.borrow(), [vec!["Added FX “ReaComp”".to_string()]]);
     }
 
     #[test]

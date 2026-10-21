@@ -616,7 +616,7 @@ impl Host {
             let seen = caught_up.contains(&(key.clone(), now.identity.clone()))
                 || (!now.identity.is_empty() && caught_up.iter().any(|(_, identity)| *identity == now.identity));
             if !seen {
-                return (json!({"saved": false, "place": place, "why": "not compared yet: catch_up first"}), false);
+                return (json!({"saved": false, "compared": false, "place": place, "why": "not compared yet: catch_up first"}), false);
             }
             caught_up.insert((key.clone(), now.identity.clone()));
         }
