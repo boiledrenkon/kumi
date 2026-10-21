@@ -886,6 +886,19 @@ fn a_step_in_a_plan_says_whether_the_plans_point_takes_it_back() {
     // And a change that found everything as asked wrote nothing.
     let (_, again) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -3.0}), "Kumi: Kick volume −3 dB (kcv03)");
     assert_eq!(covered(&again), json!(false));
+    // Nor the project's notes, title, grid and timebase, which REAPER keeps no history of (review R14).
+    for (n, (kind, input)) in [
+        ("project-notes", json!({"notes": "verse first"})),
+        ("project-info", json!({"title": "Night Drive"})),
+        ("project-grid", json!({"division": "1/8"})),
+        ("project-timebase", json!({"items": "time"})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, made) = lab.make(kind, input, &format!("Kumi: project (kcp{n:02})"));
+        assert_eq!(covered(&made), json!(false), "{kind}");
+    }
     // Outside a plan the answer says what REAPER's history shows, as before.
     lab.call("undo_step_end", json!({"stepId": step["stepId"]})).unwrap();
     let (_, alone) = lab.make("track-pan", json!({"ref": KICK, "pan": 0.2}), "Kumi: Kick pan 20% right (kcv04)");

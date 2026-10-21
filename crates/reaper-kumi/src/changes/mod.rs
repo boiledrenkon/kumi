@@ -278,6 +278,8 @@ impl Kind {
     fn leaves_point(self) -> bool {
         match self {
             Kind::LoopRepeat | Kind::Metronome => false,
+            // (r-tracks lab 7.82: the project's notes, title and author, grid and timebase make no point either)
+            Kind::ProjectNotes | Kind::ProjectInfo | Kind::ProjectGrid | Kind::ProjectTimebase => false,
             // m4-r-fxenv
             Kind::FxEnv(kind) => kind.leaves_point(),
             _ => true,
