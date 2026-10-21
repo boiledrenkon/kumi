@@ -50,6 +50,7 @@ pub const CATCH_UP: CatchUpWords = CatchUpWords {
     facts: project_facts,
     recipe: RecipeKinds {
         track_add: "track_add",
+        track_types: &[],
         effect: "FX",
         // (added again by the plug-in's own name, whatever the producer renamed it)
         effect_add: |made, name| {
