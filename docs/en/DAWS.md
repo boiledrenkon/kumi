@@ -22,6 +22,7 @@ does the job there.
 | Instant phrases, made with no model call | ✓ | ✓ | ✓ |
 | Code run inside the DAW | ✓ Python | ✓ Lua (ReaScript), REAPER's API and actions | ✓ Lua |
 | Stop everything at once (`/stop`) | ✓ | ✓ | ✓ |
+| Variations as numbered takes you keep, change or drop | not yet | not yet: item variations come later | ✓ |
 | Knows whether the DAW is recording | ✓ | ✓ | ✓ |
 | A line in the DAW's status bar | ✓ | no: REAPER's API has no status bar (a notification instead) | ✓ |
 | Opens a saved project | ✓ | not yet: you open it yourself (`kumi -r` and setup's restart don't) | not yet: you open it yourself (`kumi -r` and setup's restart don't) |
@@ -191,9 +192,10 @@ Each change is its own step of Renoise's undo. Every tool is in
 - **Tracks** (`track_…`): sequencer, send and group tracks added, moved,
   grouped, deleted, renamed, coloured, collapsed; note and effect columns;
   volume, panning, width, mute, solo, output routing and delay.
-- **Pattern sequence and matrix** (`slot_…`, `loop_range`, `loop_pattern`):
-  slots inserted, deleted, moved, cloned, made unique or given another
-  pattern; sections, matrix mutes and colours; loops.
+- **Pattern sequence and matrix** (`slot_…`, `slots_drop`, `loop_range`,
+  `loop_pattern`): slots inserted, deleted (several in one step), moved,
+  cloned, made unique, given another pattern or a variation of one; sections,
+  matrix mutes and colours; loops.
 - **Patterns and lines** (`notes_write`, `notes_clear`, `notes_transpose`,
   `notes_humanize`, `lines_copy`, `pattern_…`, `automation_write`): notes,
   instrument, volume, panning, delay and effect columns in Renoise's notation;
@@ -207,7 +209,8 @@ Each change is its own step of Renoise's undo. Every tool is in
   files; macros; sample settings, slices, keyzones, drum-kit layouts.
 - **Modulation and sample FX** (`modset_…`, `moddevice_…`, `chain_…`,
   `chaindevice_…`).
-- **Phrases** (`phrase_…`): added, mapped to keys, their playback and lines;
+- **Phrases** (`phrase_…`, `phrases_drop`): added (with their lines),
+  deleted (several in one step), mapped to keys, their playback and lines;
   phrase scripts written and rendered; .xrnz files.
 - **Plug-ins and MIDI** (`plugin_…`, `midi_set`): plug-in instruments, their
   parameters and programs; a MIDI instrument's output.
@@ -229,10 +232,22 @@ saves the song, instruments and device presets.
 
 ### Workflows
 
+- **Variations** (`variations`): numbered takes V1, V2… of a pattern track's
+  lines (a chop you wrote with `0S`, `0R` and `0B` commands), of a phrase, or
+  new phrases for an instrument ("make me 9 phrases"). Kumi keeps the lines
+  you name as what defines it, varies the rest (slices, rolls, reverses, ghost
+  notes, accents, register), checks each take differs from the source and the
+  others yet stays the same idea, and renders pattern takes to hear them
+  first. Each take is a phrase, or a slot of its own in a "Variations of …"
+  section at the sequence's end that plays the rest of the pattern with it.
+  Then "keep 1, 3 and 5; change the rest" changes only those, each in its own
+  direction, and the rest go in one step; a take you edited is left alone.
+- **Phrases:** written in Renoise's notation, or as phrase scripts rendered to
+  lines; a pattern's lines become a phrase you play from any key (`variations`
+  extract), and a faster copy is switched to with `0Zxx`, since a phrase's LPB
+  is fixed.
 - **Instruments from sample files:** a drum kit with mute groups, or keys with
   velocity layers, in one instrument.
-- **Phrases:** written in Renoise's notation, or as phrase scripts rendered to
-  lines.
 - **Doofers** from devices, with named macros.
 - **Sounds from tutorials and references:** `watch_video`, then native devices
   or your plug-ins, judged by ear.

@@ -15,6 +15,7 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 | 不调用模型就能完成的即时短语 | ✓ | ✓ | ✓ |
 | 在 DAW 内运行代码 | ✓ Python | ✓ Lua（ReaScript）、REAPER 的 API 和动作（action） | ✓ Lua |
 | 一次停止一切（`/stop`） | ✓ | ✓ | ✓ |
+| 把变奏做成带编号的版本（take），可保留、修改或丢弃 | 尚未 | 尚未：条目（item）的变奏稍后提供 | ✓ |
 | 知道 DAW 是否正在录音 | ✓ | ✓ | ✓ |
 | 在 DAW 的状态栏显示一行 | ✓ | 不能：REAPER 的 API 没有状态栏（改用通知） | ✓ |
 | 打开保存的工程 | ✓ | 尚未：需要你自己打开（`kumi -r` 和设置中的重启都不会打开） | 尚未：需要你自己打开（`kumi -r` 和设置中的重启都不会打开） |
@@ -125,12 +126,12 @@ Kumi 每次查看时都会读取这首歌曲的设置并照着做：BPM（2 倍�
 
 - **歌曲**（`song_bpm`、`song_lpb`、`song_tpl`、`song_groove` 及其他 `song_…`、`metronome_switch`、`edit_settings`）：BPM、LPB、TPL、律动（groove）、节拍器、编辑设置（Follow Player、Edit Step、八度、录音量化）、名称、艺术家、注释、余量（headroom）。
 - **轨道**（`track_…`）：音序器轨道、发送轨道和编组轨道的添加、移动、编组、删除、改名、着色、折叠；音符列和效果列；音量、声像、宽度、静音、独奏、输出路由和延迟。
-- **模式序列与矩阵**（`slot_…`、`loop_range`、`loop_pattern`）：槽位的插入、删除、移动、克隆、独立（unique）或改播另一个模式；段落（section）、矩阵中的静音和颜色；循环。
+- **模式序列与矩阵**（`slot_…`、`slots_drop`、`loop_range`、`loop_pattern`）：槽位的插入、删除（多个可在一步内完成）、移动、克隆、独立（unique）、改播另一个模式或它的变奏；段落（section）、矩阵中的静音和颜色；循环。
 - **模式与行**（`notes_write`、`notes_clear`、`notes_transpose`、`notes_humanize`、`lines_copy`、`pattern_…`、`automation_write`）：用 Renoise 的记法写音符、乐器、音量、声像、延迟和效果列；模式的名称、长度和别名（alias）；自动化。
 - **Track DSPs**（`device_…`、`doofer_…`、`splitter_set`、`notepad_write`、`meta_destination`）：原生和插件设备、参数、预设、设备链文件（.xrnt）；Doofer 及其宏、Splitter、Notepad、元设备指向哪里。
 - **乐器与采样**（`instrument_…`、`sample_…`、`keyzone_…`）：添加、复制、移动、载入（.xrni、.sfz、采样）、用采样文件制作；宏；采样设置、切片、键区（keyzone）、鼓组布局。
 - **调制与采样 FX**（`modset_…`、`moddevice_…`、`chain_…`、`chaindevice_…`）。
-- **乐句**（`phrase_…`）：添加、映射到琴键、播放方式和行；编写并渲染乐句脚本；.xrnz 文件。
+- **乐句**（`phrase_…`、`phrases_drop`）：添加（连同其行）、删除（多个可在一步内完成）、映射到琴键、播放方式和行；编写并渲染乐句脚本；.xrnz 文件。
 - **插件与 MIDI**（`plugin_…`、`midi_set`）：插件乐器及其参数和音色（program）；MIDI 乐器的输出。
 - **目标与脚本**（`scratch_keep`、`run_lua`）。
 
@@ -145,8 +146,9 @@ Kumi 每次查看时都会读取这首歌曲的设置并照着做：BPM（2 倍�
 
 ### 工作流程
 
+- **变奏**（`variations`）：把一个模式轨道的行（比如你用 `0S`、`0R`、`0B` 命令写的切片编排）、一个乐句，或某个乐器的新乐句（“给我做 9 个乐句”）做成带编号的版本 V1、V2……。你指定的行被当作这段素材的核心保留下来，其余部分（切片、滚奏、反向、鬼音、重音、音区）被改变；Kumi 会检查每个版本既不同于原素材和其他版本，又仍是同一个想法，并先渲染模式版本听一遍。每个版本是一个乐句，或在序列末尾的“Variations of …”段落里有自己的槽位，和模式的其余轨道一起播放。说“保留 1、3、5，其余的改一改”，就只改那些，每个朝不同方向，其余的在一步之内删掉；你编辑过的版本不会被动。
+- **乐句：** 用 Renoise 的记法写，或编写乐句脚本再渲染成行；把模式的行变成可以从任意键弹奏的乐句（`variations` 的 extract），而由于乐句的 LPB 是固定的，更快的副本用 `0Zxx` 切换。
 - **用采样文件制作乐器：** 带静音组的鼓组，或带力度分层的键盘乐器，都放在一个乐器里。
-- **乐句：** 用 Renoise 的记法写，或编写乐句脚本再渲染成行。
 - 用设备制作 **Doofer**，并给宏命名。
 - **来自教程和参考曲的声音：** 先 `watch_video`，再用原生设备或你的插件做出来，靠耳朵判定。
 
