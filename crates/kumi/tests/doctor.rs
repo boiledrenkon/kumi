@@ -702,6 +702,7 @@ async fn a_reaper_only_doctor_never_speaks_lives_words() {
         version: Some("0.1.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };

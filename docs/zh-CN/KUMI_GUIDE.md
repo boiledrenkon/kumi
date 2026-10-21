@@ -398,7 +398,7 @@ kumi uninstall                 # 卸载 Kumi；加上 --all 会同时删除你�
 
 **REAPER 的扩展和 Renoise 的工具**只要装有 Kumi 的桥接，就会跟着 Kumi 走：
 
-- `kumi update` 会放入新 Kumi 附带的版本，DAW 开着时会提示重启它（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。REAPER 的放到 Kumi 之前放的位置；Renoise 的放进它最新的偏好设置文件夹，因为新版 Renoise 会建立自己的文件夹。
+- `kumi update` 会放入新 Kumi 附带的版本，DAW 开着时会提示重启它（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。两者都放回 Kumi 之前放的位置，新版 Renoise 在它自己的版本文件夹中复制的工具副本也会一并更新。你移除过的不会被放回（"Kumi's tool isn't in Renoise any more"），REAPER 文件夹已不在的扩展也绝不会被移到另一个 REAPER 中：要装入，请用 `kumi --daw reaper bridge`。
 - `--rollback` 会恢复之前那个 Kumi 附带的版本。不认识 REAPER 和 Renoise 的 Kumi（1.19.3 及更早）会把它们原样留下、不再使用，并告诉你要移除时该删除哪个文件或文件夹。只要 `KUMI_DAW` 还是 `reaper` 或 `renoise`，那个 Kumi 就不会启动：要用它，请取消这个设置。
 - Kumi 放入之后在 DAW 文件夹中被改动过的副本，会先保存到 `~/.kumi/bridges/reaper/changed`（或 `renoise`），Kumi 会告诉你位置。
 - 两者都不需要关闭 Live 或该 DAW：正在运行的 DAW 会在重启时加载新版本。
@@ -435,7 +435,7 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 
 `report` 会写出 `~/kumi-report-<date and time>.txt`，其中包含 Kumi 和桥接的版本、doctor 的检查结果、你的设置、Kumi 在你上一次对话中做了什么、缺口日志，以及 Live 自身日志中来自桥接的行（对 REAPER 和 Renoise，则是 `~/.kumi/bridges/<daw>/logs` 中 Kumi 桥接日志的最后几行）。密钥和令牌会被删除，你的主文件夹显示为 `~`，你的账户名显示为 `<user>`。发送前请先读一遍。
 
-`uninstall` 会移除 Kumi、为 `--rollback` 保留的版本、更新留下的文件、保留的旧版 Node、启动器、它添加的 PATH 条目，以及 Kumi 下载的内容（程序、模型和看过的视频，需要时会再次下载），并告诉你释放了多少空间。它会提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时），并把 Kumi 的扩展从 REAPER、工具从 Renoise 中移除。你的对话、笔记、配方、登录信息、素材库和参考曲目会保留，除非你加上 `--all`。`--dry-run` 只说明会删除什么，不删除任何东西。
+`uninstall` 会移除 Kumi、为 `--rollback` 保留的版本、更新留下的文件、保留的旧版 Node、启动器、它添加的 PATH 条目，以及 Kumi 下载的内容（程序、模型和看过的视频，需要时会再次下载），并告诉你释放了多少空间。它会提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时），并把 Kumi 的扩展从 REAPER、工具从 Renoise 中移除。REAPER 和 Renoise 用来比较离开期间变化的状态也会保留，除非加上 `--all`；你改动过的桥接副本（`~/.kumi/bridges/<daw>/changed`）总会保留。你的对话、笔记、配方、登录信息、素材库和参考曲目会保留，除非你加上 `--all`。`--dry-run` 只说明会删除什么，不删除任何东西。
 
 - 当 Kumi 的文件夹（`KUMI_HOME`）是你的主文件夹、磁盘的根目录、相对路径，或者没有 Kumi 启动器和应用的文件夹时，它什么都不删除，并说明哪些 Kumi 的内容需要你手动移除。安装程序也不会安装到那里。用 `sudo` 运行时，它同样不会动你的主文件夹，也不会动任何不属于 root 的文件夹。
 - 在 `bin`、`downloads` 以及存放 Kumi 下载内容的文件夹中，只删除 Kumi 自己的文件；其他东西会保留并列出名称，文件夹也会保留。

@@ -141,14 +141,15 @@ class NativeRelease(unittest.TestCase):
         cargo_version = lambda name: tomllib.loads((root / name).read_text())["package"]["version"]
         version = cargo_version("crates/kumi/Cargo.toml")
         self.assertEqual(read_json("package.json")["version"], version)
-        for name in ("crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml"):
+        # Kumi's host for REAPER and Renoise ships beside it and moves with it (its MCP serverInfo and hello say it).
+        for name in ("crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml", "crates/daw-mcp-server/Cargo.toml"):
             self.assertEqual(cargo_version(name), version, name)
         declared = re.search(r'KUMI_VERSION[^=]*=\s*"([^"\n]+)"', (root / "crates/kumi-runtime/src/version.rs").read_text())
         self.assertIsNotNone(declared)
         self.assertEqual(declared[1], version)
         cargo_lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
         for package in cargo_lock:
-            if package["name"] in ("kumi", "kumi-runtime", "kumi-common"):
+            if package["name"] in ("kumi", "kumi-runtime", "kumi-common", "daw-mcp-server"):
                 self.assertEqual(package["version"], version, package["name"])
         bridge = cargo_version("crates/ableton-mcp-server/Cargo.toml")
         self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)
@@ -777,7 +778,15 @@ class NativeRelease(unittest.TestCase):
         self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", section)
         self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", (sdk / "reaper_plugin.h").read_text(encoding="utf-8"))
         self.assertIn("reaper-rs", section)
-        self.assertIn("../sdk/LICENSE", (release.ROOT / release.REAPER_CRATE / "shim/csurf.cpp").read_text(encoding="utf-8"))
+        # Each shim repeats an SDK declaration: each names its copyright and license, and the notice names each. A new
+        # shim is added to this list, and so to the notice.
+        shims = ("csurf.cpp", "preview.cpp")
+        self.assertEqual(sorted(path.name for path in (release.ROOT / release.REAPER_CRATE / "shim").iterdir()), list(shims))
+        for shim in shims:
+            text = (release.ROOT / release.REAPER_CRATE / "shim" / shim).read_text(encoding="utf-8")
+            self.assertIn("../sdk/LICENSE", text, shim)
+            self.assertIn("Cockos", text, shim)
+            self.assertIn(f"crates/reaper-kumi/shim/{shim}", section, shim)
 
     def test_every_packaged_document_rewrites_its_links(self):
         revision = "a" * 40

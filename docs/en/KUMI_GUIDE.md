@@ -1073,8 +1073,10 @@ bridge stays, which works with the earlier Kumi: to put back its bridge as well,
 **REAPER's extension and Renoise's tool** follow Kumi, wherever Kumi's bridge is in:
 
 - `kumi update` puts in the copy the new Kumi carries and says to restart the DAW if it's open
-  ("Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."). REAPER's goes where
-  Kumi put it; Renoise's into its newest preferences folder, since a newer Renoise makes its own.
+  ("Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."). Each goes where Kumi
+  put it, and a copy a newer Renoise made of the tool in its own version folder is brought along. One
+  you took out isn't put back ("Kumi's tool isn't in Renoise any more"), and an extension whose
+  REAPER folder is gone never moves into another REAPER: `kumi --daw reaper bridge` puts it in.
 - `--rollback` puts back the copies the earlier Kumi carried. A Kumi that doesn't know REAPER or
   Renoise (1.19.3 and earlier) leaves them where they are, unused, and Kumi names the file or folder
   to delete to take them out. That Kumi won't start while `KUMI_DAW` is `reaper` or `renoise`: unset
@@ -1155,7 +1157,9 @@ and what Kumi fetched (programs, models and watched videos, fetched again when
 needed), and says how much space that frees. It offers to take the bridge and
 the extension out of Live (only while Live is closed), Kumi's extension out of
 REAPER and its tool out of Renoise. Your conversations,
-notes, recipes, sign-ins, library and references stay unless you add `--all`.
+notes, recipes, sign-ins, library and references stay unless you add `--all`,
+and so does catch-up's state for REAPER and Renoise; copies of their bridges you
+had changed (in `~/.kumi/bridges/<daw>/changed`) always stay.
 `--dry-run` says what it would remove, and removes nothing.
 
 - It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a

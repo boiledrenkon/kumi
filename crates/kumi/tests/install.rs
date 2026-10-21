@@ -2384,6 +2384,7 @@ async fn uninstall_carries_on_when_a_daws_folder_is_gone() {
         version: Some("1.0.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };
@@ -2419,6 +2420,52 @@ async fn the_daw_used_last_and_the_other_daws_bridge_files_count_as_kumis() {
     let said = out.0.borrow().clone();
     assert!(said.contains("kumi uninstall --all would remove ") && !said.contains("isn't Kumi's"), "{said}");
     assert!(home.join("last-daw").exists() && home.join("bridges").exists(), "a dry run removes nothing");
+}
+
+/// Uninstalling takes out what's Kumi's in REAPER's and Renoise's bridge folders and keeps what the lifecycle promised:
+/// the copies of Kumi's bridge the producer had changed (`changed`) always, and catch-up's baselines (`snapshots`) until
+/// --all. A DAW's folder with nothing else in it goes whole.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_keeps_the_changed_copies_and_until_all_the_baselines_in_the_daws_bridge_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let reaper = home.join("bridges/reaper");
+    let setup = || {
+        installed_kumi(home);
+        for part in ["generations/0.1.0-1/reaper_kumi.dylib", "discovery/a.json", "logs/bridge.log", "listening/j-s.wav"] {
+            put(reaper.join(part), "kumi's");
+        }
+        for file in ["bridge.secret", "lifecycle.lock", ".install-receipt.json.tmp-0123456789ab"] {
+            put(reaper.join(file), "kumi's");
+        }
+        put(reaper.join("changed/reaper_kumi.dylib-1700000000000"), "the producer's own build");
+        put(reaper.join("snapshots/reaper-0123/last-seen.json"), "{}");
+        put(home.join("bridges/renoise/bridge.secret"), "kumi's");
+        put(home.join("bridges/renoise/logs/bridge.log"), "kumi's");
+    };
+    setup();
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for part in
+        ["generations", "discovery", "logs", "listening", "bridge.secret", "lifecycle.lock", ".install-receipt.json.tmp-0123456789ab"]
+    {
+        assert!(!reaper.join(part).exists(), "{part}: {said}");
+    }
+    assert!(!home.join("bridges/renoise").exists(), "nothing else in it: it goes whole. {said}");
+    assert_eq!(fs::read_to_string(reaper.join("changed/reaper_kumi.dylib-1700000000000")).unwrap(), "the producer's own build");
+    assert!(reaper.join("snapshots/reaper-0123/last-seen.json").exists(), "the baselines stay without --all: {said}");
+    assert!(said.contains("The copies of Kumi's bridges you had changed stay in ") && said.contains("changed"), "{said}");
+    // --all takes the baselines too, never the producer's copies.
+    setup();
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(!reaper.join("snapshots").exists(), "{said}");
+    assert!(reaper.join("changed/reaper_kumi.dylib-1700000000000").exists(), "{said}");
+    assert!(home.exists(), "the producer's copies keep Kumi's folder: {said}");
 }
 
 /// `kumi update` brings Renoise's tool from the new Kumi's own folder, not from the Kumi that runs the update; going back

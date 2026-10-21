@@ -173,6 +173,7 @@ impl AppLab {
             version: Some("1.0.0".into()),
             sha256: None,
             previous: vec![],
+            copies: vec![],
             updated_ms: 0,
             history: vec![],
         };

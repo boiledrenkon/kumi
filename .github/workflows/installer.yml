@@ -49,8 +49,9 @@ jobs:
           # Main, and pull requests that change installing, updating, releasing, Willington's files, the Mac helper the
           # bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings) and
           # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), how Kumi's extension
-          # goes into Live, or REAPER's and Renoise's bridges (the extension, the tool, Kumi's host for them and their
-          # shared lifecycle; their tests aside), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
+          # goes into Live, or how REAPER's and Renoise's bridges are built and go in (the extension's build, shim, SDK and
+          # entry point, the host's binary, the tool's manifest, entry and version, and the shared lifecycle, detection
+          # and files: a REAPER change kind or a host tool is CI's), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
           # silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install each,
           # update to it from the release before it and check the update from the JavaScript release (see below). A pull
           # request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a version
@@ -59,7 +60,7 @@ jobs:
           # merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/(reaper-kumi|daw-bridge|daw-mcp-server)/|daws/renoise/com\.kumi\.Bridge\.xrnx/)'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/reaper-kumi/(build\.rs|Cargo\.toml|shim/|sdk/|src/lib\.rs)|crates/daw-mcp-server/(Cargo\.toml|src/bin/)|crates/daw-bridge/(Cargo\.toml|src/(lifecycle|install|detect|files|owner|paths)\.rs)|daws/renoise/com\.kumi\.Bridge\.xrnx/(manifest\.xml|main\.lua|payload/version\.lua))'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
@@ -71,7 +72,8 @@ jobs:
             crates/ableton-mcp-server/src/lifecycle.rs crates/ableton-mcp-server/src/delivery_install.rs \
             crates/kumi/src/daw/own.rs crates/daw-bridge/src/lifecycle.rs crates/daw-bridge/src/install.rs crates/daw-bridge/src/detect.rs \
             crates/reaper-kumi/build.rs crates/reaper-kumi/src/lib.rs crates/daw-mcp-server/src/bin/daw-mcp-server.rs \
-            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua; do
+            crates/daw-bridge/src/files.rs crates/daw-bridge/src/owner.rs crates/daw-bridge/src/paths.rs crates/reaper-kumi/shim/csurf.cpp \
+            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua; do
             test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
@@ -321,12 +323,16 @@ jobs:
           daws | tee forward.txt
           test "$(cut -d' ' -f1-4 forward.txt)" = "$(cut -d' ' -f1-4 daws.txt)"
           echo 1 > "$KUMI_HOME/settings-marker"
+          # A file of the producer's in Kumi's tool: uninstalling takes the tool out and keeps that copy for them.
+          echo '-- mine' > "$renoise/Scripts/Tools/com.kumi.Bridge.xrnx/mine.lua"
           kumi uninstall --yes
           # One test a line: bash -e doesn't stop at a failing one that isn't the last in an && list.
           test ! -e "$KUMI_HOME/app"
           test ! -e "$KUMI_HOME/node"
           test ! -e "$KUMI_HOME/bin"
-          test ! -e "$KUMI_HOME/bridges"
+          test ! -e "$KUMI_HOME/bridges/reaper"
+          test ! -e "$KUMI_HOME/bridges/renoise/generations"
+          test -n "$(ls "$KUMI_HOME/bridges/renoise/changed")"   # the producer's copy stays
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
           test "$(marked)" = 0
           python3 scripts/tests/daw_bridges.py removed "$KUMI_HOME" "$reaper" "$renoise"
@@ -549,13 +555,17 @@ jobs:
           $forward = Daws; Write-Host $forward
           if ((Fields $forward) -ne (Fields $daws)) { throw "the second rollback didn't put back the first copies: $forward" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
+          # A file of the producer's in Kumi's tool: uninstalling takes the tool out and keeps that copy for them.
+          Set-Content -Path (Join-Path $renoise 'Scripts\Tools\com.kumi.Bridge.xrnx\mine.lua') -Value '-- mine'
           & $kumi uninstall --yes
           # REAPER's and Renoise's bridges come out at once; Kumi's folders a few seconds later, from a cmd it leaves running.
           python scripts/tests/daw_bridges.py removed $env:KUMI_HOME $reaper $renoise
           if ($LASTEXITCODE -ne 0) { throw "REAPER's or Renoise's bridge stayed" }
+          $gones = 'app', 'node', 'bin', 'bridges\reaper', 'bridges\renoise\generations'
           $deadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $deadline -and @('app', 'node', 'bin', 'bridges' | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
-          foreach ($gone in 'app', 'node', 'bin', 'bridges') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          while ((Get-Date) -lt $deadline -and @($gones | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
+          foreach ($gone in $gones) { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          if (-not (Get-ChildItem (Join-Path $env:KUMI_HOME 'bridges\renoise\changed'))) { throw "the producer's copy of the tool wasn't kept" }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
 
@@ -829,3 +839,30 @@ jobs:
           latest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -V | tail -n 1)"
           gh release edit "$latest" --repo "$GITHUB_REPOSITORY" --latest
           echo "The latest release is $latest."
+
+  nightly-failed:
+    # The nightly run is the only one before a tag that builds all six bundles with the release profile, REAPER's
+    # extension in each (the cross builds, lipo, strip and codesign). A break there stops the next release, Live's
+    # fixes too, so it opens an issue (or comments on the open one) to be seen the next morning.
+    name: The nightly build failed
+    needs: [plan, native]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="The nightly Installer build failed"
+          body="The nightly release-profile build of main failed: $RUN. Every release builds the same six bundles, with REAPER's extension in each, so a tag fails the same way until this is fixed."
+          open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

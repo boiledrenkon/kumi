@@ -33,7 +33,21 @@ fn acl_reason(code: i32) -> Option<&'static str> {
 }
 
 #[cfg(windows)]
+thread_local! {
+    /// The PowerShell runs this thread started to set or check permissions: each costs seconds (Defender scans it).
+    static ACL_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many PowerShell runs this thread started to set or check permissions (tests count them).
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn acl_runs_on_this_thread() -> usize {
+    ACL_RUNS.with(std::cell::Cell::get)
+}
+
+#[cfg(windows)]
 fn run_acl(path: &Path, script: &str, timeout_ms: u64) -> Result<(), String> {
+    ACL_RUNS.with(|runs| runs.set(runs.get() + 1));
     use base64::{engine::general_purpose::STANDARD, Engine};
     use std::io::Read;
     use std::os::windows::process::CommandExt;
@@ -113,13 +127,21 @@ pub fn create_owner_only_dir(path: &Path) -> std::io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+    // Windows: a folder this made gets its owner-only permissions (a PowerShell run, seconds each); one made already
+    // (by an earlier action, which locked it then) is left as it is, so an action with nothing to do runs none.
     #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(path)?;
-    }
+    let made = match std::fs::create_dir(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => false,
+        Err(error) => return Err(error),
+    };
     #[cfg(windows)]
-    run_acl(path, &format!("$ErrorActionPreference='Stop';{ACL_TARGET}{SECURE_DIRECTORY}{DIRECTORY_CHECKS}"), 30_000)
-        .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
+    if made {
+        run_acl(path, &format!("$ErrorActionPreference='Stop';{ACL_TARGET}{SECURE_DIRECTORY}{DIRECTORY_CHECKS}"), 30_000)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    let _ = made;
     Ok(())
 }
 

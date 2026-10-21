@@ -398,7 +398,7 @@ Live の中のブリッジのほうが古く、Live が閉じていれば、続�
 
 **REAPER の拡張機能と Renoise のツール**は、Kumi のブリッジが入っていれば Kumi に合わせて動きます。
 
-- `kumi update` は新しい Kumi に付属するものを入れ、DAW が開いていれば再起動するよう伝えます（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。REAPER のものは Kumi が入れた場所へ、Renoise のものはいちばん新しい設定フォルダーへ入れます。新しい Renoise は自分の設定フォルダーを作るためです。
+- `kumi update` は新しい Kumi に付属するものを入れ、DAW が開いていれば再起動するよう伝えます（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。どちらも Kumi が入れた場所へ入れ、新しい Renoise が自分のバージョンフォルダーに作ったツールのコピーも一緒に最新にします。あなたが取り除いたものは入れ直さず（"Kumi's tool isn't in Renoise any more"）、REAPER のフォルダーがなくなった拡張機能をほかの REAPER に移すこともありません。入れるには `kumi --daw reaper bridge` を使います。
 - `--rollback` は前の Kumi に付属していたものに戻します。REAPER と Renoise を知らない Kumi（1.19.3 以前）はそれらをそのまま残して使わず、取り除くために削除するファイルやフォルダーを Kumi が伝えます。その Kumi は、`KUMI_DAW` が `reaper` か `renoise` のままだと起動しません。使うときは外してください。
 - Kumi が入れた後に DAW のフォルダーで変わっていたものは、まず `~/.kumi/bridges/reaper/changed`（または `renoise`）に保存し、その場所を伝えます。
 - どちらも Live や DAW を閉じる必要はありません。動いている DAW は、再起動したときに新しいものを読み込みます。
@@ -435,7 +435,7 @@ REAPER や Renoise を使ったことがあれば、`doctor` はそれも DAW �
 
 `report` は `~/kumi-report-<date and time>.txt` を書き出します。Kumi とブリッジのバージョン、doctor のチェック結果、設定、直近の会話で Kumi がしたこと、ギャップのログ、Live 自身のログにあるブリッジの行（REAPER と Renoise では、`~/.kumi/bridges/<daw>/logs` にある Kumi のブリッジのログの最後の行）が入ります。キーとトークンは取り除かれ、ホームフォルダーは `~`、アカウント名は `<user>` と表示されます。送る前に目を通してください。
 
-`uninstall` は Kumi、`--rollback` のために残した版、更新が残したもの、残っている旧版の Node、ランチャー、Kumi が追加した PATH のエントリー、Kumi が取得したもの（プログラム、モデル、見たビデオ。必要になればまた取得します）を削除し、空いた容量を伝えます。ブリッジと拡張機能を Live から取り除くか（Live が閉じている間だけ）、Kumi の拡張機能を REAPER から、ツールを Renoise から取り除くかを尋ねます。会話、メモ、レシピ、サインイン、ライブラリー、リファレンスは、`--all` を付けない限り残ります。`--dry-run` は削除するものを伝えるだけで、何も削除しません。
+`uninstall` は Kumi、`--rollback` のために残した版、更新が残したもの、残っている旧版の Node、ランチャー、Kumi が追加した PATH のエントリー、Kumi が取得したもの（プログラム、モデル、見たビデオ。必要になればまた取得します）を削除し、空いた容量を伝えます。ブリッジと拡張機能を Live から取り除くか（Live が閉じている間だけ）、Kumi の拡張機能を REAPER から、ツールを Renoise から取り除くかを尋ねます。REAPER と Renoise の離れていた間の変化を比べる状態も `--all` を付けない限り残り、あなたが変えたブリッジの版（`~/.kumi/bridges/<daw>/changed`）は常に残ります。会話、メモ、レシピ、サインイン、ライブラリー、リファレンスは、`--all` を付けない限り残ります。`--dry-run` は削除するものを伝えるだけで、何も削除しません。
 
 - Kumi のフォルダー（`KUMI_HOME`）がホームフォルダー、ディスクのルート、相対パス、または Kumi のランチャーとアプリがないフォルダーのときは何も削除せず、手で取り除く Kumi のものを伝えます。インストーラーもそこにはインストールしません。`sudo` で実行しても、あなたのホームフォルダーと、root のものではないフォルダーには手を付けません。
 - `bin`、`downloads`、Kumi が取得したもののフォルダーからは、Kumi 自身のファイルだけを削除します。ほかのものは残し、その名前を伝えます。フォルダーも残ります。

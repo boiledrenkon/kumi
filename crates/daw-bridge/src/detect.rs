@@ -515,7 +515,7 @@ pub fn unquarantine(path: &Path) -> std::io::Result<()> {
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
         if unsafe { libc::removexattr(c_path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW) } != 0 {
             let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ENOATTR) {
+            if !unmarked(error.raw_os_error()) {
                 return Err(error);
             }
         }
@@ -533,9 +533,25 @@ pub fn unquarantine(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether removing the downloaded mark failed only because there's none to remove: the file has no mark, or its disk
+/// keeps no extended attributes at all (an NFS share, a FAT disk), where no mark can be either.
+#[cfg(target_os = "macos")]
+fn unmarked(errno: Option<i32>) -> bool {
+    matches!(errno, Some(libc::ENOATTR) | Some(libc::ENOTSUP))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_disk_without_extended_attributes_has_no_mark_to_take_off() {
+        assert!(unmarked(Some(libc::ENOATTR)));
+        assert!(unmarked(Some(libc::ENOTSUP)), "an NFS share or a FAT disk: no mark, nothing to fail over");
+        assert!(!unmarked(Some(libc::EACCES)));
+        assert!(!unmarked(None));
+    }
 
     fn env<'a>(os: Os, root: &Path, vars: &'a dyn Fn(&str) -> Option<String>) -> Env<'a> {
         Env { os, home: root.join("home"), var: vars, root: Some(root.join("sys")) }
