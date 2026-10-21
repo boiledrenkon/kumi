@@ -19,6 +19,9 @@ const TIMEOUT_MS: u64 = 2_000;
 const MOST_TIMEOUT_MS: u64 = 10_000;
 /// The most of a chunk's answer kept (its result and what it printed).
 const MOST_ANSWER: usize = 4 * 1024 * 1024;
+/// The most of what a chunk prints that the wrapper keeps: lines, and bytes in all.
+const MOST_LINES: usize = 2_000;
+const MOST_PRINTED: usize = 1024 * 1024;
 /// The most values of a chunk's result the wrapper writes (a result like `_G` is cut there, not encoded for minutes).
 const MOST_NODES: usize = 100_000;
 
@@ -158,14 +161,23 @@ local function answer(text) reaper.SetExtState("{section}", TOKEN, text, false) 
 local chunk, err = load(code, "=chunk", "t")
 if not chunk then answer('{{"compiled":false,"error":' .. where(err) .. '}}') return end
 if CHECK then answer('{{"compiled":true}}') return end
-local printed = {{}}
+-- What it prints, up to {most_lines} lines and {most_printed} bytes (a print loop would fill REAPER's memory and ext state).
+local printed, held, dropped = {{}}, 0, 0
+local function hold(text)
+  if #printed >= {most_lines} or held + #text > {most_printed} then
+    dropped = dropped + 1
+    return
+  end
+  held = held + #text
+  printed[#printed + 1] = text
+end
 local function keep(...)
   local parts = {{}}
   for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
-  printed[#printed + 1] = table.concat(parts, "\t")
+  hold(table.concat(parts, "\t"))
 end
 print = keep
-reaper.ShowConsoleMsg = function(text) printed[#printed + 1] = tostring(text) end
+reaper.ShowConsoleMsg = function(text) hold(tostring(text)) end
 -- A dialog would wait for someone while REAPER's main thread waits for the chunk (no hook runs inside it).
 for _, name in ipairs({{"MB", "ShowMessageBox", "GetUserInputs", "GetUserFileNameForRead", "ShowPopupMenu", "ShowActionList", "PromptForAction"}}) do
   if reaper[name] then
@@ -227,6 +239,7 @@ if sethook then sethook() end
 if not encoded then result = quote(PAST) end
 local lines = {{}}
 for i, line in ipairs(printed) do lines[i] = quote(line) end
+if dropped > 0 then lines[#lines + 1] = quote("(" .. dropped .. " more printed lines not kept)") end
 if ok then
   answer('{{"compiled":true,"ok":true,"result":' .. result .. ',"printed":[' .. table.concat(lines, ",") .. ']}}')
 else
@@ -237,6 +250,8 @@ end
         section = SECTION,
         most_bytes = MOST_ANSWER / 2,
         most_nodes = MOST_NODES,
+        most_lines = MOST_LINES,
+        most_printed = MOST_PRINTED,
     )
 }
 

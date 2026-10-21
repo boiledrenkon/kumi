@@ -3490,6 +3490,11 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     let (shared, took) = timed("local t = {}\nfor i = 1, 60 do t = {a = t, b = t} end\nreturn t");
     assert!(shared["ok"] == true && took < std::time::Duration::from_secs(2), "{took:?}");
     assert!(shared["result"].to_string().contains("(seen above)"), "{shared}");
+    // What a chunk prints is kept up to 2,000 lines and 1 MB, and says how much more there was (review R17).
+    let chatty = run("for i = 1, 100000 do print(i) end\nprint(string.rep('x', 2000000))", 5000, false);
+    let printed = chatty["printed"].as_array().unwrap();
+    assert_eq!((printed.len(), printed[0].as_str(), printed[1999].as_str()), (2001, Some("1"), Some("2000")));
+    assert_eq!(printed[2000], "(98001 more printed lines not kept)");
     // A dialog would hold REAPER until someone answers it: refused.
     let dialog = run("reaper.MB('done', 'Kumi', 0)", 1000, false);
     assert!(dialog["error"]["message"].as_str().unwrap().contains("opens a dialog"), "{dialog}");
