@@ -29,6 +29,10 @@ const KNOBS_PER_DEVICE: usize = 128;
 const KNOBS_PER_SLOT: usize = 512;
 /// The name the best goes by.
 const BEST: &str = "Kumi · Goal best";
+/// Knobs a search never moves in an own DAW, besides the shared ones: gain a plug-in adds after its sound (a louder trial
+/// would score closer), by name (exact) or by a word in it.
+const LEAVE_NAMES: [&str; 3] = ["global gain", "adjustment (db)", "output gain"];
+const LEAVE_WORDS: [&str; 1] = ["makeup"];
 
 /// One searched candidate: its track, and the scratch copy its trials are set on and heard from.
 struct Slot {
@@ -243,8 +247,9 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         let mut knobs = vec![];
         let mut places = IndexMap::new();
         for (at, device) in devices.iter().enumerate() {
-            // (Renoise's mixer is the track's fader and pan: the search leaves the producer's mix where it is)
-            if device.mixer {
+            // (Renoise's mixer is the track's fader and pan: the search leaves the producer's mix where it is; a limiter,
+            // the safety one Kumi put last included, would only make trials louder)
+            if device.mixer || r.table.limiters.iter().any(|(word, _, _)| device.name.contains(word)) {
                 continue;
             }
             // (a grid of two points: a stepped parameter answers its steps' texts)
@@ -252,8 +257,19 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
                 Ok(rows) => rows,
                 Err(why) => return Ok(Err(why)),
             };
-            for row in rows.iter().take(KNOBS_PER_DEVICE) {
+            // (REAPER lists Bypass, Wet and Delta last on every FX: not the sound's)
+            let pseudo = rows
+                .iter()
+                .rev()
+                .take(r.table.pseudo_params.len())
+                .filter(|row| text(row, "name").is_some_and(|name| r.table.pseudo_params.contains(&name.as_str())))
+                .count();
+            for row in rows[..rows.len() - pseudo].iter().take(KNOBS_PER_DEVICE) {
                 let (Some(reference), Some(name)) = (text(row, "ref"), text(row, "name")) else { continue };
+                let lower = name.to_lowercase();
+                if LEAVE_NAMES.contains(&lower.as_str()) || LEAVE_WORDS.iter().any(|word| lower.contains(word)) {
+                    continue;
+                }
                 let number = |key: &str| row.get(key).and_then(Value::as_f64);
                 let (min, max) = if r.table.normalized { (0., 1.) } else { (number("min").unwrap_or(0.), number("max").unwrap_or(1.)) };
                 let index =
@@ -361,24 +377,56 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
 
     /// The slot's knobs set on the candidate track itself, as one change (several in HISTORY's one row).
     async fn set_track(&self, slot: &str, knobs: &[Knob], values: &[f64], signal: Signal) -> Result<(), String> {
-        let pairs: Vec<(&str, f64)> = knobs.iter().zip(values).map(|(knob, value)| (knob.r#ref.as_str(), *value)).collect();
-        // (by device: one change for each, as a device's knobs are set)
-        let mut by_device: IndexMap<String, Vec<(&str, f64)>> = IndexMap::new();
-        for (knob, (reference, value)) in knobs.iter().zip(pairs) {
-            by_device.entry(knob.device.clone()).or_default().push((reference, value));
-        }
-        let devices = self.track_now(slot, &signal).await.ok_or_else(|| format!("“{slot}” isn't in the search"))?;
-        let chain = match self.renderer.devices(&devices, &signal).await {
+        let track = self.track_now(slot, &signal).await.ok_or_else(|| format!("“{slot}” isn't in the search"))?;
+        let chain = match self.renderer.devices(&track, &signal).await {
             Ok(Ok(chain)) => chain,
             Ok(Err(why)) => return Err(why),
             Err(error) => return Err(error.to_string()),
         };
-        for (device, values) in by_device {
-            let at: usize = device.split(':').next().and_then(|at| at.parse().ok()).unwrap_or(usize::MAX);
-            let Some(reference) = chain.get(at).map(|row| row.reference.clone()) else { continue };
+        // (by device as it is now: one change for each, as a device's knobs are set; nothing when one moved or went)
+        let mut by_device: IndexMap<String, Vec<(&str, f64)>> = IndexMap::new();
+        let mut moved: Vec<String> = vec![];
+        for (knob, value) in knobs.iter().zip(values) {
+            match self.device_now(knob, &chain) {
+                Some((_, row)) => by_device.entry(row.reference.clone()).or_default().push((knob.r#ref.as_str(), *value)),
+                None => {
+                    let name = knob.device.split_once(':').map_or(knob.device.as_str(), |(_, name)| name).to_owned();
+                    if !moved.contains(&name) {
+                        moved.push(name);
+                    }
+                }
+            }
+        }
+        if !moved.is_empty() {
+            return Err(self.moved_words(slot, &moved));
+        }
+        for (reference, values) in by_device {
             self.renderer.set_knobs(&reference, &values, signal.clone()).await.map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// A knob's device in the chain as it is now, and its place there: by its id where the DAW's refs are ids (REAPER's FX
+    /// GUID), else at its place under the same name (Renoise's refs are places). None when it moved or went.
+    fn device_now<'a>(&self, knob: &Knob, chain: &'a [DeviceRow]) -> Option<(usize, &'a DeviceRow)> {
+        let lasting = !self.renderer.link.book.borrow().scheme.positional();
+        if lasting {
+            if let Some(device) = super::own_listening::device_of_param(&knob.r#ref) {
+                return chain.iter().enumerate().find(|(_, row)| row.reference == device);
+            }
+        }
+        let (at, name) = knob.device.split_once(':')?;
+        let at: usize = at.parse().ok()?;
+        chain.get(at).filter(|row| row.name == name).map(|row| (at, row))
+    }
+
+    /// Why nothing was set: devices the search moved knobs of moved or went meanwhile.
+    fn moved_words(&self, slot: &str, moved: &[String]) -> String {
+        let named: Vec<String> = moved.iter().map(|name| format!("“{name}”")).collect();
+        format!(
+            "{} moved or went on “{slot}” since the search began, so Kumi set nothing there: start the goal again to search the chain as it is now",
+            named.join(", ")
+        )
     }
 }
 
@@ -531,6 +579,26 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
             if !r.link.daw.changes.kinds.iter().any(|kind| kind.tool == "scratch_keep") {
                 return Ok(Err(format!("this {} bridge can't keep a copy as a track yet: update Kumi's bridge", r.app())));
             }
+            let Some(track) = self.track_now(slot, &signal).await else { return Ok(Err(format!("“{slot}” isn't in the search"))) };
+            // Each knob's place in the chain as it is now (the copy is made of the track now): none when its device moved.
+            let chain = match r.devices(&track, &signal).await? {
+                Ok(chain) => chain,
+                Err(why) => return Ok(Err(why)),
+            };
+            let places =
+                self.slots.borrow().iter().find(|found| found.info.name == slot).map(|found| found.places.clone()).unwrap_or_default();
+            let mut set_at: Vec<(u64, u64, f64)> = vec![];
+            let mut moved: Vec<String> = vec![];
+            for (knob, value) in knobs.iter().zip(values) {
+                match (self.device_now(knob, &chain), places.get(&key(knob))) {
+                    (Some((_, row)), Some((_, param))) => set_at.push((row.index, *param, *value)),
+                    _ => moved.push(knob.device.split_once(':').map_or(knob.device.as_str(), |(_, name)| name).to_owned()),
+                }
+            }
+            moved.dedup();
+            if !moved.is_empty() {
+                return Ok(Err(self.moved_words(slot, &moved)));
+            }
             // The last best goes (Kumi's undo of keeping it, whichever goal kept it), then a fresh copy of the slot at these
             // values is kept.
             let previous = r.goal_best.borrow_mut().take();
@@ -539,7 +607,6 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
                     r.tell_app(&format!("Kumi couldn't take the last “{BEST}” away ({why}): delete it by hand"));
                 }
             }
-            let Some(track) = self.track_now(slot, &signal).await else { return Ok(Err(format!("“{slot}” isn't in the search"))) };
             let args = json!({"action": "make", "ref": track, "count": 1, "label": "Kumi: goal best"});
             let made = match r.ask("scratch", args, r.cleanup_signal()).await? {
                 Ok(made) => made,
@@ -550,16 +617,12 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
             else {
                 return Ok(Err(format!("{} made no copy of “{slot}”", r.app())));
             };
-            let places =
-                self.slots.borrow().iter().find(|found| found.info.name == slot).map(|found| found.places.clone()).unwrap_or_default();
-            let set: Vec<Value> = knobs
+            let set: Vec<Value> = set_at
                 .iter()
-                .zip(values)
-                .filter_map(|(knob, value)| {
-                    let (device, param) = places.get(&key(knob))?;
+                .map(|(device, param, value)| {
                     let mut entry = json!({"ref": copy, "device": device, "param": param});
                     entry[r.table.scratch_field] = json!(value);
-                    Some(entry)
+                    entry
                 })
                 .collect();
             let mut steps = made.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0);

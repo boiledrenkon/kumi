@@ -107,6 +107,9 @@ pub(super) struct Table {
     pub plugin_prefixes: &'static [&'static str],
     /// How a render's notes start that say it stopped what was playing: of Kumi's own play, said once a run.
     pub stop_notes: &'static [&'static str],
+    /// Parameters the DAW lists last on every device that aren't the sound's (REAPER's Bypass, Wet and Delta): a search
+    /// never moves them.
+    pub pseudo_params: &'static [&'static str],
 }
 
 /// REAPER (the extension): pre-fader stems in one pass, the master with and without its FX, ReaLimit and JS Volume
@@ -138,6 +141,7 @@ pub(super) const REAPER: Table = Table {
     captures: true,
     plugin_prefixes: &["VST:", "VSTi:", "VST3:", "VST3i:", "AU:", "AUi:", "CLAP:", "CLAPi:", "LV2:", "LV2i:", "DX:", "DXi:"],
     stop_notes: &["The audition playing was stopped", "REAPER stopped playback to render"],
+    pseudo_params: &["Bypass", "Wet", "Delta"],
 };
 
 /// Renoise (the tool): one solo render per track, through its fader and the Master track's devices; the Maximizer and
@@ -169,6 +173,7 @@ pub(super) const RENOISE: Table = Table {
     captures: false,
     plugin_prefixes: &[],
     stop_notes: &["Renoise stopped playback to render"],
+    pseudo_params: &[],
 };
 
 pub(super) fn table(id: Option<DawId>) -> &'static Table {
@@ -959,6 +964,12 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     fn eq_bands_of<'a>(&self, knobs: &'a [DeviceKnob]) -> Vec<EqBandKnobs<'a>> {
         eq_bands(knobs, self.table.eq_shelves_at_ends)
     }
+}
+
+/// The device a parameter's ref is of, where refs are ids (REAPER's `r:param:{FX GUID}:{index}` is of `r:fx:{FX GUID}`).
+pub(super) fn device_of_param(reference: &str) -> Option<String> {
+    let (guid, _) = reference.strip_prefix("r:param:")?.rsplit_once(':')?;
+    Some(format!("r:fx:{guid}"))
 }
 
 /// One knob's change: the device as it is now with the knob's number (a knob's own ref can be from before a search's copies

@@ -293,6 +293,13 @@ impl RenoiseScript {
         self.state.lock().unwrap().chains.add(track, path).unwrap_or_else(|| panic!("the simulator has no device {path}"))
     }
 
+    /// The producer puts a device at a place in a track's chain (from 1; TrackVolPan is 1): the devices after it move.
+    pub fn insert_device(&self, track: u64, at: u64, path: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.chains.insert(track, at, path);
+        state.epoch += 1;
+    }
+
     /// A parameter's value on a track's device (its place from 1), by the parameter's name.
     pub fn device_value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
         self.state.lock().unwrap().chains.value(track, at, name)

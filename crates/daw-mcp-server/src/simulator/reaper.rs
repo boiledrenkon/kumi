@@ -171,6 +171,13 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         }
         _ => return None,
     };
+    // (REAPER lists these three last on every FX)
+    let mut params = params;
+    params.extend([
+        ("Bypass".to_string(), 0., ParamShows::Plain { min: 0., max: 1. }),
+        ("Wet".to_string(), 1., ParamShows::Plain { min: 0., max: 1. }),
+        ("Delta".to_string(), 0., ParamShows::Plain { min: 0., max: 1. }),
+    ]);
     let name = match name {
         "ReaLimit" => "VST: ReaLimit (Cockos)",
         "Volume Adjustment" => "JS: Volume Adjustment",
@@ -332,6 +339,27 @@ impl ReaperScript {
         state.fx.entry(track.to_owned()).or_default().push(fx);
         state.changed += 1;
         reference
+    }
+
+    /// An FX the producer puts first on a track's chain: its ref.
+    pub fn insert_fx_first(&self, track: &str, name: &str) -> String {
+        let reference = self.add_fx(track, name);
+        let mut state = self.state.lock().unwrap();
+        if let Some(chain) = state.fx.get_mut(track) {
+            let fx = chain.pop().expect("the FX just added");
+            chain.insert(0, fx);
+        }
+        reference
+    }
+
+    /// The producer deletes an FX (its ref).
+    pub fn remove_fx(&self, reference: &str) {
+        let mut state = self.state.lock().unwrap();
+        let guid = reference.strip_prefix("r:fx:").unwrap_or(reference).to_owned();
+        for chain in state.fx.values_mut() {
+            chain.retain(|fx| fx.guid != guid);
+        }
+        state.changed += 1;
     }
 
     /// An input FX the producer puts on a track (on the master, a monitoring FX): its ref.
