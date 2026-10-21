@@ -10,6 +10,14 @@
 //! A narrow header hides what doesn't fit: the Controls View's header has no undo and redo, and a small editor (a
 //! Gain at 75%) not even the setting buttons, so a preset is changed in the editor, made a size larger at a time
 //! until the header shows the button it needs (the size put back after).
+//!
+//! The Compressor's window (measured on Logic Pro 12.3.1, Scratch's Keys) shows what a plug-in with an editor of its
+//! own and a side chain does: its editor's controls (knobs, the circuit type buttons, their fields) sit at the
+//! window's top level with the header's, 44 in all, the texts naming the plug-in and the strip last, so a header read
+//! cut at 40 is made again whole; the header lists the Side Chain pop-up ("Internal") before the setting pop-up
+//! ("Custom"); the editor keeps a size of its own besides the view menu's (71%); and its Controls View lists 29 rows,
+//! some a value it shows with no control to set it (Knee "0.7", Peak/RMS, the side chain filter's Gain, Gain
+//! Reduction: a disabled slider in the text's group), which read as a parameter Kumi can't set.
 
 use std::time::Duration;
 
@@ -29,8 +37,11 @@ const MENU_SETTLE_MS: u64 = 300;
 /// The view that lists every parameter.
 const CONTROLS: &str = "Controls";
 const EDITOR: &str = "Editor";
-/// The editor's sizes, as the view menu lists them (Logic Pro 12.3.1).
+/// The editor's sizes, as the view menu lists them (Logic Pro 12.3.1); an editor may show a size of its own too.
 const SIZES: [&str; 7] = ["50%", "75%", "100%", "125%", "150%", "175%", "200%"];
+/// The window's top-level children a header read lists first: enough for a plug-in whose editor keeps its controls
+/// below the header (Channel EQ's, the Gain's); a read cut there is made again with all of them.
+const HEADER_CHILDREN: usize = 40;
 
 /// The view a kind shows the window in: the Controls View (the parameters), or the editor (a preset's buttons and the
 /// window's own undo).
@@ -75,6 +86,8 @@ pub enum Kind {
     Choice,
     Switch,
     Menu,
+    /// A value the view shows with no control to set it (the Compressor's Knee): its text alone.
+    Readout,
 }
 
 impl Param {
@@ -97,9 +110,16 @@ fn windows(ctx: &mut Ctx) -> Done<Vec<(String, String)>> {
     Ok(windows.into_iter().map(|window| (window.title, window.subrole)).collect())
 }
 
-/// The window's top level: its header controls and the static texts naming the plug-in and the strip.
+/// The window's top level: its header controls and the static texts naming the plug-in and the strip. A plug-in whose
+/// editor puts its own controls there (the Compressor's 44) has those texts past the first read, so a read cut short
+/// is made again with every child.
 fn header(ctx: &mut Ctx, root: &Root) -> Done<Node> {
-    nudge::read(ctx.ax.tree(root, "", 1, 40, Some(&["role", "subrole", "title", "desc", "value"])))
+    const ATTRS: [&str; 5] = ["role", "subrole", "title", "desc", "value"];
+    let first = nudge::read(ctx.ax.tree(root, "", 1, HEADER_CHILDREN, Some(&ATTRS)))?;
+    if first.more == 0 {
+        return Ok(first);
+    }
+    nudge::read(ctx.ax.tree(root, "", 1, crate::ax::MAX_CHILDREN, Some(&ATTRS)))
 }
 
 /// Whether a window's static texts name the plug-in (the window shows one plug-in at a time): its slot's name, or a
@@ -217,10 +237,17 @@ pub fn reveal(ctx: &mut Ctx, shown: &Shown, label: &str) -> Done<()> {
         }
         let (button, now) =
             view_button(&window, &strings).ok_or_else(|| failed(format!("the window of {} shows no view menu", quoted(&shown.plugin))))?;
-        let Some(larger) = SIZES.iter().skip_while(|size| **size != now).nth(1) else { break };
+        let Some(larger) = larger_size(&now) else { break };
         choose_view(ctx, &shown.root, &button, larger)?;
     }
     Err(failed(format!("the window of {} shows no {label} button at any size", quoted(&shown.plugin))))
+}
+
+/// The view menu's next size up from the one the editor shows, its own (the Compressor's "71%") as well as the menu's.
+fn larger_size(now: &str) -> Option<&'static str> {
+    let percent = |size: &str| size.trim().strip_suffix('%').and_then(|n| n.trim().parse::<f64>().ok());
+    let now = percent(now)?;
+    SIZES.iter().copied().find(|size| percent(size).is_some_and(|size| size > now))
 }
 
 /// Puts the view back as it was and closes the window when Kumi opened it.
@@ -342,6 +369,21 @@ fn params_with(ctx: &mut Ctx, shown: &Shown, only: Option<usize>) -> Done<Vec<Pa
                 choices: vec![],
                 text_path: None,
             }
+        } else if let Some((group, inner)) = group.and_then(|g| g.children.iter().find(|c| c.role == "AXSlider").map(|s| (g, s))) {
+            // The text's group alone, its slider disabled with no range: a value shown, never set from here.
+            let text = Some(group.value_text()).filter(|t| !t.is_empty()).unwrap_or_else(|| inner.value_desc.clone());
+            Param {
+                index,
+                name,
+                kind: Kind::Readout,
+                path: inner.path.clone(),
+                value: None,
+                text,
+                min: None,
+                max: None,
+                choices: vec![],
+                text_path: None,
+            }
         } else {
             continue;
         };
@@ -379,6 +421,7 @@ pub fn write(ctx: &mut Ctx, shown: &Shown, param: &Param, raw: f64) -> Done<Para
             }
         }
         Kind::Menu => return Err(failed(format!("{}'s {} is a menu Kumi can't set from outside", quoted(&shown.plugin), param.name))),
+        Kind::Readout => return Err(failed(readout_words(&shown.plugin, &param.name))),
     }
     super::pause(Duration::from_millis(100));
     match (param.kind, &param.text_path) {
@@ -404,13 +447,19 @@ fn param_named(ctx: &mut Ctx, shown: &Shown, wanted: &Param) -> Done<Param> {
     Ok(now)
 }
 
-/// The preset the window's setting pop-up names.
+/// Why a value the Controls View only shows isn't set.
+pub fn readout_words(plugin: &str, name: &str) -> String {
+    format!("{}'s Controls View shows its {name} with no control to set it: Kumi can read it, not change it", quoted(plugin))
+}
+
+/// The preset the window's setting pop-up names: the header's last pop-up (a plug-in with a side chain, the
+/// Compressor, lists its Side Chain pop-up first).
 pub fn preset(ctx: &mut Ctx, shown: &Shown) -> Done<(String, String)> {
     let window = header(ctx, &shown.root)?;
     let popup = window
         .children
         .iter()
-        .find(|c| c.role == "AXPopUpButton")
+        .rfind(|c| c.role == "AXPopUpButton")
         .ok_or_else(|| failed(format!("the window of {} shows no setting menu", quoted(&shown.plugin))))?;
     Ok((popup.path.clone(), popup.value_text()))
 }
@@ -560,5 +609,15 @@ mod tests {
         assert_eq!(reading("−16.0 dB"), Some(-16.0));
         assert_eq!(reading("250 Hz"), Some(250.0));
         assert_eq!(reading("Norm"), None);
+    }
+
+    #[test]
+    fn an_editor_is_made_a_size_larger_from_the_menus_sizes_or_its_own() {
+        assert_eq!(larger_size("75%"), Some("100%"));
+        // The Compressor's editor keeps 71%, which the view menu lists after its own sizes.
+        assert_eq!(larger_size("71%"), Some("75%"));
+        assert_eq!(larger_size("200%"), None);
+        assert_eq!(larger_size("Controls"), None);
+        assert!(readout_words("Compressor", "Knee").starts_with("“Compressor”'s Controls View shows its Knee with no control"));
     }
 }

@@ -41,7 +41,7 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel, selected? | the Event List of the region, which shows the selected region's events: a region not selected is selected first, through its item |
 | `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top; an output's plug-ins (the Stereo Out's) under `trackRef` `<epoch>:output:<n>` |
 | `send` | ref, trackRef, slot, destination, level | the strip's send slots: a send's group names its bus, the knob listed right after it says its level ("-6.0", "-∞" as −96) |
-| `param` | ref, pluginRef, index, name, value, text, min, max, normalized | the plug-in window's Controls View (opened from the slot's open button for the read and closed after, its view put back): a row per parameter, its name without the colon, the slider's value and range (`normalized` is the value's share of it), the text beside it; a choice's value is its option's place and a menu's value `null`; needs `parent` (the plug-in) |
+| `param` | ref, pluginRef, index, name, value, text, min, max, normalized | the plug-in window's Controls View (opened from the slot's open button for the read and closed after, its view put back): a row per parameter, its name without the colon, the slider's value and range (`normalized` is the value's share of it), the text beside it; a choice's value is its option's place, and a menu's value `null`, as is a value the view shows with no control to set it (the Compressor's Knee: its text alone, and a change of it refused `bad-params`); needs `parent` (the plug-in) |
 | `smart` | ref, trackRef, index, name, value (0 to 1), text | the Smart Controls pane (opened for the read and closed after) for the track, selected for the read and the selection put back; needs `parent` (the track); a track whose strip has nothing the pane maps (an audio track with only a Channel EQ on it) shows the pane's header over no controls and reads no rows, while a pane that hasn't drawn its header is `failed` |
 | `automation` | ref, trackRef, index, parameter, number, events (positionBeats, value) | the Track Automation Event List of the track (its key command, command 1032, Control-Command-E in the factory set, opens it as a window of its own for the selected track; closed after): its "Fader" rows grouped by parameter, the parameter's name from the Length/Info cell, its number from Num, each event's value (0 to 127) from Val; needs `parent` (the track) |
 | `marker` | ref, position, name, length (beats), text | the Marker List |
@@ -500,6 +500,19 @@ titles.
   editor, made a size larger at a time (the view menu's sizes) until the header shows the button, the
   size put back after. "Default Preset" is on no setting button's way (next from it is the first
   preset, previous from there stays put): only the window's Undo brings it back.
+- A **plug-in with an editor of its own puts its controls beside the header's**: the Compressor's
+  window (Logic Pro 12.3.1) lists 44 elements at its top level, its knobs, circuit type buttons and
+  fields among the header's, with the texts naming the plug-in and the strip last; the bridge reads a
+  window's top level 40 at a time and again whole when that was cut, so the window is found. Its
+  header lists the Side Chain pop-up ("Internal") before the setting pop-up ("Custom"), so the setting
+  is the header's last pop-up; its editor keeps a size of its own (71%) beside the view menu's 50% to
+  200%, and a size larger is the next of the menu's above it. Its Controls View lists 25 parameters:
+  Threshold ("-17.5 dB"), Ratio ("3.9:1"), Attack, Release, Make Up ("0.0 dB"), Knee ("0.7"),
+  Peak/RMS, Auto Gain, Distortion, Circuit Type, Side Chain Detection, Limiter Threshold, Limiter
+  On, Auto Release, the side chain filter's State, Mode, Frequency, Q and Gain, Mix, Gain Reduction,
+  Input Gain, Output Gain, Display Select and View Select (Scratch's Keys). Knee, Peak/RMS, the filter's
+  Gain and Gain Reduction are shown with no control (the text's group holds a disabled slider with no
+  range): they read with their text and a `null` value, and aren't set.
 - A **send Logic makes starts at −∞** on this Mac: `send-add` sets `volumeDb` when it is given, and
   says so when it isn't. A new bus's aux is Logic's own doing, named under `created.aux`.
 - A **patch replaces the whole strip** (instrument, effects, sends): it is loaded through the Library's

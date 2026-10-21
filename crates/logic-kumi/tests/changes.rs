@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 60] = [
+const SCENES: [&str; 61] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -86,6 +86,7 @@ const SCENES: [&str; 60] = [
     "read-paged",
     "read-bulk",
     "change-sample-load",
+    "read-param-compressor",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -1309,4 +1310,50 @@ fn a_sample_comes_in_on_an_audio_track_and_logic_converts_it_into_a_new_sampler_
     assert_eq!(restored["restored"]["pressed"], json!(["Undo Convert Regions to New Sampler Track", "Undo Insert"]));
     assert_eq!(reads[2].result()["total"], 2, "the Sampler track gone");
     assert_eq!(reads[3].result()["total"], 1, "the audio region gone too");
+}
+
+#[test]
+fn the_compressors_window_is_found_past_its_editors_controls_and_its_controls_view_reads_as_channel_eqs_does() {
+    // Scratch's Keys holds a Compressor, whose editor puts its own controls at the window's top level with the header's
+    // (44 in all), the texts naming the plug-in and the strip last: the header read cut at 40 is made again whole, so
+    // the window is found, its view switched to Controls, its rows read, its editor put back and the window closed.
+    let replayed = replay("read-param-compressor");
+    let reads = of(&replayed, "read");
+    let page = reads[0].result();
+    assert_eq!(page["total"], 25);
+    let items = page["items"].as_array().unwrap();
+    let names: Vec<&str> = items.iter().map(|row| row["name"].as_str().unwrap()).collect();
+    assert_eq!(names[..6], ["Threshold", "Ratio", "Attack", "Release", "Make Up", "Knee"]);
+    assert_eq!(
+        items[0],
+        json!({"ref": "1:param:2.3.1", "pluginRef": "1:plugin:2.3", "index": 1, "name": "Threshold", "value": 65.0, "text": "-17.5 dB", "min": 0.0, "max": 100.0, "normalized": 0.65})
+    );
+    let shown = |name: &str| items.iter().find(|row| row["name"] == name).map(|row| row["text"].clone()).unwrap();
+    assert_eq!((shown("Ratio"), shown("Make Up"), shown("Mix")), (json!("3.9:1"), json!("0.0 dB"), json!("59.0 %")));
+    // A value the view shows with no control (its slider disabled, with no range) reads as its text alone, as a menu's.
+    let knee = items.iter().find(|row| row["name"] == "Knee").unwrap();
+    assert_eq!((knee["text"].as_str(), knee["value"].is_null(), knee["min"].is_null()), (Some("0.7"), true, true));
+    assert_eq!(reads[1].result()["items"][0], items[0], "the Threshold by its ref");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[0].replayed["error"]["code"], "bad-params");
+    assert!(previews[0].replayed["error"]["message"].as_str().unwrap().contains("Knee with no control"));
+    // The setting is the header's last pop-up: the Compressor lists its Side Chain pop-up ("Internal") before it.
+    assert_eq!(previews[1].result()["fence"], json!({"plugin": "Compressor", "preset": "Custom"}));
+    let scene = load("read-param-compressor");
+    let headers: Vec<(u64, usize)> = scene
+        .calls
+        .iter()
+        .filter(|call| call.op == "tree" && call.params["root"] == json!({"title": "Keys"}) && call.params["depth"] == 1)
+        .map(|call| (call.params["children"].as_u64().unwrap(), call.reply["node"]["c"].as_array().map_or(0, Vec::len)))
+        .collect();
+    assert!(headers.contains(&(40, 40)) && headers.contains(&(256, 44)), "{headers:?}");
+    // Each read opened the window and closed it after, its view put back to the editor.
+    let presses = |path: &str| {
+        scene
+            .calls
+            .iter()
+            .filter(|call| call.op == "action" && call.params["root"] == json!({"title": "Keys"}) && call.params["path"] == path)
+            .count()
+    };
+    assert_eq!((presses("3.0.0"), presses("3.0.1"), presses("0")), (3, 3, 4), "Controls, Editor, close");
 }
