@@ -75,11 +75,28 @@ local function column_text(value, name)
   return text
 end
 
-local function fx_text(value)
+-- Older spellings of Renoise's sample offset, 0Sxx: 09xx (early Renoise's and ProTracker's), Sxx and -Sxx. Each is read as
+-- 0Sxx, and `read_as` keeps what was read how, for the change to say.
+local function offset_number(number)
+  if number == "09" or number == "S" or number == "-S" then return "0S" end
+end
+
+local function fx_text(value, read_as)
   if value == "" then return "0000" end
   local text = text_of(value, "fx", "0A20")
+  local amount = text:match("^%-?S(%x%x)$") or text:match("^09(%x%x)$")
+  if amount then
+    read_as[#read_as + 1] = text .. " as 0S" .. amount
+    text = "0S" .. amount
+  end
   if not text:match("^%w%w%x%x$") then bad("fx: an effect number and amount such as 0A20, or 0000 for none; got " .. value) end
   return text
+end
+
+-- What the change says of the spellings it read as Renoise's.
+local function read_as_note(read_as)
+  if #read_as == 0 then return nil end
+  return "Read " .. table.concat(read_as, ", ") .. ": Renoise's sample offset is 0Sxx."
 end
 
 -- Cells
@@ -409,7 +426,7 @@ end
 
 -- (`env` for refs inside the cells: a pattern's notes may name their instrument by its ref)
 local function parse_cells(pattern, track, input, env)
-  local wants, count = {}, 0
+  local wants, count, read_as = {}, 0, {}
   local function add(at, given, clear)
     local key = key_of(at)
     if wants[key] then bad(string.format("line %02d %s column %d is given twice", at.line - 1, at.kind, at.col)) end
@@ -435,7 +452,7 @@ local function parse_cells(pattern, track, input, env)
       if cell.volume ~= nil then given.volume = column_text(cell.volume, "volume") end
       if cell.panning ~= nil then given.panning = column_text(cell.panning, "panning") end
       if cell.delay ~= nil then given.delay = delay_text(cell.delay) end
-      if cell.fx ~= nil then given.fx = fx_text(cell.fx) end
+      if cell.fx ~= nil then given.fx = fx_text(cell.fx, read_as) end
       if next(given) == nil and cell.clear ~= true then bad(string.format("line %02d note column %d says nothing to write: give a field, or clear: true", entry.line, at.col)) end
       add(at, given, cell.clear == true)
       any = true
@@ -444,11 +461,16 @@ local function parse_cells(pattern, track, input, env)
       if type(cell) ~= "table" then bad("each of effects is an object {col, number?, amount?, clear?}") end
       local at = cell_at(pattern, track, line, "effect", cell.col)
       local given = {}
+      if cell.amount ~= nil then given.amount = hex2(cell.amount, "amount", "00") end
       if cell.number ~= nil then
         given.number = text_of(cell.number, "number", "0A")
+        local offset = offset_number(given.number)
+        if offset then
+          read_as[#read_as + 1] = given.number .. (given.amount or "") .. " as 0S" .. (given.amount or "")
+          given.number = offset
+        end
         if not given.number:match("^%w%w$") then bad("number: two characters such as 0A; got " .. cell.number) end
       end
-      if cell.amount ~= nil then given.amount = hex2(cell.amount, "amount", "00") end
       if next(given) == nil and cell.clear ~= true then bad(string.format("line %02d effect column %d says nothing to write: give a field, or clear: true", entry.line, at.col)) end
       add(at, given, cell.clear == true)
       any = true
@@ -457,7 +479,7 @@ local function parse_cells(pattern, track, input, env)
       bad(string.format("line %02d says nothing to write: give notes or effects, or clear: true", entry.line))
     end
   end
-  return wants, count
+  return wants, count, read_as
 end
 
 -- The cells a clear of whole lines takes: every cell with something in it, in all columns (hidden ones too). (After
@@ -542,11 +564,13 @@ end
 -- transpose and humanize; `ctx` is {p, index, track, pattern_track, pattern})
 local function preview_of(song, env, input, kind, verb, planner)
   local p, index, track, pattern_track, pattern = locate(song, env, input, kind)
-  local prior, after, title
+  local prior, after, title, read_as
   if planner then
     prior, after, title = planner({ p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern }, input)
   else
-    local wants = parse_cells(pattern, track, input, env)
+    local parsed = { parse_cells(pattern, track, input, env) }
+    local wants = parsed[1]
+    read_as = parsed[3]
     add_cleared(pattern_track, input, wants)
     prior, after = plan_of(pattern_track, wants, input.merge == true)
   end
@@ -561,6 +585,8 @@ local function preview_of(song, env, input, kind, verb, planner)
   if #after == 0 then display.unchanged = true end
   local needs = needs_of(after)
   if needs.note > (columns.note or 0) then display.note = "It shows note column " .. needs.note .. " first." end
+  local said = read_as_note(read_as or {})
+  if said then display.note = display.note and (said .. " " .. display.note) or said end
   return {
     target = target_of(env, p, index), prior = { cells = prior, columns = columns },
     fence = { cells = #prior, hash = fingerprint(prior), id = base.track_id(track), label = base.named(index, track) },
@@ -1246,6 +1272,7 @@ M.CHANGED = CHANGED
 
 -- n-instruments: the cells' text, plan and writes, for a phrase's lines (changes_phrases.lua): a phrase's lines are PatternLines.
 M.cells = {
+  read_as_note = read_as_note,
   line_range = line_range, parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
   same_cell = same_cell, same_cells = same_cells, is_empty_cell = is_empty_cell, fingerprint = fingerprint, writes_of = writes_of,
   counts_of = counts_of, needs_of = needs_of, lines_in = lines_in,

@@ -126,3 +126,19 @@ fn the_packs_rules_read_as_meant() {
     // Line numbers stay decimal, as the reads give them; hex is for values.
     assert!(!renoise.contains("LPB and hex") && renoise.contains("line numbers in decimal"));
 }
+
+/// A problem with one clear mechanical cause is fixed, not only explained: as one undoable change, said with how to take it
+/// back; a question comes first only for a musical choice (the P30 smoke: Kumi found the duplicate route and asked).
+#[test]
+fn a_mechanical_cause_is_fixed_and_a_musical_choice_asked() {
+    for daw in [&reaper::DAW, &renoise::DAW] {
+        let text = instructions_of(daw);
+        let rule = &text[text.find("one clear mechanical cause").unwrap_or_else(|| panic!("{}: the rule", daw.profile.words.app))..];
+        let rule = &rule[..rule.find(". ").unwrap_or(rule.len())];
+        for words in ["fix it as one change", "how to take it back", "musical choice", "track reaching the master twice"] {
+            assert!(rule.contains(words), "{}: {words} in “{rule}”", daw.profile.words.app);
+        }
+    }
+    let lines = renoise::DAW.changes.kinds.iter().find(|kind| kind.tool == "notes_write").unwrap().description;
+    assert!(lines.contains("09xx") && lines.contains("0Sxx"), "notes_write says the older spellings are written as 0Sxx");
+}

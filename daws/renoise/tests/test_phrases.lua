@@ -208,6 +208,16 @@ test("phrases: lines written in Renoise's own text, columns shown first; Kumi's 
   eq(phrase(2, 1).delay_column_visible, false)
 end)
 
+test("phrases: an older sample-offset spelling is written as Renoise's 0Sxx, and the change says so", function()
+  local env, peer = setup()
+  local input = { ref = pref(place(peer), 2, 1), lines = { { line = 2, effects = { { col = 1, number = "09", amount = "40" } } } } }
+  local record, done = change(peer, "phrase-write", input)
+  local fx = mock.song:instrument(2):phrase(1):line(3):effect_column(1)
+  eq(fx.number_string .. fx.amount_string, "0S40")
+  eq(done.display.note, "Read 0940 as 0S40: Renoise's sample offset is 0Sxx.")
+  ok(record, "a record")
+end)
+
 test("phrases: a line the producer edited anywhere in the phrase since refuses the undo of Kumi's lines (the plain rule), nothing written", function()
   local env, peer = setup()
   local record = change(peer, "phrase-write", { ref = pref(place(peer), 2, 1), lines = { { line = 1, notes = { { col = 1, note = "D-4" } } } } })
