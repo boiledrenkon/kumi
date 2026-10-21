@@ -426,12 +426,21 @@ struct Shared {
     config: Config,
     hub: Hub,
     jobs: Mutex<Sender<Job>>,
-    /// The plan's undo step as it was begun: its id and the label it was begun with, so that a close asked while REAPER is
-    /// busy can be accepted for the next free tick and say what it will be named.
-    step: Mutex<Option<(String, String)>>,
+    /// The plan's undo step as it was begun: its id, the label it was begun with and the connection that began it, so that
+    /// a close asked while REAPER is busy can be accepted for the next free tick and say what it will be named, and a step
+    /// whose connection went is closed.
+    step: Mutex<Option<OpenStep>>,
     snapshot: Arc<Mutex<Snapshot>>,
     stopping: Arc<AtomicBool>,
     flushed: Arc<AtomicBool>,
+}
+
+/// A plan's undo step the server saw begin.
+#[derive(Clone)]
+struct OpenStep {
+    id: String,
+    label: String,
+    conn: u64,
 }
 
 impl Shared {
@@ -532,7 +541,7 @@ impl Shared {
     fn defer_step_end(&self, id: u64, params: Value) -> Frame {
         let step = params["stepId"].as_str().unwrap_or_default().to_string();
         let begun = match lock(&self.step).clone() {
-            Some((open, label)) if open == step => label,
+            Some(open) if open.id == step => open.label,
             _ => return Frame::error(id, code::FAILED, "that step isn't open (it ended already, or the project changed under it)"),
         };
         let desc = params["label"].as_str().filter(|label| !label.is_empty()).map_or(begun, str::to_string);
@@ -545,7 +554,25 @@ impl Shared {
         Frame::ok(id, json!({"deferred": true, "desc": desc}))
     }
 
-    fn answer(&self, request: Request) -> Frame {
+    /// A connection ended. A plan's step it began and never ended is closed at the first free tick: nothing else would end
+    /// it (the host died, was killed or closed its connection mid-plan), and a block left open folds every edit the
+    /// producer makes into Kumi's point, which an undo of it then takes too.
+    fn gone(&self, conn: u64) {
+        let step = {
+            let mut open = lock(&self.step);
+            match open.as_ref() {
+                Some(step) if step.conn == conn => open.take(),
+                _ => None,
+            }
+        };
+        let Some(step) = step else { return };
+        log::line(&format!("connection {conn} ended with a plan's step open: it is closed"));
+        // (nobody waits for the answer, as for a close asked while REAPER is busy)
+        let (job, _waiter) = queue::job("undo_step_end", json!({"stepId": step.id}));
+        let _ = lock(&self.jobs).send(job);
+    }
+
+    fn answer(&self, conn: u64, request: Request) -> Frame {
         let id = request.id;
         match request.method.as_str() {
             "ping" => return Frame::ok(id, json!({})),
@@ -603,7 +630,7 @@ impl Shared {
         match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &cannot_run) {
             Outcome::Answered(Ok(result)) => {
                 if let (Some(label), Some(step)) = (begun, result["stepId"].as_str()) {
-                    *lock(&self.step) = Some((step.to_string(), label));
+                    *lock(&self.step) = Some(OpenStep { id: step.to_string(), label, conn });
                 }
                 if ending.is_some() {
                     *lock(&self.step) = None;
@@ -733,6 +760,7 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
         let shared = reader_shared;
         crate::guard("connection", (), || serve(&conn, state, stream, started, &shared));
         shared.hub.remove(conn.id);
+        shared.gone(conn.id);
     });
     let read = match read {
         Ok(read) => read,
@@ -809,7 +837,7 @@ fn serve(conn: &Arc<Conn>, mut state: ServerConnection, mut stream: TcpStream, s
                 }
                 ServerAction::Authenticated => conn.authenticated.store(true, Ordering::Release),
                 ServerAction::Request(request) => {
-                    let response = shared.answer(request);
+                    let response = shared.answer(conn.id, request);
                     if conn.out.send(response.encode()).is_err() {
                         return;
                     }
@@ -1189,6 +1217,36 @@ mod tests {
         send(&mut stream, 2, "undo_step_end", json!({"stepId": "s7", "label": "Kumi: Vocal volume −4.5 dB and 1 more (k2222)"}));
         assert_eq!(read_frame(&mut reader)["result"], json!({"deferred": true, "desc": "Kumi: Vocal volume −4.5 dB and 1 more (k2222)"}));
         assert_eq!(jobs.try_recv().unwrap().params["label"], "Kumi: Vocal volume −4.5 dB and 1 more (k2222)");
+    }
+
+    #[test]
+    fn a_plans_step_whose_connection_goes_is_closed_and_one_another_connection_began_isnt() {
+        // A host that dies (or closes) mid-plan leaves nobody to end its step: REAPER's block stayed open for two minutes,
+        // folding the producer's edits into Kumi's point.
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        let (mut other, mut other_reader, _) = lab.authenticated();
+        let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let main = thread::spawn(move || {
+            let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(job.claim());
+            assert_eq!(job.method, "undo_step_begin");
+            job.answer(Ok(json!({"stepId": "s3"})));
+            jobs
+        });
+        send(&mut stream, 1, "undo_step_begin", json!({"label": "Kumi: Kumi (k3333)"}));
+        assert_eq!(read_frame(&mut reader)["result"], json!({"stepId": "s3"}));
+        let jobs = main.join().unwrap();
+        // The other connection goes: the step isn't its own.
+        assert_eq!(request(&mut other, &mut other_reader, 2, "ping")["result"], json!({}));
+        drop((other, other_reader));
+        thread::sleep(Duration::from_millis(300));
+        assert!(jobs.try_recv().is_err(), "nothing closed for a connection that began no step");
+        // The one that began it goes: its close is queued for the first free tick.
+        drop((stream, reader));
+        let job = jobs.recv_timeout(Duration::from_secs(5)).expect("the step's close is queued");
+        assert_eq!((job.method.as_str(), job.params["stepId"].as_str()), ("undo_step_end", Some("s3")));
+        assert!(jobs.try_recv().is_err(), "once");
     }
 
     #[test]

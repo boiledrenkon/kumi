@@ -344,6 +344,14 @@ fn build_shim(shims: &[&Path]) {
 
 const HANDLES: [&str; 5] = ["MediaTrack", "MediaItem", "MediaItem_Take", "TrackEnvelope", "ReaProject"];
 
+/// The flags that make a GetSet… function set (generic.rs's `reads_only` reads the same names).
+const SET_FLAGS: [&str; 7] = ["setNewValue", "setnewvalue", "set", "is_set", "isSet", "bSet", "setNewValueOptional"];
+
+/// A value REAPER only writes back (`…Out`, `…OutOptional`), never reads.
+fn out_only(name: &str) -> bool {
+    !name.contains("InOut") && (name.ends_with("Out") || name.contains("OutOptional"))
+}
+
 fn scalar_kind(base: &str) -> Option<&'static str> {
     Some(match base {
         "int" | "char" => "int",
@@ -379,6 +387,9 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
         None => (false, base),
     };
     match (stars, constant, base) {
+        // (GetTrackInfo's `track`: a number REAPER reads as a MediaTrack* when it isn't a track's index, so any other
+        // number crashes it; GetTrack, GetTrackName and GetMediaTrackInfo_Value read the same by ref)
+        (0, _, "INT_PTR") => Err("a number REAPER also reads as a pointer (INT_PTR)".into()),
         (0, _, b) => match scalar_kind(b) {
             Some(kind) => Ok(match kind {
                 "int" => format!("c.int({}, {name:?}, {optional})? as _", at(k)),
@@ -400,7 +411,8 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
             let input = in_out || name.contains("NeedBig") && !out_only;
             *sized = size.is_some();
             let k = if input { at(k) } else { "None".into() };
-            Ok(format!("c.buf({k}, {name:?})?"))
+            // (a buffer REAPER isn't told the size of is never made smaller than the default, whatever the caller asks)
+            Ok(format!("c.buf({k}, {name:?}, {sized})?", sized = size.is_some()))
         }
         (1, true, b) if scalar_kind(b).is_some() => Ok(format!("c.in_ptr_{}({}, {name:?})? as _", scalar_kind(b).unwrap(), at(k))),
         (1, false, b) if scalar_kind(b).is_some() => {
@@ -471,10 +483,29 @@ fn emit_generic(functions: &[Function]) -> String {
         let mut k = 0usize;
         let mut names = Vec::new();
         let mut skip = false;
+        // A GetSet… function's values REAPER writes back (`…Out`) are also the values it sets (GetSet_LoopTimeRange's
+        // start and end): taken from the caller, and needed, when its set flag is on.
+        let set_flag = f
+            .name
+            .starts_with("GetSet")
+            .then(|| f.params.iter().find(|p| p.ty.trim() == "bool" && SET_FLAGS.contains(&p.name.as_str())))
+            .flatten();
+        let mut set_k = None;
         for (i, p) in f.params.iter().enumerate() {
             if skip {
                 skip = false;
                 continue;
+            }
+            if set_flag.is_some_and(|flag| flag.name == p.name) {
+                set_k = Some(k);
+            }
+            if let (Some(flag), Some(flag_k), "double*") = (set_flag, set_k, p.ty.trim()) {
+                if out_only(&p.name) {
+                    exprs.push(format!("c.out_double_set(Some({k}), {:?}, Some({flag_k}), {:?})?", p.name, flag.name));
+                    names.push(format!("{:?}", p.name));
+                    k += 1;
+                    continue;
+                }
             }
             let input = is_input(p);
             // A buffer whose size REAPER reads and writes back (`char* name` then `int* name_sz`): one expression that makes

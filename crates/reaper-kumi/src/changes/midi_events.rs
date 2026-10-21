@@ -8,6 +8,8 @@
 //! it is never listed, moved or deleted. An event has no identity of its own, so a change fences the take's whole list of
 //! these events (count and hash), and an undo finds the events it wrote by their values, as notes are found.
 
+use std::collections::{HashMap, VecDeque};
+
 use serde_json::{json, Map, Value};
 
 use super::items::{changed, gone};
@@ -61,7 +63,7 @@ fn is_bezier_data(msg: &[u8]) -> bool {
 }
 
 /// Where the take's source ends: the end marker's tick, when the last event is one.
-fn source_end(events: &[Event]) -> Option<i64> {
+pub(super) fn source_end(events: &[Event]) -> Option<i64> {
     events.last().filter(|e| e.msg == END_MARKER).map(|e| e.pos)
 }
 
@@ -112,9 +114,11 @@ fn fence_of(events: &[Ev]) -> Value {
     json!({"count": events.len(), "hash": format!("{hash:016x}")})
 }
 
-/// The same event: everything but whether it is selected.
-fn same(a: &Ev, b: &Ev) -> bool {
-    a.pos == b.pos && (a.flag & !1) == (b.flag & !1) && a.msg == b.msg && a.bezier == b.bezier
+/// What tells an event apart: everything but whether it is selected.
+type Key<'a> = (i64, u8, &'a [u8], Option<&'a [u8]>);
+
+fn key(event: &Ev) -> Key<'_> {
+    (event.pos, event.flag & !1, &event.msg, event.bezier.as_deref())
 }
 
 fn ev_json(event: &Ev) -> Value {
@@ -141,16 +145,20 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
     text.split_whitespace().map(|word| u8::from_str_radix(word, 16).ok()).collect()
 }
 
-/// The events of `a` that `b` has no event for (each counted once).
+/// The events of `a` that `b` has no event for (each counted once), by counting `b`'s: a take of tens of thousands is
+/// compared in one pass each way, not one search of the other's events per event.
 fn difference(a: &[Ev], b: &[Ev]) -> Vec<Ev> {
-    let mut left: Vec<&Ev> = b.iter().collect();
+    let mut left: HashMap<Key, usize> = HashMap::new();
+    for event in b {
+        *left.entry(key(event)).or_insert(0) += 1;
+    }
     a.iter()
-        .filter(|event| match left.iter().position(|other| same(other, event)) {
-            Some(at) => {
-                left.remove(at);
+        .filter(|event| match left.get_mut(&key(event)) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
                 false
             }
-            None => true,
+            _ => true,
         })
         .cloned()
         .collect()
@@ -162,12 +170,16 @@ fn difference(a: &[Ev], b: &[Ev]) -> Vec<Ev> {
 pub(crate) fn edit(buffer: &[Event], remove: &[Ev], add: &[Ev]) -> Result<Vec<Event>, String> {
     let listed = events_of(buffer);
     let mut gone = vec![false; buffer.len()];
-    let mut used = vec![false; listed.len()];
+    // (each event's places in the buffer by what it is, in buffer order: a removal takes the first one left)
+    let mut places: HashMap<Key, VecDeque<usize>> = HashMap::new();
+    for (n, (event, _)) in listed.iter().enumerate() {
+        places.entry(key(event)).or_default().push_back(n);
+    }
     for event in remove {
-        let at = (0..listed.len())
-            .find(|&n| !used[n] && same(&listed[n].0, event))
+        let at = places
+            .get_mut(&key(event))
+            .and_then(VecDeque::pop_front)
             .ok_or_else(|| format!("an event at tick {} isn't in the take as given", event.pos))?;
-        used[at] = true;
         for place in &listed[at].1 {
             gone[*place] = true;
         }
@@ -895,6 +907,25 @@ mod tests {
         assert_eq!(&order[2..5], &[vec![0xB0, 32, 2], vec![0xC0, 7], vec![0xB0, 7, 100]]);
         assert_eq!(order[5], vec![0xB0, 74, 9], "a controller goes after those already at its tick");
         assert_eq!(out.last().unwrap().msg, END_MARKER.to_vec());
+    }
+
+    #[test]
+    fn deleting_half_of_a_big_takes_controllers_is_read_in_linear_time() {
+        // 60,000 controller events, every second one deleted: a search of the take per event held REAPER's main thread
+        // for seconds.
+        let mut buffer: Vec<Event> = (0..60_000).map(|i| ev(i * 10, &[0xB0, 1, (i % 128) as u8])).collect();
+        buffer.push(ev(600_000, &END_MARKER));
+        let events: Vec<Ev> = events_of(&buffer).into_iter().map(|(event, _)| event).collect();
+        let remove: Vec<Ev> = events.iter().step_by(2).cloned().collect();
+        let started = std::time::Instant::now();
+        let edited = edit(&buffer, &remove, &[]).unwrap();
+        let after: Vec<Ev> = events_of(&edited).into_iter().map(|(event, _)| event).collect();
+        let gone = difference(&events, &after);
+        let kept = difference(&events, &gone);
+        let took = started.elapsed();
+        assert_eq!((edited.len(), after.len()), (30_001, 30_000));
+        assert_eq!((gone, kept), (remove, after));
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     #[test]

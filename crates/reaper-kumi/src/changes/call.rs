@@ -14,13 +14,13 @@ const NOTE: &str = "Only REAPER's own undo can take this back (Edit > Undo).";
 fn plan(input: &Value) -> Done<(usize, &'static str, Value)> {
     let name = input.get("fn").and_then(Value::as_str).ok_or_else(|| bad("fn: the name of a REAPER API function"))?;
     let index = generic::function(name).map_err(bad)?;
-    if let Some(why) = generic::denied(index) {
+    let args = input.get("args").cloned().unwrap_or(Value::Array(vec![]));
+    if let Some(why) = generic::denied(index, &args) {
         return Err(bad(why));
     }
     if let Some(why) = generic::uncallable(index) {
         return Err(bad(format!("{name} can't be called by name: {why} (run-lua can call it)")));
     }
-    let args = input.get("args").cloned().unwrap_or(Value::Array(vec![]));
     if !matches!(args, Value::Array(_) | Value::Object(_)) {
         return Err(bad("args: a list of the function's arguments in order, or an object of them by name"));
     }

@@ -25,6 +25,9 @@ pub trait Handles {
 
 /// A sized buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`).
 const BUFFER: usize = 64 * 1024;
+/// The most a buffer holds, and what one REAPER isn't told the size of (its `…NeedBig` and `…Need64` texts) always holds:
+/// REAPER writes the whole text whatever the buffer is (lab 7.82: more than 96 KiB of a track's 200 KB P_EXT), and the
+/// memory is only taken as far as it writes.
 const MOST_BUFFER: usize = 64 * 1024 * 1024;
 /// The most of a buffer's contents an answer carries, as text (past it, `<name>_cut`): the host's frame holds 256 KiB
 /// (lab: a take's 144 KB of MIDI, as hex, was refused whole).
@@ -123,14 +126,15 @@ impl<'h> Call<'h> {
         }
     }
 
-    /// A buffer REAPER writes into (and reads first, for an input): its pointer and size.
-    pub fn buf(&mut self, k: Option<usize>, name: &str) -> Result<(*mut c_char, c_int), String> {
-        let size = match &self.args {
+    /// A buffer REAPER writes into (and reads first, for an input): its pointer and size. When REAPER is told the size
+    /// (`sized`, the size passed after it), `<name>_sz` may make it smaller or bigger; when it isn't (`…NeedBig`,
+    /// `…Need64`), REAPER writes the whole text whatever the caller says, so the buffer is the biggest there is.
+    pub fn buf(&mut self, k: Option<usize>, name: &str, sized: bool) -> Result<(*mut c_char, c_int), String> {
+        let asked = match &self.args {
             Value::Object(map) => map.get(&format!("{name}_sz")).and_then(Value::as_u64).map(|n| n as usize),
             _ => None,
-        }
-        .unwrap_or(BUFFER)
-        .clamp(2, MOST_BUFFER);
+        };
+        let size = if sized { asked.unwrap_or(BUFFER) } else { MOST_BUFFER }.clamp(2, MOST_BUFFER);
         let mut buf = vec![0u8; size].into_boxed_slice();
         match self.arg(k, name) {
             Some(Value::String(s)) => {
@@ -216,6 +220,15 @@ impl<'h> Call<'h> {
         let mut b = Box::new(self.double(k, name, true)?);
         let p = &mut *b as *mut f64;
         Ok(self.slot(name, Slot::Double(b), true, p))
+    }
+
+    /// A value a GetSet… function writes back when it gets and reads when it sets (GetSet_LoopTimeRange's start and end):
+    /// the caller's, which a call that sets must give (REAPER would set it to 0 otherwise).
+    pub fn out_double_set(&mut self, k: Option<usize>, name: &str, k_set: Option<usize>, set: &str) -> Result<*mut f64, String> {
+        if self.boolean(k_set, set, true)? && self.arg(k, name).is_none() {
+            return Err(format!("args: {name} is what the call sets when {set} is true: give it"));
+        }
+        self.out_double(k, name)
     }
 
     pub fn out_bool(&mut self, k: Option<usize>, name: &str) -> Result<*mut bool, String> {
@@ -419,7 +432,7 @@ pub fn uncallable(index: usize) -> Option<&'static str> {
 
 /// Functions Kumi never calls by name, and why: they open windows or dialogs, quit, change REAPER's own settings, run
 /// programs or register code. An action is run with the `action` method, which keeps dialogs and quitting out.
-const DENIED: [(&str, &str); 36] = [
+const DENIED: [(&str, &str); 40] = [
     ("Main_OnCommand", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
     ("KBD_OnMainActionEx", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
     ("PromptForAction", "opens the action list"),
@@ -458,27 +471,48 @@ const DENIED: [(&str, &str); 36] = [
     ("set_config_var", "changes REAPER's preferences"),
     ("MIDIEditor_LastFocused_OnCommand", "runs a MIDI editor action (some open dialogs)"),
     ("MIDIEditor_OnCommand", "runs a MIDI editor action (some open dialogs)"),
+    // (an OSC message to REAPER itself can run any action: "/action/40860")
+    ("OscLocalMessageToHost", "runs what an OSC message names, any action included"),
+    ("CSurf_OnOscControlMessage", "runs what an OSC message names, any action included"),
+    ("CrossfadeEditor_OnCommand", "runs a crossfade editor action"),
+    ("RenderFileSection", "renders a file onto the disk"),
 ];
 
-pub fn denied(index: usize) -> Option<String> {
+/// Why Kumi never makes this call, with these arguments, by name; None when it may.
+pub fn denied(index: usize, args: &Value) -> Option<String> {
     let name = name_of(index);
     if name == "MB" {
         return Some(format!("{name} opens a dialog"));
     }
-    DENIED.iter().find(|(part, _)| name.contains(part)).map(|(_, why)| format!("{name} {why}"))
+    if let Some((_, why)) = DENIED.iter().find(|(part, _)| name.contains(part)) {
+        return Some(format!("{name} {why}"));
+    }
+    // RENDER_STATS and RENDER_STATS_SUMMARY run the action their value names before answering ("41824" renders the
+    // project over the producer's files): read with an empty value only.
+    let given = |param: &str| given(index, args, param);
+    if name.starts_with("GetSetProjectInfo_String")
+        && given("desc").and_then(Value::as_str).is_some_and(|key| key.trim().to_ascii_uppercase().starts_with("RENDER_STATS"))
+        && given("valuestrNeedBig").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
+    {
+        return Some(format!("{name} runs the action its value names for RENDER_STATS: read it with an empty value"));
+    }
+    None
+}
+
+/// The argument a call gives for parameter `param` of function `index`, by place or by name.
+fn given<'a>(index: usize, args: &'a Value, param: &str) -> Option<&'a Value> {
+    let at = INPUTS[index].iter().position(|p| *p == param)?;
+    match args {
+        Value::Array(list) => list.get(at),
+        Value::Object(map) => map.get(param),
+        _ => None,
+    }
 }
 
 /// Whether a call of this function with these arguments only reads: a getter, or a GetSet… function asked to get.
 pub fn reads_only(index: usize, args: &Value) -> bool {
     let name = name_of(index);
-    let given = |param: &str| -> Option<&Value> {
-        let at = INPUTS[index].iter().position(|p| *p == param)?;
-        match args {
-            Value::Array(list) => list.get(at),
-            Value::Object(map) => map.get(param),
-            _ => None,
-        }
-    };
+    let given = |param: &str| given(index, args, param);
     if name.starts_with("GetSet") {
         // (a getter and a setter in one: it sets when its flag says so, or, for the repeat, when the value isn't -1)
         if name.starts_with("GetSetRepeat") {

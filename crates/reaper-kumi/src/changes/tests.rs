@@ -1383,6 +1383,27 @@ fn notes_are_written_where_asked_in_beats_and_undo_takes_exactly_those_away() {
 }
 
 #[test]
+fn an_undo_of_written_notes_the_producer_changed_every_one_of_is_refused_not_told_back_already() {
+    // None of Kumi's notes found by value read as back already: the undo answered "put back" with nothing written, HISTORY
+    // said undone, and the notes stayed.
+    let lab = Lab::new();
+    let before = snare_notes();
+    let input =
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 1.0, "length": 0.5}, {"pitch": 64, "start": 2.0, "length": 0.5}]});
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 2 notes in snare.mid take (knb01)");
+    let ours = |n: &fake::FakeNote| n.pitch == 60 || n.pitch == 64;
+    state(|s| s.tracks[2].items[0].takes[0].notes.iter_mut().filter(|n| ours(n)).for_each(|n| n.velocity = 33));
+    let (code, _) = lab.undo("notes-add", &preview, &applied, "Kumi: undo (knb02)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(snare_notes().len(), before.len() + 2, "the producer's notes stay");
+    // REAPER's own undo took them back: Kumi's undo is back already, and writes nothing.
+    state(|s| s.tracks[2].items[0].takes[0].notes.retain(|n| !ours(n)));
+    let undone = lab.undo("notes-add", &preview, &applied, "Kumi: undo (knb03)").unwrap();
+    assert!(undone["display"]["note"].as_str().is_some_and(|note| note.contains("back already")), "{undone}");
+    assert_eq!(snare_notes(), before);
+}
+
+#[test]
 fn notes_are_changed_by_index_and_put_back_by_their_values() {
     let lab = Lab::new();
     let before = snare_notes();
@@ -3466,6 +3487,24 @@ fn a_lua_chunk_that_doesnt_compile_is_refused_at_the_apply_and_one_that_fails_sa
     assert_eq!(top().as_deref(), Some("Kumi: Ran Lua (kl003)"), "what it did before the error is one point REAPER's undo takes back");
 }
 
+fn lua_fails_after_printing_a_lot(script: &str) {
+    let printed = "x".repeat(5 << 20);
+    answer(script, &format!(r#"{{"compiled":true,"ok":false,"error":{{"message":"boom","line":3}},"printed":["{printed}"]}}"#));
+}
+
+#[test]
+fn a_lua_chunk_that_fails_after_printing_more_than_kumi_keeps_is_still_said_to_have_failed() {
+    // An answer past 4 MB was read as a clean run whatever its head said.
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_fails_after_printing_a_lot));
+    let (_, applied) = lab.make("run-lua", json!({"code": "for i = 1, 1e6 do print(i) end\nlocal f\nf()"}), "Kumi: Ran Lua (kl006)");
+    assert_eq!(applied["applied"]["failed"], json!({"message": "boom", "line": 3}), "{applied}");
+    assert!(applied["applied"].get("result").is_none(), "{applied}");
+    let note = applied["display"]["note"].as_str().unwrap();
+    assert!(note.contains("line 3: boom"), "{note}");
+    assert!(applied["applied"]["printed"][0].as_str().unwrap().contains("more than Kumi keeps"), "{applied}");
+}
+
 #[test]
 fn a_lua_chunk_that_gives_no_answer_is_uncertain_and_limits_are_checked() {
     let lab = Lab::new();
@@ -3505,6 +3544,15 @@ fn luajit_wrapper(dir: &std::path::Path, more: &str, code: &str, limit: u64) -> 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    // (read as it writes: an answer past the pipe's 64 KiB would otherwise wait for a reader that waits for it to end)
+    let drain = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let (stdout, stderr) = (drain(Box::new(child.stdout.take().unwrap())), drain(Box::new(child.stderr.take().unwrap())));
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
         if started.elapsed() > std::time::Duration::from_secs(20) {
@@ -3514,9 +3562,9 @@ fn luajit_wrapper(dir: &std::path::Path, more: &str, code: &str, limit: u64) -> 
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let out = child.wait_with_output().unwrap();
-    let answer = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
-    Some((answer, String::from_utf8_lossy(&out.stderr).into_owned()))
+    let (stdout, stderr) = (stdout.join().unwrap(), stderr.join().unwrap());
+    let answer = serde_json::from_slice(&stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&stdout)));
+    Some((answer, String::from_utf8_lossy(&stderr).into_owned()))
 }
 
 /// The wrapper itself, run by LuaJIT where it is installed, against a stand-in `reaper` table.
@@ -3576,6 +3624,56 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert_eq!(run("local t = {5}\nreturn t[1]", 1000)["result"], 5);
     assert_eq!(run("local t = {5}\nreturn t[#t]", 1000)["result"], 5);
     assert_eq!(run("local s = 'a]='\nreturn s", 1000)["result"], "a]=");
+}
+
+#[test]
+fn the_lua_time_limit_holds_for_code_the_chunk_loads_and_against_a_chunk_that_replaces_what_the_wrapper_calls() {
+    // The limit raised only in code whose source was the chunk's own: code it loaded (`load`, `dofile`, `require`) ran on
+    // and held REAPER. A chunk that replaced `error` or the clock stopped the limit too.
+    let dir = tempfile::tempdir().unwrap();
+    if luajit_wrapper(dir.path(), "", "return 1", 1000).is_none() {
+        return;
+    }
+    let looping = dir.path().join("loop.lua");
+    std::fs::write(&looping, "while true do end").unwrap();
+    for code in [
+        "load('while true do end')()".to_string(),
+        "loadstring('while true do pcall(error, 1) end')()".to_string(),
+        "local f = load('return function() while true do end end')()\nwhile true do pcall(f) end".to_string(),
+        format!("dofile({:?})", looping.display().to_string()),
+        "error = function() end\nwhile true do end".to_string(),
+        "reaper.time_precise = function() return 0 end\nwhile true do end".to_string(),
+        "string.gsub = function() while true do end end\nerror(string.rep('x', 10))".to_string(),
+    ] {
+        let started = std::time::Instant::now();
+        let (ran, _) = luajit_wrapper(dir.path(), "", &code, 50).unwrap();
+        let took = started.elapsed();
+        assert_eq!(ran["ok"], false, "{code}: {ran}");
+        assert!(took < std::time::Duration::from_secs(3), "{code} took {took:?}");
+    }
+    // An error that isn't text is named by its type: its __tostring would run the chunk's code with no limit.
+    let (ran, _) = luajit_wrapper(dir.path(), "", "error(setmetatable({}, {__tostring = function() while true do end end}))", 50).unwrap();
+    assert_eq!(ran["error"]["message"], "(a table raised as the error)");
+    // A huge error's text is cut.
+    let (ran, _) = luajit_wrapper(dir.path(), "", "error(string.rep('x', 1e6), 0)", 1000).unwrap();
+    assert!(ran["error"]["message"].as_str().unwrap().len() < 70_000, "cut");
+}
+
+#[test]
+fn a_lua_chunk_cant_hand_reaper_code_to_run_after_it() {
+    // reaper.defer, runloop and atexit run code after the chunk: outside Kumi's undo block (bare edits, no HISTORY) and its
+    // time limit (a loop there holds REAPER).
+    let dir = tempfile::tempdir().unwrap();
+    let later = ", defer = function() io.stderr:write('LATER ') end, runloop = function() io.stderr:write('LATER ') end, \
+                 atexit = function() io.stderr:write('LATER ') end";
+    if luajit_wrapper(dir.path(), later, "return 1", 1000).is_none() {
+        return;
+    }
+    for name in ["defer", "runloop", "atexit"] {
+        let (ran, told) = luajit_wrapper(dir.path(), later, &format!("reaper.{name}(function() while true do end end)"), 1000).unwrap();
+        assert!(ran["error"]["message"].as_str().unwrap().contains("runs a chunk once"), "{name}: {ran}");
+        assert!(!told.contains("LATER"), "{name}: {told}");
+    }
 }
 
 #[test]
@@ -3646,6 +3744,105 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
         (json!(true), midi["out"]["bufOutNeedBig_sz"].as_i64().unwrap() * 2)
     );
     assert_eq!(midi["out"].get("bufOutNeedBig_cut"), None);
+}
+
+#[test]
+fn a_buffer_reaper_isnt_told_the_size_of_holds_the_whole_text_whatever_the_caller_asks() {
+    // `stringNeedBig` (the GetSet…Info_String family) and `strNeed64` (mkvolstr): REAPER writes the whole value, told no
+    // size, and the buffer was made as small as the caller's `<name>_sz` asked, or 64 KiB. The fake writes a track's whole
+    // P_EXT value, as REAPER does.
+    let lab = Lab::new();
+    let value = "x".repeat(50_000);
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:big".into()), value.clone());
+    });
+    let args = json!({"tr": KICK, "parmname": "P_EXT:big", "setNewValue": false, "stringNeedBig_sz": 16});
+    let read = lab.call("read", json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": args})).unwrap();
+    assert_eq!(read["result"], true);
+    assert_eq!(read["out"]["stringNeedBig"].as_str().map(str::len), Some(value.len()), "the whole value");
+    assert_eq!(read["out"].get("stringNeedBig_cut"), None);
+    // REAPER writes a text longer than 64 KiB whole as well (lab 7.82: a track's 200 KB P_EXT): it fits, and the answer
+    // carries the first 96 KiB of it.
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:huge".into()), "y".repeat(200_000));
+    });
+    let args = json!({"tr": KICK, "parmname": "P_EXT:huge", "setNewValue": false});
+    let huge = lab.call("read", json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": args})).unwrap();
+    assert_eq!((huge["out"]["stringNeedBig"].as_str().map(str::len), &huge["out"]["stringNeedBig_cut"]), (Some(96 << 10), &json!(true)));
+    // A buffer REAPER is told the size of still takes the caller's size.
+    let short = lab.call("read", json!({"kind": "call", "fn": "GetTrackName", "args": {"track": KICK, "bufOut_sz": 3}})).unwrap();
+    assert_eq!((&short["out"]["bufOut"], &short["out"]["bufOut_cut"]), (&json!("Ki"), &json!(true)));
+}
+
+#[test]
+fn the_bridges_own_reads_of_a_text_reaper_isnt_told_the_size_of_take_it_whole() {
+    // The bridge read names, P_EXT values, razor edits and the like into 4 KiB; REAPER writes the whole text (lab 7.82), so
+    // a longer one ran past it.
+    let _lab = Lab::new();
+    let value = "z".repeat(300_000);
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:long".into()), value.clone());
+    });
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let track = reaper.track_at(reaper.current_project().unwrap().ptr, 1).unwrap();
+    assert_eq!(reaper.track_string(track, "P_EXT:long").map(|text| text.len()), Some(value.len()));
+    assert_eq!(reaper.track_string(track, "P_NAME").as_deref(), Some("Kick"), "and a short one after it");
+}
+
+#[test]
+fn a_number_reaper_also_reads_as_a_pointer_cant_be_given_to_the_generic_call() {
+    // GetTrackInfo's `track` is a track's index or, past them, a MediaTrack* cast to a number: 123456789 crashes REAPER.
+    use crate::reaper::generic::{function, uncallable};
+    let index = function("GetTrackInfo").unwrap();
+    assert!(uncallable(index).is_some_and(|why| why.contains("pointer")), "{:?}", uncallable(index));
+    let lab = Lab::new();
+    let (_, message) = call_read(&lab, json!({"kind": "call", "fn": "GetTrackInfo", "args": [123_456_789]})).unwrap_err();
+    assert!(message.contains("pointer"), "{message}");
+}
+
+#[test]
+fn the_generic_time_selection_sets_the_start_and_end_it_is_given() {
+    // GetSet_LoopTimeRange2's start and end are what it writes back when it gets, and what it reads when it sets: a set
+    // took neither from the caller and made the time selection 0–0.
+    let lab = Lab::new();
+    state(|s| s.time_selection = (1.0, 3.0));
+    let read = call_read(
+        &lab,
+        json!({"kind": "call", "fn": "GetSet_LoopTimeRange2", "args": {"isSet": false, "isLoop": false, "allowautoseek": false}}),
+    )
+    .unwrap();
+    assert_eq!((&read["out"]["startOut"], &read["out"]["endOut"]), (&json!(1.0), &json!(3.0)));
+    let set = json!({"fn": "GetSet_LoopTimeRange2", "args": {"isSet": true, "isLoop": false, "startOut": 2.0, "endOut": 4.5, "allowautoseek": false}});
+    lab.make("api-call", set, "Kumi: Called GetSet_LoopTimeRange2 (kts01)");
+    assert_eq!(state(|s| s.time_selection), (2.0, 4.5));
+    // A set that leaves either out is refused before REAPER is called.
+    let half = json!({"kind": "api-call", "input": {"fn": "GetSet_LoopTimeRange2", "args": {"isSet": true, "isLoop": false, "startOut": 1.0, "allowautoseek": false}}});
+    let (_, message) = lab.call("change_preview", half).unwrap_err();
+    assert!(message.contains("endOut"), "{message}");
+    assert_eq!(state(|s| s.time_selection), (2.0, 4.5));
+}
+
+#[test]
+fn calls_that_run_any_action_or_render_files_are_refused_by_name() {
+    let lab = Lab::new();
+    let read = |f: &str, args: Value| call_read(&lab, json!({"kind": "call", "fn": f, "args": args})).unwrap_err().1;
+    let change =
+        |f: &str, args: Value| lab.call("change_preview", json!({"kind": "api-call", "input": {"fn": f, "args": args}})).unwrap_err().1;
+    assert!(change("OscLocalMessageToHost", json!(["/action/40860"])).contains("any action"));
+    assert!(change("CSurf_OnOscControlMessage", json!(["/action", 40860.0])).contains("any action"));
+    assert!(change("CSurf_OnOscControlMessage2", json!(["/action", 40860.0, ""])).contains("any action"));
+    assert!(change("CrossfadeEditor_OnCommand", json!([40001])).contains("action"));
+    assert!(change("RenderFileSection", json!(["/a.wav", "/b.wav", 0.0, 1.0, 1.0])).contains("renders"));
+    // RENDER_STATS runs the action its value names before it answers: a "read" that renders.
+    for args in [json!([0, "RENDER_STATS", "41824", false]), json!({"desc": "RENDER_STATS_SUMMARY", "valuestrNeedBig": "42437"})] {
+        assert!(read("GetSetProjectInfo_String", args).contains("RENDER_STATS"));
+    }
+    let stats = call_read(&lab, json!({"kind": "call", "fn": "GetSetProjectInfo_String", "args": [0, "RENDER_STATS", "", false]}));
+    assert!(stats.is_ok(), "an empty value only reads: {stats:?}");
 }
 
 #[test]

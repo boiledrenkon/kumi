@@ -7,8 +7,16 @@ use std::ptr;
 use super::{Envelope, Fx, FxOwner, Item, Project, Reaper, Take, Track};
 use crate::api::{self, ProjectMarker};
 
-/// REAPER's string getters that take no size want a big buffer.
+/// The size told to REAPER's string getters that take one (the most of a text they write).
 const BIG: usize = 4096;
+/// The buffer of REAPER's string getters that take no size: REAPER writes the whole text whatever the buffer holds
+/// (lab 7.82: more than 96 KiB of a track's 200 KB P_EXT), so it is as big as a buffer gets. Its memory is taken only as far as
+/// REAPER writes, once: REAPER's main thread reads one text at a time.
+const UNSIZED: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    static UNSIZED_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 /// Added to an FX index to address the track's input chain.
 pub const INPUT_FX: i32 = 0x100_0000;
 /// Added to an FX index to address a container's child.
@@ -20,15 +28,26 @@ fn cstring(text: &str) -> CString {
     CString::new(text.replace('\0', "")).unwrap_or_default()
 }
 
-/// Reads a string a getter writes into a big buffer.
+/// Reads a string a getter writes into a big buffer: one it isn't told the size of (`…NeedBig`), which holds a text of any
+/// length REAPER gives (a name, a P_EXT value, razor edits), or one it is told `BIG` of.
 pub(super) fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
-    let mut buf = vec![0u8; BIG];
-    if !fill(buf.as_mut_ptr().cast()) {
-        return None;
-    }
-    buf[BIG - 1] = 0;
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(BIG - 1);
-    Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+    UNSIZED_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < UNSIZED {
+            *buf = vec![0u8; UNSIZED];
+        }
+        buf[0] = 0;
+        if !fill(buf.as_mut_ptr().cast()) {
+            return None;
+        }
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(UNSIZED - 1);
+        let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+        // (a long text's memory is given back; the next read takes a fresh buffer)
+        if len > 1 << 20 {
+            *buf = Vec::new();
+        }
+        Some(text)
+    })
 }
 
 /// Reads a string from a getter that takes the buffer and its size.

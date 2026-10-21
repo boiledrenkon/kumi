@@ -72,7 +72,8 @@ use crate::refs::Ref;
 pub type Fault = (String, String);
 pub type Done<T> = Result<T, Fault>;
 
-/// The step a plan holds open at most: a host that never ended it must not leave REAPER's undo history in a block.
+/// The longest a plan's step stays open with no change made in it: a host that never ends it, though its connection
+/// stays (a host that's gone has its step closed at once), must not leave REAPER's undo history in a block.
 const PLAN_MAX: Duration = Duration::from_secs(120);
 
 /// What a kind needs of the world it changes.
@@ -463,7 +464,8 @@ struct Plan {
     label: String,
     proj: Project,
     epoch: String,
-    started: Instant,
+    /// When it began, or last had a change made in it.
+    active: Instant,
 }
 
 #[derive(Default)]
@@ -586,7 +588,13 @@ impl Changes {
         marks: bool,
         write: impl FnOnce(&Ctx) -> Done<T>,
     ) -> Done<(T, Value)> {
-        let in_plan = self.plan.borrow().is_some();
+        let in_plan = match self.plan.borrow_mut().as_mut() {
+            Some(plan) => {
+                plan.active = Instant::now();
+                true
+            }
+            None => false,
+        };
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
@@ -700,7 +708,7 @@ impl Changes {
         self.steps.set(self.steps.get() + 1);
         let id = format!("s{}", self.steps.get());
         *self.plan.borrow_mut() =
-            Some(Plan { id: id.clone(), label: label.to_string(), proj: info.ptr, epoch: reads.epoch(), started: Instant::now() });
+            Some(Plan { id: id.clone(), label: label.to_string(), proj: info.ptr, epoch: reads.epoch(), active: Instant::now() });
         Ok(json!({"stepId": id}))
     }
 
@@ -741,11 +749,12 @@ impl Changes {
         json!({"desc": plan.label, "entry": entry, "stateCount": count})
     }
 
-    /// Once a tick: a plan left open too long, or across a change of project, is closed (a block left open would swallow
-    /// every edit the producer makes after it); and the producer's own undo and redo of Kumi's points are noticed.
+    /// Once a tick: a plan left open with no change made in it too long, or across a change of project, is closed (a block
+    /// left open would swallow every edit the producer makes after it); and the producer's own undo and redo of Kumi's
+    /// points are noticed.
     /// True when the producer's undo or redo moved the project in front since the last tick.
     pub fn tick(&self, reaper: &Reaper, reads: &Reads, out: &dyn Outbox) -> bool {
-        let stale = self.plan.borrow().as_ref().is_some_and(|plan| plan.started.elapsed() > PLAN_MAX || plan.epoch != reads.epoch());
+        let stale = self.plan.borrow().as_ref().is_some_and(|plan| plan.active.elapsed() > PLAN_MAX || plan.epoch != reads.epoch());
         if stale {
             if let Some(plan) = self.plan.borrow_mut().take() {
                 self.close(reaper, reads, plan);
