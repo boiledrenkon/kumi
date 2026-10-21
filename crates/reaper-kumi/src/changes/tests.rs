@@ -1246,7 +1246,7 @@ fn a_tempo_marker_kumi_made_is_found_by_its_beat_after_a_tempo_change_and_left_o
         params["discard"] = discard.into();
         let (code, message) = lab.call("change_restore", params.clone()).unwrap_err();
         assert_eq!(code, "changed", "discard {discard}: {message}");
-        assert!(message.contains("moved"), "{message}");
+        assert!(message.contains("moved or deleted"), "{message}");
         assert_eq!(tempo_markers()[1].0, 20.0, "the producer's tempo map stays");
     }
     params["discard"] = false.into();

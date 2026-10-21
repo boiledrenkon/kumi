@@ -235,8 +235,8 @@ fn kumis_marker(ctx: &Ctx, restore: &Restore, time: f64) -> Done<(f64, Option<(i
         .any(|m| same_marker(&marker_state(Some(&m)), restore.applied));
     if elsewhere {
         return Err(changed(format!(
-            "the tempo marker Kumi set at {} isn't there any more: it was moved in REAPER since, so Kumi leaves the tempo map as \
-             it is, even with discard",
+            "the tempo marker Kumi set at {} isn't there any more (moved or deleted in REAPER since), and one like it is \
+             elsewhere: Kumi can't tell whether that one is it, so it leaves the tempo map as it is, even with discard",
             bar_text(ctx.reaper, ctx.proj, time)
         )));
     }
