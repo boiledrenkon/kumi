@@ -493,8 +493,8 @@ pub fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let add = add_plan(ctx, input)?;
     let print = chunks::item_print(ctx.reaper, add.found.item).ok_or_else(|| failed("REAPER wouldn't give the item's state"))?;
     let mut display = json!({"title": add_title(ctx, &add)});
-    if add.path.is_some() {
-        display["note"] = "The file stays where it is: REAPER plays it from there.".into();
+    if let Some(path) = &add.path {
+        display["note"] = super::kumi_files::note(ctx, path).into();
     }
     Ok(Preview { target: items::target(&add.found.guid), prior: json!({"print": print}), fence: json!({"print": print}), display })
 }
@@ -513,6 +513,8 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(changed(format!("{} changed since the preview", items::label(ctx, item))));
     }
     refuse_locked(ctx, item)?;
+    // (a file in Kumi's own folder plays from a copy in the project's media folder)
+    let played = add.path.as_deref().map(|path| super::kumi_files::playable(ctx, path)).transpose()?;
     // (said before the take is added: a new active take gives the item its name)
     let title = add_title(ctx, &add);
     let reaper = ctx.reaper;
@@ -524,7 +526,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             Err(_) => ("uncertain".into(), format!("{message}, and Kumi could not put the item back: read it")),
         }
     };
-    if let Some(path) = &add.path {
+    if let Some(path) = &played {
         if reaper.set_take_file(take, path).is_none() {
             return Err(undo("REAPER wouldn't read that file into the take"));
         }
@@ -543,8 +545,8 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let guid = reaper.take_guid(take);
     let print = chunks::item_print(reaper, item).ok_or_else(|| undo("REAPER wouldn't give the item's state"))?;
     let mut display = json!({"title": title});
-    if add.path.is_some() {
-        display["note"] = "The file stays where it is: REAPER plays it from there.".into();
+    if let Some(path) = &add.path {
+        display["note"] = super::kumi_files::note(ctx, path).into();
     }
     Ok(Applied {
         applied: json!({"print": print}),

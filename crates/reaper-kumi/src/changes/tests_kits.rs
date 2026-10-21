@@ -66,6 +66,29 @@ fn kit(paths: &[String], extra: Value) -> Value {
 }
 
 #[test]
+fn a_pads_file_in_kumis_own_folder_plays_from_a_copy_in_the_projects_media_folder() {
+    let lab = Lab::new();
+    let kumi = tempfile::tempdir().unwrap();
+    let media = tempfile::tempdir().unwrap();
+    lab.reads.set_kumi_folder(kumi.path().to_path_buf());
+    fake::with(|s| s.media = media.path().to_string_lossy().into_owned());
+    let (_dir, theirs) = sounds(&["Kick"]);
+    // (a render Kumi made, in its listening folder)
+    let listening = kumi.path().join("bridges/reaper/listening");
+    std::fs::create_dir_all(&listening).unwrap();
+    let render = listening.join("Snare.wav");
+    std::fs::copy(&theirs[0], &render).unwrap();
+    let paths = vec![theirs[0].clone(), render.to_string_lossy().into_owned()];
+    let (preview, made) = lab.make("drum-kit", kit(&paths, json!({})), "Kumi: kit (kk001)");
+    assert!(preview["display"]["note"].as_str().unwrap().contains("play copies in the project's media folder"), "{}", preview["display"]);
+    let copy = media.path().join("Snare.wav").to_string_lossy().into_owned();
+    assert_eq!(sampler(6, None).1.as_deref(), Some(paths[0].as_str()), "the producer's own file stays where it is");
+    assert_eq!(sampler(7, None).1.as_deref(), Some(copy.as_str()), "Kumi's render plays from its copy");
+    assert_eq!(made["applied"]["pads"][1]["file"], copy.as_str());
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&render).unwrap());
+}
+
+#[test]
 fn a_drum_kit_is_a_folder_a_midi_track_and_a_sampler_per_pad_its_hats_choking_and_one_undo_point() {
     let lab = Lab::new();
     fake::extra(|e| e.stable_chunks = true);

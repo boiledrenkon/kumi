@@ -183,6 +183,12 @@ impl<'a> Reaper<'a> {
         Some(ProjectInfo { ptr: Project(proj), path, name })
     }
 
+    /// The folder REAPER keeps a project's recorded media in (its own, or the default path when it has none).
+    pub fn project_media_folder(&self, proj: Project) -> Option<String> {
+        let f = self.api.GetProjectPathEx()?;
+        Some(api::read_buffer(|buf, size| unsafe { f(proj.0, buf, size) })).filter(|path| !path.is_empty())
+    }
+
     pub fn is_dirty(&self, proj: Project) -> bool {
         self.api.IsProjectDirty().is_some_and(|f| unsafe { f(proj.0) } != 0)
     }

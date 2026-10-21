@@ -216,6 +216,47 @@ fn a_media_file_is_imported_in_place_and_a_missing_or_unreadable_one_is_refused(
     }
 }
 
+/// Kumi's own folder with a render in it, and the project's media folder: the render's path and the folders (kept alive).
+pub(super) fn kumi_render(lab: &Lab, name: &str) -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let kumi = tempfile::tempdir().unwrap();
+    let media = tempfile::tempdir().unwrap();
+    let listening = kumi.path().join("bridges/reaper/listening");
+    std::fs::create_dir_all(&listening).unwrap();
+    let path = listening.join(name);
+    std::fs::write(&path, b"RIFF render").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    fake::items::add_media(&path, "WAVE", 2.0, false);
+    lab.reads.set_kumi_folder(kumi.path().to_path_buf());
+    fake::with(|s| s.media = media.path().to_string_lossy().into_owned());
+    (kumi, media, path)
+}
+
+#[test]
+fn a_render_in_kumis_own_folder_is_imported_from_a_copy_in_the_projects_media_folder() {
+    let lab = Lab::new();
+    let (_kumi, media, render) = kumi_render(&lab, "bounce.wav");
+    // A file of that name in the media folder already is never written over.
+    std::fs::write(media.path().join("bounce.wav"), b"the producer's").unwrap();
+    let copy = media.path().join("bounce (2).wav").to_string_lossy().into_owned();
+    fake::items::add_media(&copy, "WAVE", 2.0, false);
+    let input = json!({"ref": SNARE, "path": render, "positionBeats": 0.0});
+    let preview = lab.preview("item-import", input.clone()).unwrap();
+    assert!(preview["display"]["note"].as_str().unwrap().contains("a copy of it in the project's media folder"), "{}", preview["display"]);
+    assert!(!std::path::Path::new(&copy).exists(), "the preview copies nothing");
+    let applied = lab.apply_with("item-import", &input, &preview, "Kumi: import (k1)").unwrap();
+    let (_, imported) = item(&guid_in(&applied["created"]["ref"])).unwrap();
+    assert_eq!(imported.takes[0].more.file.as_deref(), Some(copy.as_str()), "the project plays the copy");
+    assert_eq!(std::fs::read(&copy).unwrap(), b"RIFF render");
+    assert_eq!(std::fs::read(media.path().join("bounce.wav")).unwrap(), b"the producer's");
+    assert!(imported.takes[0].name.ends_with("bounce.wav"), "named after the render");
+    // Without a media folder to copy into, nothing is made.
+    fake::with(|s| s.media.clear());
+    let preview = lab.preview("item-import", input.clone()).unwrap();
+    let (code, message) = lab.apply_with("item-import", &input, &preview, "Kumi: import (k2)").unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("no media folder"), "{message}");
+}
+
 // ----- moving -----
 
 #[test]

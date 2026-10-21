@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use super::tests_items::{code, guid_in, item, state, top, Lab, K1};
+use super::tests_items::{code, guid_in, item, kumi_render, state, top, Lab, K1};
 use crate::reaper::fake::{self, FakeTake};
 
 const T1: &str = "r:take:{TAKE-K1}";
@@ -139,6 +139,19 @@ fn an_empty_take_is_added_and_plays_and_the_undo_puts_the_item_back_whole() {
     assert!(item("{ITEM-K1}").unwrap().1 == before);
     let again = lab.undo("take-add", &preview, &applied).unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
+#[test]
+fn a_take_of_a_render_in_kumis_own_folder_plays_a_copy_in_the_projects_media_folder() {
+    let lab = Lab::new();
+    let (_kumi, media, render) = kumi_render(&lab, "idea.wav");
+    let copy = media.path().join("idea.wav").to_string_lossy().into_owned();
+    fake::items::add_media(&copy, "WAVE", 2.0, false);
+    let (preview, applied) = lab.make("take-add", json!({"ref": K1, "path": render}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("a copy of it"), "{}", preview["display"]);
+    let now = item("{ITEM-K1}").unwrap().1;
+    assert_eq!(now.takes[1].more.file.as_deref(), Some(copy.as_str()));
+    assert!(applied["display"]["note"].as_str().unwrap().contains("Kumi clears"));
 }
 
 #[test]

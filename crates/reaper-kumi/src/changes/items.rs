@@ -308,8 +308,8 @@ fn make_title(ctx: &Ctx, make: &Make, import: bool) -> String {
 pub fn make_preview(ctx: &Ctx, input: &Value, import: bool) -> Done<Preview> {
     let make = make_plan(ctx, input, import)?;
     let mut display = json!({"title": make_title(ctx, &make, import), "length": rows::seconds(make.end - make.start)});
-    if import {
-        display["note"] = "The file stays where it is: REAPER plays it from there.".into();
+    if let Some((path, _)) = &make.file {
+        display["note"] = super::kumi_files::note(ctx, path).into();
     }
     Ok(Preview {
         target: json!({"ref": null, "kind": "item"}),
@@ -334,9 +334,11 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
             reaper.create_midi_item(make.track, make.start, make.end).ok_or_else(|| failed("REAPER wouldn't make a MIDI item there"))?
         }
         Some((path, _)) => {
+            // (a file in Kumi's own folder plays from a copy in the project's media folder)
+            let played = super::kumi_files::playable(ctx, path)?;
             let item = reaper.add_item(make.track).ok_or_else(|| failed("REAPER wouldn't make an item"))?;
             let take = reaper.add_take(item);
-            let media = take.and_then(|take| reaper.set_take_file(take, path));
+            let media = take.and_then(|take| reaper.set_take_file(take, &played));
             if media.is_none() {
                 // Nothing half-made stays.
                 reaper.delete_item(make.track, item);
@@ -369,7 +371,13 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
         applied: json!({"print": print, "position": reaper.item_value(item, "D_POSITION"), "length": reaper.item_value(item, "D_LENGTH")}),
         created: Some(json!({"ref": refs::item_ref(&guid), "kind": "item", "takeRef": take_ref})),
         material: None,
-        display: json!({"title": make_title(ctx, &make, import), "items": drawn_items(vec![], vec![drawn(ctx, item)])}),
+        display: {
+            let mut display = json!({"title": make_title(ctx, &make, import), "items": drawn_items(vec![], vec![drawn(ctx, item)])});
+            if let Some((path, _)) = &make.file {
+                display["note"] = super::kumi_files::note(ctx, path).into();
+            }
+            display
+        },
         ..Default::default()
     })
 }

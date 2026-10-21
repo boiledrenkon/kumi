@@ -309,13 +309,23 @@ fn note_of(kit: &Kit, choke_found: bool) -> String {
     note
 }
 
+/// The kit's note, and that its files in Kumi's own folder play from copies in the project's media folder.
+fn note_with_copies(ctx: &Ctx, kit: &Kit, given: &[String], choke_found: bool) -> String {
+    let mut note = note_of(kit, choke_found);
+    if given.iter().any(|path| super::kumi_files::is_kumis(ctx, path)) {
+        note += " Pads whose files are in Kumi's own folder, which Kumi clears, play copies in the project's media folder.";
+    }
+    note
+}
+
 pub fn preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let kit = kit_of(ctx, input)?;
+    let given: Vec<String> = kit.pads.iter().map(|pad| pad.path.clone()).collect();
     Ok(Preview {
         target: json!({"ref": null, "kind": "track", "index": kit.at}),
         prior: json!({"tracks": ctx.reaper.track_count(ctx.proj)}),
         fence: fence_of(ctx, &kit),
-        display: json!({"title": title_of(&kit), "note": note_of(&kit, true)}),
+        display: json!({"title": title_of(&kit), "note": note_with_copies(ctx, &kit, &given, true)}),
     })
 }
 
@@ -515,6 +525,12 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if &fence_of(ctx, &kit) != fence {
         return Err(changed("the tracks, or a pad's file, changed since the preview"));
     }
+    // (a pad's file in Kumi's own folder plays from a copy in the project's media folder)
+    let given: Vec<String> = kit.pads.iter().map(|pad| pad.path.clone()).collect();
+    let mut kit = kit;
+    for pad in &mut kit.pads {
+        pad.path = super::kumi_files::playable(ctx, &pad.path)?;
+    }
     let mut made = Vec::new();
     let built = match build(ctx, &kit, &mut made) {
         Ok(built) => built,
@@ -537,7 +553,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"index": kit.at, "layout": if kit.layout == Layout::Tracks { "tracks" } else { "container" }, "tracks": tracks, "pads": pads, "choke": built.choke}),
         created: Some(json!({"ref": notes_ref, "kind": "track", "trackRefs": track_refs})),
         material: None,
-        display: json!({"title": title_of(&kit), "note": note_of(&kit, built.choke)}),
+        display: json!({"title": title_of(&kit), "note": note_with_copies(ctx, &kit, &given, built.choke)}),
         ..Default::default()
     })
 }

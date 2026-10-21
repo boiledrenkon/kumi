@@ -444,6 +444,8 @@ pub struct FakeTempo {
 pub struct State {
     pub version: String,
     pub resource: String,
+    /// The project's media folder (`GetProjectPathEx`): empty for none.
+    pub media: String,
     /// None: no project (REAPER never has none, but the bridge must not care).
     pub project: Option<(String, String)>,
     /// Which project object the active tab holds: a tab switch changes it, a new project in the tab doesn't.
@@ -561,6 +563,7 @@ impl Default for State {
         State {
             version: String::new(),
             resource: String::new(),
+            media: String::new(),
             project: None,
             project_id: 0,
             other_tabs: vec![],
@@ -853,6 +856,9 @@ unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) ->
             _ => ptr::null_mut(),
         }
     })
+}
+unsafe extern "C" fn get_project_path_ex(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
+    with(|s| write(buf, size, &s.media))
 }
 unsafe extern "C" fn get_project_name(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
     with(|s| write(buf, size, s.project.as_ref().map(|p| p.1.as_str()).unwrap_or("")))
@@ -3040,6 +3046,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"DeleteExtState" => delete_ext_state as unsafe extern "C" fn(*const c_char, *const c_char, bool),
         b"EnumProjects" => enum_projects as unsafe extern "C" fn(c_int, *mut c_char, c_int) -> *mut ReaProject,
         b"GetProjectName" => get_project_name as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
+        b"GetProjectPathEx" => get_project_path_ex as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
         b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as unsafe extern "C" fn() -> *mut ReaProject,
         b"GetPlayStateEx" => get_play_state_ex as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"Master_GetTempo" => master_get_tempo as unsafe extern "C" fn() -> f64,
