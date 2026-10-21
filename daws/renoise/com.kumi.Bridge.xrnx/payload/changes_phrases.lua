@@ -878,7 +878,8 @@ local function used_columns(phrase)
   return used
 end
 
-local function lower(phrase, prior, applied)
+-- (`on_write`, when given, runs just before anything is written: a restore that found the lines back names its step there)
+local function lower(phrase, prior, applied, on_write)
   if type(prior) ~= "table" or type(applied) ~= "table" then return end
   local now, used = phrase_columns(phrase), used_columns(phrase)
   local back = {}
@@ -887,7 +888,11 @@ local function lower(phrase, prior, applied)
   for _, flag in ipairs({ "volume", "panning", "delay", "sampleEffects", "instrument" }) do
     if prior[flag] == false and applied[flag] == true and now[flag] == true and not used[flag] then back[flag] = false end
   end
-  if next(back) then set_phrase_columns(phrase, back) end
+  if next(back) then
+    if on_write then on_write() end
+    set_phrase_columns(phrase, back)
+    return true
+  end
 end
 
 -- What a request's lines name in the phrase: the cells and what they get (cells.parse_cells takes a pattern and a track:
@@ -1008,8 +1013,12 @@ local function lines_kind(spec)
     end
     local place = places_.journal_place("phrase", n)
     if #todo == 0 then
-      lower(phrase, restore_.prior.columns, restore_.applied.columns)
+      -- (the lines are back; hiding the columns Kumi showed is a step of Renoise's undo, named as Kumi's)
+      local hid = lower(phrase, restore_.prior.columns, restore_.applied.columns, function() song:describe_undo(desc) end)
       base.note_restored(env.journal, kind, place, restore_.applied, base.KINDS[kind])
+      if hid then
+        return { restored = { done = true }, display = { title = noun .. " in " .. label .. " are back already: the columns Kumi showed are hidden again" }, undo = { desc = desc, entry = true } }
+      end
       return { restored = { done = true }, display = { title = noun .. " in " .. label .. " are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     song:describe_undo(desc)

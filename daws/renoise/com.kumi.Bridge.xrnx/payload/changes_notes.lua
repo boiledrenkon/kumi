@@ -288,7 +288,8 @@ end
 
 -- The columns Kumi showed are hidden again when they are still as Kumi left them and nothing is in them but what was there,
 -- hidden, before Kumi showed them (`applied.hidden`): what the producer put in them since keeps them shown.
-local function lower_columns(song, index, track, prior, applied)
+-- (`on_write`, when given, runs just before anything is written: a restore that found the lines back names its step there)
+local function lower_columns(song, index, track, prior, applied, on_write)
   if type(prior) ~= "table" or type(applied) ~= "table" then return end
   local now = read_columns(track)
   local used = in_use(song, index, prior)
@@ -313,7 +314,11 @@ local function lower_columns(song, index, track, prior, applied)
   for _, flag in ipairs({ "volume", "panning", "delay", "sampleEffects" }) do
     if prior[flag] == false and applied[flag] == true and now[flag] == true and (not used[flag] or before[flag]) then back[flag] = false end
   end
-  if next(back) then set_columns(track, back) end
+  if next(back) then
+    if on_write then on_write() end
+    set_columns(track, back)
+    return true
+  end
 end
 
 -- What a request names
@@ -706,8 +711,12 @@ local function restore_of(spec_kind, noun)
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]
     if #todo == 0 then
-      lower_columns(song, index, track, restore.prior.columns, restore.applied.columns)
+      -- (the lines are back; hiding the columns Kumi showed is a step of Renoise's undo, named as Kumi's)
+      local hid = lower_columns(song, index, track, restore.prior.columns, restore.applied.columns, function() song:describe_undo(desc) end)
       base.note_restored(env.journal, spec_kind, place, restore.applied, spec)
+      if hid then
+        return { restored = { done = true }, display = { title = noun .. " in " .. label .. " is back already: the columns Kumi showed are hidden again" }, undo = { desc = desc, entry = true } }
+      end
       return { restored = { done = true }, display = { title = noun .. " in " .. label .. " is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     local chunks = chunks_of(todo)
