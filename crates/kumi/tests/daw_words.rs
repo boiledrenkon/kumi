@@ -353,3 +353,24 @@ fn reapers_and_renoises_bodies_and_pictures_never_speak_lives_words() {
     }
     assert!(screens >= 50, "every scene's screens are read: {screens}");
 }
+
+// Review K11: /reconnect in REAPER or Renoise leaves each row to the integration, which retires it in the DAW's words;
+// Live's note ("Kumi reconnected to Live since…; Live's own undo still can") is for Live's rows alone.
+case!(a_reconnect_in_renoise_never_gives_rows_lives_note, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    c.set("reconnect", json!(true));
+    let h = Harness::with(120, 36, c, |_| {});
+    h.start().await;
+    h.connect();
+    h.emit(json!({"type":"change","change":{"id":"c5","family":"mixer","title":"Track 1 muted","state":"applied","at":1}}));
+    h.type_text("/reconnect\r").await;
+    assert!(h.calls().contains(&"reconnect".into()));
+    assert!(!h.screen().iter().any(|s| s.contains("Track 1 muted") && s.contains("no undo")), "{:?}", h.screen());
+    // The integration's own word for it arrives as a change, and that's what the row says.
+    let note = "Kumi's link to Renoise started again, so Kumi can't undo this anymore, and Renoise's own undo doesn't take this back: neither can now, so change it by hand if needed.";
+    h.emit(json!({"type":"change","change":{"id":"c5","family":"mixer","title":"Track 1 muted","state":"expired","note":note,"at":1}}));
+    assert!(h.screen().iter().any(|s| s.contains("Track 1 muted") && s.contains("no undo")), "{:?}", h.screen());
+    h.close().await;
+    work_with(DawId::Ableton);
+});

@@ -340,6 +340,17 @@ impl<S: RefScheme> Link<S> {
         }
     }
 
+    /// What an Undone row says once Kumi can't follow the DAW's undo any more: the producer's undo of Kumi's undo puts
+    /// the change back, unseen.
+    fn undone_note(&self, ending: Ending) -> String {
+        let (app, own_undo) = (self.words().words.app, self.words().vocab.own_undo);
+        let why = match ending {
+            Ending::Restart => format!("Kumi's link to {app} started again"),
+            _ => "Kumi can't follow this anymore".to_string(),
+        };
+        format!("{why}: if {own_undo} took back Kumi's undo, this is in effect again, and Kumi can't see it.")
+    }
+
     /// The DAW's words for a refusal, with its long refs in this turn's short ones.
     fn in_short_refs(&self, why: &str) -> String {
         let mut why = why.to_owned();
@@ -1190,6 +1201,10 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             if matches!(state, ChangeState::Applied | ChangeState::Unsure) {
                 let note = self.link().ending_note(&transaction, state, ending);
                 self.history.update(&entry, ChangeState::Expired, Some(note));
+            } else if state == ChangeState::Undone && !self.link().outside_daw_undo.borrow().contains(&transaction) {
+                // The DAW's undo of Kumi's undo would put it back, and Kumi can't see that any more.
+                let note = self.link().undone_note(ending);
+                self.history.update(&entry, ChangeState::Undone, Some(note));
             }
         }
     }

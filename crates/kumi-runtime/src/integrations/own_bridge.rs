@@ -1324,6 +1324,8 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         self.closed.set(true);
         self.lifetime.cancel();
+        // Kumi's undo goes with its host: each row says who can still take its change back, in the DAW's words.
+        self.changes.retire_all(Ending::Restart);
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {
             unlisten();
         }

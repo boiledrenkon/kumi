@@ -592,6 +592,61 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
         .await;
 }
 
+/// Reviews K11 and K37: closing the integration (a /reconnect, a restart) ends Kumi's undo with its host, and each row
+/// says so in Renoise's words: a mute, which Renoise's undo skips, can be changed only by hand now; a fader Renoise's
+/// undo may still take back; and a change Kumi undid may be back, if Renoise's undo took Kumi's undo back unseen.
+#[tokio::test(flavor = "current_thread")]
+async fn closing_retires_each_row_in_the_daws_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Renoise);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = RenoiseScript::new();
+            let mut config = script.config_with_changes(secret, "/lab/Renoise");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            renoise.start(Signal::new()).await.unwrap();
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_volume", "input": {"ref": "track:1", "volumeDb": -6}},
+                {"tool": "track_mute", "input": {"ref": "track:1", "mute": true}},
+                {"tool": "track_volume", "input": {"ref": "track:2", "volumeDb": -3}},
+            ]});
+            let done = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
+            let id = |title: &str| told.borrow().iter().find(|record| record.title == title).map(|record| record.id.clone()).unwrap();
+            let undone = tool(&again, "undo_change").execute(input(json!({"change": id("Track 2 volume -3 dB")})), Signal::new()).await;
+            assert!(!undone.unwrap().is_error);
+            renoise.close().await.unwrap();
+            let last = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).cloned().unwrap();
+            let fader = last("Track 1 volume -6 dB");
+            assert_eq!(fader.state, ChangeState::Expired, "{fader:?}");
+            assert!(fader.note.as_deref().is_some_and(|note| note.starts_with("Kumi's link to Renoise started again")), "{fader:?}");
+            let mute = last("Track 1 muted");
+            assert_eq!(mute.state, ChangeState::Expired, "{mute:?}");
+            assert!(mute.note.as_deref().is_some_and(|note| note.contains("neither can now, so change it by hand")), "{mute:?}");
+            assert!(!mute.note.as_deref().unwrap().contains("Live"), "{mute:?}");
+            let back = last("Track 2 volume -3 dB");
+            assert_eq!(back.state, ChangeState::Undone, "{back:?}");
+            assert!(back.note.as_deref().is_some_and(|note| note.contains("took back Kumi's undo, this is in effect again")), "{back:?}");
+            simulator.stop();
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is_never_undone_blindly() {
     tokio::task::LocalSet::new()

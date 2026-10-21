@@ -936,7 +936,8 @@ impl TuiApp {
         } else if command == "/reconnect" && controller.has_reconnect() {
             self.0.state.borrow_mut().activity = format!("connecting to {}", crate::daw::words().app);
             let result = controller.reconnect().await;
-            if result.is_ok() {
+            // REAPER's and Renoise's integrations retire their rows as they close, each in its DAW's words.
+            if result.is_ok() && crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
                 for change in self.0.state.borrow_mut().records.changes_mut() {
                     if matches!(change.state, ChangeState::Applied | ChangeState::Unsure) {
                         change.state = ChangeState::Expired;
