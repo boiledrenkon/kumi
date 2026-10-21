@@ -602,9 +602,17 @@ base.register({
 
 local PLAY_MODES = named({ points = 1, lines = 2, curves = 3 })
 local ENV_LOOPS = named({ off = 1, forward = 2, reverse = 3, pingpong = 4 })
-local LFO_WAVES = named({ sine = 1, saw = 2, pulse = 3, random = 4 })
-local VELOCITY_MODES = named({ clamp = 1, scale = 2 })
-local FADER_SCALINGS = named({ ["log fast"] = 1, ["log slow"] = 2, linear = 3, ["exp slow"] = 4, ["exp fast"] = 5 })
+-- (Renoise's own constants where it has them; 3.5's numbers otherwise)
+local function constant(class, name, fallback)
+  local ok, value = pcall(function() return renoise[class][name] end)
+  return ok and type(value) == "number" and value or fallback
+end
+local LFO, FADER, VELOCITY = "SampleLfoModulationDevice", "SampleFaderModulationDevice", "SampleVelocityTrackingModulationDevice"
+local LFO_WAVES = named({ sine = constant(LFO, "MODE_SIN", 1), saw = constant(LFO, "MODE_SAW", 2), pulse = constant(LFO, "MODE_PULSE", 3),
+  random = constant(LFO, "MODE_RANDOM", 4) })
+local VELOCITY_MODES = named({ clamp = constant(VELOCITY, "MODE_CLAMP", 1), scale = constant(VELOCITY, "MODE_SCALE", 2) })
+local FADER_SCALINGS = named({ ["log fast"] = constant(FADER, "SCALING_LOG_FAST", 1), ["log slow"] = constant(FADER, "SCALING_LOG_SLOW", 2),
+  linear = constant(FADER, "SCALING_LINEAR", 3), ["exp slow"] = constant(FADER, "SCALING_EXP_SLOW", 4), ["exp fast"] = constant(FADER, "SCALING_EXP_FAST", 5) })
 
 -- A field only one type of device has, by its names (`map`) both ways.
 local function typed_field(kind, field, map, says, text)
