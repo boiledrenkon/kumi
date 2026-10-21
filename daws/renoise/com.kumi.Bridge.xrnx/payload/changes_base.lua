@@ -332,6 +332,13 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   -- was loaded is another one)
   local applied = wire(spec, after, env, loc)
   if spec.restore_by_id then applied = with_id(applied, loc.id, loc.name) end
+  -- (`keep(loc, before, after)`: what else the undo needs to know of the place as the change left it)
+  if spec.keep then
+    local copy = {}
+    for k, v in pairs(applied) do copy[k] = v end
+    for k, v in pairs(spec.keep(loc, now, after) or {}) do copy[k] = v end
+    applied = copy
+  end
   return {
     applied = applied, journal_applied = after,
     display = display,
@@ -362,6 +369,8 @@ function M.prop_restore(song, env, spec, restore, desc)
     if not restore.discard and not spec.same(now, applied) then
       fail("changed", loc.name .. "'s " .. spec.noun .. " changed in Renoise since Kumi set it")
     end
+    -- (`before_restore`: what else must hold for the old value to go back, refusing when it doesn't)
+    if spec.before_restore and not restore.discard then spec.before_restore(loc, now, prior, restore.applied) end
     if spec.undoable then song:describe_undo(desc) end
     if spec.watch then spec.watch(env, loc) end
     write_whole(spec, loc, prior, now)

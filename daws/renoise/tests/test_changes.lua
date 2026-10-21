@@ -2565,3 +2565,23 @@ test("changes: Kumi's undo of the second of two device adds marks that one undon
   eq(told[1].data.how, "redo")
   eq(told[1].data.descs[1], "Kumi: add two (ks02)", "the change Kumi undid, not the first add")
 end)
+
+test("changes: Kumi's undo of columns it showed refuses to hide a note written in them since; discard hides it (#361 N-S7)", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3), noteColumns = 4 }
+  local previewed = preview(peer, "track-columns", input)
+  local done = apply(peer, "track-columns", input, "Kumi: columns (kc71)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(mock.song:track(3).visible_note_columns, 4)
+  mock.ops.set_note(1, 3, 1, 4, { note = 48 }) -- the producer writes a chord note in column 4
+  H.tick(2)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied }
+  local refused = restore(peer, "track-columns", record, "Kumi: undo columns (kc72)", done.result.epoch, done.result.layout)
+  failure(refused, "changed")
+  ok(refused.error.message:find("written since", 1, true), refused.error.message)
+  eq(mock.song:track(3).visible_note_columns, 4, "still shown")
+  local forced = restore(peer, "track-columns", record, "Kumi: undo columns (kc73)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(mock.song:track(3).visible_note_columns, 2)
+end)

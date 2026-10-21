@@ -1448,6 +1448,14 @@ local columns_spec = base.settings({
   kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
 })
 columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+-- (the undo hides columns again: what they held when Kumi showed them may be hidden again, but what the producer wrote in
+-- them since is refused, unless discard)
+columns_spec.keep = function(loc, before) return { heldHidden = hidden_note(loc, before) ~= nil } end
+columns_spec.before_restore = function(loc, _, prior, applied)
+  if type(applied) == "table" and applied.heldHidden == false and hidden_note(loc, prior) ~= nil then
+    fail("changed", loc.name .. "'s columns Kumi showed hold notes written since: hiding them again would hide those, so Kumi left them")
+  end
+end
 prop(columns_spec)
 
 -- A note column's name and mute: the column is part of what the change is about, so the record keeps it (`col`).
