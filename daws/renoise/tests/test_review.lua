@@ -285,7 +285,7 @@ test("review M-7: a restore asked behind a dialog is busy too, and writes nothin
   failure(restore(peer, "track-volume", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo v (kr09)", epoch, layout), "busy")
   mock.stall_timers = false
   eq(steps(), before)
-  ok(mock.data.tracks[1].volume < 1, "still at -6 dB")
+  ok((mock.data.tracks[1].post_volume or 1) < 1, "still at -6 dB")
   H.no_dialogs()
 end)
 
@@ -343,15 +343,15 @@ test("review M-3: an apply that locates another track than the preview did is re
   failure(wrong, "changed")
   ok(wrong.error.message:find("\226\128\156Bass\226\128\157 isn't at that place any more", 1, true), "it names the track that was previewed: " .. wrong.error.message)
   ok(not wrong.error.message:find("Hat", 1, true), "and not the one at its place now: " .. wrong.error.message)
-  eq(mock.data.tracks[3].volume, 1, "Hat was not changed")
-  eq(mock.data.tracks[4].volume, 1)
+  eq(mock.data.tracks[3].post_volume or 1, 1, "Hat was not changed")
+  eq(mock.data.tracks[4].post_volume or 1, 1)
   eq(steps(), 0)
   -- paired as Kumi asked (its own layout), the ref is carried to Bass
   local right = call(peer, "change_apply", { kind = "track-volume", input = input, fence = previewed.fence, desc = "Kumi: v (kr13)",
     epoch = epoch, layout = layout })
   ok(right.result, json.encode(right.error or {}))
-  ok(math.abs(mock.data.tracks[4].volume - 10 ^ (-6 / 20)) < 1e-6, "Bass")
-  eq(mock.data.tracks[3].volume, 1)
+  ok(math.abs((mock.data.tracks[4].post_volume or 1) - 10 ^ (-6 / 20)) < 1e-6, "Bass")
+  eq(mock.data.tracks[3].post_volume or 1, 1)
   eq(right.result.target.ref, track_ref(right.result.epoch, 4), "the answer names the track it located, in its own layout")
   H.no_dialogs()
 end)

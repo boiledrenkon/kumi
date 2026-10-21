@@ -174,9 +174,11 @@ local function target(env, index)
   return { ref = refs.make(env.epoch(), "track", index), kind = "track" }
 end
 
+-- A track's volume or pan stage: post (the fader Renoise's mixer shows and the producer rides; the default) or pre (the
+-- Vol/Pan before its devices).
 local function stage_of(source)
   local stage = type(source) == "table" and source.stage or nil
-  if stage == nil then return "pre" end
+  if stage == nil then return "post" end
   if stage ~= "pre" and stage ~= "post" then bad("stage must be \"pre\" or \"post\"") end
   return stage
 end

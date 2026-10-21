@@ -329,13 +329,24 @@ local function sends_check(song, receiver)
   end
 end
 
-local function add_input(song, track, input)
+-- The send a #Send aims at, by its number among the send tracks (from 0: the first send is 0): receiverRef (the send
+-- track) or receiver (that number).
+local function receiver_of(song, env, input)
+  if input.receiverRef == nil then return input.receiver end
+  if input.receiver ~= nil then bad("give receiverRef (the send track) or receiver, not both") end
+  local index, track = base.find(song, env, input.receiverRef, "receiverRef")
+  if rows.track_type(track) ~= "send" then bad(string.format("receiverRef must be a send track; %s isn't one", q(base.named(index, track)))) end
+  return index - song.sequencer_track_count - 2
+end
+
+local function add_input(song, env, track, input)
   local info = resolve_device(track, input.path)
   local is_send = info.path:find("#Send", 1, true) ~= nil
-  if (input.receiver ~= nil or input.amount ~= nil) and not is_send then
-    bad("receiver and amount are for the #Send device")
+  if (input.receiver ~= nil or input.receiverRef ~= nil or input.amount ~= nil) and not is_send then
+    bad("receiverRef, receiver and amount are for the #Send device")
   end
-  if input.receiver ~= nil then sends_check(song, input.receiver) end
+  local receiver = receiver_of(song, env, input)
+  if receiver ~= nil then sends_check(song, receiver) end
   -- (the #Send's Amount is 0 to 1: measured, 3.5.4. Checked before anything is written; apply checks the parameter's own range too)
   if input.amount ~= nil and (type(input.amount) ~= "number" or input.amount ~= input.amount or input.amount < 0 or input.amount > 1) then
     bad("amount must be a number from 0 to 1")
@@ -347,7 +358,7 @@ local function add_input(song, track, input)
   elseif type(at) ~= "number" or at ~= math.floor(at) or at < 2 or at > last then
     bad(string.format("index must be a whole number from 2 (after the mixer device) to %d", last))
   end
-  return info, at
+  return info, at, receiver
 end
 
 local function add_signature(index, track)
@@ -356,10 +367,10 @@ end
 
 local function add_preview(song, env, input)
   local index, track = base.find(song, env, input.ref, "device-add")
-  local info, at = add_input(song, track, input)
+  local info, at, receiver = add_input(song, env, track, input)
   local now = add_signature(index, track)
   -- (the send the receiver names, as a track the layout carries: one made before it by the apply refuses `changed`)
-  if input.receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + input.receiver) end
+  if receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + receiver) end
   local display = {
     title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
     before = { devices = now.devices }, after = { devices = now.devices + 1, path = info.path, index = at },
@@ -380,11 +391,11 @@ local function add_apply(song, env, input, fence, desc)
   local now = add_signature(index, track)
   if type(fence.receiver) == "string" then
     local send = refs.expect(fence.receiver, "track", 1, env.epoch())[1]
-    if input.receiver ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
+    if receiver_of(song, env, input) ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
     now.receiver = fence.receiver
   end
   if not base.same_table(now, fence) then fail("changed", base.named(index, track) .. "'s devices changed since the preview") end
-  local info, at = add_input(song, track, input)
+  local info, at, receiver = add_input(song, env, track, input)
   song:describe_undo(desc)
   local made, device = pcall(function() return track:insert_device_at(info.path, at) end)
   if not made or not device then
@@ -393,10 +404,10 @@ local function add_apply(song, env, input, fence, desc)
   end
   -- The device is set up in this callback; if that can't be done it goes again, so a refused change leaves no device behind.
   local set, err = pcall(function()
-    if input.receiver ~= nil then
+    if receiver ~= nil then
       local parameter = parameter_named(device, "Receiver")
       if not parameter then error({ code = "failed", message = "the #Send device has no Receiver parameter in this Renoise" }, 0) end
-      parameter.value = input.receiver
+      parameter.value = receiver
     end
     if input.amount ~= nil then
       local parameter = parameter_named(device, "Amount")

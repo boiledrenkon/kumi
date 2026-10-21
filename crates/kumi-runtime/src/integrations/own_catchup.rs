@@ -64,13 +64,15 @@ pub struct RecipeKinds {
     pub mixer: &'static [Mixer],
 }
 
-/// One of a track's mixer values (`mixer.volume`), the kind that sets it (`track_volume`) and its field (`volumeDb`), and
-/// the value the kind takes from what the host read (None when the kind can't set it).
+/// One of a track's mixer values (`mixer.volume`), the kind that sets it (`track_volume`) and its field (`volumeDb`), the
+/// value the kind takes from what the host read (None when the kind can't set it), and what else the step always takes
+/// (Renoise's `stage`).
 pub struct Mixer {
     pub what: &'static str,
     pub tool: &'static str,
     pub field: &'static str,
     pub value: fn(&Value) -> Option<Value>,
+    pub with: &'static [(&'static str, &'static str)],
 }
 
 /// A mixer value as the host read it, the kind takes it as it is.
@@ -407,6 +409,9 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
         let mut input = JsonObject::new();
         input.insert("ref".into(), by.into());
         input.insert(mixer.field.into(), value);
+        for (key, value) in mixer.with {
+            input.insert((*key).into(), (*value).into());
+        }
         draft.step(mixer.tool, input, None);
         true
     };
@@ -652,8 +657,8 @@ mod tests {
                 ("fx_params", json!({"values": values}).as_object().cloned().unwrap())
             },
             mixer: &[
-                Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read },
-                Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read },
+                Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[] },
+                Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read, with: &[] },
             ],
         },
         watch_description: "",

@@ -31,7 +31,7 @@ end
 local function delay_text(value)
   if value == "" or value == ".." then return ".." end
   if type(value) == "number" then
-    if value < 0 or value > 255 or value ~= math.floor(value) then bad("delay: a whole number from 0 to 255, or two hex digits") end
+    if value < 0 or value > 255 or value ~= math.floor(value) then bad("delay: a whole number from 0 to 255 (decimal: 128 is half a line), or two hex digits as Renoise shows them (\"80\")") end
     return value == 0 and ".." or string.format("%02X", value)
   end
   local text = text_of(value, "delay", "10 or ..")
@@ -42,7 +42,11 @@ end
 local function hex2(value, name, empty)
   if value == "" or value == ".." then return empty end
   if type(value) == "number" then
-    if value < 0 or value > 254 or value ~= math.floor(value) then bad(name .. ": a whole number from 0 to 254, or two hex digits") end
+    -- (255 is the instrument's "none"; an effect's amount goes to FF)
+    local top = empty == ".." and 254 or 255
+    if value < 0 or value > top or value ~= math.floor(value) then
+      bad(string.format("%s: a whole number from 0 to %d (decimal: 10 is 0A), or two hex digits as Renoise shows them", name, top))
+    end
     return string.format("%02X", value)
   end
   local text = text_of(value, name, "01 or ..")
@@ -389,7 +393,17 @@ end
 -- The cells a request names, with what it gives for each (`given`) and whether to clear first: [key] = want.
 local function key_of(at) return at.line * 100 + (at.kind == "note" and 0 or 50) + at.col end
 
-local function parse_cells(pattern, track, input)
+-- A note's instrument named by its ref (a pattern's notes only: `env` is there), as the two hex digits Renoise shows.
+local function instrument_of_ref(env, reference)
+  if env == nil then bad("instrumentRef is for a pattern's notes: give instrument") end
+  if type(reference) ~= "string" then bad("instrumentRef must be an instrument ref") end
+  local index = refs.expect(reference, "instrument", 1, env.epoch())[1]
+  if index > #the_song().instruments then fail("gone", "that instrument isn't in the song any more") end
+  return string.format("%02X", index - 1)
+end
+
+-- (`env` for refs inside the cells: a pattern's notes may name their instrument by its ref)
+local function parse_cells(pattern, track, input, env)
   local wants, count = {}, 0
   local function add(at, given, clear)
     local key = key_of(at)
@@ -406,11 +420,13 @@ local function parse_cells(pattern, track, input)
     seen[line] = true
     local any = false
     for _, cell in ipairs(entry.notes or {}) do
-      if type(cell) ~= "table" then bad("each of notes is an object {col, note?, instrument?, volume?, panning?, delay?, fx?, clear?}") end
+      if type(cell) ~= "table" then bad("each of notes is an object {col, note?, instrument? (or instrumentRef), volume?, panning?, delay?, fx?, clear?}") end
       local at = cell_at(pattern, track, line, "note", cell.col)
       local given = {}
       if cell.note ~= nil then given.note = note_text(cell.note) end
+      if cell.instrument ~= nil and cell.instrumentRef ~= nil then bad("give instrument or instrumentRef, not both") end
       if cell.instrument ~= nil then given.instrument = hex2(cell.instrument, "instrument", "..") end
+      if cell.instrumentRef ~= nil then given.instrument = instrument_of_ref(env, cell.instrumentRef) end
       if cell.volume ~= nil then given.volume = column_text(cell.volume, "volume") end
       if cell.panning ~= nil then given.panning = column_text(cell.panning, "panning") end
       if cell.delay ~= nil then given.delay = delay_text(cell.delay) end
@@ -525,7 +541,7 @@ local function preview_of(song, env, input, kind, verb, planner)
   if planner then
     prior, after, title = planner({ p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern }, input)
   else
-    local wants = parse_cells(pattern, track, input)
+    local wants = parse_cells(pattern, track, input, env)
     add_cleared(pattern_track, input, wants)
     prior, after = plan_of(pattern_track, wants, input.merge == true)
   end

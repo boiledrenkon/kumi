@@ -60,12 +60,15 @@ pub const CATCH_UP: CatchUpWords = CatchUpWords {
             ("device_params", serde_json::json!({"values": values}).as_object().cloned().unwrap_or_default())
         },
         mixer: &[
-            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read },
-            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read },
-            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read },
+            // (the watch reads both stages: the pre-FX Vol/Pan as volume and pan, the mixer's faders as postVolume and postPan)
+            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[("stage", "pre")] },
+            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read, with: &[("stage", "pre")] },
+            Mixer { what: "mixer.postVolume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[("stage", "post")] },
+            Mixer { what: "mixer.postPan", tool: "track_pan", field: "pan", value: as_read, with: &[("stage", "post")] },
+            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read, with: &[] },
             // (Renoise's mute states: active plays, muted and off don't)
-            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: |state| state.as_str().map(|state| Value::Bool(state != "active")) },
-            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read },
+            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: |state| state.as_str().map(|state| Value::Bool(state != "active")), with: &[] },
+            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read, with: &[] },
         ],
     },
     watch_description: "Learn a routine the producer does by hand in Renoise: action start just before they do it (Kumi notes the song as it is; nothing in Renoise changes), then action stop when they say they're done. Stop gives what changed: tracks added (with their mixer and routing), devices added (with the parameters they moved after adding them), patterns' lines, instruments and settings changed, each with its track; and recipeSteps, a draft of the steps that would redo it in your change kinds, with $blanks for the tracks they worked on (the one they selected is $track). Save it at once with save_recipe from those steps, fixing the draft where it's off and leaving out anything clearly unrelated. Then say in a few words what the recipe does. The producer can ask you to change it.",
@@ -357,6 +360,27 @@ pub fn create_renoise_integration(options: OwnOptions) -> Rc<dyn Integration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// U3: the producer rides the mixer's (post-FX) fader; watch_me drafts it as the step that moves that fader.
+    #[test]
+    fn a_watched_fader_move_is_drafted_on_the_stage_it_was_made_on() {
+        use serde_json::json;
+        let detail = |what: &str, to: f64| json!({"facet": "mixer", "what": what, "from": 0.0, "to": to});
+        let answer = json!({"changes": [{"change": "changed", "kind": "track", "before": {"name": "Bass", "order": 2},
+            "after": {"name": "Bass", "order": 2},
+            "details": [detail("mixer.postVolume", -6.0), detail("mixer.postPan", 0.5), detail("mixer.volume", -3.0)]}],
+            "selected": [{"name": "Bass"}]});
+        let reply = super::super::own_catchup::watched(&answer, &CATCH_UP);
+        assert_eq!(
+            reply["recipeSteps"]["steps"],
+            json!([
+                {"tool": "track_volume", "input": {"ref": "$track", "volumeDb": -6.0, "stage": "post"}},
+                {"tool": "track_pan", "input": {"ref": "$track", "pan": 0.5, "stage": "post"}},
+                {"tool": "track_volume", "input": {"ref": "$track", "volumeDb": -3.0, "stage": "pre"}},
+            ]),
+            "{reply:?}"
+        );
+    }
 
     /// m6-places: each phrase's steps in a song as the look found it.
     #[test]

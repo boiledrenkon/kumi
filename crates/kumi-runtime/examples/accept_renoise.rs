@@ -308,7 +308,7 @@ const AU_UNDO: &str = "Renoise's undo history goes empty now and then once AU pl
 static CASES: &[Case] = &[
     // Mixer, names, structure (M3 kinds, now through the whole stack)
     case("track_volume", TRACK, r#"{"ref":"$E:track:$t","volumeDb":-6}"#, "local tr = song:track($t) return {tr.prefx_volume.value, tr.postfx_volume.value}"),
-    case("track_pan", TRACK, r#"{"ref":"$E:track:$t","pan":-0.5}"#, "return song:track($t).prefx_panning.value"),
+    case("track_pan", TRACK, r#"{"ref":"$E:track:$t","pan":-0.5}"#, "return song:track($t).postfx_panning.value"),
     case("track_mute", TRACK, r#"{"ref":"$E:track:$t","mute":true}"#, "return song:track($t).mute_state"),
     case("track_solo", TRACK, r#"{"ref":"$E:track:$t","solo":true}"#, "local out = {} for _, tr in ipairs(song.tracks) do if tr.type ~= R.Track.TRACK_TYPE_MASTER then out[#out + 1] = tr.mute_state .. (tr.solo_state and '*' or '') end end return out"),
     case("track_rename", TRACK, r#"{"ref":"$E:track:$t","name":"K renamed"}"#, "return song:track($t).name"),
@@ -1327,14 +1327,14 @@ mod extras {
         let (host, t) = (lab.host.clone(), vars["t"].clone());
         let edit: Hook = Box::new(move || {
             async move {
-                lua_on(&host, &format!("song:track({t}).prefx_volume.value = 0.3")).await.ok();
+                lua_on(&host, &format!("song:track({t}).postfx_volume.value = 0.3")).await.ok();
             }
             .boxed_local()
         });
         lab.hooked.before("change_apply", 0, edit);
         let (said, added) =
             lab.plan(json!([{"tool": "track_volume", "input": input(r#"{"ref":"$E:track:$t","volumeDb":-6}"#, &vars)}])).await;
-        let now = read(lab, &fill_lua("return song:track($t).prefx_volume.value", &vars)).await;
+        let now = read(lab, &fill_lua("return song:track($t).postfx_volume.value", &vars)).await;
         out.step("refused", said.error && added.is_empty(), short(&said.text, 140));
         out.step("producer's value kept", same(&now, &json!(0.3)), format!("{now}"));
         out.step("edit made", !lab.hooked.armed(), "");
@@ -1397,7 +1397,7 @@ mod extras {
         out.step("note columns refused", columns.error, short(&columns.text, 100));
         let (delete, _) = lab.plan(json!([{"tool": "track_delete", "input": input(r#"{"ref":"$E:track:$g"}"#, &vars)}])).await;
         out.step("delete refused", delete.error, short(&delete.text, 100));
-        let probe = fill_lua("return song:track($g).prefx_volume.value", &vars);
+        let probe = fill_lua("return song:track($g).postfx_volume.value", &vars);
         let before = read(lab, &probe).await;
         let (said, added) =
             lab.plan(json!([{"tool": "track_volume", "input": input(r#"{"ref":"$E:track:$g","volumeDb":-4}"#, &vars)}])).await;
