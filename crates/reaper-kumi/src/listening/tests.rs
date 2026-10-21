@@ -412,7 +412,8 @@ fn a_render_reaper_stopped_short_is_refused_and_one_with_no_known_speed_says_so(
 #[test]
 fn a_render_reaper_keeps_too_busy_to_begin_gives_up_with_nothing_done() {
     let rig = Rig::new();
-    render::TEST_QUEUED_FOR.with(|w| w.set(Some(Duration::from_millis(30))));
+    // (a window a slow test machine can't cross between the start and the first tick, as 30 ms once was)
+    render::TEST_QUEUED_FOR.with(|w| w.set(Some(Duration::from_millis(400))));
     rig.ask(
         "render_start",
         json!({"jobId": "jb1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}),
@@ -421,7 +422,7 @@ fn a_render_reaper_keeps_too_busy_to_begin_gives_up_with_nothing_done() {
     fake::with(|s| s.loading = true);
     rig.tick();
     assert_eq!(rig.status("jb1")["state"], "queued", "it waits for REAPER");
-    std::thread::sleep(Duration::from_millis(40));
+    std::thread::sleep(Duration::from_millis(450));
     rig.tick();
     let status = rig.status("jb1");
     render::TEST_QUEUED_FOR.with(|w| w.set(None));
