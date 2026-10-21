@@ -251,16 +251,18 @@ fn reaper_default_resource(env: &Env) -> PathBuf {
     }
 }
 
+fn reaper_described(env: &Env, app: Option<&PathBuf>, resource: PathBuf, from: ResourceFrom) -> ReaperInstall {
+    let version = app.filter(|_| env.os == Os::Mac).and_then(|app| plist_value(app, "CFBundleShortVersionString"));
+    let archs = app.map(|app| binary_archs(&reaper_binary(env.os, app))).unwrap_or_default();
+    let opened = resource.join("reaper.ini").exists();
+    ReaperInstall { app: app.cloned(), version, archs, resource, resource_from: from, opened }
+}
+
 /// Every REAPER this computer has: one row per resource folder (the default one, each portable install, or the one
 /// `KUMI_REAPER_RESOURCE_DIR` names, which then is the only one).
 pub fn detect_reaper(env: &Env) -> Vec<ReaperInstall> {
     let apps = reaper_apps(env);
-    let describe = |app: Option<&PathBuf>, resource: PathBuf, from: ResourceFrom| {
-        let version = app.filter(|_| env.os == Os::Mac).and_then(|app| plist_value(app, "CFBundleShortVersionString"));
-        let archs = app.map(|app| binary_archs(&reaper_binary(env.os, app))).unwrap_or_default();
-        let opened = resource.join("reaper.ini").exists();
-        ReaperInstall { app: app.cloned(), version, archs, resource, resource_from: from, opened }
-    };
+    let describe = |app: Option<&PathBuf>, resource: PathBuf, from: ResourceFrom| reaper_described(env, app, resource, from);
     if let Some(resource) = env.var_path("KUMI_REAPER_RESOURCE_DIR") {
         let app = apps.iter().find(|app| reaper_portable_dir(env.os, app).as_ref() == Some(&resource)).or(apps.first());
         return vec![describe(app, resource, ResourceFrom::Override)];
@@ -278,6 +280,27 @@ pub fn detect_reaper(env: &Env) -> Vec<ReaperInstall> {
         found.insert(0, describe(default_app, resource, ResourceFrom::Default));
     }
     found
+}
+
+/// `installs`, and the resource folder Kumi's extension was put in (`placed`: the extension's path, from its receipt)
+/// when detection didn't find it: a portable REAPER outside the folders Kumi looks in, named once with
+/// `KUMI_REAPER_RESOURCE_DIR`. Not while that variable names a folder: that one is the only one then.
+pub fn with_placed(env: &Env, mut installs: Vec<ReaperInstall>, placed: Option<&Path>) -> Vec<ReaperInstall> {
+    let resource = placed.and_then(Path::parent).filter(|plugins| name_of(plugins) == "UserPlugins").and_then(Path::parent);
+    let Some(resource) = resource.filter(|resource| resource.is_dir()) else { return installs };
+    let same = |other: &Path| other == resource || std::fs::canonicalize(other).ok() == std::fs::canonicalize(resource).ok();
+    if env.var("KUMI_REAPER_RESOURCE_DIR").is_some() || installs.iter().any(|install| same(&install.resource)) {
+        return installs;
+    }
+    // The app beside its reaper.ini, when it's there.
+    let names: &[&str] = match env.os {
+        Os::Mac => &["REAPER.app", "REAPER64.app"],
+        Os::Windows => &["reaper.exe"],
+        Os::Linux => &["reaper"],
+    };
+    let app = names.iter().map(|name| resource.join(name)).find(|app| app.exists());
+    installs.push(reaper_described(env, app.as_ref(), resource.to_path_buf(), ResourceFrom::Portable));
+    installs
 }
 
 /// A Renoise version, from `V3.5.4` or `3.5.4`.
@@ -301,6 +324,17 @@ impl std::fmt::Display for Version {
 
 /// The oldest Renoise whose scripting API (6.2) Kumi's tool needs.
 pub const RENOISE_MIN: Version = Version(3, 5, 0);
+/// The oldest REAPER Kumi's extension is built for.
+pub const REAPER_MIN: Version = Version(7, 0, 0);
+
+impl Version {
+    /// The version an app says, from its first word ("3.4.4 Demo", "7.22"); None when it doesn't start with one.
+    pub fn of_app(text: &str) -> Option<Version> {
+        let word = text.split_whitespace().next()?;
+        let numbers: String = word.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        Version::parse(numbers.trim_end_matches('.'))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

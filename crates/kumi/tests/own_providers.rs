@@ -183,11 +183,20 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
 /// `/daw` says which DAW Kumi works with, and takes the DAW by the producer's name for it ("live") or Kumi's id.
 #[test]
 fn daw_says_which_daw_kumi_works_with_and_switches_by_name() {
-    use kumi::daw::{daw_command, work_with, DawCommand};
+    use kumi::daw::{daw_command, daw_command_among, work_with, DawCommand};
     work_with(DawId::Reaper);
     assert_eq!(
-        daw_command(""),
+        daw_command_among("", &|_| true),
         DawCommand::Say("Kumi works with REAPER. /daw live or /daw renoise opens Kumi again with Live or Renoise.".into())
+    );
+    // Review K43: only the DAWs on this computer are offered.
+    assert_eq!(
+        daw_command_among("", &|provider| provider.id() == DawId::Ableton),
+        DawCommand::Say("Kumi works with REAPER. /daw live opens Kumi again with Live.".into())
+    );
+    assert_eq!(
+        daw_command_among("", &|_| false),
+        DawCommand::Say("Kumi works with REAPER, the only DAW it works with on this computer.".into())
     );
     for typed in [" Live", "live", "ableton"] {
         assert_eq!(daw_command(typed), DawCommand::Switch(DawId::Ableton, "Kumi closes and opens again with Live.".into()), "{typed}");
@@ -582,4 +591,130 @@ async fn an_update_keeps_the_bridges_in_place_and_a_rollback_takes_each_to_the_c
     for default in ["Library/Application Support/REAPER", "AppData/Roaming/REAPER", ".config/REAPER"] {
         assert!(!dir.path().join(default).join("UserPlugins").exists(), "{default}");
     }
+}
+
+/// Review K19 and U6: setup opens the app it found when the DAW hasn't been opened yet (never an empty name, which
+/// opened nothing), and names a REAPER older than 7 by its version rather than put the extension in it.
+#[tokio::test(flavor = "current_thread")]
+async fn setup_opens_the_app_it_found_and_names_an_older_reaper() {
+    use kumi::daw::{older_than, Installed};
+    let dir = tempfile::tempdir().unwrap();
+    let app = if cfg!(target_os = "macos") {
+        dir.path().join("Applications/REAPER.app")
+    } else if cfg!(windows) {
+        dir.path().join("Program Files/REAPER/reaper.exe")
+    } else {
+        dir.path().join("opt/REAPER/reaper")
+    };
+    let plist = |version: &str| format!("<plist><dict><key>CFBundleShortVersionString</key>\n<string>{version}</string></dict></plist>");
+    if cfg!(target_os = "macos") {
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/REAPER"), "").unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), plist("7.22")).unwrap();
+    } else {
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, "").unwrap();
+    }
+    let env = |resource: &std::path::Path| {
+        Env::from([
+            ("HOME".into(), dir.path().to_string_lossy().into_owned()),
+            ("KUMI_HOME".into(), dir.path().join(".kumi").to_string_lossy().into_owned()),
+            ("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned()),
+            ("ProgramFiles".into(), dir.path().join("Program Files").to_string_lossy().into_owned()),
+        ])
+    };
+    let setup = |env: &Env| own::REAPER.setup(env, Rc::default(), false, Rc::default());
+    // Installed, never opened (no resource folder yet): setup opens this app.
+    let never = setup(&env(&dir.path().join("REAPER"))).installed().await;
+    let Installed::NeverOpened(found) = never else { panic!("{never:?}") };
+    assert!(found.ends_with(app.file_name().unwrap().to_str().unwrap()), "{found}");
+    // A portable REAPER 6 (its reaper.ini beside the app; macOS apps say their version): named, and older than Kumi needs.
+    if cfg!(target_os = "macos") {
+        std::fs::write(app.join("Contents/Info.plist"), plist("6.83")).unwrap();
+        std::fs::write(dir.path().join("Applications/reaper.ini"), "").unwrap();
+        let older = setup(&env(&dir.path().join("Applications")));
+        assert_eq!(older.installed().await, Installed::Older("6.83".into()));
+        let version = older.version(Some(app.to_string_lossy().into_owned())).await.unwrap();
+        assert!(older_than(&version, DawProvider::min_version(&own::REAPER)), "{version}");
+        assert!(
+            !older_than("3.5.4", DawProvider::min_version(&own::RENOISE)) && older_than("3.4.4", DawProvider::min_version(&own::RENOISE))
+        );
+        assert!(older_than("11.3.21", "12") && !older_than("12.0b4", "12") && !older_than("unknown", "12"));
+    }
+}
+
+/// Review K20: a portable REAPER Kumi doesn't find by itself is found once its receipt says the extension went in it;
+/// with that folder gone (the drive is out), the doctor names the variable that shows Kumi where REAPER is.
+#[tokio::test(flavor = "current_thread")]
+async fn a_portable_reaper_is_found_by_its_receipt_and_otherwise_named_by_the_variable() {
+    use kumi::daw::Installed;
+    let dir = tempfile::tempdir().unwrap();
+    let env = Env::from([
+        ("HOME".into(), dir.path().to_string_lossy().into_owned()),
+        ("KUMI_HOME".into(), dir.path().join(".kumi").to_string_lossy().into_owned()),
+        ("ProgramFiles".into(), dir.path().join("Program Files").to_string_lossy().into_owned()),
+    ]);
+    let reaper: &dyn DawProvider = &own::REAPER;
+    // A REAPER installed on this computer itself would be found anyway.
+    let alone = !reaper.here(&env);
+    let portable = dir.path().join("Stick/REAPER");
+    std::fs::create_dir_all(portable.join("UserPlugins")).unwrap();
+    std::fs::write(portable.join("reaper.ini"), "").unwrap();
+    let target = portable.join("UserPlugins").join(daw_bridge::install::reaper_extension_name(daw_bridge::detect::Os::current()));
+    let paths = daw_bridge::paths::BridgePaths::new(&dir.path().join(".kumi"), daw_bridge::daw::Daw::Reaper);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let receipt = serde_json::json!({
+        "schema": daw_bridge::lifecycle::RECEIPT_SCHEMA, "daw": "reaper", "status": "installed",
+        "target": target, "reference": portable.join("UserPlugins/kumi-bridge-reference.json"),
+        "previous": [], "updatedMs": 0, "history": [],
+    });
+    std::fs::write(paths.receipt(), receipt.to_string()).unwrap();
+    assert!(reaper.here(&env));
+    assert_eq!(reaper.setup(&env, Rc::default(), false, Rc::default()).installed().await, Installed::Ready);
+    std::fs::remove_dir_all(dir.path().join("Stick")).unwrap();
+    if alone {
+        let checks = reaper.installation_checks(&env, &kumi::doctor::InstallationIo::default(), "darwin").await;
+        let said = format!("{checks:?}");
+        assert!(said.contains("set KUMI_REAPER_RESOURCE_DIR to its resource folder"), "{said}");
+    }
+}
+
+/// Review U13 and K42: each of the doctor's REAPER and Renoise failures names what puts it right (the bridge command,
+/// or opening the DAW once), and a host that won't start is a failure with the repair to run.
+#[tokio::test(flavor = "current_thread")]
+async fn the_doctor_names_each_fix_and_says_when_kumis_host_wont_start() {
+    use kumi::doctor::{Check, CheckStatus, DoctorIo, LiveProbe};
+    let (dir, env) = renoise_home();
+    assert_eq!(own::RENOISE.setup_bridge(Rc::new(Out::default()), &env, yes()).await.unwrap(), 0);
+    // The producer deleted Kumi's tool from Renoise.
+    std::fs::remove_dir_all(dir.path().join("Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx")).unwrap();
+    let mut io = DoctorIo::new(Rc::new(Out::default()), env.clone());
+    io.probe_own = Some(Rc::new(|_| {
+        async { LiveProbe { started: false, said: Some("daw-mcp-server wasn't found".into()), ..Default::default() } }.boxed_local()
+    }));
+    let checks = own::RENOISE.doctor_checks(&io, &Check::ok("Kumi")).await;
+    let again = format!("{} --daw renoise bridge", *kumi_runtime::KUMI);
+    let removed = checks.iter().find(|check| check.text.contains("was removed from")).unwrap_or_else(|| panic!("{checks:?}"));
+    assert_eq!((removed.status.clone(), removed.next.as_deref()), (CheckStatus::Fix, Some(again.as_str())), "{checks:?}");
+    let host = checks.iter().find(|check| check.text == "Kumi's host for Renoise didn't start: daw-mcp-server wasn't found");
+    let host = host.unwrap_or_else(|| panic!("{checks:?}"));
+    assert_eq!(host.status, CheckStatus::Fix);
+    assert!(host.next.as_deref().is_some_and(|next| next.contains(kumi_runtime::KUMI_REPAIR.as_str())), "{host:?}");
+}
+
+/// Review K43: the report reads the bridge's logs oldest first, whatever order their folder lists them in.
+#[tokio::test(flavor = "current_thread")]
+async fn the_report_reads_the_bridge_logs_oldest_first() {
+    let (dir, env) = renoise_home();
+    let logs = dir.path().join(".kumi/bridges/renoise/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let now = std::time::SystemTime::now();
+    for (name, hours_ago) in [("a.log", 1), ("b.log", 3), ("c.log", 2)] {
+        std::fs::write(logs.join(name), format!("{name} line\n")).unwrap();
+        let file = std::fs::File::options().write(true).open(logs.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(hours_ago * 3600)).unwrap();
+    }
+    let (heading, lines) = own::RENOISE.report_log(&env, "", None).await;
+    assert_eq!(heading, "Renoise's bridge log");
+    assert_eq!(lines, "b.log line\nc.log line\na.log line");
 }

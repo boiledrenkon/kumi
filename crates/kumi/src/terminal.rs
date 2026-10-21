@@ -1207,8 +1207,13 @@ impl Terminal for PlainTerminal {
                         .map(|set| format!("“{}”", clean(set)))
                         .unwrap_or_else(|| format!("a {} not saved yet", ask.noun));
                     let title = if ask.title.is_empty() { "This conversation".into() } else { format!("“{}”", clean(&ask.title)) };
+                    let first = if ask.by_hand {
+                        format!("Open {theirs} in {daw} yourself (this conversation carries on once it's open)", daw = ask.daw)
+                    } else {
+                        format!("Open {theirs} in {daw} ({daw} may ask whether to save {open} first)", daw = ask.daw)
+                    };
                     let question = format!(
-                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. Open {theirs} in {daw} ({daw} may ask whether to save {open} first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
+                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. {first} · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
                         daw = ask.daw
                     );
                     self.0.state.borrow_mut().asking = Some(question.clone());

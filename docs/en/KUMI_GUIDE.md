@@ -236,8 +236,10 @@ again with that one. `--daw` and `KUMI_DAW` always decide.
 
 - **REAPER:** its resource folder (`~/Library/Application Support/REAPER` on a
   Mac, `%APPDATA%\REAPER` on Windows, `~/.config/REAPER` or `~/.reaper` on
-  Linux), each portable REAPER (a `reaper.ini` beside the app), or only the
-  folder `KUMI_REAPER_RESOURCE_DIR` names.
+  Linux), each portable REAPER in the usual app folders (a `reaper.ini` beside
+  the app), the one Kumi's extension went in, or only the folder
+  `KUMI_REAPER_RESOURCE_DIR` names. A portable REAPER elsewhere (on another
+  drive, say) needs `KUMI_REAPER_RESOURCE_DIR` the first time.
 - **Renoise:** the newest preferences folder for 3.5 or later (such as
   `V3.5.4` in `~/Library/Preferences/Renoise`, `%APPDATA%\Renoise`, or
   `~/.config/Renoise` or `~/.renoise` on Linux), or the one
@@ -991,7 +993,11 @@ afresh.
   in the DAW's unsaved place until its first save; then they go on in the saved
   one's.
 - Kumi writes an id into a saved REAPER project (REAPER keeps it with your next
-  save), so a project saved under another name or moved carries on.
+  save), so a project moved, or saved under another name in the same folder,
+  carries on; a copy saved in another folder while the original is still there
+  starts afresh.
+- Another project's conversation: Kumi asks you to open that project yourself
+  (it can't open one there), and the conversation carries on once it's open.
 - Catch-up also tells what changed while REAPER or Renoise was closed or
   restarted, in the DAW's words: REAPER's tracks, FX, items, markers and
   regions, tempo and time signature; Renoise's tracks, devices, patterns,

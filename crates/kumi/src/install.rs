@@ -1193,6 +1193,9 @@ pub const KUMI_S_OWN: [&str; 13] = [
 /// them, always stay.
 pub const BRIDGES_OWN: [&str; 8] =
     ["generations", "discovery", "logs", "listening", "install-receipt.json", "bridge.secret", "lifecycle.lock", "lifecycle-journal.json"];
+/// What only Kumi's bridge lifecycle writes in a DAW's folder in `bridges`: in a folder the producer also uses, a DAW's
+/// folder is Kumi's only when it holds one of these.
+const BRIDGES_MARKS: [&str; 4] = ["install-receipt.json", "bridge.secret", "lifecycle.lock", "lifecycle-journal.json"];
 /// The data in a DAW's folder in `bridges`, and the copies kept for the producer there.
 const BRIDGES_DATA: &str = "snapshots";
 const BRIDGES_CHANGED: &str = "changed";
@@ -1586,7 +1589,9 @@ fn own_parts(home: &str, all: bool, kept: &[&str]) -> Result<Parts, RuntimeError
 }
 /// What goes of `bridges`, a folder per DAW (`all`: --all, in a folder of Kumi's alone): Kumi's own entries; the
 /// baselines too with `all`; never the copies kept for the producer, or what Kumi doesn't make. A DAW's folder goes
-/// whole once all in it goes, and so does `bridges`; else their entries go one by one, and the folders stay.
+/// whole once all in it goes, and so does `bridges`; else their entries go one by one, and the folders stay. Only
+/// REAPER's and Renoise's folders are Kumi's, and in a folder the producer also uses only those its lifecycle wrote
+/// ([`BRIDGES_MARKS`]): a `bridges` there may be someone else's, and stays unless Kumi's folders were all it held.
 fn bridges_parts(bridges: &str, all: bool, parts: &mut Parts) {
     let Ok(daws) = fs::read_dir(bridges) else {
         // Not a folder: Kumi makes none by this name.
@@ -1600,8 +1605,12 @@ fn bridges_parts(bridges: &str, all: bool, parts: &mut Parts) {
     let (mut whole, mut gone) = (true, vec![]);
     for daw in daws.filter_map(Result::ok) {
         let folder = daw.path().display().to_string();
-        let Ok(entries) = fs::read_dir(daw.path()) else {
-            if !litter(&daw.file_name().to_string_lossy()) {
+        let name = daw.file_name().to_string_lossy().into_owned();
+        let kumis_folder = daw_bridge::daw::Daw::from_id(&name).is_some()
+            && (parts.alone || BRIDGES_MARKS.iter().any(|mark| daw.path().join(mark).exists()));
+        let entries = fs::read_dir(daw.path()).ok().filter(|_| kumis_folder);
+        let Some(entries) = entries else {
+            if !litter(&name) {
                 parts.others.push(folder);
                 whole = false;
             }
@@ -1636,8 +1645,10 @@ fn bridges_parts(bridges: &str, all: bool, parts: &mut Parts) {
             gone.extend(entries_gone);
         }
     }
-    if whole {
+    if whole && (parts.alone || !gone.is_empty()) {
         parts.gone.push(bridges.to_string());
+    } else if whole {
+        parts.others.push(bridges.to_string());
     } else {
         parts.gone.extend(gone);
     }

@@ -97,7 +97,7 @@ Kumi は REAPER 7 以降と Renoise 3.5 以降で、macOS、Windows、Linux の�
 
 **Kumi が探す場所。**
 
-- **REAPER：** リソースフォルダー（Mac は `~/Library/Application Support/REAPER`、Windows は `%APPDATA%\REAPER`、Linux は `~/.config/REAPER` か `~/.reaper`）、ポータブル版の REAPER（アプリの隣に `reaper.ini` があるもの）それぞれ、または `KUMI_REAPER_RESOURCE_DIR` で指定したフォルダーだけ。
+- **REAPER：** リソースフォルダー（Mac は `~/Library/Application Support/REAPER`、Windows は `%APPDATA%\REAPER`、Linux は `~/.config/REAPER` か `~/.reaper`）、いつものアプリフォルダーにあるポータブル版の REAPER（アプリの隣に `reaper.ini` があるもの）それぞれ、Kumi の拡張機能を入れた REAPER、または `KUMI_REAPER_RESOURCE_DIR` で指定したフォルダーだけ。ほかの場所（別のドライブなど）にあるポータブル版は、最初の一度だけ `KUMI_REAPER_RESOURCE_DIR` が要ります。
 - **Renoise：** 3.5 以降でいちばん新しい設定フォルダー（`~/Library/Preferences/Renoise`、`%APPDATA%\Renoise`、Linux では `~/.config/Renoise` か `~/.renoise` の中の `V3.5.4` など）、または `KUMI_RENOISE_PREFS_DIR` で指定したもの（`V<x.y.z>` フォルダーか、それを収めたフォルダー）。
 
 **接続。** DAW がブリッジ付きで動いていれば Kumi は自分で接続し、DAW が戻ってきたときもまた接続します。DAW がダイアログやレンダリングで手が離せない間は、Kumi はそう伝え、応答するまで何も変更しません。
@@ -356,7 +356,8 @@ Kumi は、保存済みの各 Set を最後に見たときの状態も覚えて�
 **REAPER と Renoise では**、保存済みの各プロジェクトやソングについても同じです。
 
 - 会話、メモ、離れていた間の変化はそれぞれのものです。保存していないものは、初めて保存するまで DAW の未保存用の場所に置かれ、保存すると保存したものの場所で続きます。
-- Kumi は保存済みの REAPER プロジェクトに ID を書き込みます（次に保存したときに REAPER がプロジェクトに残します）。そのため、別名で保存したり移動したりしたプロジェクトもそのまま続きます。
+- Kumi は保存済みの REAPER プロジェクトに ID を書き込みます（次に保存したときに REAPER がプロジェクトに残します）。そのため、移動したプロジェクトや、同じフォルダーに別名で保存したプロジェクトはそのまま続きます。元のファイルが残ったまま別のフォルダーに保存したコピーは新しく始まります。
+- 別のプロジェクトの会話：Kumi はそのプロジェクトを自分で開くよう伝えます（Kumi からは開けません）。開くと会話が続きます。
 - 離れていた間の変化には、REAPER や Renoise が閉じていた間や再起動した間の変化も、DAW の言葉で含まれます。REAPER のトラック、FX、アイテム、マーカーとリージョン、テンポと拍子。Renoise のトラック、デバイス、パターン、インストゥルメント、テンポ、LPB（Lines per beat）、パターンシーケンス。
 - 比べる元の状態は `~/.kumi/bridges/reaper/snapshots`（または `renoise`）にあり、あなただけが読めます。削除しても、次回の比較が最初からになるだけです。
 

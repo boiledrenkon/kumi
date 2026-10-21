@@ -11,6 +11,7 @@ use crate::{
         phrases::{Intent, PhraseTrack},
         place::{is_project_id, unsaved, Place},
         plan::make_changes,
+        project::{decide_project_with, ProjectRules},
         refs::{Book, Moved, RefScheme, Shift},
         view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
@@ -156,6 +157,73 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// Pins from FOCUS where refs are positions (Renoise's): each by the refs it was pinned with (the TUI sends those every
     /// turn), carried through the track shifts since Kumi first saw it; None for one whose object was deleted.
     pins: Rc<RefCell<indexmap::IndexMap<(String, String), Option<Carried>>>>,
+    /// Where each saved project was last seen, by the id its file carries.
+    places: Places,
+}
+
+/// How REAPER and Renoise tell templates and a song's own folder, for core's rules on copies: a project in REAPER's
+/// templates folder never keeps an id of its own; a copy in the same folder as its original is a version of the same song.
+struct OwnRules;
+
+impl ProjectRules for OwnRules {
+    fn template_location(&self, path: &str) -> bool {
+        std::path::Path::new(path).components().any(|part| part.as_os_str() == "ProjectTemplates")
+    }
+    fn project_folder(&self, path: &str) -> Option<PathBuf> {
+        std::path::Path::new(path).parent().map(std::path::Path::to_path_buf)
+    }
+}
+
+/// The most saved projects whose last place Kumi keeps for one DAW.
+const MOST_PLACES: usize = 2000;
+
+/// Where each saved project was last seen, by the id its file carries (REAPER's and Renoise's travel with the file, Save
+/// As and all): a copy saved in another folder while its original is still there is a project of its own, by core's
+/// rules ([`decide_project_with`]), so it never carries on the original's conversation, notes and goals. Kept in the
+/// DAW's snapshots folder, through restarts.
+struct Places {
+    file: PathBuf,
+    seen: RefCell<Option<indexmap::IndexMap<String, String>>>,
+}
+
+impl Places {
+    fn new(kumi_home: &std::path::Path, daw: &str) -> Self {
+        Self { file: kumi_home.join("bridges").join(daw).join("snapshots").join("places.json"), seen: RefCell::default() }
+    }
+
+    /// The project the file at `path` is, carrying the id `kept`: that id, or a copy's own (the one its path gives, the
+    /// same each time). Only the original's own file, or where it moved, is kept as where that id was last seen.
+    fn decide(&self, kept: &str, path: &str) -> String {
+        let mut seen = self.seen.borrow_mut();
+        // (on disk as [id, path] pairs, oldest first)
+        let seen = seen.get_or_insert_with(|| {
+            let pairs: Option<Vec<(String, String)>> = std::fs::read(&self.file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            pairs.unwrap_or_default().into_iter().collect()
+        });
+        let (id, _) = decide_project_with(&OwnRules, Some(kept), path, seen.get(kept).map(String::as_str), false);
+        if id == kept && seen.get(kept).map(String::as_str) != Some(path) && std::path::Path::new(path).exists() {
+            seen.shift_remove(kept);
+            seen.insert(kept.to_owned(), path.to_owned());
+            if seen.len() > MOST_PLACES {
+                seen.shift_remove_index(0);
+            }
+            // Best effort: a place that can't be kept is decided again from what this session saw.
+            let part = self.file.with_extension("json.part");
+            let written = self
+                .file
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .ok()
+                .and_then(|_| serde_json::to_vec(&seen.iter().collect::<Vec<_>>()).ok());
+            if let Some(bytes) = written {
+                if std::fs::write(&part, bytes).and_then(|_| std::fs::rename(&part, &self.file)).is_err() {
+                    let _ = std::fs::remove_file(&part);
+                }
+            }
+        }
+        id
+    }
 }
 
 /// A pinned node's refs as they are now, and the epoch and layout they're at: at any other, a shift went by uncarried.
@@ -215,6 +283,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     };
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
+    let kumi_home = options.kumi_home.clone();
     Rc::new(OwnIntegration::<S> {
         daw,
         options,
@@ -247,6 +316,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         flags_at: Cell::new(None),
         heard: Rc::default(),
         pins: Rc::default(),
+        places: Places::new(&kumi_home, daw.host_flag),
     })
 }
 
@@ -918,7 +988,14 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let path = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty());
         // Saved: a file and an id (Renoise names an unsaved song by an id of its own until its first save keeps it), as
         // the host's snapshots are kept. Every unsaved project of the DAW shares its unsaved place, as Live's Sets do.
-        let saved = project.get("id").and_then(Value::as_str).filter(|id| is_project_id(id) && path.is_some());
+        // A copy of another project carries that one's id: it's a project of its own by core's rules (`Places`).
+        let saved = project
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| is_project_id(id))
+            .zip(path)
+            .map(|(id, path)| self.places.decide(id, path));
+        let saved = saved.as_deref();
         let place = match saved {
             Some(id) => Place::Saved { daw: self.id(), id: id.into() }.text(),
             None => unsaved(self.id()).into(),
@@ -970,14 +1047,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         } else if snapshot.get("moreTracks") == Some(&Value::Bool(true)) {
             context["moreTracks"] = json!(format!("Not every track is listed here; {read_tool} kind track pages through every one"));
         }
-        // Markers within the look's budget: the rest are read.
+        // Markers within the look's budget: the rest are read. REAPER's snapshot holds some of them, and names how many
+        // there are in all.
         if let Some(all) = markers.as_array() {
-            if all.len() > MARKERS_SHOWN {
-                context["markers"] = json!(all[..MARKERS_SHOWN]);
-                context["moreMarkers"] =
-                    json!(format!("{} more markers; {read_tool} kind marker pages through every one", all.len() - MARKERS_SHOWN));
-            } else {
-                context["markers"] = markers;
+            let total =
+                snapshot.pointer("/truncated/markers/total").and_then(Value::as_u64).map_or(0, |total| total as usize).max(all.len());
+            let shown = all.len().min(MARKERS_SHOWN);
+            context["markers"] = json!(all[..shown]);
+            if total > shown {
+                context["moreMarkers"] = json!(format!(
+                    "{} more markers; {read_tool} kind marker pages through every one",
+                    crate::notation::thousands(total - shown)
+                ));
             }
         } else if !markers.is_null() {
             context["markers"] = markers;
@@ -1324,6 +1405,8 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         self.closed.set(true);
         self.lifetime.cancel();
+        // Kumi's undo goes with its host: each row says who can still take its change back, in the DAW's words.
+        self.changes.retire_all(Ending::Restart);
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {
             unlisten();
         }

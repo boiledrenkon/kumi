@@ -33,7 +33,12 @@ use std::{
 };
 use tokio::sync::Notify;
 
-const MAX_CHANGES: usize = 5_000;
+/// The most changes one answer makes, however they come (a plan's steps, change tools; Live's and the other DAWs').
+pub const MAX_CHANGES: usize = 5_000;
+/// What a change past [`MAX_CHANGES`] in one answer says.
+pub fn too_many_changes() -> String {
+    format!("That's {MAX_CHANGES} changes in one answer; carry on in the next one")
+}
 const STEP_COUNT: &str = "Give 1 to 5000 steps in all.";
 crate::daw_text!(
     /// Said with a plan's refused steps.
@@ -953,5 +958,14 @@ impl<H: PlanHost> StreamingCall for StreamingPlan<H> {
         }
         self.plan.close();
         self.plan.result(input.as_ref().and_then(|v| v.get("final")) == Some(&json!(true))).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review K40: one cap for every DAW's changes, in the words Live's always said.
+    #[test]
+    fn the_cap_on_an_answers_changes_says_what_it_always_said() {
+        assert_eq!(super::too_many_changes(), "That's 5000 changes in one answer; carry on in the next one");
     }
 }

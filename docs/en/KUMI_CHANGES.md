@@ -422,10 +422,12 @@ picture. What differs:
 - **How long:** Kumi keeps its newest 400 changes for undo, while its link to
   the DAW lasts ([when the DAW goes away](KUMI_GUIDE.md#when-live-goes-away)).
 - **A copy before a delete.** Before a change that deletes or overwrites
-  something, Kumi copies the project or song as last saved into a `Kumi copies`
-  folder beside it (`Song saved 2026-10-20 14.05.31.rpp`), once for each saved
-  version, and keeps its five newest copies. A saved file over 512 MB isn't
-  copied, and the change says so; an unsaved project or song gets none.
+  something, Kumi copies the project or song as last saved beside it, in its
+  folder (`Song (Kumi copy 2026-10-20 14.05.31 +0900).rpp`, so a REAPER
+  project's media is found from the copy too), once for each saved version, and
+  keeps its five newest copies. A saved file over 512 MB isn't copied, nor is
+  one Kumi can't copy (a folder it can't write in, a full disk); the change says
+  so. An unsaved project or song gets none.
 
 ### What Kumi can change in REAPER
 

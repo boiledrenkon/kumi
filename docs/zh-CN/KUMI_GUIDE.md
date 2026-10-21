@@ -97,7 +97,7 @@ Kumi 可以在 REAPER 7 及更高版本和 Renoise 3.5 及更高版本中工作�
 
 **Kumi 查找的位置。**
 
-- **REAPER：** 它的资源文件夹（Mac 上为 `~/Library/Application Support/REAPER`，Windows 上为 `%APPDATA%\REAPER`，Linux 上为 `~/.config/REAPER` 或 `~/.reaper`）、每个便携版 REAPER（应用旁边有 `reaper.ini`），或者只用 `KUMI_REAPER_RESOURCE_DIR` 指定的文件夹。
+- **REAPER：** 它的资源文件夹（Mac 上为 `~/Library/Application Support/REAPER`，Windows 上为 `%APPDATA%\REAPER`，Linux 上为 `~/.config/REAPER` 或 `~/.reaper`）、常用应用文件夹中的每个便携版 REAPER（应用旁边有 `reaper.ini`）、装有 Kumi 扩展的那个 REAPER，或者只用 `KUMI_REAPER_RESOURCE_DIR` 指定的文件夹。放在别处（例如另一个磁盘上）的便携版 REAPER，第一次需要设置 `KUMI_REAPER_RESOURCE_DIR`。
 - **Renoise：** 3.5 及更高版本中最新的偏好设置文件夹（例如 `~/Library/Preferences/Renoise`、`%APPDATA%\Renoise`，或 Linux 上 `~/.config/Renoise` 或 `~/.renoise` 中的 `V3.5.4`），或者 `KUMI_RENOISE_PREFS_DIR` 指定的文件夹：一个 `V<x.y.z>` 文件夹，或包含它们的文件夹。
 
 **连接。** DAW 带着桥接运行后，Kumi 会自己连接，DAW 回来时也会再次连接。DAW 忙于对话框或渲染时，Kumi 会说明，并在它应答之前不做任何修改。
@@ -356,7 +356,8 @@ Kumi 还会记住它最后一次看到的每个已保存工程是什么样子。
 **在 REAPER 和 Renoise 中**，每个保存过的工程或歌曲也是如此：
 
 - 它的对话、笔记和离开期间的变化都是它自己的。未保存的工程或歌曲在第一次保存之前，把这些内容放在该 DAW 的未保存位置；保存后就在保存后的位置继续。
-- Kumi 会把一个 ID 写进保存过的 REAPER 工程（REAPER 会在你下次保存时把它存进工程），所以另存为其他名称或移动过的工程会接着之前的继续。
+- Kumi 会把一个 ID 写进保存过的 REAPER 工程（REAPER 会在你下次保存时把它存进工程），所以移动过的工程，或在同一文件夹中另存为其他名称的工程，会接着之前的继续；原文件还在时保存到其他文件夹的副本则重新开始。
+- 其他工程的对话：Kumi 会请你自己打开那个工程（它无法从这里打开），打开后对话就会继续。
 - 离开期间的变化也包括 REAPER 或 Renoise 关闭或重启期间的变化，用 DAW 自己的说法：REAPER 的轨道、FX、对象（item）、标记与区域、速度与拍号；Renoise 的轨道、设备、模式（pattern）、乐器、速度、每拍行数（LPB）和模式序列。
 - 用来比较的状态保存在 `~/.kumi/bridges/reaper/snapshots`（或 `renoise`）中，只有你能读取。删除它只会让下一次比较从头开始。
 

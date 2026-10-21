@@ -462,7 +462,12 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut snapshot = reaper_snapshot();
-            snapshot["truncated"] = json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}});
+            // (review K38: REAPER sends at most 100 of its 1,250 markers, and names the total)
+            let markers: Vec<Value> =
+                (0..100).map(|n| json!({"ref": format!("r:marker:{{M{n}}}"), "name": format!("M{n}"), "position": n})).collect();
+            snapshot["markers"] = json!(markers);
+            snapshot["truncated"] =
+                json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}, "markers": {"total": 1250, "nextCursor": "c1.2.100"}});
             let host = Rc::new(Host {
                 answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
                 asked: RefCell::default(),
@@ -471,6 +476,8 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
             reaper.start(Signal::new()).await.unwrap();
             let context: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
             assert_eq!(context["moreTracks"], "1,000 tracks in all, 2 listed here; reaper_read kind track pages through every one");
+            assert_eq!(context["markers"].as_array().map(Vec::len), Some(30));
+            assert_eq!(context["moreMarkers"], "1,220 more markers; reaper_read kind marker pages through every one");
 
             let renoise_snapshot = json!({
                 "epoch": "3", "moreTracks": true,
@@ -486,6 +493,56 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
             renoise.start(Signal::new()).await.unwrap();
             let context: Value = serde_json::from_str(&renoise.observe(Signal::new(), None).await.unwrap().context).unwrap();
             assert_eq!(context["moreTracks"], "Not every track is listed here; renoise_read kind track pages through every one");
+        })
+        .await;
+}
+
+/// Review K30: a project saved as a copy in another folder carries its original's id (REAPER's travels with the file),
+/// but while the original is still there the copy is a project of its own, by core's rules: its own place, the same
+/// each time and after a restart, so it never carries on the original's conversation. A copy beside the original is a
+/// version of the same song, and a project moved (its original gone) stays the same one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_copy_saved_elsewhere_is_a_project_of_its_own_while_its_original_is_there() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = |at: &str| {
+                let path = dir.path().join(at);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, "<REAPER_PROJECT").unwrap();
+                path.to_string_lossy().into_owned()
+            };
+            let (original, elsewhere, beside) = (file("A/Song A.rpp"), file("B/Song B.rpp"), file("A/Song A v2.rpp"));
+            let home = dir.path().join(".kumi");
+            let place_of = |path: &String| {
+                let (path, home) = (path.clone(), home.clone());
+                async move {
+                    let mut snapshot = reaper_snapshot();
+                    snapshot["project"]["path"] = json!(path);
+                    let host = Rc::new(Host {
+                        answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                        asked: RefCell::default(),
+                    });
+                    let mut options = options(host, Rc::default());
+                    options.kumi_home = home;
+                    let reaper = create_reaper_integration(options);
+                    reaper.start(Signal::new()).await.unwrap();
+                    let seen = reaper.observe(Signal::new(), None).await.unwrap();
+                    reaper.close().await.unwrap();
+                    seen.project.map(|project| project.id).unwrap()
+                }
+            };
+            let ours = format!("reaper-{PROJECT_ID}");
+            assert_eq!(place_of(&original).await, ours, "the original, first seen");
+            let copy = place_of(&elsewhere).await;
+            assert_ne!(copy, ours, "Save As in another folder, the original still there");
+            assert_eq!(place_of(&elsewhere).await, copy, "the same place each time, through a restart");
+            assert_eq!(place_of(&original).await, ours, "the original stays itself");
+            assert_eq!(place_of(&beside).await, ours, "a version beside it is the same song");
+            // The song's files deleted (the version, seen last, too): what's left of it is where it went.
+            std::fs::remove_file(&original).unwrap();
+            std::fs::remove_file(&beside).unwrap();
+            assert_eq!(place_of(&elsewhere).await, ours, "moved");
         })
         .await;
 }

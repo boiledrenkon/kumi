@@ -71,6 +71,8 @@ struct Record {
     origin: RefCell<Option<String>>,
     /// The integration leaves what the DAW and a place in it are called to the default.
     plain_words: Cell<bool>,
+    /// The integration can't open places (REAPER's and Renoise's).
+    cant_open: Cell<bool>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -180,6 +182,9 @@ impl Integration for TestIntegration {
         } else {
             ("Live", "Set")
         }
+    }
+    fn has_open_place(&self) -> bool {
+        !self.record.cant_open.get()
     }
     async fn open_place(&self, place: &str, _: Signal) -> Result<Result<(), String>, RuntimeError> {
         self.record.opened.borrow_mut().push(place.into());
@@ -4119,6 +4124,29 @@ local_test!(another_daws_words_are_its_own_in_what_kumi_says_about_another_place
     assert_eq!((ask.daw.as_str(), ask.noun.as_str()), ("the DAW", "project"));
     h.session.answer_set(SetChoice::Open).await.unwrap();
     assert!(h.notice("Opening its project in the DAW; this conversation carries on once it's open."));
+    h.session.close().await.unwrap();
+});
+// Review K13: a DAW Kumi can't open places in (REAPER, Renoise) is asked as one the producer opens by hand, and
+// choosing to open it says so plainly, with nothing tried.
+local_test!(a_daw_kumi_cant_open_places_in_is_asked_to_open_it_by_hand, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    h.record.plain_words.set(true);
+    h.record.cant_open.set(true);
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    let ask = asks(&h).last().unwrap().clone().unwrap();
+    assert!(ask.by_hand, "{ask:?}");
+    h.session.answer_set(SetChoice::Open).await.unwrap();
+    assert!(h.record.opened.borrow().is_empty());
+    assert!(h.notice("Open its project in the DAW, and this conversation carries on there."));
+    // The producer opens it: the conversation goes on there.
+    live(&h, Some(SET_A));
+    h.session.refresh().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
     h.session.close().await.unwrap();
 });
 local_test!(a_new_sets_conversation_stays_held_when_the_set_is_saved_before_its_first_request, {
