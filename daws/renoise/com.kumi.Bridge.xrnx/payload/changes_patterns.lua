@@ -392,7 +392,17 @@ local function alias_apply(song, env, input, fence, desc)
     if writes > base.MAX_APPLY_WRITES then
       fail("failed", string.format("its own lines are more than Kumi puts back in one step (%d writes): clear them first, or make the alias in Renoise", writes))
     end
-    material = { lines = lines, automation = read_pattern_automation(song, env, plan.p, plan.t) }
+    -- (the instruments its notes play, each to be found again where it is when the lines go back: Renoise renumbers notes as
+    -- instruments are made, deleted or moved, but not kept lines)
+    local values = {}
+    for _, row in ipairs(lines) do
+      for _, cell in ipairs(row.notes) do
+        if cell.instrument ~= 255 then values[cell.instrument] = true end
+      end
+    end
+    material = {
+      lines = lines, automation = read_pattern_automation(song, env, plan.p, plan.t), instruments = material_.keep_instruments(song, env, values),
+    }
   else
     material = { alias = plan.now }
   end
@@ -452,11 +462,21 @@ local function alias_restore(song, env, restore, desc)
   if applied.alias == 0 and own_print(song, p, t) ~= applied.own then
     fail("changed", label .. "'s lines or automation changed in Renoise since Kumi took the alias away")
   end
+  local instruments
+  if material.lines then
+    local why
+    instruments, why = material_.instruments_now(song, env, material.instruments)
+    if not instruments and why == "unknown" then
+      fail("stale", string.format("the instruments changed in a way Kumi couldn't follow since it made %s an alias, so it can't tell which its notes play: nothing was put back", label))
+    elseif not instruments and not restore.discard then
+      fail("changed", string.format("the instrument %s that %s's notes play was deleted in Renoise since: Kumi won't put them back playing another", q(why), label))
+    end
+  end
   song:describe_undo(desc)
   local note
   if material.lines then
     pattern_track.alias_pattern_index = 0
-    material_.write_lines(song, t, { pattern = p, lines = material.lines })
+    material_.write_lines(song, t, { pattern = p, lines = material.lines }, instruments)
     local lost = 0
     for _, saved in ipairs(material.automation or {}) do
       local d = material_.device_now(song, env, t, saved.device)

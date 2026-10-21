@@ -197,6 +197,29 @@ test("patterns: a track made an alias drops its own lines; Kumi keeps them and i
   H.no_dialogs()
 end)
 
+test("patterns: an alias's kept lines go back playing the instruments they played, where those are now; a deleted one refuses (#361 N11)", function()
+  local _, peer = K.setup(nil, { instruments = 2 })
+  local E = K.place(peer)
+  mock.ops.set_note(2, 2, 3, 1, { note = 52, instrument = 1 }) -- (the second instrument: Renoise's 01)
+  local input = { ref = K.ref(E, "pattern", 2), track = K.ref(E, "track", 2), alias = K.ref(E, "pattern", 1) }
+  local record = K.change(peer, "pattern-alias", input, "Kumi: alias (ka31)")
+  mock.ops.insert_instrument_at(1, { name = "Piano" }) -- the producer makes one before it: Renoise renumbers notes, not kept lines
+  H.tick(2)
+  local undone = K.restore(peer, record)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(mock.song:pattern(2):track(2):line(3):note_column(1).instrument_value, 2, "the same instrument, now 02")
+  -- the instrument it played deleted: refused, nothing written
+  local again = K.change(peer, "pattern-alias", { ref = K.ref(K.place(peer), "pattern", 2), track = K.ref(K.place(peer), "track", 2),
+    alias = K.ref(K.place(peer), "pattern", 1) }, "Kumi: alias (ka32)")
+  mock.song:delete_instrument_at(3)
+  H.tick(2)
+  local before = K.steps()
+  K.failure(K.restore(peer, again), "changed")
+  eq(pattern(2).tracks[2].alias, 1, "still the alias")
+  eq(K.steps(), before)
+  H.no_dialogs()
+end)
+
 test("patterns: after Renoise's own undo and redo of an alias Kumi made, Kumi's undo takes it away with its own lines back", function()
   local _, peer = K.setup()
   local E = K.place(peer)
