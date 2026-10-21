@@ -354,6 +354,29 @@ fn an_unmarked_output_is_written_or_removed_only_as_kumi_left_it_even_told_to_un
 }
 
 #[test]
+fn kumis_undo_of_a_send_receive_or_output_it_added_leaves_it_once_the_producer_drew_its_envelopes() {
+    let lab = Lab::new();
+    // (Kick has no sends of its own: Kumi's is its first)
+    for (kind, input) in [
+        ("send-add", json!({"ref": KICK, "toRef": REVERB})),
+        ("receive-add", json!({"ref": REVERB, "fromRef": KICK})),
+        ("hw-out-add", json!({"ref": KICK, "output": {"first": 1}})),
+    ] {
+        let (preview, made) = lab.make(kind, input, "Kumi: x (kv001)");
+        let chunk = if kind == "hw-out-add" { "hw<VOLENV" } else { "<VOLENV" };
+        state(|s| s.tracks[1].envelopes.push(FakeEnvelope::for_send("Volume", 0, chunk, 4)));
+        let (code, message) = lab.undo(kind, &preview, &made, "Kumi: undo (kv002)").unwrap_err();
+        assert_eq!(code, "changed", "{kind}: {message}");
+        assert!(message.contains("1 envelope(s)"), "{kind}: {message}");
+        assert_eq!(state(|s| s.tracks[1].sends.len() + s.tracks[1].hw_outs.len()), 1, "{kind}: kept");
+        // Told to undo anyway, it goes with them.
+        lab.undo_anyway(kind, &preview, &made, "Kumi: undo (kv003)").unwrap();
+        state(|s| s.tracks[1].envelopes.clear());
+        assert_eq!(state(|s| s.tracks[1].sends.len() + s.tracks[1].hw_outs.len()), 0, "{kind}");
+    }
+}
+
+#[test]
 fn removing_an_output_with_automation_says_undo_cant_bring_its_envelopes_back() {
     let lab = Lab::new();
     state(|s| {

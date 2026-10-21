@@ -1031,6 +1031,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_state(&now, restore.applied) {
         return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
     }
+    // Its volume, pan and mute envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
+    let drawn = active_envelopes(ctx.reaper, found.track, found.index);
+    if !restore.discard && drawn > 0 {
+        return Err(changed(format!(
+            "the send {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
+            route_text(&found.from, &found.to)
+        )));
+    }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !ctx.reaper.remove_send(found.track, 0, found.index) {
         return Err(failed("REAPER wouldn't remove the send"));
