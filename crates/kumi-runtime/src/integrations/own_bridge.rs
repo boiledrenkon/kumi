@@ -128,8 +128,11 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// A project first seen unsaved: its identity and the key it was looked at under, which it keeps through its first
     /// save while it stays open in this run of the DAW (the conversation moves from the unsaved place to its own).
     first_unsaved: RefCell<Option<(String, String)>>,
-    /// The last snapshot a look read: what a fixed phrase is made from, right after the look before it.
+    /// The last snapshot a look read: what a fixed phrase is made from, right after the look before it. A look that
+    /// fails forgets it (the tracks may have moved since: Renoise's refs are places).
     looked: RefCell<Option<Value>>,
+    /// The project's fingerprint from the last look that read it (`fingerprint_of`): kept while the DAW is busy or away.
+    printed: RefCell<Option<Value>>,
     /// Kumi's changes in the DAW: HISTORY, plans and undo through the host's journal.
     changes: Rc<OwnPlan<S>>,
     /// Cancelled when the integration closes: a change under way is let go.
@@ -232,6 +235,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         previous: RefCell::default(),
         first_unsaved: RefCell::default(),
         looked: RefCell::default(),
+        printed: RefCell::default(),
         changes,
         lifetime: link.lifetime.clone(),
         tempo: link.tempo.clone(),
@@ -887,6 +891,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     fn no_access(&self, why: Option<&str>) -> Observation {
+        self.looked.borrow_mut().take();
         // The last project read keeps its key: a busy or quit DAW isn't another project.
         let (key, project) = self.previous.borrow().clone().unwrap_or_else(|| (unsaved(self.id()).into(), None));
         let mut observation = no_access(self.daw.profile, self.daw.instructions, &key, Utc::now(), project);
@@ -1028,6 +1033,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         self.looks_again.set(0);
         *self.looked.borrow_mut() = Some(snapshot.clone());
+        *self.printed.borrow_mut() = Some(fingerprint_of(snapshot));
         Observation {
             key: key.clone(),
             revision: None,
@@ -1142,7 +1148,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         by_playing.into_iter().chain(by_kumi).min()
     }
     fn fingerprint(&self) -> Option<Value> {
-        self.looked.borrow().as_ref().map(fingerprint_of)
+        self.printed.borrow().clone()
     }
     /// A line in the DAW's status bar (Renoise's, through the tool's show_status), where its profile says it has one.
     async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {

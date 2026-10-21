@@ -525,6 +525,39 @@ async fn a_failed_look_keeps_the_songs_key_and_project() {
         .await;
 }
 
+/// (#361 review K33) A fixed phrase after a look Renoise refused isn't planned from the look before it (a track may have
+/// been put above Drums since, and Renoise's refs are places): the model takes it. The project's fingerprint stays.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fixed_phrase_after_a_failed_look_goes_to_the_model_not_the_last_look() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({
+                "epoch": "3",
+                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140},
+                "tracks": [
+                    {"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"},
+                    {"ref": "3:track:2", "index": 2, "name": "Drums", "type": "sequencer"},
+                ],
+                "selection": {"trackRef": "3:track:1"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "a dialog is open", "code": "busy", "connected": true}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let asked = host.asked.borrow().len();
+            let intent = kumi_runtime::core::phrases::parse("mute drums").expect("a fixed phrase");
+            assert!(renoise.instant(&intent, Signal::new()).await.unwrap().is_none(), "the model takes it");
+            assert_eq!(host.asked.borrow().len(), asked, "nothing asked of Renoise");
+            assert_eq!(renoise.fingerprint().unwrap()["name"], "Acid", "the song's fingerprint stays");
+        })
+        .await;
+}
+
 /// The model's reads stay readable and its refs plain: an error names objects in short refs, REAPER's names hold
 /// through an epoch change (its refs are GUIDs), a page too big for the model is asked for again with fewer rows (its
 /// nextCursor kept), markers come within the look's budget, and what the producer pinned in FOCUS is in the look.
