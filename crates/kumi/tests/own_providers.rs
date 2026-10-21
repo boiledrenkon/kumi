@@ -669,3 +669,26 @@ async fn a_portable_reaper_is_found_by_its_receipt_and_otherwise_named_by_the_va
         assert!(said.contains("set KUMI_REAPER_RESOURCE_DIR to its resource folder"), "{said}");
     }
 }
+
+/// Review U13 and K42: each of the doctor's REAPER and Renoise failures names what puts it right (the bridge command,
+/// or opening the DAW once), and a host that won't start is a failure with the repair to run.
+#[tokio::test(flavor = "current_thread")]
+async fn the_doctor_names_each_fix_and_says_when_kumis_host_wont_start() {
+    use kumi::doctor::{Check, CheckStatus, DoctorIo, LiveProbe};
+    let (dir, env) = renoise_home();
+    assert_eq!(own::RENOISE.setup_bridge(Rc::new(Out::default()), &env, yes()).await.unwrap(), 0);
+    // The producer deleted Kumi's tool from Renoise.
+    std::fs::remove_dir_all(dir.path().join("Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx")).unwrap();
+    let mut io = DoctorIo::new(Rc::new(Out::default()), env.clone());
+    io.probe_own = Some(Rc::new(|_| {
+        async { LiveProbe { started: false, said: Some("daw-mcp-server wasn't found".into()), ..Default::default() } }.boxed_local()
+    }));
+    let checks = own::RENOISE.doctor_checks(&io, &Check::ok("Kumi")).await;
+    let again = format!("{} --daw renoise bridge", *kumi_runtime::KUMI);
+    let removed = checks.iter().find(|check| check.text.contains("was removed from")).unwrap_or_else(|| panic!("{checks:?}"));
+    assert_eq!((removed.status.clone(), removed.next.as_deref()), (CheckStatus::Fix, Some(again.as_str())), "{checks:?}");
+    let host = checks.iter().find(|check| check.text == "Kumi's host for Renoise didn't start: daw-mcp-server wasn't found");
+    let host = host.unwrap_or_else(|| panic!("{checks:?}"));
+    assert_eq!(host.status, CheckStatus::Fix);
+    assert!(host.next.as_deref().is_some_and(|next| next.contains(kumi_runtime::KUMI_REPAIR.as_str())), "{host:?}");
+}

@@ -357,11 +357,12 @@ impl DawProvider for Own {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
         (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect })
     }
-    fn probe(&self, _bridge_config: String, _factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
+    fn probe(&self, _bridge_config: String, factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         let create = self.create;
         let home = kumi_home(env);
+        let connect = factory.own_host.as_ref().map(|host| host(self.id));
         async move {
-            let integration = create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home, connect: None });
+            let integration = create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home, connect });
             if let Err(error) = integration.start(abort::timeout(20_000)).await {
                 let _ = integration.close().await;
                 return LiveProbe { started: false, said: Some(error.to_string()), ..Default::default() };
@@ -411,14 +412,22 @@ impl DawProvider for Own {
             );
             return async move { vec![note] }.boxed_local();
         }
-        let daw = self.daw;
+        let (daw, id, name) = (self.daw, self.id, self.name());
         let env = io.env.clone();
+        let probe = io.probe_own.clone();
         let bundled = self.bundled_source().and_then(|source| {
             let sha256 = daw_bridge::lifecycle::tree_sha256(&source).ok()?;
             Some(Bundled { version: self.bundled_version().unwrap_or_else(|| "dev".into()), sha256 })
         });
+        // What puts each failure right: the bridge put in again, or the DAW opened once first.
+        let again = format!("{} --daw {} bridge", *kumi_runtime::KUMI, id.as_str());
+        let next = move |id: &str| match id {
+            "bridge" | "reference" | "secret" | "quarantine" | "arch" => Some(again.clone()),
+            "opened" => Some(format!("Open {name} once, then run {again}")),
+            _ => None,
+        };
         async move {
-            tokio::task::spawn_blocking(move || {
+            let mut checks: Vec<Check> = tokio::task::spawn_blocking(move || {
                 let var = |name: &str| env.get(name).cloned();
                 let home_dir = kumi_home(&env);
                 let inputs = doctor::Inputs {
@@ -432,13 +441,28 @@ impl DawProvider for Own {
                     .into_iter()
                     .map(|check| match check.level {
                         Level::Ok => Check::ok(check.message),
-                        Level::Note | Level::Warn => Check::note(check.message, None),
-                        Level::Fail => Check::fix(check.message, None),
+                        Level::Note => Check::note(check.message, None),
+                        Level::Warn => Check::note(check.message, next(check.id)),
+                        Level::Fail => Check::fix(check.message, next(check.id)),
                     })
                     .collect()
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+            // Kumi's host, started once: a Kumi missing it (or one that won't run) can't reach the DAW at all.
+            if let Some(probe) = probe {
+                let host = probe(id).await;
+                if !host.started {
+                    let said = host.said.map(|said| format!(": {said}")).unwrap_or_default();
+                    let repair = if *kumi_runtime::INSTALLED {
+                        format!("Run {} to repair Kumi", *kumi_runtime::KUMI_REPAIR)
+                    } else {
+                        format!("Build it ({})", *kumi_runtime::KUMI_REPAIR)
+                    };
+                    checks.push(Check::fix(format!("Kumi's host for {name} didn't start{said}"), Some(repair)));
+                }
+            }
+            checks
         }
         .boxed_local()
     }
