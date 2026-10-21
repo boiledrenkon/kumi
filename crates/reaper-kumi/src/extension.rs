@@ -152,7 +152,7 @@ struct Sent {
 }
 
 /// How long the set of track GUIDs a project had may be before it is read again when the project changes.
-const WATCH_REFRESH: Duration = Duration::from_millis(250);
+pub(crate) const WATCH_REFRESH: Duration = Duration::from_millis(250);
 /// The most track GUIDs kept to tell one project from another.
 const WATCH_TRACKS: i32 = 2000;
 

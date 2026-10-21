@@ -72,11 +72,18 @@ fn tick_inside_the_render() {
 
 impl Rig {
     fn new() -> Rig {
+        Rig::with_project(|| {})
+    }
+
+    /// A rig over the lab project as `setup` leaves it. The extension's first look is at that project: a setup that gives
+    /// every track another id (`real_ids`) after it would be, to the bridge, another project in the tab.
+    fn with_project(setup: impl FnOnce()) -> Rig {
         fake::lab_project();
         fake::with(|s| {
             s.on_action = Some(fake::render_action);
             s.listening.sources_from_files = true;
         });
+        setup();
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = queue::channel();
         let out = Recorder::default();
@@ -87,6 +94,13 @@ impl Rig {
         INSIDE.with(|i| i.borrow_mut().clear());
         CANCEL_INSIDE.with(|c| c.set(false));
         Rig { ext, tx, snapshot, dir, out }
+    }
+
+    /// A rig over `copyable`'s project, and Kick's ref.
+    fn copyable() -> (Rig, String) {
+        let mut kick = String::new();
+        let rig = Rig::with_project(|| kick = copyable());
+        (rig, kick)
     }
 
     /// Lets the fake's render tick this rig's extension, as REAPER's timer does inside a render.
@@ -923,8 +937,7 @@ fn a_render_stops_the_audition_playing_and_says_so() {
 
 #[test]
 fn a_preview_and_a_scratch_set_never_ask_a_closed_tabs_project_anything() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let file = wav_file(&rig.folder(), "take.wav", 4.0);
     make(&rig, "s4", &kick, 1);
     let copy = fake::with(|s| s.tracks[4].guid.clone());
@@ -1176,7 +1189,7 @@ fn status_says_what_listening_can_do_now() {
 // ----- scratch copies -----
 
 /// REAPER's ids are GUIDs (`{8-4-4-4-12}`): the lab project's short ones made so, for the copies' rewrite to see them.
-/// Returns a track's ref by its old id.
+/// Returns a track's ref by its old id. Called before the extension first looks (`Rig::with_project`).
 fn real_ids() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let mut n = 0u32;
@@ -1222,6 +1235,16 @@ fn copyable() -> String {
     format!("r:track:{}", ids["{BBBB}"])
 }
 
+#[test]
+fn the_copyable_project_is_the_one_the_bridge_first_saw_when_it_reads_the_tracks_again() {
+    let (rig, _) = Rig::copyable();
+    let epoch = rig.epoch();
+    // A change REAPER counts, and the bridge's next look at the tracks (a slow runner's test gets there by itself).
+    fake::producer_edit("Track volume");
+    std::thread::sleep(crate::extension::WATCH_REFRESH);
+    assert_eq!(rig.epoch(), epoch, "the same project: refs read before still hold");
+}
+
 fn make(rig: &Rig, id: &str, reference: &str, count: u64) -> Value {
     let epoch = rig.epoch();
     rig.ask("scratch", json!({"action": "make", "scratchId": id, "ref": reference, "count": count, "label": "tune", "epoch": epoch}))
@@ -1230,8 +1253,7 @@ fn make(rig: &Rig, id: &str, reference: &str, count: u64) -> Value {
 
 #[test]
 fn a_scratch_copy_has_every_id_new_and_reaches_nothing_of_the_producers() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let epoch = rig.epoch();
     let made = make(&rig, "s1k9z", &kick, 3);
     assert_eq!(made["undo"], json!({"steps": 0}));
@@ -1280,9 +1302,11 @@ fn a_scratch_copy_has_every_id_new_and_reaches_nothing_of_the_producers() {
 
 #[test]
 fn a_folders_copy_hears_its_tracks_through_sends_that_go_with_it() {
-    let rig = Rig::new();
-    fake::with(|s| s.listening.chunk_guids = true);
-    let ids = real_ids();
+    let mut ids = Default::default();
+    let rig = Rig::with_project(|| {
+        fake::with(|s| s.listening.chunk_guids = true);
+        ids = real_ids();
+    });
     make(&rig, "s2", &format!("r:track:{}", ids["{AAAA}"]), 1);
     fake::with(|s| {
         assert_eq!(s.tracks.len(), 5);
@@ -1296,12 +1320,14 @@ fn a_folders_copy_hears_its_tracks_through_sends_that_go_with_it() {
 
 #[test]
 fn copies_go_above_the_first_track_when_the_last_leaves_a_folder_open() {
-    let rig = Rig::new();
-    fake::with(|s| {
-        s.listening.chunk_guids = true;
-        s.tracks[3].folder = 1;
+    let mut ids = Default::default();
+    let rig = Rig::with_project(|| {
+        fake::with(|s| {
+            s.listening.chunk_guids = true;
+            s.tracks[3].folder = 1;
+        });
+        ids = real_ids();
     });
-    let ids = real_ids();
     let made = make(&rig, "s3", &format!("r:track:{}", ids["{BBBB}"]), 2);
     assert!(made["notes"][0].as_str().unwrap().contains("above the first track"));
     fake::with(|s| {
@@ -1324,8 +1350,7 @@ fn a_make_reaper_would_give_the_sources_ids_is_refused_whole() {
 
 #[test]
 fn scratch_set_turns_a_copys_knob_and_nothing_else() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "s5", &kick, 2);
     let copy = made["copies"][1]["ref"].as_str().unwrap().to_string();
     let set = |values: Value| rig.ask("scratch", json!({"action": "set", "scratchId": "s5", "values": values}));
@@ -1361,8 +1386,7 @@ fn scratch_set_turns_a_copys_knob_and_nothing_else() {
 
 #[test]
 fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_changed_flag_back() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     fake::with(|s| s.dirty = false);
     let made = make(&rig, "s6", &kick, 3);
     assert!(fake::with(|s| s.tracks.len()) == 7);
@@ -1401,8 +1425,7 @@ fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_cha
 
 #[test]
 fn copies_reapers_undo_brings_back_after_a_drop_are_swept_again_and_the_host_told() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     make(&rig, "s5", &kick, 2);
     // The producer moves a fader: REAPER's point holds the whole state, copies included.
     fake::with(|s| {
@@ -1430,8 +1453,7 @@ fn copies_reapers_undo_brings_back_after_a_drop_are_swept_again_and_the_host_tol
 
 #[test]
 fn a_drop_after_an_edit_of_the_producers_leaves_the_project_marked_changed() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     fake::with(|s| s.dirty = false);
     make(&rig, "s8", &kick, 1);
     fake::with(|s| {
@@ -1444,8 +1466,7 @@ fn a_drop_after_an_edit_of_the_producers_leaves_the_project_marked_changed() {
 
 #[test]
 fn copies_a_crash_left_are_swept_when_the_bridge_loads_and_the_host_is_told() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     make(&rig, "s9", &kick, 2);
     let names: Vec<String> = fake::with(|s| s.tracks[4..].iter().map(|t| t.name.clone()).collect());
     // The producer renamed the second; then REAPER crashed (the bridge never dropped them).
@@ -1498,8 +1519,7 @@ fn keep_input(copy: &str) -> Value {
 
 #[test]
 fn scratch_keep_makes_a_copy_the_producers_and_kumis_undo_takes_it_away() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sa", &kick, 2);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
@@ -1538,8 +1558,7 @@ fn scratch_keep_makes_a_copy_the_producers_and_kumis_undo_takes_it_away() {
 
 #[test]
 fn a_goal_keeps_its_best_copy_and_the_drop_takes_every_other_one() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sg", &kick, 3);
     // The best is the last copy: kept, it sits after the others with no scratch mark.
     let best = made["copies"][2]["ref"].as_str().unwrap().to_string();
@@ -1560,8 +1579,7 @@ fn a_goal_keeps_its_best_copy_and_the_drop_takes_every_other_one() {
 
 #[test]
 fn scratch_keep_refuses_a_copy_changed_since_its_preview_and_writes_nothing() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sb", &kick, 1);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
@@ -1596,8 +1614,7 @@ fn scratch_keep_refuses_a_copy_changed_since_its_preview_and_writes_nothing() {
 
 #[test]
 fn kumis_undo_of_a_kept_copy_refuses_when_the_producer_changed_it_unless_told_to_discard() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sc", &kick, 1);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
@@ -1622,8 +1639,7 @@ fn kumis_undo_of_a_kept_copy_refuses_when_the_producer_changed_it_unless_told_to
 
 #[test]
 fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_faded_muted_or_put_a_take_fx_on_its_items() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sf", &kick, 1);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
@@ -1661,8 +1677,7 @@ fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_faded_muted_or_put_a_ta
 
 #[test]
 fn kumis_undo_of_a_kept_copy_takes_it_away_after_the_project_played_its_automation() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sp", &kick, 1);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     // The copy's ReaEQ gain is automated: an envelope on it.
@@ -1686,8 +1701,7 @@ fn kumis_undo_of_a_kept_copy_takes_it_away_after_the_project_played_its_automati
 
 #[test]
 fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_turned_a_knob_on_it() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "se", &kick, 1);
     let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
     let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
@@ -1711,8 +1725,7 @@ fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_turned_a_knob_on_it() {
 
 #[test]
 fn listening_answers_and_rows_name_refs_only_where_refs_go() {
-    let rig = Rig::new();
-    let kick = copyable();
+    let (rig, kick) = Rig::copyable();
     let made = make(&rig, "sd", &kick, 1);
     let spans = rig.ask("read", json!({"kind": "spans"})).unwrap();
     let fx = fake::with(|s| s.tracks[1].fx[0].guid.clone());
