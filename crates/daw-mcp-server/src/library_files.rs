@@ -6,8 +6,10 @@
 
 use crate::presets::{Refusal, MAX_PRESET_BYTES};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A file kind Kumi takes from Renoise's libraries, by the change kind that takes it: its extension, its document's root
 /// element (none for a script), the library folder Renoise keeps them in, what it is in words, its most bytes, and for a
@@ -128,8 +130,24 @@ fn document_root(text: &str) -> Option<(&str, Option<u32>)> {
     (!name.is_empty()).then_some((name, version))
 }
 
+/// The newest version found in Renoise's own library folders, by those folders and the kind: read once a run (another
+/// Renoise version's library is other folders).
+type Newest = BTreeMap<(Vec<PathBuf>, &'static str), Option<u32>>;
+static NEWEST: Mutex<Newest> = Mutex::new(BTreeMap::new());
+
 /// The newest document version among Renoise's own library files of this kind (Renoise wrote them: it loads up to that).
 fn newest_version(own: &[PathBuf], spec: &FileKind) -> Option<u32> {
+    let key = (own.to_vec(), spec.kind);
+    if let Some(newest) = NEWEST.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return *newest;
+    }
+    let newest = scan_newest(own, spec);
+    NEWEST.lock().unwrap_or_else(|e| e.into_inner()).insert(key, newest);
+    newest
+}
+
+/// Up to 2,000 of the library's files of the kind, each read to its root element.
+fn scan_newest(own: &[PathBuf], spec: &FileKind) -> Option<u32> {
     let mut newest = None;
     let mut seen = 0;
     for root in own {
@@ -315,6 +333,10 @@ mod tests {
         std::fs::write(&newer, CHAIN.replace("doc_version=\"21\"", "doc_version=\"22\"")).unwrap();
         let refused = check_file(&newer.to_string_lossy(), &FILE_KINDS[2], &libraries);
         assert!(matches!(refused, Err(Refusal::Bad(m)) if m.contains("newer Renoise")));
+        // (review H11) Renoise's own library is read once a run: gone from here on, its newest version still holds.
+        std::fs::remove_dir_all(dir.path().join("Own")).unwrap();
+        let refused = check_file(&newer.to_string_lossy(), &FILE_KINDS[2], &libraries);
+        assert!(matches!(refused, Err(Refusal::Bad(m)) if m.contains("this one's library has 21")));
         // A file of another kind under the loader's extension.
         let wrong = dir.path().join("User Library").join("Wrong.xrnz");
         std::fs::write(&wrong, CHAIN).unwrap();

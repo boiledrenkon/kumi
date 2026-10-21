@@ -634,8 +634,15 @@ impl crate::host::Host {
         let layout = arguments.get("layout").and_then(Value::as_u64);
         // (M4 n-devices: a device's preset data from an .xrdp file in Renoise's library is read here; the tool writes it as
         // preset data given in full)
+        // (the library's files are read off the runtime's workers)
         let read;
-        let input = match crate::library_files::with_file(self.daw(), &kind, input, &crate::library_files::library_roots()) {
+        let (daw, asked, given) = (self.daw(), kind.clone(), input.clone());
+        let with_file = tokio::task::spawn_blocking(move || {
+            crate::library_files::with_file(daw, &asked, &given, &crate::library_files::library_roots())
+        })
+        .await
+        .unwrap_or_else(|_| Some(Err(crate::presets::Refusal::Bad("Kumi couldn't read the library file".into()))));
+        let input = match with_file {
             Some(Ok(with_data)) => {
                 read = with_data;
                 &read
