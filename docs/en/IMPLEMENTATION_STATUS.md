@@ -380,6 +380,11 @@ bridge, the version given is the one in the commit that added it.
   on its screen; a guard in code against ending a way round with `final: true`,
   which the eval shows words only nudge
   (`docs/evidence/logic-m7-evals-2026-10-21.md`).
+- Logic Pro: the last acceptance run on this Mac failed in a cascade the
+  earlier gates passed, after a day of automation left Logic with its main
+  window closed and dozens of leftover Window menu entries; a run after Logic
+  is restarted, and the bridge clearing a dialog it didn't ask for, are open
+  (`docs/evidence/logic-m8-release-2026-10-21.md`).
 - Logic Pro, M6: catching up on a saved project as it opens or is switched to,
   and `watch_me`, run over the simulated Logic (the snapshot is kept in the
   project store under the project's place, `logic-<id>`, beside its

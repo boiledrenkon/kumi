@@ -69,6 +69,7 @@
 
 - 支持 Renoise 和 Reaper。
 - Logic Pro：第一个附带其桥接的发布版本（M8）；在 Logic 上的目标搜索（一个 `GoalRig`）；片段中超出 Event List 在屏幕上所显示行的音符；在代码中防止以 `final: true` 结束变通做法的保护（评测表明，单靠措辞只能起到提示作用，见 `docs/evidence/logic-m7-evals-2026-10-21.md`）。
+- Logic Pro：本机上最后一次验收运行在先前各关口都通过的地方连锁失败；经过一天的自动操作后，Logic 的主窗口被关闭，窗口菜单中留下了几十个条目。在重新启动 Logic 之后再运行一次，以及让桥接清理并非它所请求的对话框，仍待完成（`docs/evidence/logic-m8-release-2026-10-21.md`）。
 - Logic Pro，M6：已保存的工程在打开或被切换到时追上离开期间的变化，以及 `watch_me`，都已在模拟的 Logic 上运行（快照保存在工程存储中该工程的位置 `logic-<id>` 下，与它的对话放在一起，每五分钟以及 Kumi 自己做出修改之后重新保存）；这台 Mac 上的 M6 关口（所有检查在第三次运行时都通过，记录在 `docs/evidence/logic-m6-gate-2026-10-21.md` 中）在真实的 Logic 上运行了批量快照（在 Scratch 上为 2.8 s，而六次分页读取为 4.9 s，Mixer 和 List Editors 各短暂打开一次）、`watch_me`、即时短语、节拍器、把采样放进 Sampler 轨道、最近的工程、中央 C，以及 Channel EQ 和 Compressor 的曲线；工程打开时追上离开期间的变化，仍在等待在那里单独运行一次。
 - 确认 Windows 上的 Live 把 Extensions 文件夹放在哪里。
 - 生成的能力清单仍把 Browser 预览列为保留，尽管只要 Live 的 Browser 能够预览，桥接就会提供它。
