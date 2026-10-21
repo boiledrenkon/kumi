@@ -123,6 +123,28 @@ fn text_and_sysex_are_written_and_nothing_goes_past_the_end_of_the_source() {
 }
 
 #[test]
+fn a_note_is_kept_inside_the_takes_source() {
+    // A note at or past the source's end was sorted after REAPER's end marker: the source grew, and a looped item's
+    // period with it.
+    let lab = midi_lab();
+    let before = raw();
+    for note in [json!({"pitch": 60, "start": 8.0, "length": 0.5}), json!({"pitch": 60, "start": 7.5, "length": 1.0})] {
+        let (code_, message) = lab.preview("notes-add", json!({"ref": S1, "notes": [note]})).unwrap_err();
+        assert_eq!(code_, "bad-params");
+        assert!(message.contains("end of the take's source"), "{message}");
+    }
+    let moved = lab.preview("notes-change", json!({"ref": S1, "changes": [{"index": 0, "start": 7.75}]}));
+    assert_eq!(code(moved), "bad-params", "a change that would move a note past the end");
+    let late = lab.preview("notes-quantize", json!({"ref": S1, "grid": 16.0, "ends": "end"}));
+    assert_eq!(code(late), "bad-params", "a quantize that would end a note past the end");
+    assert_eq!(raw(), before);
+    // A note that ends on the end marker's tick is inside it, and the marker stays last.
+    lab.make("notes-add", json!({"ref": S1, "notes": [{"pitch": 60, "start": 7.5, "length": 0.5}]}));
+    let now = raw();
+    assert_eq!((now.last().unwrap().pos, now.last().unwrap().msg.clone()), (7680, vec![0xB0, 0x7B, 0]));
+}
+
+#[test]
 fn a_notes_release_velocity_stays_through_a_change_and_its_undo() {
     // Every note Kumi wrote again ended with velocity 0: a recorded release velocity was lost, and the undo couldn't bring
     // it back.

@@ -295,6 +295,19 @@ fn new_note(ctx: &Ctx, take: Take, item_qn: f64, spec: &Value) -> Done<Note> {
     })
 }
 
+/// Inside the take's source: no note starts at or past the marker that ends it, or ends past it. REAPER would sort it
+/// after the marker: the source grows, and a looped item's period with it (the old end then plays mid-loop).
+pub(super) fn check_inside(ctx: &Ctx, take: Take, item_qn: f64, events: &[Event], add: &[Note]) -> Done<()> {
+    let Some(end) = super::midi_events::source_end(events) else { return Ok(()) };
+    if add.iter().any(|note| note.start.round() as i64 >= end || note.end.round() as i64 > end) {
+        let end_qn = ctx.reaper.ppq_to_quarter_notes(take, end as f64).map_or(0.0, |qn| qn - item_qn);
+        return Err(bad(format!(
+            "a note must start before the end of the take's source and end by it, {end_qn:.3} quarter notes from the item's start"
+        )));
+    }
+    Ok(())
+}
+
 fn changed_note(ctx: &Ctx, take: Take, item_qn: f64, was: &Note, spec: &Value) -> Done<Note> {
     let mut note = *was;
     if let Some(pitch) = whole(spec, "pitch", 0, 127)? {
@@ -398,6 +411,7 @@ fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
         return Err(bad("a note is named twice"));
     }
     check_overlaps(&before, &remove, &add).map_err(bad)?;
+    check_inside(ctx, take, item_qn, &events, &add)?;
     Ok(Plan { take, item_qn, before, events, remove, add })
 }
 
