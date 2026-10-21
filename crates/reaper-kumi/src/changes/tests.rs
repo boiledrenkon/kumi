@@ -3703,6 +3703,25 @@ fn the_generic_time_selection_sets_the_start_and_end_it_is_given() {
 }
 
 #[test]
+fn calls_that_run_any_action_or_render_files_are_refused_by_name() {
+    let lab = Lab::new();
+    let read = |f: &str, args: Value| call_read(&lab, json!({"kind": "call", "fn": f, "args": args})).unwrap_err().1;
+    let change =
+        |f: &str, args: Value| lab.call("change_preview", json!({"kind": "api-call", "input": {"fn": f, "args": args}})).unwrap_err().1;
+    assert!(change("OscLocalMessageToHost", json!(["/action/40860"])).contains("any action"));
+    assert!(change("CSurf_OnOscControlMessage", json!(["/action", 40860.0])).contains("any action"));
+    assert!(change("CSurf_OnOscControlMessage2", json!(["/action", 40860.0, ""])).contains("any action"));
+    assert!(change("CrossfadeEditor_OnCommand", json!([40001])).contains("action"));
+    assert!(change("RenderFileSection", json!(["/a.wav", "/b.wav", 0.0, 1.0, 1.0])).contains("renders"));
+    // RENDER_STATS runs the action its value names before it answers: a "read" that renders.
+    for args in [json!([0, "RENDER_STATS", "41824", false]), json!({"desc": "RENDER_STATS_SUMMARY", "valuestrNeedBig": "42437"})] {
+        assert!(read("GetSetProjectInfo_String", args).contains("RENDER_STATS"));
+    }
+    let stats = call_read(&lab, json!({"kind": "call", "fn": "GetSetProjectInfo_String", "args": [0, "RENDER_STATS", "", false]}));
+    assert!(stats.is_ok(), "an empty value only reads: {stats:?}");
+}
+
+#[test]
 fn binary_data_with_its_size_and_arrays_reaper_fills_cant_be_passed_to_the_generic_call() {
     use crate::reaper::generic::{function, uncallable};
     for (name, why) in [

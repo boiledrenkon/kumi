@@ -600,10 +600,10 @@ impl Reads {
         use crate::reaper::generic;
         let name = params.get("fn").and_then(Value::as_str).ok_or_else(|| bad("fn: the name of a REAPER API function"))?;
         let index = generic::function(name).map_err(bad)?;
-        if let Some(why) = generic::denied(index) {
+        let args = params.get("args").cloned().unwrap_or(Value::Array(vec![]));
+        if let Some(why) = generic::denied(index, &args) {
             return Err(bad(why));
         }
-        let args = params.get("args").cloned().unwrap_or(Value::Array(vec![]));
         if !generic::reads_only(index, &args) {
             return Err(bad(format!("{name} changes the project: make it a change, the api-call kind, which REAPER's undo takes back")));
         }
