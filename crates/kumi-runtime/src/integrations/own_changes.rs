@@ -15,7 +15,7 @@ use crate::{
     },
     integrations::shared::{
         changes::{new_record, ChangeSummary},
-        steps::{plan_tool, step_line},
+        steps::{own_step_line, plan_tool},
         undo::undo_change_with,
     },
     mcp::client::McpEndpoint,
@@ -658,13 +658,13 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         for kind in set.kinds {
             tools.push(Rc::new(ChangeTool { engine: self.clone(), kind }));
             if !kind.core {
-                lines.push(step_line(kind.tool, kind.description, &kind.input_schema()));
+                lines.push(own_step_line(kind.tool, kind.description, &kind.input_schema()));
             }
         }
         for action in set.actions {
             tools.push(Rc::new(ActionTool { engine: self.clone(), action }));
             if !action.core {
-                lines.push(step_line(action.tool, action.description, &action.input_schema()));
+                lines.push(own_step_line(action.tool, action.description, &action.input_schema()));
             }
         }
         let steps = set.kinds.iter().map(|kind| kind.tool).chain(set.actions.iter().map(|action| action.tool)).map(str::to_owned).collect();
@@ -2073,6 +2073,32 @@ mod tests {
         let note = unsure_note(&DawProfile::REAPER, "Vocal volume −6 dB", false, true);
         assert!(note.contains("with the plan's other changes"), "{note}");
         assert!(unsure_undo_note(&DawProfile::REAPER, "Vocal volume −6 dB").contains("its undo went through"));
+    }
+
+    #[test]
+    fn each_step_line_says_what_the_step_does_to_what() {
+        // (make_changes' line is all the model sees of a step that isn't a tool until it calls find_tools)
+        let dangling = ["a", "an", "the", "its", "of", "into", "in", "at", "by", "and", "or", "with", "for"];
+        for (app, set) in sets() {
+            let kinds = set.kinds.iter().filter(|kind| !kind.core).map(|kind| (kind.tool, kind.description, kind.input_schema()));
+            let actions =
+                set.actions.iter().filter(|action| !action.core).map(|action| (action.tool, action.description, action.input_schema()));
+            for (tool, description, schema) in kinds.chain(actions) {
+                let line = own_step_line(tool, description, &schema);
+                let what = line.strip_prefix(&format!("{tool}: ")).unwrap_or_else(|| panic!("{app}: {line}"));
+                let what = if what.ends_with(')') { what.rsplit_once(" (").map_or(what, |(what, _)| what) } else { what };
+                let last = what.rsplit(' ').next().unwrap_or("");
+                assert!(what.split(' ').count() >= 3 && !what.contains('(') && !dangling.contains(&last), "{app}: {line}");
+                let names = match tool {
+                    "doofer_make" | "doofer_macro" => "Splitter",
+                    "sample_slices" => "slice markers",
+                    "track_channels" => "channels",
+                    "item_import" => "on a track",
+                    _ => "",
+                };
+                assert!(what.contains(names), "{app}: {line}");
+            }
+        }
     }
 
     #[test]

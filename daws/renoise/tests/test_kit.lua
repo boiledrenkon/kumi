@@ -74,7 +74,7 @@ end)
 
 test("kits: notes, first, white keys, a group named and the choke turned off are kept; the kit goes at index", function()
   local env, peer = setup()
-  local input = kit_input({ first = 36, whiteKeys = true, index = 1 })
+  local input = kit_input({ first = 36, whiteKeys = true, index = 0 })
   input.samples[2].note = 37
   local record = change(peer, "instrument-kit", input)
   eq(names(), "Tight Kit,Drums,Bass synth,Pad")
@@ -132,7 +132,7 @@ test("kits: into an empty instrument (its name kept), refused into one that isn'
   eq(again.result.display.title, "\226\128\156Pad\226\128\157 is empty already")
   epoch = place(peer)
   failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 1) }), epoch = epoch }), "bad-params")
-  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3), index = 1 }), epoch = epoch }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3), index = 0 }), epoch = epoch }), "bad-params")
 end)
 
 test("kits: a file that isn't audio, a missing one or too many samples are refused before Renoise sees them; one Renoise refuses leaves nothing", function()
@@ -243,4 +243,28 @@ test("places, kit × insert before, delete before, swap: Kumi's undo follows the
   eq(#events, 1)
   eq(events[1].data.descs[1], "Kumi: kit (k400)")
   failure(restore(peer, "instrument-kit", record), "gone")
+end)
+
+test("kits: Kumi's undo of a kit made into an empty instrument empties it again whatever notes played it before (#361 N-S11)", function()
+  local env, peer = setup()
+  note_at(1, 2) -- the producer's beat for empty instrument 02 (Pad), written before the kit
+  note_at(5, 2)
+  local input = kit_input({ ref = iref(place(peer), 3) })
+  input.name = nil
+  local record = change(peer, "instrument-kit", input)
+  eq(#instrument(3).samples, 4)
+  local undone = restore(peer, "instrument-kit", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#instrument(3).samples, 0, "emptied again")
+  eq(I.note_value(1), 2, "the producer's notes stay")
+end)
+
+test("kits: an instrument with a MIDI output device isn't empty, so no kit goes into it (#361 N-S12)", function()
+  local env, peer = setup()
+  mock.midi_outputs = { "IAC Driver Bus 1" }
+  mock.song:instrument(3).midi_output_properties.device_name = "IAC Driver Bus 1"
+  mock.midi_outputs = nil
+  local epoch = place(peer)
+  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3) }), epoch = epoch }), "bad-params")
+  eq(#instrument(3).samples, 0)
 end)

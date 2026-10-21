@@ -90,7 +90,8 @@ fn field(cell: &Value, key: &str) -> Option<String> {
     cell.get(key).and_then(Value::as_str).filter(|text| *text != "..").map(str::to_owned)
 }
 
-/// A pattern track's notes from its line rows: each note cell by its id (its line × 16 + its column), with its start
+/// A pattern track's notes from its line rows (lines by Renoise's numbers, from 0): each note cell by its id (its line × 16
+/// + its column), with its start
 /// and length in beats (to the next note or OFF in its column, or the pattern's end), and every cell that holds
 /// something.
 pub(super) fn cells_of(rows: &[Value], lines: u64, lpb: f64) -> (Vec<(i64, Cell, Note)>, HashSet<(u64, u64)>) {
@@ -103,7 +104,7 @@ pub(super) fn cells_of(rows: &[Value], lines: u64, lpb: f64) -> (Vec<(i64, Cell,
             taken.insert((line, col));
             let note = cell.get("note").and_then(Value::as_str).unwrap_or("---");
             let delay = field(cell, "delay").and_then(|text| u32::from_str_radix(&text, 16).ok()).unwrap_or(0).min(255);
-            let at = (line - 1) as f64 + delay as f64 / 256.;
+            let at = line as f64 + delay as f64 / 256.;
             if note == "OFF" {
                 columns.entry(col).or_default().push((at, None));
             } else if note_number(note).is_some() {
@@ -155,12 +156,12 @@ pub(super) fn writes_for(
     for patch in patches {
         let Some(cell) = cells.get(&patch.id) else { continue };
         let wanted = (patch.start.max(0.) * lpb).min(lines as f64 - 1. / 256.);
-        let (mut line, mut delay) = (wanted.floor() as u64 + 1, ((wanted - wanted.floor()) * 256.).round() as u32);
+        let (mut line, mut delay) = (wanted.floor() as u64, ((wanted - wanted.floor()) * 256.).round() as u32);
         if delay >= 256 {
             (line, delay) = (line + 1, 0);
         }
-        if line > lines {
-            (line, delay) = (lines, 255);
+        if line >= lines {
+            (line, delay) = (lines - 1, 255);
         }
         if line != cell.line {
             let free = line.abs_diff(cell.line) == 1 && !taken.contains(&(line, cell.col)) && !claimed.contains(&(line, cell.col));
@@ -320,15 +321,13 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let song = self.rows(json!({"kind": "song"}), 1, signal).await.map_err(error)??;
         let lpb = song.first().and_then(|row| row.get("lpb")).and_then(Value::as_f64).filter(|lpb| *lpb >= 1.).unwrap_or(4.);
         let pattern_rows = self.rows(json!({"ref": format!("{epoch}:pattern:{p}")}), 1, signal).await.map_err(error)??;
-        let row = pattern_rows.first().ok_or_else(|| format!("there's no pattern {p}"))?;
-        // An alias plays another pattern's lines: those are read and written.
-        let from = row.pointer(&format!("/aliases/{t}")).and_then(Value::as_u64).unwrap_or(p);
+        // (the pattern as Renoise numbers it, from 00)
+        let shown = format!("pattern {:02}", p.saturating_sub(1));
+        let row = pattern_rows.first().ok_or_else(|| format!("there's no {shown}"))?;
+        // An alias plays another pattern's lines: those are read and written (the row numbers it as Renoise does).
+        let from = row.pointer(&format!("/aliases/{t}")).and_then(Value::as_u64).map_or(p, |alias| alias + 1);
         let pattern = format!("{epoch}:pattern:{from}");
-        let label = row
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-            .map_or(format!("pattern {p}"), |name| format!("“{name}”"));
+        let label = row.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map_or(shown, |name| format!("“{name}”"));
         let lines_row = if from == p {
             row.clone()
         } else {
@@ -567,11 +566,11 @@ mod tests {
 
     fn rows() -> Vec<Value> {
         vec![
-            json!({"line": 1, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}, {"col": 2, "note": "E-4", "instrument": "00", "volume": "40"}]}),
+            json!({"line": 0, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}, {"col": 2, "note": "E-4", "instrument": "00", "volume": "40"}]}),
+            json!({"line": 2, "notes": [{"col": 1, "note": "OFF"}]}),
             json!({"line": 3, "notes": [{"col": 1, "note": "OFF"}]}),
-            json!({"line": 4, "notes": [{"col": 1, "note": "OFF"}]}),
-            json!({"line": 5, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "delay": "80", "fx": "0D10"}]}),
-            json!({"line": 6, "notes": [{"col": 2, "note": "---", "volume": "G3"}]}),
+            json!({"line": 4, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "delay": "80", "fx": "0D10"}]}),
+            json!({"line": 5, "notes": [{"col": 2, "note": "---", "volume": "G3"}]}),
         ]
     }
 
@@ -579,9 +578,9 @@ mod tests {
     fn a_pattern_tracks_notes_last_to_the_next_note_or_off_in_their_column_and_play_at_their_volume() {
         let (notes, taken) = cells_of(&rows(), 8, 4.);
         let shown: Vec<(i64, f64, f64, i32, f64)> = notes.iter().map(|(id, _, n)| (*id, n.start, n.length, n.pitch, n.velocity)).collect();
-        // C-4 to the OFF on line 3 (two lines: half a beat); E-4 to the pattern's end; D#4 half a line late, to the end.
-        assert_eq!(shown, [(17, 0., 0.5, 48, 127.), (18, 0., 2., 52, 64.), (81, 1.125, 0.875, 51, 127.)]);
-        assert!(taken.contains(&(3, 1)) && taken.contains(&(6, 2)), "an OFF and a cell with only a volume take their cells");
+        // C-4 to the OFF on line 02 (two lines: half a beat); E-4 to the pattern's end; D#4 half a line late, to the end.
+        assert_eq!(shown, [(1, 0., 0.5, 48, 127.), (2, 0., 2., 52, 64.), (65, 1.125, 0.875, 51, 127.)]);
+        assert!(taken.contains(&(2, 1)) && taken.contains(&(5, 2)), "an OFF and a cell with only a volume take their cells");
         assert_eq!(note_number("C#9"), Some(109));
         assert_eq!((note_number("OFF"), note_number("---"), note_number("C4")), (None, None, None));
         assert_eq!((velocity_of(Some("80")), velocity_of(Some("G3")), volume_of(64.)), (Some(127.), None, "41".into()));
@@ -592,29 +591,29 @@ mod tests {
         let (notes, taken) = cells_of(&rows(), 8, 4.);
         let cells: HashMap<i64, Cell> = notes.into_iter().map(|(id, cell, _)| (id, cell)).collect();
         let patch = |id: i64, start: f64, velocity: f64| NotePatch { id, start, velocity, duration: None };
-        // D#4 (line 5, delay 80) a little earlier: its own line, delay 40.
-        let lines = writes_for(&cells, &taken, &[patch(81, 1.0625, 127.)], 4., 8);
-        assert_eq!(lines, [json!({"line": 5, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "fx": "0D10", "delay": "40"}]})]);
-        // Earlier than its line: line 4 holds an OFF in its column, so it stays on its own line, as early as that goes.
-        let lines = writes_for(&cells, &taken, &[patch(81, 0.98, 127.)], 4., 8);
-        assert_eq!(lines, [json!({"line": 5, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "fx": "0D10"}]})]);
-        // E-4 0.6 of a line past line 2's start: line 2 is free in its column, so it goes there (delay 9A) and its old
+        // D#4 (line 04, delay 80) a little earlier: its own line, delay 40.
+        let lines = writes_for(&cells, &taken, &[patch(65, 1.0625, 127.)], 4., 8);
+        assert_eq!(lines, [json!({"line": 4, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "fx": "0D10", "delay": "40"}]})]);
+        // Earlier than its line: line 03 holds an OFF in its column, so it stays on its own line, as early as that goes.
+        let lines = writes_for(&cells, &taken, &[patch(65, 0.98, 127.)], 4., 8);
+        assert_eq!(lines, [json!({"line": 4, "notes": [{"col": 1, "note": "D#4", "instrument": "00", "fx": "0D10"}]})]);
+        // E-4 0.6 of a line past line 01's start: line 01 is free in its column, so it goes there (delay 9A) and its old
         // cell is cleared.
-        let lines = writes_for(&cells, &taken, &[patch(18, 0.4, 64.)], 4., 8);
+        let lines = writes_for(&cells, &taken, &[patch(2, 0.4, 64.)], 4., 8);
         assert_eq!(
             lines,
             [
-                json!({"line": 1, "notes": [{"col": 2, "clear": true}]}),
-                json!({"line": 2, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "40", "delay": "9A"}]}),
+                json!({"line": 0, "notes": [{"col": 2, "clear": true}]}),
+                json!({"line": 1, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "40", "delay": "9A"}]}),
             ]
         );
         // Two lines later is further than a move goes: as late as its own line goes.
-        let lines = writes_for(&cells, &taken, &[patch(18, 0.6, 64.)], 4., 8);
-        assert_eq!(lines, [json!({"line": 1, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "40", "delay": "FF"}]})]);
+        let lines = writes_for(&cells, &taken, &[patch(2, 0.6, 64.)], 4., 8);
+        assert_eq!(lines, [json!({"line": 0, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "40", "delay": "FF"}]})]);
         // Not before the pattern's start; only its volume changes.
-        let lines = writes_for(&cells, &taken, &[patch(18, -0.1, 100.)], 4., 8);
-        assert_eq!(lines, [json!({"line": 1, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "65"}]})]);
+        let lines = writes_for(&cells, &taken, &[patch(2, -0.1, 100.)], 4., 8);
+        assert_eq!(lines, [json!({"line": 0, "notes": [{"col": 2, "note": "E-4", "instrument": "00", "volume": "65"}]})]);
         // Nothing to change: nothing written.
-        assert!(writes_for(&cells, &taken, &[patch(17, 0., 127.)], 4., 8).is_empty());
+        assert!(writes_for(&cells, &taken, &[patch(1, 0., 127.)], 4., 8).is_empty());
     }
 }

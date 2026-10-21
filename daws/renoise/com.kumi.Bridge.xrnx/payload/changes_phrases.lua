@@ -55,10 +55,11 @@ local PHRASE_FIELDS = {
     text = function(v) return "LPB " .. v end },
   looping = bool_field("looping", "looping is true or false", "looping", "one-shot"),
   -- (the loop's lines are checked with the length the change gives: see phrase-set's wanted)
-  loopStart = { get = function(p) return p.loop_start end, set = function(p, v) p.loop_start = v end, field = "loop_start",
-    check = whole(1, 512), says = "loopStart is a line of the phrase", text = function(v) return "loop from line " .. v end },
-  loopEnd = { get = function(p) return p.loop_end end, set = function(p, v) p.loop_end = v end, field = "loop_end",
-    check = whole(1, 512), says = "loopEnd is a line of the phrase", text = function(v) return "loop to line " .. v end },
+  -- (lines by Renoise's numbers, from 0)
+  loopStart = { get = function(p) return p.loop_start - 1 end, set = function(p, v) p.loop_start = v + 1 end, field = "loop_start",
+    check = whole(0, 511), says = "loopStart is a line of the phrase, from 0", text = function(v) return string.format("loop from line %02d", v) end },
+  loopEnd = { get = function(p) return p.loop_end - 1 end, set = function(p, v) p.loop_end = v + 1 end, field = "loop_end",
+    check = whole(0, 511), says = "loopEnd is a line of the phrase, from 0", text = function(v) return string.format("loop to line %02d", v) end },
   shuffle = { get = function(p) return p.shuffle end, set = function(p, v) p.shuffle = v end, field = "shuffle",
     check = function(v) return type(v) == "number" and v >= 0 and v <= 1 end, says = "shuffle is from 0 to 1", text = function(v) return "shuffle " .. math.floor(v * 100 + 0.5) .. "%" end },
   keyTracking = { get = function(p) return KEY_TRACKING.get(p.key_tracking) end, set = function(p, v) p.key_tracking = KEY_TRACKING.parse(v) end, field = "key_tracking",
@@ -91,8 +92,8 @@ local function write_settings(phrase, state)
   end
   if state.lines ~= nil then put(function() phrase.number_of_lines = state.lines end) end
   local lines = phrase.number_of_lines
-  local start = state.loopStart and math.min(state.loopStart, lines)
-  local finish = state.loopEnd and math.min(state.loopEnd, lines)
+  local start = state.loopStart and math.min(state.loopStart + 1, lines)
+  local finish = state.loopEnd and math.min(state.loopEnd + 1, lines)
   put(function()
     if start ~= nil and finish ~= nil and start > phrase.loop_end then
       phrase.loop_end = finish
@@ -117,8 +118,8 @@ do
   phrase_set.wanted = function(phrase, input)
     local state = inner(phrase, input)
     local lines = state.lines or phrase.number_of_lines
-    local start, finish = state.loopStart or math.min(phrase.loop_start, lines), state.loopEnd or math.min(phrase.loop_end, lines)
-    if start > lines or finish > lines then bad("the loop must be within the phrase's lines") end
+    local start, finish = state.loopStart or math.min(phrase.loop_start, lines) - 1, state.loopEnd or math.min(phrase.loop_end, lines) - 1
+    if start >= lines or finish >= lines then bad("the loop must be within the phrase's lines") end
     if start > finish then bad("loopStart must not be after loopEnd") end
     return state
   end
@@ -263,7 +264,7 @@ local function add_plan(song, env, input)
   end
   -- (a new phrase has 16 lines unless given: its loop must fit what it will have)
   local lines = settings.lines or 16
-  if (settings.loopStart or 1) > lines or (settings.loopEnd or 1) > lines then bad("the loop must be within the phrase's lines") end
+  if (settings.loopStart or 0) >= lines or (settings.loopEnd or 0) >= lines then bad("the loop must be within the phrase's lines") end
   if settings.loopStart and settings.loopEnd and settings.loopStart > settings.loopEnd then bad("loopStart must not be after loopEnd") end
   return { n = n, label = label, count = count, index = index, settings = settings }
 end
@@ -274,7 +275,7 @@ end
 
 local function add_preview(song, env, input)
   local plan = add_plan(song, env, input)
-  local title = string.format("Added phrase %s to %s", input.name and q(input.name) or string.format("%02X", plan.index - 1), q(plan.label))
+  local title = string.format("Added phrase %s to %s", input.name and q(input.name) or string.format("%02d", plan.index), q(plan.label))
   return {
     target = places_.target_of(env, "instrument", plan.n), prior = { phrases = plan.count }, fence = { phrases = plan.count, index = plan.index },
     display = {
@@ -352,6 +353,38 @@ local function delete_preview(song, env, input)
   return { target = places_.target_of(env, "phrase", n), prior = { deleted = false }, fence = phrase_print(objects.phrase), display = display }
 end
 
+-- (the mapping's fields and how a delete keeps them: below, with phrase-map)
+local map_state, write_map, ALL_MAPPING
+
+-- The values of the script's input parameters, by name (none until Renoise compiled it).
+local function script_parameters(phrase)
+  local ok, kept = pcall(function()
+    local out = {}
+    for _, parameter in ipairs(phrase.script.parameters) do out[#out + 1] = { name = parameter.name, value = parameter.value } end
+    return out
+  end)
+  return ok and #kept > 0 and kept or nil
+end
+
+-- Those values set again on the script's parameters of the same names: how many couldn't be (Renoise compiles a committed
+-- script in its player a moment later, so its parameters may not be there yet).
+local function write_script_parameters(phrase, kept)
+  local missed = 0
+  for _, saved in ipairs(kept or {}) do
+    local done = pcall(function()
+      for _, parameter in ipairs(phrase.script.parameters) do
+        if parameter.name == saved.name then
+          parameter.value = saved.value
+          return
+        end
+      end
+      error("not there")
+    end)
+    if not done then missed = missed + 1 end
+  end
+  return missed
+end
+
 local function delete_apply(song, env, input, fence, desc)
   local ok, n, objects, label = pcall(places_.locate, song, env, "phrase", input, "phrase-delete")
   if not ok then base.gone_is_changed(n) end
@@ -360,8 +393,10 @@ local function delete_apply(song, env, input, fence, desc)
   local lines, writes = read_lines(phrase)
   if writes > M.MAX_WRITES then fail("failed", label .. " holds more lines than Kumi puts back in one step, so it won't delete it: clear some of its lines first, or delete it in Renoise") end
   local material = {
-    index = n[2], settings = settings_of(phrase), lines = lines, columns = columns_of(phrase), mapping = mapping_of(phrase),
-    script = phrase.script.paragraphs, program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == n[2]) or nil,
+    index = n[2], settings = settings_of(phrase), lines = lines, columns = columns_of(phrase),
+    -- (its keys and how they play it: key tracking, base note, looping and loop, which are the mapping's own)
+    mapping = phrase.mapping and map_state(phrase, ALL_MAPPING) or nil,
+    script = phrase.script.paragraphs, scriptParameters = script_parameters(phrase), program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == n[2]) or nil,
     -- (its count of changed lines, for the one Kumi puts back to take on)
     logs = env.logs_of and env.logs_of("phrase", n) or nil,
   }
@@ -379,7 +414,7 @@ end
 local function delete_restore(song, env, restore, desc)
   local material = restore.material
   if type(material) ~= "table" or type(material.instrument) ~= "table" or type(material.settings) ~= "table" then bad("material: what the delete kept") end
-  local label = q(material.settings.name ~= "" and material.settings.name or string.format("Phrase %02X", material.index - 1))
+  local label = q(material.settings.name ~= "" and material.settings.name or string.format("Phrase %02d", material.index))
   local n, why, which = places_.follow(env, material.instrument)
   if not n then places_.follow_failed(why, which, material.settings.name) end
   local instrument = song:instrument(n[1])
@@ -406,9 +441,14 @@ local function delete_restore(song, env, restore, desc)
       phrase.script.paragraphs = material.script
       phrase.script:commit()
     end)
+    local missed = write_script_parameters(phrase, material.scriptParameters)
+    if missed > 0 then
+      notes[#notes + 1] = string.format("Its script's %s back at %s defaults (Renoise compiles the script a moment later): set %s again in its script panel.",
+        missed == 1 and "parameter comes" or (missed .. " parameters come"), missed == 1 and "its" or "their", missed == 1 and "it" or "them")
+    end
   end
   if material.mapping then
-    local mapped, why_not = set_mapping(instrument, phrase, material.mapping.noteRange)
+    local mapped, why_not = write_map(instrument, phrase, material.mapping)
     if not mapped then notes[#notes + 1] = string.format("Its keys (%d-%d) weren't mapped again: %s.", material.mapping.noteRange[1], material.mapping.noteRange[2], why_not) end
   end
   if material.program then
@@ -439,10 +479,13 @@ local MAPPING_FIELDS = {
     check = function(v) return KEY_TRACKING.parse(v) ~= nil end, says = "keyTracking is none, transpose or offset" },
   baseNote = { get = function(m) return m.base_note end, set = function(m, v) m.base_note = v end, check = whole(0, 119), says = "baseNote is a note from 0 to 119" },
   looping = { get = function(m) return m.looping end, set = function(m, v) m.looping = v end, check = is_boolean, says = "looping is true or false" },
-  loopStart = { get = function(m) return m.loop_start end, set = function(m, v) m.loop_start = v end, check = whole(1, 512), says = "loopStart is a line of the phrase" },
-  loopEnd = { get = function(m) return m.loop_end end, set = function(m, v) m.loop_end = v end, check = whole(1, 512), says = "loopEnd is a line of the phrase" },
+  -- (lines by Renoise's numbers, from 0)
+  loopStart = { get = function(m) return m.loop_start - 1 end, set = function(m, v) m.loop_start = v + 1 end, check = whole(0, 511), says = "loopStart is a line of the phrase, from 0" },
+  loopEnd = { get = function(m) return m.loop_end - 1 end, set = function(m, v) m.loop_end = v + 1 end, check = whole(0, 511), says = "loopEnd is a line of the phrase, from 0" },
 }
 local MAPPING_ORDER = { "keyTracking", "baseNote", "looping", "loopStart", "loopEnd" }
+ALL_MAPPING = {}
+for _, key in ipairs(MAPPING_ORDER) do ALL_MAPPING[key] = true end
 
 local function same_range(a, b)
   if not a or not b then return (not a) == (not b) end
@@ -450,7 +493,7 @@ local function same_range(a, b)
 end
 
 -- The mapping's state for the keys a change names: its range (false when unmapped) and the fields asked.
-local function map_state(phrase, keys)
+function map_state(phrase, keys)
   local mapping = phrase.mapping
   local state = { noteRange = mapping and { mapping.note_range[1], mapping.note_range[2] } or false }
   for _, key in ipairs(MAPPING_ORDER) do
@@ -467,15 +510,15 @@ local function same_map(a, b)
   return true
 end
 
-local function write_map(instrument, phrase, state)
+function write_map(instrument, phrase, state)
   local done, why = set_mapping(instrument, phrase, state.noteRange or nil)
   if not done then return false, why end
   local mapping = phrase.mapping
   if mapping then
     -- (the loop's ends in the order that keeps its start before its end)
-    if state.loopStart and state.loopEnd and state.loopStart > mapping.loop_end then
-      mapping.loop_end = state.loopEnd
-      mapping.loop_start = state.loopStart
+    if state.loopStart and state.loopEnd and state.loopStart + 1 > mapping.loop_end then
+      mapping.loop_end = state.loopEnd + 1
+      mapping.loop_start = state.loopStart + 1
       state = (function() local c = {} for k, v in pairs(state) do c[k] = v end c.loopStart, c.loopEnd = nil, nil return c end)()
     end
     for _, key in ipairs(MAPPING_ORDER) do
@@ -511,7 +554,7 @@ local function map_plan(song, env, input)
   if not any then bad("give noteRange (or null to unmap), keyTracking, baseNote, looping, loopStart or loopEnd") end
   if wanted.loopStart and wanted.loopEnd and wanted.loopStart > wanted.loopEnd then bad("loopStart must not be after loopEnd") end
   for _, key in ipairs({ "loopStart", "loopEnd" }) do
-    if wanted[key] and wanted[key] > phrase.number_of_lines then bad(key .. " is a line of the phrase (it has " .. phrase.number_of_lines .. ")") end
+    if wanted[key] and wanted[key] >= phrase.number_of_lines then bad(string.format("%s is a line of the phrase, from 0 to %d", key, phrase.number_of_lines - 1)) end
   end
   if wanted.noteRange and not mapping_slot(objects.instrument, wanted.noteRange[1], wanted.noteRange[2], current.noteRange and current.noteRange[1] or nil) then
     bad("those keys overlap another phrase's mapping")
@@ -529,8 +572,8 @@ local function map_title(plan)
   if wanted.keyTracking then parts[#parts + 1] = "key tracking " .. wanted.keyTracking end
   if wanted.baseNote then parts[#parts + 1] = "base note " .. wanted.baseNote end
   if wanted.looping ~= nil then parts[#parts + 1] = wanted.looping and "looping" or "one-shot" end
-  if wanted.loopStart then parts[#parts + 1] = "loop from line " .. wanted.loopStart end
-  if wanted.loopEnd then parts[#parts + 1] = "loop to line " .. wanted.loopEnd end
+  if wanted.loopStart then parts[#parts + 1] = string.format("loop from line %02d", wanted.loopStart) end
+  if wanted.loopEnd then parts[#parts + 1] = string.format("loop to line %02d", wanted.loopEnd) end
   if #parts == 0 then parts[1] = string.format("notes %d-%d", wanted.noteRange[1], wanted.noteRange[2]) end
   return string.format("Mapped %s: %s", plan.label, table.concat(parts, ", "))
 end
@@ -600,7 +643,7 @@ local playback = instruments_.settings_kind({
       field = "phrase_playback_mode", check = function(v) return MODES.parse(v) ~= nil end, says = "mode is off, program or keymap",
       text = function(v) return v == "off" and "phrases off" or ("phrases by " .. v) end },
     program = { get = function(i) return i.phrase_program end, set = function(i, v) if v >= 1 and v <= 126 then i.phrase_program = v end end, field = "phrase_program",
-      text = function(v) return "phrase " .. string.format("%02X", v - 1) end },
+      text = function(v) return "phrase " .. string.format("%02d", v) end },
   },
 })
 -- (program mode with no phrase chosen, program 0, is what a new instrument has: lab. A state keeps both as Renoise has them)
@@ -639,7 +682,7 @@ playback.write = function(instrument, state)
 end
 playback.same = function(a, b) return a.mode == b.mode and a.program == b.program end
 playback.title = function(name, _, to)
-  if to.mode == "program" and type(to.program) == "number" and to.program >= 1 then return string.format("%s plays phrase %02X on every key", name, to.program - 1) end
+  if to.mode == "program" and type(to.program) == "number" and to.program >= 1 then return string.format("%s plays phrase %02d on every key", name, to.program) end
   if to.mode == "program" then return name .. ": phrases by program, none chosen" end
   return name .. (to.mode == "off" and ": phrases off" or ": phrases by keymap")
 end
@@ -769,14 +812,11 @@ local function lines_title(verb, cells_, label)
 end
 
 local function clear_input(phrase, input)
-  local first, last = input.first or 1, input.last or phrase.number_of_lines
-  for _, value in ipairs({ first, last }) do
-    if not whole(1, phrase.number_of_lines)(value) then bad(string.format("first and last are lines from 1 to %d", phrase.number_of_lines)) end
-  end
-  if first > last then bad("first must not come after last") end
+  local first, last = cells.line_range(input, phrase.number_of_lines)
   local lines = {}
+  -- (as phrase-write takes them: by Renoise's numbers)
   for l = first, last do
-    if not phrase:line(l).is_empty then lines[#lines + 1] = { line = l, clear = true } end
+    if not phrase:line(l).is_empty then lines[#lines + 1] = { line = l - 1, clear = true } end
   end
   return { lines = lines }
 end
@@ -833,7 +873,7 @@ local function lines_kind(spec)
       if not cells.same_cell(cell, p.after[i]) then
         for j = 1, #p.after do cells.write_cell(p.phrase, p.prior[j]) end
         set_phrase_columns(p.phrase, p.columns)
-        fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col))
+        fail("failed", string.format("Renoise didn't keep line %02d column %d as written", cell.line - 1, cell.col))
       end
     end
     return {
@@ -864,7 +904,7 @@ local function lines_kind(spec)
     for i = 1, #prior do
       local now = cells.read_cell(phrase, prior[i])
       if not cells.same_cell(now, prior[i]) then
-        if not cells.same_cell(now, applied[i]) then fail("changed", string.format("line %d of %s was changed in Renoise since Kumi wrote it", prior[i].line, label)) end
+        if not cells.same_cell(now, applied[i]) then fail("changed", string.format("line %02d of %s was changed in Renoise since Kumi wrote it", prior[i].line - 1, label)) end
         todo[#todo + 1] = prior[i]
       end
     end
@@ -954,8 +994,9 @@ base.register({
     if plan.commit then script:commit() end
     if env.watch_undo then env.watch_undo(script.paragraphs_assignment_observable) env.watch_undo(script.paragraphs_observable) env.watch_undo(phrase.playback_mode_observable) end
     local n = plan.n
-    local function answer(compile, runtime, waited)
-      local applied = script_state(phrase)
+    -- (`live`: the phrase where it is now)
+    local function answer(compile, runtime, waited, live)
+      local applied = script_state(live)
       applied.compileError = compile ~= "" and compile or json.null
       applied.runtimeError = runtime ~= "" and runtime or json.null
       local note
@@ -968,22 +1009,42 @@ base.register({
         prior = plan.state, journal_applied = { mode = applied.mode, paragraphs = applied.paragraphs }, place = places_.journal_place("phrase", n),
       }
     end
-    if not plan.commit then return answer("", "", true) end
-    -- (the compile lands a moment later: Kumi waits, writing nothing more)
+    if not plan.commit then return answer("", "", true, phrase) end
+    -- (the compile lands a moment later: Kumi waits, writing nothing more. The change is written already, so what the producer
+    -- does meanwhile never makes it answer as if nothing was: the wait checks nothing, and the phrase is found by its place)
+    local at = places_.place_of(env, "phrase", n)
     return {
       kumi_job = function(job)
-        local started = env.now_ms()
-        local waited = false
+        job.wrote = "The script of " .. plan.label
+        local function live_phrase()
+          local now = places_.follow(env, at)
+          if not now then return nil end
+          local found, objects = pcall(places_.resolve, renoise.song() or song, "phrase", now)
+          if not found or not objects.phrase then return nil end
+          n = now
+          return objects.phrase
+        end
+        local started, waited = env.now_ms(), false
         while env.now_ms() - started < M.COMPILE_WAIT_MS do
-          job.step(50)
-          local live = places_.resolve(renoise.song() or song, "phrase", n).phrase.script
-          if live.pending_changes == 0 and (live.compile_error ~= before.compile or live.runtime_error ~= before.runtime or env.now_ms() - started >= 200) then
+          local resume = env.now_ms() + 50
+          repeat coroutine.yield() until env.now_ms() >= resume
+          local live = live_phrase()
+          if not live then break end
+          local script_now = live.script
+          -- (an error that changed is the new script's; errors that stay as they were are only trusted after the whole wait: the
+          -- lab saw a compile's errors within 0.5 s)
+          if script_now.pending_changes == 0 and (script_now.compile_error ~= before.compile or script_now.runtime_error ~= before.runtime) then
             waited = true
             break
           end
         end
-        local live = places_.resolve(renoise.song() or song, "phrase", n).phrase.script
-        return answer(live.compile_error, live.runtime_error, waited)
+        if not waited and env.now_ms() - started >= M.COMPILE_WAIT_MS then waited = true end
+        job.rebase()
+        local live = live_phrase()
+        if not live then
+          error({ code = "uncertain", message = "Kumi wrote the script of " .. plan.label .. ", and the song changed while Renoise compiled it so that Kumi can't find the phrase now: look at it in Renoise" }, 0)
+        end
+        return answer(live.script.compile_error, live.script.runtime_error, waited, live)
       end,
     }
   end,
@@ -994,6 +1055,16 @@ base.register({
     local phrase = objects.phrase
     local now = script_state(phrase)
     if now.mode == prior.mode and same_paragraphs(now.paragraphs, prior.paragraphs) then
+      -- (Renoise's own undo puts the text back uncommitted, lab: the player keeps Kumi's script until it is committed)
+      if (phrase.script.pending_changes or 0) > 0 then
+        song:describe_undo(desc)
+        phrase.script:commit()
+        base.note_restored(env.journal, "phrase-script", places_.journal_place("phrase", n), { mode = applied.mode, paragraphs = applied.paragraphs }, base.KINDS["phrase-script"])
+        return {
+          restored = { done = true }, undo = { desc = desc, entry = true },
+          display = { title = label .. "'s script put back", note = "Its text was back (Renoise's undo), but not committed, so Kumi's script still played: Kumi committed it." },
+        }
+      end
       return { restored = { done = true }, display = { title = label .. "'s script is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     if not restore.discard and (now.mode ~= applied.mode or not same_paragraphs(now.paragraphs, applied.paragraphs)) then

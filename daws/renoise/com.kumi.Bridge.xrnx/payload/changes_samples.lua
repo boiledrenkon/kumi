@@ -484,8 +484,10 @@ local function load_plan(song, env, input)
   local instrument = objects.instrument
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then bad(q(label) .. " is sliced: Renoise takes no other samples in it") end
   local count = #instrument.samples
-  local index = input.index == nil and count + 1 or input.index
-  if not whole(1, count + 1)(index) then bad(string.format("index is a place from 1 to %d among the samples", count + 1)) end
+  -- (`index` by Renoise's number, from 0, as it numbers samples from 00)
+  local index = input.index == nil and count or input.index
+  if not whole(0, count)(index) then bad(string.format("index is a sample's number from 0 to %d, as Renoise numbers them (00 the first)", count)) end
+  index = index + 1
   return { path = path, instrument = n[1], index = index, count = count, label = label }
 end
 
@@ -548,7 +550,7 @@ local function load_apply(song, env, input, fence, desc)
   if input.name ~= nil then sample.name = input.name elseif sample.name == "" then sample.name = file_name(plan.path) end
   local n = { plan.instrument, plan.index }
   return {
-    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name },
+    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name, work = places_.sample_work(sample) },
     created = { ref = places_.ref_of(env, "sample", n), kind = "sample" }, material = { made = places_.place_of(env, "sample", n) },
     target = sample_target(env, n),
     display = { title = string.format("Loaded %s into %s", q(file_name(plan.path)), q(plan.label)), before = { samples = plan.count }, after = { samples = #instrument.samples } },
@@ -570,8 +572,9 @@ local function load_restore(song, env, restore, desc)
   local label = string.format("%s in %s", q(places_.sample_label(n[2], sample)), q(places_.instrument_label(n[1], instrument)))
   local now = M.buffer_print(sample.sample_buffer)
   if material.made then
-    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name) then
-      fail("changed", label .. " changed in Renoise since Kumi loaded it")
+    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name
+      or (applied.work ~= nil and not base.same_table(places_.sample_work(sample), applied.work))) then
+      fail("changed", label .. " changed in Renoise since Kumi loaded it (its audio, slices or settings)")
     end
     song:describe_undo(desc)
     delete_sample(instrument, n[2])
@@ -685,6 +688,11 @@ local function delete_restore(song, env, restore, desc)
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then
     fail("changed", q(places_.instrument_label(i, instrument)) .. " is sliced now: Renoise takes no other samples in it")
   end
+  -- (a sliced sample is its instrument's only one: its slices come back only into an instrument that holds no other)
+  if material.markers and #instrument.samples > 0 then
+    fail("changed", string.format("%s was sliced, and %s holds other samples now: its slices can't come back beside them, so Kumi left it",
+      label, q(places_.instrument_label(i, instrument))))
+  end
   if material.file and not io.exists(material.file) then fail("failed", "the audio Kumi kept is gone (Renoise empties its temporary folder as it quits)") end
   song:describe_undo(desc)
   local sample = instrument:insert_sample_at(at)
@@ -696,7 +704,11 @@ local function delete_restore(song, env, restore, desc)
   if env.back then env.back("samples", i, nil, material.after, at) end
   local lost = put_settings(env, sample, material, true)
   if material.markers then
-    pcall(function() sample.slice_markers = material.markers end)
+    local sliced = pcall(function() sample.slice_markers = material.markers end)
+    if not sliced or #sample.slice_markers ~= #material.markers then
+      pcall(delete_sample, instrument, at)
+      fail("failed", "Renoise wouldn't slice " .. label .. " again: nothing was put back")
+    end
     for k, kept in ipairs(material.slices or {}) do
       local alias = instrument.samples[at + k] and instrument:sample(at + k)
       if alias and alias.is_slice_alias then lost = lost + put_settings(env, alias, kept, false) end

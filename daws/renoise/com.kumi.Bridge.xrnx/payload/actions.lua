@@ -220,10 +220,11 @@ function M.select(params, env)
   if params.line ~= nil then
     local p = song.sequencer.pattern_sequence[plan.sequence or song.selected_sequence_index]
     local lines = song:pattern(p).number_of_lines
-    if type(params.line) ~= "number" or params.line ~= math.floor(params.line) or params.line < 1 or params.line > lines then
-      bad(string.format("line is a line of that pattern, from 1 to %d", lines))
+    -- (Renoise's number, from 0)
+    if type(params.line) ~= "number" or params.line ~= math.floor(params.line) or params.line < 0 or params.line >= lines then
+      bad(string.format("line is a line of that pattern, from 0 to %d", lines - 1))
     end
-    plan.line = params.line
+    plan.line = params.line + 1
   end
   local W = renoise.ApplicationWindow
   if params.frame ~= nil then
@@ -256,7 +257,7 @@ function M.select(params, env)
   if plan.phrase then set("the phrase", function() song.selected_phrase_index = plan.phrase end) end
   if plan.sequence and set("the slot", function() song.selected_sequence_index = plan.sequence end) then said[#said + 1] = "slot " .. plan.sequence end
   -- (Renoise moves the edit line a moment later: measured)
-  if plan.line and set("the line", function() song.selected_line_index = plan.line end) then said[#said + 1] = "line " .. plan.line end
+  if plan.line and set("the line", function() song.selected_line_index = plan.line end) then said[#said + 1] = string.format("line %02d", plan.line - 1) end
   local window = renoise.app().window
   if plan.frame and set("the frame", function() window.active_middle_frame = plan.frame end) then
     said[#said + 1] = "the " .. params.frame .. (params.frame == "mixer" and "" or " view")
@@ -281,7 +282,7 @@ function M.select(params, env)
       sampleRef = plan.sample and refs.make(epoch, "sample", plan.instrument, plan.sample) or nil,
       phraseRef = plan.phrase and refs.make(epoch, "phrase", plan.instrument, plan.phrase) or nil,
       sequenceRef = plan.sequence and refs.make(epoch, "seq", plan.sequence) or nil,
-      line = plan.line, frame = params.frame, lower = params.lower, matrix = plan.matrix,
+      line = plan.line and plan.line - 1, frame = params.frame, lower = params.lower, matrix = plan.matrix,
     },
     display = {
       title = #said > 0 and ("Selected " .. table.concat(said, ", ")) or "Showed what was asked",

@@ -174,9 +174,11 @@ local function target(env, index)
   return { ref = refs.make(env.epoch(), "track", index), kind = "track" }
 end
 
+-- A track's volume or pan stage: post (the fader Renoise's mixer shows and the producer rides; the default) or pre (the
+-- Vol/Pan before its devices).
 local function stage_of(source)
   local stage = type(source) == "table" and source.stage or nil
-  if stage == nil then return "pre" end
+  if stage == nil then return "post" end
   if stage ~= "pre" and stage ~= "post" then bad("stage must be \"pre\" or \"post\"") end
   return stage
 end
@@ -287,6 +289,16 @@ local function gone_is_changed(err)
 end
 M.gone_is_changed = gone_is_changed
 
+-- Writes `state` with the kind's own write; when Renoise refuses part of it (a field past what this device takes), what was
+-- there (`was`) is written back, so nothing half-done stays, and the change fails with Renoise's words.
+local function write_whole(spec, loc, state, was)
+  local ok, err = pcall(spec.write, loc.object, state)
+  if ok then return end
+  pcall(spec.write, loc.object, was)
+  local why = type(err) == "table" and err.message or tostring(err)
+  fail("failed", string.format("Renoise refused %s's %s as asked (%s): nothing was changed", loc.name, spec.noun, (tostring(why):gsub("^[^%s:]*%.lua:%d+: ", ""))))
+end
+
 function M.prop_apply(song, env, spec, input, fence, desc)
   local ok, loc = pcall(spec.locate, song, env, input)
   if not ok then gone_is_changed(loc) end
@@ -305,7 +317,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   end
   if spec.undoable then song:describe_undo(desc) end
   if spec.watch then spec.watch(env, loc) end
-  if not spec.same(now, wanted) then spec.write(loc.object, wanted) end
+  if not spec.same(now, wanted) then write_whole(spec, loc, wanted, now) end
   -- (a setting Renoise applies a moment later answers its old value when read at once: `eventual` trusts the write)
   local after = spec.eventual and wanted or spec.read(loc.object, wanted)
   if not spec.same(after, wanted) then
@@ -316,8 +328,19 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
   add_shown(spec, loc, display)
+  -- (`restore_by_id`: what the undo writes into must be what was set, discard or not: a plug-in's parameter after another plug-in
+  -- was loaded is another one)
+  local applied = wire(spec, after, env, loc)
+  if spec.restore_by_id then applied = with_id(applied, loc.id, loc.name) end
+  -- (`keep(loc, before, after)`: what else the undo needs to know of the place as the change left it)
+  if spec.keep then
+    local copy = {}
+    for k, v in pairs(applied) do copy[k] = v end
+    for k, v in pairs(spec.keep(loc, now, after) or {}) do copy[k] = v end
+    applied = copy
+  end
   return {
-    applied = wire(spec, after, env, loc), journal_applied = after,
+    applied = applied, journal_applied = after,
     display = display,
     undo = { desc = desc, entry = spec.undoable },
     spec = spec, place = loc.place, prior = now, target = loc.target,
@@ -337,15 +360,20 @@ function M.prop_restore(song, env, spec, restore, desc)
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
   end
+  if spec.restore_by_id and type(restore.applied) == "table" and restore.applied.id ~= nil and restore.applied.id ~= loc.id then
+    fail("changed", string.format("%s isn't what Kumi set any more (another plug-in or device is there): Kumi won't write into it", loc.name))
+  end
   local prior, applied = unwire(spec, restore.prior, env, loc), unwire(spec, restore.applied, env, loc)
   local now = spec.read(loc.object, prior)
   if not spec.same(now, prior) then
     if not restore.discard and not spec.same(now, applied) then
       fail("changed", loc.name .. "'s " .. spec.noun .. " changed in Renoise since Kumi set it")
     end
+    -- (`before_restore`: what else must hold for the old value to go back, refusing when it doesn't)
+    if spec.before_restore and not restore.discard then spec.before_restore(loc, now, prior, restore.applied) end
     if spec.undoable then song:describe_undo(desc) end
     if spec.watch then spec.watch(env, loc) end
-    spec.write(loc.object, prior)
+    write_whole(spec, loc, prior, now)
     local after = spec.eventual and prior or spec.read(loc.object, prior)
     if not spec.same(after, prior) then fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was") end
   end
@@ -807,29 +835,41 @@ function M.journal_list_event(journal, key, scope, type_, index, index2, undoing
 end
 
 -- n-instruments: Kumi put back a change that made or removed something itself, found by its place (the journal followed it).
-function M.note_restored_at(journal, kind, place)
-  for _, entry in ipairs(journal.entries) do
-    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
-      entry.state, entry.redone = "undone", nil
-      stamp(journal, entry)
-      return true
+-- The journal entry of the change Kumi is putting back: the one the restore names (`journal.restoring`, its desc), else the
+-- newest of the kind that `matches`. (Two changes of one kind and place are told apart by their desc, not by the first found.)
+local function restored_entry(journal, kind, matches)
+  local function open(entry) return entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") end
+  if type(journal.restoring) == "string" then
+    for i = #journal.entries, 1, -1 do
+      local entry = journal.entries[i]
+      if entry.desc == journal.restoring and open(entry) then return entry end
     end
   end
-  return false
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if open(entry) and matches(entry) then return entry end
+  end
+  return nil
+end
+
+function M.note_restored_at(journal, kind, place)
+  local entry = restored_entry(journal, kind, function(e) return M.same_table(e.place, place) end)
+  if not entry then return false end
+  entry.state, entry.redone = "undone", nil
+  stamp(journal, entry)
+  return true
 end
 
 -- Kumi put a change back itself: the change is not the producer's to undo any more (the producer's undo of that restore then
 -- brings it back, which is told as a redo).
 function M.note_restored(journal, kind, place, applied, spec)
-  for _, entry in ipairs(journal.entries) do
-    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and
-      (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
-      entry.state, entry.redone = "undone", nil
-      stamp(journal, entry)
-      if entry.shape and place then entry.place = place end
-      return
-    end
-  end
+  local entry = restored_entry(journal, kind, function(e)
+    return e.shape or (M.same_table(e.place, place) and spec and spec.same(e.applied, applied))
+  end)
+  if not entry then return end
+  entry.state, entry.redone = "undone", nil
+  stamp(journal, entry)
+  if entry.shape and place then entry.place = place end
 end
 
 -- M4 (n-song): a kind of several settings of one object (the song's groove, a track's columns), any of which a change gives:

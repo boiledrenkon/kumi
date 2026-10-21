@@ -489,7 +489,8 @@ impl TuiApp {
             } else {
                 st::FAINT
             };
-            screen.put(x, y, &format!("{:>3}", line + 1), &style);
+            // (as the tracker numbers it: 00 the first line)
+            screen.put(x, y, &format!("{:>3}", format!("{:02}", line)), &style);
             for (track, at, cell) in &shown {
                 let text = track.cells.get(index).map(String::as_str).unwrap_or("");
                 screen.put(
@@ -538,7 +539,7 @@ impl TuiApp {
                 screen.put(
                     x + 5 + track as i32 * column,
                     y + row,
-                    &format!("{:>2}", slot.pattern),
+                    &format!("{:02}", slot.pattern),
                     &if muted { st::FAINT } else { st::TEXT },
                 );
             }

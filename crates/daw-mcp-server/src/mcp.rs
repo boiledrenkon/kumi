@@ -44,8 +44,8 @@ fn tool_list(daw: Daw) -> Value {
     // Renoise plays from a slot and line; REAPER from where it is (cursor_set moves it).
     let play = match daw {
         Daw::Renoise => (
-            "Starts Renoise's playback from where it is, or from sequence (a slot, from 1) and line.",
-            json!({"sequence": {"type": "integer", "minimum": 1}, "line": {"type": "integer", "minimum": 1}, "epoch": {"type": "string"}}),
+            "Starts Renoise's playback from where it is, or from sequence (a slot, from 1) and line (from 0, as Renoise numbers lines).",
+            json!({"sequence": {"type": "integer", "minimum": 1}, "line": {"type": "integer", "minimum": 0}, "epoch": {"type": "string"}}),
         ),
         _ => ("Starts REAPER's playback from where it is (cursor_set moves it first).", json!({"epoch": {"type": "string"}})),
     };

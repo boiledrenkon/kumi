@@ -187,7 +187,7 @@ local function pattern_record(job, song, p, count, labels, budget)
     local pattern_track = pattern:track(t)
     local track = song:track(t)
     if pattern_track.alias_pattern_index > 0 then
-      lines[labels[t]] = format("alias of Pattern %02X", pattern_track.alias_pattern_index - 1)
+      lines[labels[t]] = format("alias of Pattern %02d", pattern_track.alias_pattern_index - 1)
     elseif not pattern_track.is_empty then
       if not budget.content or budget.lines + length > M.LINES_BUDGET then
         lines[labels[t]] = json.null
@@ -235,7 +235,7 @@ local function pattern_record(job, song, p, count, labels, budget)
   job.slice()
   return {
     k = "pattern",
-    n = name ~= "" and name or format("Pattern %02X", p - 1),
+    n = name ~= "" and name or format("Pattern %02d", p - 1),
     dn = name == "" or nil,
     o = p,
     f = {

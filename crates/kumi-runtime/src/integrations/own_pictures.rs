@@ -97,7 +97,8 @@ fn cell_text(cell: &Value, fx: bool) -> String {
 }
 
 /// The lines a change wrote, before and after: `cells` in `prior` and `applied` are the same cells (each a line's note or
-/// effect column), in the same order. Each line shows the columns the change wrote, notes first.
+/// effect column, its line a place from 1), in the same order. Each line shows the columns the change wrote, notes first,
+/// by Renoise's number (from 0).
 pub fn lines(answers: &Answers) -> Option<ChangePicture> {
     let (before, after) = (list(answers.prior(), "cells"), list(answers.after(), "cells"));
     if before.len() != after.len() || before.is_empty() {
@@ -107,7 +108,7 @@ pub fn lines(answers: &Answers) -> Option<ChangePicture> {
     // By line, then each column in its place: notes before effects, by column.
     let mut by_line: BTreeMap<u32, BTreeMap<(bool, u64), (String, String)>> = BTreeMap::new();
     for (was, now) in before.iter().zip(after) {
-        let line = number(was, "line").filter(|n| *n >= 1.)? as u32;
+        let line = number(was, "line").filter(|n| *n >= 1.)? as u32 - 1;
         let column = (was.get("kind").and_then(Value::as_str) == Some("effect"), number(was, "col").unwrap_or(1.) as u64);
         by_line.entry(line).or_default().insert(column, (cell_text(was, fx), cell_text(now, fx)));
     }
@@ -529,8 +530,8 @@ mod tests {
         assert_eq!(
             lines,
             [
-                PictureLine { line: 1, before: "--- .. .. .. .. ....".into(), after: "C-4 00 80 .. .. 0A10".into() },
-                PictureLine { line: 9, before: "E-4 01 40 .. ..".into(), after: "OFF .. .. .. ..".into() },
+                PictureLine { line: 0, before: "--- .. .. .. .. ....".into(), after: "C-4 00 80 .. .. 0A10".into() },
+                PictureLine { line: 8, before: "E-4 01 40 .. ..".into(), after: "OFF .. .. .. ..".into() },
             ],
             "line 5 was written as it was, so it isn't drawn"
         );

@@ -1,5 +1,6 @@
 -- Refs: how the tool names things in the song. Renoise has no ids, so a ref is positional:
--- <epoch>:<kind>:<indices>, 1-based as Renoise shows them (E:track:3, E:sample:2.5, E:param:3.2.7).
+-- <epoch>:<kind>:<indices>, Lua's indices from 1 (E:track:3, E:sample:2.5, E:param:3.2.7). Kumi shows the model a short name
+-- for each; the numbers Renoise shows (lines, patterns, instruments and samples from 00) are the rows'.
 -- The epoch changes whenever refs stop meaning what they meant (a song switch, a restructure the tool
 -- can't map), and a ref from another epoch is refused rather than read as something else.
 

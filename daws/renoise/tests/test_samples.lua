@@ -108,7 +108,7 @@ test("places, sample × insert before, swap, delete before, Kumi's own load: the
       local f = assert(io.open(wav, "wb"))
       f:write("RIFF\0\0\0\0WAVE" .. string.rep("c", 288))
       f:close()
-      change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav, index = 1 })
+      change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav, index = 0 })
       at = 3
     end
     eq(sample(1, at).name, "Snare", how)
@@ -221,9 +221,37 @@ local function wav_file(name, size)
   return path
 end
 
+test("samples: lossy audio counts as what it decodes to against the load bound: a 9 MB MP3 is refused, a 9 MB WAV isn't (#361 N-S25)", function()
+  local env, peer = setup()
+  local mp3 = mock.temp_dir .. "/Mix.mp3"
+  local f = assert(io.open(mp3, "wb"))
+  f:write("ID3" .. string.rep("m", 9 * 1024 * 1024))
+  f:close()
+  local epoch = place(peer)
+  local refused = call(peer, "change_preview", { kind = "sample-load", input = { ref = iref(epoch, 1), path = mp3 }, epoch = epoch })
+  failure(refused, "failed")
+  ok(refused.error.message:find("decodes", 1, true), refused.error.message)
+  local fine = call(peer, "change_preview", { kind = "sample-load", input = { ref = iref(epoch, 1), path = wav_file("Big", 9 * 1024 * 1024) }, epoch = epoch })
+  ok(fine.result, json.encode(fine.error or {}))
+  os.remove(mp3)
+end)
+
+test("samples: Kumi's undo of a sample it loaded refuses once the producer retuned it; of an instrument it made, once they worked in it (#361 N-S1)", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap", 4096), index = 1 })
+  mock.song:instrument(1):sample(2).transpose = 5 -- the producer retunes it
+  failure(restore(peer, "sample-load", record), "changed", "slices or settings")
+  eq(sample_names(1):sub(1, 10), "Kick,Clap,", "it stays")
+  local made = change(peer, "instrument-add", { name = "Lead" })
+  local lead = #mock.data.instruments
+  mock.song:instrument(lead):macro(1).name = "Cutoff" -- the producer names a macro of it
+  failure(restore(peer, "instrument-add", made), "changed", "macros")
+  eq(#mock.data.instruments, lead, "Lead stays")
+end)
+
 test("samples: a sample file loads as a new sample at its place; Kumi's undo deletes it, refused once the producer changed it", function()
   local env, peer = setup()
-  local record, done = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 2 })
+  local record, done = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 1 })
   eq(sample_names(1), "Kick,Clap,Snare,Hat")
   eq(sample(1, 2).buffer.frames, 256)
   eq(done.created.kind, "sample")
@@ -241,7 +269,7 @@ end)
 test("samples: after Renoise's own undo and redo of a sample Kumi loaded, Kumi's undo deletes it; changed since: refused", function()
   for _, changed in ipairs({ false, true }) do
     local env, peer = setup()
-    local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 2 })
+    local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 1 })
     mock.song:undo()
     eq(sample_names(1), "Kick,Snare,Hat")
     mock.song:redo()
@@ -259,14 +287,14 @@ end)
 
 test("samples: a sample's audio replaced by a file is kept and put back by the undo, its name and loop too", function()
   local env, peer = setup()
-  local before = json.encode(sample(1, 1).buffer)
+  local before = json.encode(sample(1, 1).buffer, { sort_keys = true })
   sample(1, 1).loop_mode, sample(1, 1).loop_start, sample(1, 1).loop_end = 2, 10, 900
   local record, done = change(peer, "sample-load", { ref = sref(place(peer), 1, 1), path = wav_file("Kick2", 4000) })
   eq(sample(1, 1).buffer.frames, 4000)
   ok(done.material.old.file and io.open(done.material.old.file, "rb"), "the old audio is kept in a file")
   local undone = restore(peer, "sample-load", record)
   ok(undone.result, json.encode(undone.error or {}))
-  eq(json.encode(sample(1, 1).buffer), before, "the same audio")
+  eq(json.encode(sample(1, 1).buffer, { sort_keys = true }), before, "the same audio")
   eq(sample(1, 1).name, "Kick")
   eq(sample(1, 1).loop_start, 10)
   eq(sample(1, 1).loop_end, 900)
@@ -282,7 +310,7 @@ test("samples: a deleted sample comes back after the one that was before it, wit
   local env, peer = setup(nil, { instrument_specs = {
     { name = "Drums", sets = 1, sample_specs = { { name = "Kick", frames = 1000 }, { name = "Snare", frames = 800, volume = 0.5, mute_group = 4, modulation_set_index = 1, note_range = { 38, 38 }, base_note = 38 }, { name = "Hat", frames = 300 } } },
     { name = "Bass synth" }, { name = "Pad" } } })
-  local snare = json.encode(sample(1, 2).buffer)
+  local snare = json.encode(sample(1, 2).buffer, { sort_keys = true })
   local record, done = change(peer, "sample-delete", { ref = sref(place(peer), 1, 2) }, "Kumi: del (k520)")
   eq(sample_names(1), "Kick,Hat")
   ok(done.material.file, "its audio kept")
@@ -292,7 +320,7 @@ test("samples: a deleted sample comes back after the one that was before it, wit
   ok(undone.result, json.encode(undone.error or {}))
   eq(sample_names(1), "New,Kick,Snare,Hat")
   local back = sample(1, 3)
-  eq(json.encode(back.buffer), snare)
+  eq(json.encode(back.buffer, { sort_keys = true }), snare)
   ok(math.abs(back.volume - 0.5) < 1e-9)
   eq(back.mute_group, 4)
   eq(back.modulation_set_index, 1)
@@ -336,6 +364,22 @@ test("samples: a slice can't be deleted (its marker can); the sliced sample's de
   eq(#instrument(1).samples, 3)
   eq(sample(1, 1).markers[2], 600)
   ok(math.abs(sample(1, 3).volume - 0.25) < 1e-9, "the slice's own settings")
+end)
+
+test("samples: the undo of a sliced sample's delete refuses once the producer put a sample into the instrument (#361 N-S21)", function()
+  local env, peer = setup()
+  local master = mock.song:instrument(1):sample(1)
+  master:insert_slice_marker(200)
+  master:insert_slice_marker(600)
+  mock.data.undo.stack = {}
+  local record = change(peer, "sample-delete", { ref = sref(place(peer), 1, 1) })
+  eq(sample_names(1), "")
+  mock.song:instrument(1):insert_sample_at(1).name = "Vocal" -- the producer drops a vocal in
+  H.tick(2)
+  local refused = restore(peer, "sample-delete", record)
+  failure(refused, "changed")
+  ok(refused.error.message:find("holds other samples", 1, true), refused.error.message)
+  eq(sample_names(1), "Vocal", "the producer's sample stays, alone")
 end)
 
 -- sample-slices

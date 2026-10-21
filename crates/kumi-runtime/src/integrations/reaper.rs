@@ -62,12 +62,12 @@ pub const CATCH_UP: CatchUpWords = CatchUpWords {
             ("fx_params", serde_json::json!({"values": values}).as_object().cloned().unwrap_or_default())
         },
         mixer: &[
-            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read },
-            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read },
-            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read },
-            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: as_read },
-            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read },
-            Mixer { what: "mixer.phase", tool: "track_phase", field: "inverted", value: as_read },
+            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[] },
+            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read, with: &[] },
+            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read, with: &[] },
+            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: as_read, with: &[] },
+            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read, with: &[] },
+            Mixer { what: "mixer.phase", tool: "track_phase", field: "inverted", value: as_read, with: &[] },
         ],
     },
     watch_description: "Learn a routine the producer does by hand in REAPER: action start just before they do it (Kumi notes the project as it is; nothing in REAPER changes), then action stop when they say they're done. Stop gives what changed: tracks added (with their mixer, folder and sends), FX added (with the parameters they moved after adding them), items, markers and settings changed, each with its track; and recipeSteps, a draft of the steps that would redo it in your change kinds, with $blanks for the tracks they worked on (the one they selected is $track). Save it at once with save_recipe from those steps, fixing the draft where it's off and leaving out anything clearly unrelated. Then say in a few words what the recipe does. The producer can ask you to change it.",

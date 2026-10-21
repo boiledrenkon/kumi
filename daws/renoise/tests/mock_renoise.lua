@@ -462,7 +462,14 @@ local function install_os_shims()
   end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
-    return { type = "file", mode = M.stat_modes[path] or 33152, size = 0, mtime = M.stat_mtimes[path] or os.time() }
+    -- (a real file's own size: the tool's size bounds read it)
+    local size = 0
+    local f = io.open(path, "rb")
+    if f then
+      size = f:seek("end") or 0
+      f:close()
+    end
+    return { type = "file", mode = M.stat_modes[path] or 33152, size = size, mtime = M.stat_mtimes[path] or os.time() }
   end
   -- Names (not paths) of the files in a folder, optionally only those matching {"*.log", ...}.
   os.filenames = function(dir, extensions)

@@ -97,7 +97,7 @@ pub enum ChangePicture {
     },
 }
 
-/// One line of a tracker before and after (its number counted from 1, as the DAW shows it); an empty side is a line
+/// One line of a tracker before and after (its number as the DAW shows it: Renoise's from 0); an empty side is a line
 /// that had nothing (or has nothing now).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PictureLine {
@@ -317,7 +317,6 @@ impl ChangePicture {
             ChangePicture::Lines { lines, more } => {
                 let mut lines: Vec<PictureLine> = lines
                     .into_iter()
-                    .filter(|line| line.line > 0)
                     .map(|line| PictureLine { line: line.line, before: cut(&line.before, MAX_LINE), after: cut(&line.after, MAX_LINE) })
                     .filter(|line| line.before != line.after)
                     .collect();
@@ -775,6 +774,8 @@ mod tests {
         assert_eq!((lines[0].line, lines[15].line), (1, 16), "in order");
         let same = ChangePicture::Lines { lines: vec![PictureLine { line: 3, before: "OFF".into(), after: "OFF".into() }], more: 0 };
         assert_eq!(same.bounded(), None, "a line written as it was draws nothing");
+        let first = ChangePicture::Lines { lines: vec![PictureLine { line: 0, before: "---".into(), after: "C-4".into() }], more: 0 };
+        assert_eq!(first.clone().bounded(), Some(first), "a tracker's first line is its 00");
         let item = |length: f64, fade_out: f64| PictureItem { name: "Vox".into(), start: 1., length, fade_in: 0., fade_out, muted: false };
         let items = ChangePicture::Items { before: vec![item(f64::NAN, 0.)], after: vec![item(2., 9.)], values: vec![] };
         let ChangePicture::Items { before, after, .. } = items.bounded().unwrap() else { panic!() };

@@ -18,7 +18,7 @@ local M = {}
 
 function M.pattern_label(song, p)
   local name = song:pattern(p).name
-  if name == nil or name == "" then name = string.format("Pattern %02X", p - 1) end
+  if name == nil or name == "" then name = string.format("Pattern %02d", p - 1) end
   return name
 end
 
@@ -134,12 +134,14 @@ base.register({
 -- automation points) are as the change left them: the producer's lines written into a pattern Kumi made longer would go out of
 -- sight.
 
--- The lines from `from` to `to` of every track of the pattern, and the automation points in them, as a short fingerprint.
+-- The lines from `from` to `to` of every track of the pattern, and the automation points in them, as a short fingerprint; "none"
+-- when they hold nothing. (An empty pattern track's lines aren't read: only its automation.)
 local function region_print(song, p, from, to)
   if from > to then return "none" end
   local pattern = song:pattern(p)
-  local a, b = 5381, 0
+  local a, b, any = 5381, 0, false
   local function add(text)
+    any = true
     for i = 1, #text do
       local byte = text:byte(i)
       a = (a * 33 + byte) % 4294967296
@@ -149,7 +151,7 @@ local function region_print(song, p, from, to)
   for t = 1, rows.track_count(song) do
     local pattern_track = pattern:track(t)
     if not pattern_track.is_alias then
-      for l = from, to do
+      for l = from, pattern_track.is_empty and from - 1 or to do
         local line = pattern_track:line(l)
         if not line.is_empty then
           add(t .. ":" .. l .. "=")
@@ -173,7 +175,7 @@ local function region_print(song, p, from, to)
       end
     end
   end
-  return string.format("%08x%08x", a, b)
+  return any and string.format("%08x%08x", a, b) or "none"
 end
 M.region_print = region_print
 
@@ -190,12 +192,14 @@ end
 
 local function length_title(label, lines) return string.format("%s %d lines", label, lines) end
 
-local function length_note(song, p, old, new)
+-- (the lines by Renoise's numbers, from 00)
+-- (`region`: the region's print, read once a callback)
+local function length_note(old, new, region)
   if new < old then
-    return string.format("Lines %d to %d are kept, hidden: making it longer again shows them.", new + 1, old)
+    return string.format("Lines %02d to %02d are kept, hidden: making it longer again shows them.", new, old - 1)
   end
-  if new > old and region_print(song, p, old + 1, new) ~= "none" then
-    return string.format("Lines %d to %d hold what was kept there, hidden: it shows again.", old + 1, new)
+  if new > old and region ~= "none" then
+    return string.format("Lines %02d to %02d hold what was kept there, hidden: it shows again.", old, new - 1)
   end
   return nil
 end
@@ -208,12 +212,13 @@ end
 local function length_preview(song, env, input)
   local p, pattern, label = length_locate(song, env, input.ref)
   local old, new = pattern.number_of_lines, length_input(input)
-  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(song, p, old, new) }
-  if old == new then display.unchanged = true end
   local low, high = math.min(old, new), math.max(old, new)
+  local region = region_print(song, p, low + 1, high)
+  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(old, new, region) }
+  if old == new then display.unchanged = true end
   return {
     target = pattern_target(env, p), prior = { lines = old },
-    fence = { lines = old, region = region_print(song, p, low + 1, high), name = pattern.name },
+    fence = { lines = old, region = region, name = pattern.name },
     display = display,
   }
 end
@@ -223,10 +228,11 @@ local function length_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(p) end
   local old, new = pattern.number_of_lines, length_input(input)
   local low, high = math.min(old, new), math.max(old, new)
-  if old ~= fence.lines or pattern.name ~= fence.name or region_print(song, p, low + 1, high) ~= fence.region then
+  local region = region_print(song, p, low + 1, high)
+  if old ~= fence.lines or pattern.name ~= fence.name or region ~= fence.region then
     fail("changed", label .. " changed since the preview")
   end
-  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(song, p, old, new) }
+  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(old, new, region) }
   if old == new then
     display.unchanged = true
     return { applied = { lines = new }, display = display, undo = { desc = desc, entry = false }, prior = { lines = old } }
@@ -260,8 +266,8 @@ local function length_restore(song, env, restore, desc)
   end
   if now ~= applied.lines then fail("changed", label .. "'s length changed in Renoise since Kumi set it") end
   if not restore.discard and type(applied.from) == "number" and region_print(song, p, applied.from, applied.to) ~= applied.region then
-    fail("changed", string.format("lines %d to %d of %s changed in Renoise since Kumi set its length: putting it back would hide them",
-      applied.from, applied.to, label))
+    fail("changed", string.format("lines %02d to %02d of %s changed in Renoise since Kumi set its length: putting it back would hide them",
+      applied.from - 1, applied.to - 1, label))
   end
   song:describe_undo(desc)
   pattern.number_of_lines = prior.lines
@@ -391,7 +397,17 @@ local function alias_apply(song, env, input, fence, desc)
     if writes > base.MAX_APPLY_WRITES then
       fail("failed", string.format("its own lines are more than Kumi puts back in one step (%d writes): clear them first, or make the alias in Renoise", writes))
     end
-    material = { lines = lines, automation = read_pattern_automation(song, env, plan.p, plan.t) }
+    -- (the instruments its notes play, each to be found again where it is when the lines go back: Renoise renumbers notes as
+    -- instruments are made, deleted or moved, but not kept lines)
+    local values = {}
+    for _, row in ipairs(lines) do
+      for _, cell in ipairs(row.notes) do
+        if cell.instrument ~= 255 then values[cell.instrument] = true end
+      end
+    end
+    material = {
+      lines = lines, automation = read_pattern_automation(song, env, plan.p, plan.t), instruments = material_.keep_instruments(song, env, values),
+    }
   else
     material = { alias = plan.now }
   end
@@ -451,11 +467,21 @@ local function alias_restore(song, env, restore, desc)
   if applied.alias == 0 and own_print(song, p, t) ~= applied.own then
     fail("changed", label .. "'s lines or automation changed in Renoise since Kumi took the alias away")
   end
+  local instruments
+  if material.lines then
+    local why
+    instruments, why = material_.instruments_now(song, env, material.instruments)
+    if not instruments and why == "unknown" then
+      fail("stale", string.format("the instruments changed in a way Kumi couldn't follow since it made %s an alias, so it can't tell which its notes play: nothing was put back", label))
+    elseif not instruments and not restore.discard then
+      fail("changed", string.format("the instrument %s that %s's notes play was deleted in Renoise since: Kumi won't put them back playing another", q(why), label))
+    end
+  end
   song:describe_undo(desc)
   local note
   if material.lines then
     pattern_track.alias_pattern_index = 0
-    material_.write_lines(song, t, { pattern = p, lines = material.lines })
+    material_.write_lines(song, t, { pattern = p, lines = material.lines }, instruments)
     local lost = 0
     for _, saved in ipairs(material.automation or {}) do
       local d = material_.device_now(song, env, t, saved.device)
@@ -490,8 +516,8 @@ base.register({
 })
 
 -- automation-write: a device parameter's automation in one pattern (its envelope in that pattern's track): points added or
--- changed, removed, a range cleared, the play mode, or the whole envelope deleted. Time is in lines from 1 (fractions to 1/256
--- of a line, as Renoise keeps them; a tick is 1/TPL of a line); a point's value is 0 to 1 of the parameter's range (measured:
+-- changed, removed, a range cleared, the play mode, or the whole envelope deleted. A request's time is in lines from 0, by
+-- Renoise's numbers (fractions to 1/256 of a line, as Renoise keeps them; a tick is 1/TPL of a line), and Renoise's own from 1; a point's value is 0 to 1 of the parameter's range (measured:
 -- linear in its own value: Gainer's gain 0..4, a point of 0.25 is 1.0), or `paramValue` in the parameter's own range.
 -- The record keeps the envelope's points before and after, whole: Kumi's undo puts them back only while they are as it left them.
 
@@ -554,6 +580,7 @@ end
 
 local function quantized(time) return math.floor(time * 256 + 0.5) / 256 end
 
+-- (a point's time as Renoise keeps it, from 1)
 local function time_of(point, lines, tpl)
   local time
   if point.time ~= nil then
@@ -563,10 +590,10 @@ local function time_of(point, lines, tpl)
     if type(tick) ~= "number" or tick < 0 or tick >= tpl then bad(string.format("tick is from 0 to %d (the song's ticks per line less one)", tpl - 1)) end
     time = (type(point.line) == "number" and point.line or 0) + tick / tpl
   end
-  if type(time) ~= "number" or time ~= time then bad("each point needs time (lines from 1, a fraction too) or line (and tick)") end
+  if type(time) ~= "number" or time ~= time then bad("each point needs time (lines from 0, a fraction too) or line (and tick)") end
   time = quantized(time)
-  if time < 1 or time >= lines + 1 then bad(string.format("a point's time is from 1 to just before %d (the pattern's %d lines)", lines + 1, lines)) end
-  return time
+  if time < 0 or time >= lines then bad(string.format("a point's time is from 0 to just before %d (the pattern's %d lines)", lines, lines)) end
+  return time + 1
 end
 
 local function envelope_wanted(object, input)
@@ -595,10 +622,10 @@ local function envelope_wanted(object, input)
       points = {}
     elseif type(input.clear) == "table" then
       local from, to = input.clear.from, input.clear.to
-      if type(from) ~= "number" or type(to) ~= "number" or from < 1 or to < from or to > lines then
-        bad(string.format("clear is true (every point) or {from, to}: lines from 1 to %d, from up to to", lines))
+      if type(from) ~= "number" or type(to) ~= "number" or from < 0 or to < from or to >= lines then
+        bad(string.format("clear is true (every point) or {from, to}: lines from 0 to %d, from up to to", lines - 1))
       end
-      drop(function(point) return point.time >= from and point.time < to + 1 end)
+      drop(function(point) return point.time >= from + 1 and point.time < to + 2 end)
     else
       bad("clear is true (every point) or {from, to}")
     end
@@ -607,7 +634,7 @@ local function envelope_wanted(object, input)
     if type(input.remove) ~= "table" then bad("remove: a list of the times of points to remove") end
     for _, time in ipairs(input.remove) do
       if type(time) ~= "number" then bad("remove: a list of the times of points to remove") end
-      local at, found = quantized(time), false
+      local at, found = quantized(time) + 1, false
       drop(function(point)
         if point.time == at then found = true end
         return point.time == at
@@ -623,7 +650,7 @@ local function envelope_wanted(object, input)
     for _, point in ipairs(input.points) do
       if type(point) ~= "table" then bad("each of points is an object {time or line, value or paramValue, scaling?}") end
       local time = time_of(point, lines, tpl)
-      if given[time] then bad("two points at " .. time .. ": one point a time") end
+      if given[time] then bad("two points at " .. (time - 1) .. ": one point a time") end
       given[time] = true
       local value = point.value
       if point.paramValue ~= nil then
