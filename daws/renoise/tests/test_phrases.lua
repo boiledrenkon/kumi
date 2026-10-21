@@ -43,7 +43,10 @@ test("phrases: a deleted phrase comes back with its lines, settings, column name
   p:line(3):note_column(2).note_string = "E-4"
   p:line(5):effect_column(1).number_string = "0A"
   p:set_column_name(1, "Root")
-  mock.song:instrument(2):insert_phrase_mapping_at(1, p).note_range = { 60, 71 }
+  local mapping = mock.song:instrument(2):insert_phrase_mapping_at(1, p)
+  mapping.note_range = { 60, 71 }
+  -- (how its keys play it, the mapping's own: #361 N13)
+  mapping.key_tracking, mapping.base_note, mapping.looping, mapping.loop_end, mapping.loop_start = 3, 60, false, 8, 3
   mock.data.undo.stack = {}
   local record = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 1) })
   eq(#instrument(2).phrases, 0)
@@ -60,6 +63,9 @@ test("phrases: a deleted phrase comes back with its lines, settings, column name
   eq(back:line(5):effect_column(1).number_string, "0A")
   eq(back:column_name(1), "Root")
   eq(instrument(2).mappings[1].note_range[1], 60, "its keys mapped again")
+  local kept = instrument(2).mappings[1]
+  eq(string.format("%s %s %s %s %s", kept.key_tracking, kept.base_note, tostring(kept.looping), kept.loop_start, kept.loop_end), "3 60 false 3 8",
+    "playing as they did (#361 N13)")
   local again = restore(peer, "phrase-delete", record)
   ok(again.result, json.encode(again.error or {}))
   ok(again.result.display.title:find("back already", 1, true), again.result.display.title)

@@ -353,6 +353,38 @@ local function delete_preview(song, env, input)
   return { target = places_.target_of(env, "phrase", n), prior = { deleted = false }, fence = phrase_print(objects.phrase), display = display }
 end
 
+-- (the mapping's fields and how a delete keeps them: below, with phrase-map)
+local map_state, write_map, ALL_MAPPING
+
+-- The values of the script's input parameters, by name (none until Renoise compiled it).
+local function script_parameters(phrase)
+  local ok, kept = pcall(function()
+    local out = {}
+    for _, parameter in ipairs(phrase.script.parameters) do out[#out + 1] = { name = parameter.name, value = parameter.value } end
+    return out
+  end)
+  return ok and #kept > 0 and kept or nil
+end
+
+-- Those values set again on the script's parameters of the same names: how many couldn't be (Renoise compiles a committed
+-- script in its player a moment later, so its parameters may not be there yet).
+local function write_script_parameters(phrase, kept)
+  local missed = 0
+  for _, saved in ipairs(kept or {}) do
+    local done = pcall(function()
+      for _, parameter in ipairs(phrase.script.parameters) do
+        if parameter.name == saved.name then
+          parameter.value = saved.value
+          return
+        end
+      end
+      error("not there")
+    end)
+    if not done then missed = missed + 1 end
+  end
+  return missed
+end
+
 local function delete_apply(song, env, input, fence, desc)
   local ok, n, objects, label = pcall(places_.locate, song, env, "phrase", input, "phrase-delete")
   if not ok then base.gone_is_changed(n) end
@@ -361,8 +393,10 @@ local function delete_apply(song, env, input, fence, desc)
   local lines, writes = read_lines(phrase)
   if writes > M.MAX_WRITES then fail("failed", label .. " holds more lines than Kumi puts back in one step, so it won't delete it: clear some of its lines first, or delete it in Renoise") end
   local material = {
-    index = n[2], settings = settings_of(phrase), lines = lines, columns = columns_of(phrase), mapping = mapping_of(phrase),
-    script = phrase.script.paragraphs, program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == n[2]) or nil,
+    index = n[2], settings = settings_of(phrase), lines = lines, columns = columns_of(phrase),
+    -- (its keys and how they play it: key tracking, base note, looping and loop, which are the mapping's own)
+    mapping = phrase.mapping and map_state(phrase, ALL_MAPPING) or nil,
+    script = phrase.script.paragraphs, scriptParameters = script_parameters(phrase), program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == n[2]) or nil,
     -- (its count of changed lines, for the one Kumi puts back to take on)
     logs = env.logs_of and env.logs_of("phrase", n) or nil,
   }
@@ -407,9 +441,14 @@ local function delete_restore(song, env, restore, desc)
       phrase.script.paragraphs = material.script
       phrase.script:commit()
     end)
+    local missed = write_script_parameters(phrase, material.scriptParameters)
+    if missed > 0 then
+      notes[#notes + 1] = string.format("Its script's %s back at %s defaults (Renoise compiles the script a moment later): set %s again in its script panel.",
+        missed == 1 and "parameter comes" or (missed .. " parameters come"), missed == 1 and "its" or "their", missed == 1 and "it" or "them")
+    end
   end
   if material.mapping then
-    local mapped, why_not = set_mapping(instrument, phrase, material.mapping.noteRange)
+    local mapped, why_not = write_map(instrument, phrase, material.mapping)
     if not mapped then notes[#notes + 1] = string.format("Its keys (%d-%d) weren't mapped again: %s.", material.mapping.noteRange[1], material.mapping.noteRange[2], why_not) end
   end
   if material.program then
@@ -445,6 +484,8 @@ local MAPPING_FIELDS = {
   loopEnd = { get = function(m) return m.loop_end - 1 end, set = function(m, v) m.loop_end = v + 1 end, check = whole(0, 511), says = "loopEnd is a line of the phrase, from 0" },
 }
 local MAPPING_ORDER = { "keyTracking", "baseNote", "looping", "loopStart", "loopEnd" }
+ALL_MAPPING = {}
+for _, key in ipairs(MAPPING_ORDER) do ALL_MAPPING[key] = true end
 
 local function same_range(a, b)
   if not a or not b then return (not a) == (not b) end
@@ -452,7 +493,7 @@ local function same_range(a, b)
 end
 
 -- The mapping's state for the keys a change names: its range (false when unmapped) and the fields asked.
-local function map_state(phrase, keys)
+function map_state(phrase, keys)
   local mapping = phrase.mapping
   local state = { noteRange = mapping and { mapping.note_range[1], mapping.note_range[2] } or false }
   for _, key in ipairs(MAPPING_ORDER) do
@@ -469,7 +510,7 @@ local function same_map(a, b)
   return true
 end
 
-local function write_map(instrument, phrase, state)
+function write_map(instrument, phrase, state)
   local done, why = set_mapping(instrument, phrase, state.noteRange or nil)
   if not done then return false, why end
   local mapping = phrase.mapping
