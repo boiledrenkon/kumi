@@ -1023,6 +1023,7 @@ case!(an_own_daws_setup_hands_the_session_its_bridge_and_reconnects_it, async {
         version: Some("0.1.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };

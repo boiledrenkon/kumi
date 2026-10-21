@@ -67,7 +67,7 @@ async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     let code = renoise.setup_bridge(out.clone(), &env, yes()).await.unwrap();
     assert_eq!(code, 0, "{}", out.0.borrow());
     assert!(out.0.borrow().contains("Kumi's tool 1.0.0 is in Renoise"), "{}", out.0.borrow());
-    let tool = dir.path().join("Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx");
+    let tool = dir.path().join("Renoise").join("V3.5.4").join("Scripts").join("Tools").join("com.kumi.Bridge.xrnx");
     assert!(tool.join("main.lua").exists() && tool.join("bridge-reference.json").exists());
     assert!(renoise.bridge_installed(&env));
     let config = renoise.bridge_config(&env).expect("the reference, once installed");
@@ -343,7 +343,7 @@ async fn an_update_follows_each_copy_and_never_puts_back_a_bridge_taken_out_or_m
     daw_bridge::lifecycle::Lifecycle::new(std::path::Path::new(&home), target).install(&extension, "0.1.0").unwrap();
 
     // Renoise 3.5.5's first run copied 3.5.4's folder, Kumi's tool in it: an update brings both along, from 3.5.4.
-    let tool = |version: &str| dir.path().join("Renoise").join(version).join("Scripts/Tools/com.kumi.Bridge.xrnx");
+    let tool = |version: &str| dir.path().join("Renoise").join(version).join("Scripts").join("Tools").join("com.kumi.Bridge.xrnx");
     copy_folder(&tool("V3.5.4"), &tool("V3.5.5"));
     out.0.borrow_mut().clear();
     assert_eq!(own::RENOISE.after_update(&io, &home, &later.to_string_lossy(), None).await, 0);
