@@ -826,29 +826,41 @@ function M.journal_list_event(journal, key, scope, type_, index, index2, undoing
 end
 
 -- n-instruments: Kumi put back a change that made or removed something itself, found by its place (the journal followed it).
-function M.note_restored_at(journal, kind, place)
-  for _, entry in ipairs(journal.entries) do
-    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
-      entry.state, entry.redone = "undone", nil
-      stamp(journal, entry)
-      return true
+-- The journal entry of the change Kumi is putting back: the one the restore names (`journal.restoring`, its desc), else the
+-- newest of the kind that `matches`. (Two changes of one kind and place are told apart by their desc, not by the first found.)
+local function restored_entry(journal, kind, matches)
+  local function open(entry) return entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") end
+  if type(journal.restoring) == "string" then
+    for i = #journal.entries, 1, -1 do
+      local entry = journal.entries[i]
+      if entry.desc == journal.restoring and open(entry) then return entry end
     end
   end
-  return false
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if open(entry) and matches(entry) then return entry end
+  end
+  return nil
+end
+
+function M.note_restored_at(journal, kind, place)
+  local entry = restored_entry(journal, kind, function(e) return M.same_table(e.place, place) end)
+  if not entry then return false end
+  entry.state, entry.redone = "undone", nil
+  stamp(journal, entry)
+  return true
 end
 
 -- Kumi put a change back itself: the change is not the producer's to undo any more (the producer's undo of that restore then
 -- brings it back, which is told as a redo).
 function M.note_restored(journal, kind, place, applied, spec)
-  for _, entry in ipairs(journal.entries) do
-    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and
-      (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
-      entry.state, entry.redone = "undone", nil
-      stamp(journal, entry)
-      if entry.shape and place then entry.place = place end
-      return
-    end
-  end
+  local entry = restored_entry(journal, kind, function(e)
+    return e.shape or (M.same_table(e.place, place) and spec and spec.same(e.applied, applied))
+  end)
+  if not entry then return end
+  entry.state, entry.redone = "undone", nil
+  stamp(journal, entry)
+  if entry.shape and place then entry.place = place end
 end
 
 -- M4 (n-song): a kind of several settings of one object (the song's groove, a track's columns), any of which a change gives:

@@ -101,7 +101,19 @@ function M.restores_by_place(kind)
   return spec ~= nil and spec.by_place == true
 end
 
+-- (the journal is told which change is being put back, by its desc, for the length of the restore's own callback)
+local restore_in
+
 function M.restore(params, env)
+  local journal = env.journal
+  if journal then journal.restoring = type(params.of) == "string" and params.of or nil end
+  local ok, done = pcall(restore_in, params, env)
+  if journal then journal.restoring = nil end
+  if not ok then error(done, 0) end
+  return done
+end
+
+function restore_in(params, env)
   local song = base.context(params, env)
   local spec = kind_of(params)
   local desc = base.need_text(params, "desc")

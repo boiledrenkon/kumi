@@ -2538,3 +2538,30 @@ test("changes: a #Send is aimed by receiverRef, the send track; anything else is
   failure(asked({ path = "Gainer", receiverRef = track_ref(e2, second) }), "bad-params")
   H.no_dialogs()
 end)
+
+test("changes: Kumi's undo of the second of two device adds marks that one undone, so the producer's Cmd-Z of it is told as its redo (#361 N-S3)", function()
+  local env, peer = device_song()
+  local function add(t, desc)
+    local epoch, layout = place(peer)
+    local input = { ref = track_ref(epoch, t), path = "Gainer" }
+    local previewed = preview(peer, "device-add", input)
+    local done = apply(peer, "device-add", input, desc, previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    H.tick(2)
+    return { target = done.result.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }, done.result
+  end
+  add(1, "Kumi: add one (ks01)")
+  local second, done = add(2, "Kumi: add two (ks02)")
+  local undone = restore(peer, "device-add", second, "Kumi: undo two (ks03)", done.epoch, done.layout, { of = "Kumi: add two (ks02)" })
+  ok(undone.result, json.encode(undone.error or {}))
+  H.tick(2)
+  drain(peer)
+  peer.events = {}
+  mock.song:undo() -- the producer takes Kumi's undo back: the second Gainer again
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1, "told once")
+  eq(told[1].data.how, "redo")
+  eq(told[1].data.descs[1], "Kumi: add two (ks02)", "the change Kumi undid, not the first add")
+end)
