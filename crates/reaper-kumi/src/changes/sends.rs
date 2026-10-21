@@ -179,6 +179,17 @@ fn note_written(reaper: &Reaper, owner: Track, receiver: Track, before: String) 
     });
 }
 
+/// Runs a write Kumi makes to send `index` of `owner` elsewhere (its automation mode, its envelopes shown or hidden) and
+/// notes what it did to the sends between the two tracks, as this module's own writes are: a ref to one of several
+/// sends between them, read before, still names its send after.
+pub(super) fn noting_writes<T>(reaper: &Reaper, owner: Track, index: i32, write: impl FnOnce() -> T) -> T {
+    let Some(receiver) = reaper.send_peer(owner, 0, index) else { return write() };
+    let before = pair_seen(reaper, owner, receiver);
+    let done = write();
+    note_written(reaper, owner, receiver, before);
+    done
+}
+
 /// Whether a ref to one of the sends from `owner` to `receiver` still names the send it was read as: those sends are as the ref
 /// saw them (`seen`), or as Kumi's own writes made them since. A ref to one of two or more without `seen` names none.
 pub(crate) fn seen_holds(reaper: &Reaper, owner: Track, receiver: Track, seen: Option<&str>) -> bool {
@@ -720,6 +731,15 @@ fn channels_text(state: &Value) -> String {
 
 /// Whether the tracks at both ends have the channels the wanted state uses: a send can't take from or give to channels a
 /// track doesn't have (REAPER keeps them, unheard).
+/// The fields asked for over the send's own: a change of one end is checked with the other end it has.
+fn over(now: &Value, wanted: &Value) -> Value {
+    let mut merged = now.clone();
+    for (key, value) in wanted.as_object().into_iter().flatten() {
+        merged[key] = value.clone();
+    }
+    merged
+}
+
 fn fits(reaper: &Reaper, from: Track, to: Track, wanted: &Value) -> Done<()> {
     let channels = |track: Track| reaper.track_value(track, "I_NCHAN").max(2.0) as i64;
     let src = wanted["srcChan"].as_i64();
@@ -753,7 +773,7 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let route = route_text(&found.from, &found.to);
     let mut display = json!({"title": (prop.title)(&route, &wanted), "before": now, "after": wanted});
@@ -773,7 +793,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
     }
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !(prop.same)(&now, &wanted) && !(prop.write)(ctx.reaper, found.track, found.index, &wanted) {
@@ -1030,6 +1050,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = send_state(ctx.reaper, found.track, found.index);
     if !restore.discard && !same_state(&now, restore.applied) {
         return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
+    }
+    // Its volume, pan and mute envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
+    let drawn = active_envelopes(ctx.reaper, found.track, found.index);
+    if !restore.discard && drawn > 0 {
+        return Err(changed(format!(
+            "the send {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
+            route_text(&found.from, &found.to)
+        )));
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !ctx.reaper.remove_send(found.track, 0, found.index) {

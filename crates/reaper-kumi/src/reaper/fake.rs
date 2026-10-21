@@ -2509,10 +2509,17 @@ unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const
             return false;
         };
         let Some(state) = s.chunks.get(n).cloned() else { return false };
+        let height = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("TRACKHEIGHT "))
+            .and_then(|rest| rest.split_whitespace().next()?.parse::<f64>().ok());
         let Some(slot) = track_mut(s, track as u64) else { return false };
-        // A track's sends are the destination's lines, not part of its chunk.
+        // A track's sends are the destination's lines, not part of its chunk, and nor is its selection (7.82 lab).
         let sends = std::mem::take(&mut slot.sends);
-        *slot = FakeTrack { sends: if state.sends.is_empty() { sends } else { state.sends }, ..state };
+        *slot = FakeTrack { sends: if state.sends.is_empty() { sends } else { state.sends }, selected: slot.selected, ..state };
+        if let Some(height) = height.filter(|height| *height != 0.0) {
+            slot.extra.insert("I_HEIGHTOVERRIDE".into(), height);
+        }
         s.undo_dirty = true;
         true
     })

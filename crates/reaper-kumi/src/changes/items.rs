@@ -442,7 +442,8 @@ fn put_place(ctx: &Ctx, guid: &str, place: &Value) -> Done<Item> {
             if !reaper.move_item_to_track(item, track) {
                 return Err(failed("REAPER wouldn't move the item to that track"));
             }
-            item = item_by_guid(ctx, guid).ok_or_else(|| failed("the item went while it was moved"))?;
+            item = item_by_guid(ctx, guid)
+                .ok_or_else(|| ("uncertain".to_string(), "the item went while it was moved: read the items".to_string()))?;
         }
     }
     reaper.set_item_value(item, "D_POSITION", number(place, "position"));
@@ -556,10 +557,37 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_place(&now, restore.applied) {
         return Err(changed(format!("{} has been moved in REAPER since Kumi moved it", label(ctx, found.item))));
     }
-    let item = put_place(ctx, &found.guid, restore.prior)?;
+    // The lane it goes back to, as the track it goes back to has lanes now: one whose fixed lanes went off or on since (or
+    // that has fewer) can't hold it as it was, which is the producer's change, found before anything is written. Told to
+    // undo anyway, it goes back to its place on that track, on its first lane if it has lanes.
+    let mut back = restore.prior.clone();
+    if let Some(track) = restore.prior["track"].as_str().and_then(|guid| track_by_guid(ctx, guid)) {
+        let lanes = lane_count(ctx.reaper, track);
+        let fits = match restore.prior["lane"].as_i64() {
+            Some(lane) => lanes.is_some_and(|count| lane < count),
+            None => lanes.is_none(),
+        };
+        if !fits {
+            if !restore.discard {
+                return Err(changed(format!(
+                    "{}'s lanes have been changed in REAPER since Kumi moved {} off it: it can't go back to its lane",
+                    quoted(&super::track_name(ctx.reaper, track)),
+                    label(ctx, found.item)
+                )));
+            }
+            back["lane"] = lanes.map(|_| 0).into();
+        }
+    }
+    let item = put_place(ctx, &found.guid, &back)?;
     let after = place_of(ctx.reaper, item);
-    if !same_place(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item back where it was"));
+    if !same_place(&after, &back) {
+        // Written, so never a plain failure: put where Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_place(ctx, &found.guid, &now).is_ok_and(|item| same_place(&place_of(ctx.reaper, item), &now));
+        return Err(if left {
+            failed("REAPER didn't put the item back where it was; it is where Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item back where it was, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored { restored: after, display: json!({"title": format!("{} moved back", label_opening(ctx, item))}), unwritten: false })
 }
@@ -822,10 +850,37 @@ pub fn trim_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_edges(&now, restore.applied) {
         return Err(changed(format!("{} has been changed in REAPER since Kumi trimmed it", label(ctx, found.item))));
     }
+    // Putting the start back moves its takes' offsets, and REAPER doesn't move stretch markers with them: markers the
+    // producer added since (the trim had none to move) would slide off the audio they hold, discard or not.
+    let reaper = ctx.reaper;
+    let offset_of = |state: &Value, guid: &str| {
+        state["offsets"].as_array().into_iter().flatten().find(|e| e[0].as_str() == Some(guid)).and_then(|e| e[1].as_f64())
+    };
+    let slid = (0..reaper.take_count(found.item)).filter_map(|n| reaper.take_at(found.item, n)).any(|take| {
+        let guid = reaper.take_guid(take);
+        let moves = match (offset_of(&now, &guid), offset_of(restore.prior, &guid)) {
+            (Some(now), Some(then)) => !close(now, then),
+            _ => false,
+        };
+        moves && !reaper.stretch_markers(take).is_empty()
+    });
+    if slid {
+        return Err(changed(format!(
+            "{} has stretch markers now, which REAPER doesn't move with its start: putting the start back would slide them off \
+             the audio they hold, so Kumi leaves it, even with discard",
+            label(ctx, found.item)
+        )));
+    }
     put_edges(ctx, found.item, restore.prior);
     let after = edges_of(ctx.reaper, found.item);
     if !same_edges(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item's edges back"));
+        // Written, so never a plain failure: put as Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_edges(ctx, found.item, &now) && same_edges(&edges_of(ctx.reaper, found.item), &now);
+        return Err(if left {
+            failed("REAPER didn't put the item's edges back; it is as Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item's edges back, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored {
         restored: after,
@@ -1394,11 +1449,17 @@ pub fn props_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         ("lock", _) => 2,
         _ => 1,
     });
-    // A lock Kumi set is opened first, so the rest can be put back.
-    if is_locked(ctx.reaper, found.item) {
-        ctx.reaper.set_item_value(found.item, "C_LOCK", (ctx.reaper.item_value(found.item, "C_LOCK") as i64 & !1) as f64);
+    // A lock is opened first, so the rest can be put back; one that isn't Kumi's to put back (the producer's, set since)
+    // is closed again after.
+    let lock = ctx.reaper.item_value(found.item, "C_LOCK");
+    let locked = is_locked(ctx.reaper, found.item);
+    if locked {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", (lock as i64 & !1) as f64);
     }
     write_state(ctx.reaper, found.item, &order, restore.prior);
+    if locked && !fields.iter().any(|field| field.key == "lock") {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", lock);
+    }
     ctx.reaper.update_item(found.item);
     let after = state_of(ctx.reaper, found.item, &fields);
     if !same_state(&fields, &after, restore.prior) {
@@ -1576,6 +1637,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         "chunk": chunk,
         "track": reaper.track_guid(found.track),
         "selected": reaper.item_value(found.item, "B_UISEL") != 0.0,
+        "tempo": marks::tempo_print(reaper, ctx.proj),
     });
     if !reaper.delete_item(found.track, found.item) {
         return Err(failed("REAPER wouldn't delete the item"));
@@ -1635,6 +1697,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
         return Err(changed("an item with that id is in the project again"));
     }
+    marks::tempo_unmoved(ctx, material, restore.discard, "the item")?;
     let item = remake(ctx, track_guid, chunk, &guid)?;
     // The producer's selection stands: the item is selected again only where nothing else is.
     let select = material["selected"] == true && !other_items_selected(ctx, item);

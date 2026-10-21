@@ -1,10 +1,11 @@
 //! Keeping a scratch copy (M5 listening, `scratch-keep {ref: copy, name}`): a goal's best copy becomes a track of the
 //! producer's, named as Kumi says and sending to the master as a track does, and leaves the scratch copies (its mark is
-//! taken off, so no drop or sweep removes it). Undone by value: the track is deleted while it is as Kumi left it.
+//! taken off, so no drop or sweep removes it). Undone by value: the track is deleted while it is as Kumi left it, all of
+//! it (its chunk's print: items, takes, fades, FX and take FX, envelopes, automation items, containers).
 
 use serde_json::{json, Value};
 
-use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
+use super::{chunks, Applied, Ctx, Done, Fault, Preview, Restore, Restored};
 use crate::listening::scratch::MARK;
 use crate::read::{bad, failed};
 use crate::reaper::{FxOwner, Reaper, Track};
@@ -140,6 +141,12 @@ fn mark_of(reaper: &Reaper, track: Track) -> String {
     reaper.track_string(track, MARK).unwrap_or_default()
 }
 
+/// The print of the track's whole state (`chunks::print_of`: what only the screen or a selection changes left out), or
+/// None when REAPER won't give it.
+fn print(reaper: &Reaper, track: Track) -> Option<String> {
+    reaper.track_chunk(track).map(|chunk| chunks::print_of(&chunk))
+}
+
 /// What the preview fences and the apply checks again: the copy by its GUID, still a scratch copy, as it was.
 fn fence(reaper: &Reaper, track: Track, guid: &str) -> Value {
     json!({
@@ -148,6 +155,7 @@ fn fence(reaper: &Reaper, track: Track, guid: &str) -> Value {
         "name": reaper.track_name(track),
         "mainSend": reaper.track_value(track, "B_MAINSEND") != 0.0,
         "signature": signature(reaper, track),
+        "print": print(reaper, track),
     })
 }
 
@@ -184,8 +192,11 @@ pub fn apply(ctx: &Ctx, input: &Value, fenced: &Value) -> Done<Applied> {
     // Out of the scratch copies: no drop or sweep takes a track without Kumi's mark.
     reaper.set_track_string(track, MARK, "");
     let reference = refs::track_ref(&TrackId::Guid(guid.clone()));
+    // The whole track as Kumi leaves it: its undo deletes the track only while it is still so (by the signature alone when
+    // REAPER won't give the track's state).
+    let print = print(reaper, track);
     Ok(Applied {
-        applied: json!({"name": reaper.track_name(track), "mainSend": true, "signature": signature(reaper, track)}),
+        applied: json!({"name": reaper.track_name(track), "mainSend": true, "signature": signature(reaper, track), "print": print}),
         created: Some(json!({"ref": reference, "kind": "track"})),
         material: None,
         display: json!({"title": format!("Kept {}", super::quoted(&name))}),
@@ -202,15 +213,16 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     let name = reaper.track_name(track);
     let applied = restore.applied;
-    let as_left = applied["name"].as_str() == Some(name.as_str())
-        && reaper.track_value(track, "B_MAINSEND") != 0.0
-        && applied.get("signature") == Some(&signature(reaper, track));
+    // All of the track (a copy kept before its print was, by its signature).
+    let same = match applied["print"].as_str() {
+        Some(kept) => print(reaper, track).as_deref() == Some(kept),
+        None => applied.get("signature") == Some(&signature(reaper, track)),
+    };
+    let as_left = applied["name"].as_str() == Some(name.as_str()) && reaper.track_value(track, "B_MAINSEND") != 0.0 && same;
     if !as_left && !restore.discard {
         return Err(changed(format!("{} changed in REAPER since Kumi kept it", super::quoted(&name))));
     }
-    if !reaper.delete_track(track) {
-        return Err(failed("REAPER wouldn't delete the track"));
-    }
+    super::tracks::delete_keeping_folders(ctx, &[track], if restore.discard { None } else { Some(&[]) })?;
     Ok(Restored {
         restored: json!({"deletedRef": refs::track_ref(&TrackId::Guid(guid))}),
         display: json!({"title": format!("{} taken away again", super::quoted(&name))}),

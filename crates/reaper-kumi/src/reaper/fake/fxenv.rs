@@ -255,6 +255,20 @@ fn prune_all(s: &mut State) {
 
 fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
     let mut text = format!("BYPASS {} {} 0\n", if fx.enabled { 0 } else { 1 }, if fx.offline { 1 } else { 0 });
+    // Equal states share a number, so an unchanged FX reads the same each time (print fences hash chunk text). A
+    // plug-in's is inside its block, where REAPER keeps the plug-in's own state; a container's covers the container
+    // alone (what is inside it has entries of its own, as in REAPER's text).
+    let mut kept = fx.clone();
+    if kept.children.is_some() {
+        kept.children = Some(vec![]);
+    }
+    let n = match s.fx_store.iter().position(|stored| *stored == kept) {
+        Some(n) => n,
+        None => {
+            s.fx_store.push(kept);
+            s.fx_store.len() - 1
+        }
+    };
     match &fx.children {
         Some(children) => {
             text += "<CONTAINER Container \"\"\n";
@@ -262,6 +276,7 @@ fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
                 text += &entry_text(s, owner, child);
             }
             text += ">\n";
+            text += &format!("FAKEFX {n}\n");
         }
         None => {
             text += &format!("<VST \"{}\" fake.vst 0 \"\" 0\n", fx.name);
@@ -271,18 +286,10 @@ fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
             if let Some(chunk) = &fx.chunk {
                 text += &format!("CHUNK {chunk}\n");
             }
+            text += &format!("FAKEFX {n}\n");
             text += ">\n";
         }
     }
-    // Equal states share a number, so an unchanged FX reads the same each time (print fences hash chunk text).
-    let n = match s.fx_store.iter().position(|kept| kept == fx) {
-        Some(n) => n,
-        None => {
-            s.fx_store.push(fx.clone());
-            s.fx_store.len() - 1
-        }
-    };
-    text += &format!("FAKEFX {n}\n");
     if !fx.renamed.is_empty() {
         text += &format!("RENAMED \"{}\"\n", fx.renamed);
     }
@@ -373,6 +380,8 @@ fn parse_entries(s: &mut State, lines: &[&str], at: &mut usize, end_at_close: bo
                             }
                         } else if let Some(rest) = inner.strip_prefix("CHUNK ") {
                             chunk = Some(rest.to_string());
+                        } else if let Some(n) = inner.strip_prefix("FAKEFX ") {
+                            stored = n.trim().parse::<usize>().ok();
                         }
                         *at += 1;
                     }
@@ -508,6 +517,32 @@ pub(super) fn chain_block(s: &mut State, owner: u64, name: &str, chain: &[FakeFx
 
 // ----- adds, deletes, copies -----
 
+/// REAPER keeps a parameter link's source by its place in the chain and follows it as FX come and go (7.82 lab): a link
+/// to an FX that is deleted is cleared, one to an FX after a place that changed moves with it.
+fn follow_links(chain: &mut [FakeFx], place: usize, inserted: Option<usize>) {
+    for fx in chain.iter_mut() {
+        let linked: Vec<String> = fx.config.keys().filter(|k| k.ends_with(".plink.effect")).cloned().collect();
+        for key in linked {
+            let Some(effect) = fx.config.get(&key).and_then(|v| v.parse::<i64>().ok()).filter(|e| *e >= 0) else { continue };
+            let effect = effect as usize;
+            let moved = match inserted {
+                Some(count) if effect >= place => Some(effect + count),
+                Some(_) => None,
+                None if effect == place => {
+                    fx.config.insert(key.replace(".plink.effect", ".plink.active"), "0".into());
+                    fx.config.insert(key.clone(), "-1".into());
+                    None
+                }
+                None if effect > place => Some(effect - 1),
+                None => None,
+            };
+            if let Some(moved) = moved {
+                fx.config.insert(key, moved.to_string());
+            }
+        }
+    }
+}
+
 /// Puts FX into a chain at an address (REAPER's `-1000 - address`, or the end): the place in its chain the first went to.
 fn insert(s: &mut State, owner: u64, input: bool, address: Option<i32>, made: Vec<Parsed>) -> c_int {
     let path = match address {
@@ -520,6 +555,9 @@ fn insert(s: &mut State, owner: u64, input: bool, address: Option<i32>, made: Ve
     let place = {
         let Some((chain, place)) = holder_mut(s, owner, input, &path) else { return -1 };
         let place = place.min(chain.len());
+        if path.len() == 1 {
+            follow_links(chain, place, Some(made.len()));
+        }
         for (n, parsed) in made.into_iter().enumerate() {
             envelopes.extend(parsed.envelopes);
             chain.insert(place + n, parsed.fx);
@@ -593,6 +631,9 @@ fn delete(owner: u64, index: c_int) -> bool {
             return false;
         }
         let removed = chain.remove(place);
+        if path.len() == 1 {
+            follow_links(chain, place, None);
+        }
         drop_envelopes(s, owner, &removed);
         prune_all(s);
         s.undo_dirty = true;

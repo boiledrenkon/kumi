@@ -2,31 +2,50 @@
 //! take deleted or rendered, a glue. Such a change keeps the item's chunk from before it and puts it back whole, but only
 //! while the item is exactly as the change left it (its print, below): then nothing of the producer's is overwritten.
 //!
-//! The print leaves out what only the screen or a selection changes (the item's selection, the MIDI editor's view and
-//! filter, which notes are selected, open FX windows), so opening an item to look at it doesn't make it "changed".
+//! The print leaves out what only the screen or a selection changes (the item's and the track's selection, the MIDI
+//! editor's view and filter, which notes and envelope points are selected, open FX windows, track and envelope lane
+//! heights), so looking at an item or a track, or clicking another, doesn't make it "changed".
 
 use crate::reaper::{Item, Reaper};
 
 /// The most of an item's state a change keeps to put back: it travels in a frame and sits in the host's journal.
 pub const MOST_KEPT: usize = 24 << 20;
 
-/// Lines that say only how the item is shown or selected, at any depth.
-const VIEW_LINES: [&str; 10] =
-    ["CFGEDITVIEW ", "CFGEDIT ", "EVTFILTER ", "KEYSNAP ", "TRACKSEL ", "VELLANE ", "SHOW ", "LASTSEL ", "DOCKED ", "FLOATPOS "];
+/// Lines that say only how the item or track is shown or selected, at any depth: the MIDI editor's view, FX windows, and
+/// the heights of the track and its envelope lanes (`TRACKHEIGHT` moves when the producer resizes the track, 7.82 lab).
+const VIEW_LINES: [&str; 13] = [
+    "CFGEDITVIEW ",
+    "CFGEDIT ",
+    "EVTFILTER ",
+    "KEYSNAP ",
+    "TRACKSEL ",
+    "VELLANE ",
+    "SHOW ",
+    "LASTSEL ",
+    "DOCKED ",
+    "FLOATPOS ",
+    "WNDRECT ",
+    "TRACKHEIGHT ",
+    "LANEHEIGHT ",
+];
 
 /// The chunk without what only the screen or a selection changes: an item's selection and list number (in an item's chunk,
-/// or in each item of a track's), the MIDI editor's view, which events are selected, FX windows.
+/// or in each item of a track's), the track's own selection, the MIDI editor's view, which events and envelope points are
+/// selected, FX windows, lane heights.
 pub fn normalized(chunk: &str) -> String {
     let mut out = String::with_capacity(chunk.len());
-    // The blocks open around each line, by their first word: an item's own lines are those right inside `<ITEM`.
+    // The blocks open around each line, by their first word: an item's own lines are those right inside `<ITEM`, a
+    // track's those right inside `<TRACK`.
     let mut blocks: Vec<&str> = Vec::new();
     for line in chunk.lines() {
         let trimmed = line.trim_start();
         let opens = trimmed.starts_with('<');
         let closes = trimmed.trim_end() == ">";
         let in_item = blocks.last() == Some(&"<ITEM");
+        let in_track = blocks.last() == Some(&"<TRACK");
         let item_level = in_item && (trimmed.starts_with("SEL ") || trimmed.starts_with("IID "));
-        if item_level || VIEW_LINES.iter().any(|prefix| trimmed.starts_with(prefix)) || trimmed == "FLOAT" {
+        let track_level = in_track && trimmed.starts_with("SEL ");
+        if item_level || track_level || VIEW_LINES.iter().any(|prefix| trimmed.starts_with(prefix)) || trimmed == "FLOAT" {
             continue;
         }
         // A track's lane-recording line naming no recording or comp lane: REAPER writes it once it has put the track back
@@ -35,11 +54,14 @@ pub fn normalized(chunk: &str) -> String {
         if trimmed.trim_end().strip_prefix("LANEREC -1 -1 -1 ").is_some_and(|rest| rest.parse::<i64>().is_ok()) {
             continue;
         }
-        // A selected MIDI event (`e`, `em`, `<x`) is the same event as an unselected one.
+        // A selected MIDI event (`e`, `em`, `<x`) is the same event as an unselected one, and so is a selected envelope
+        // point (`PT 0 0.14 0` is written `PT 0 0.14 0 0 1` once selected: time, value, shape, tension, selected; 7.82 lab).
         let line = if trimmed.starts_with("e ") || trimmed.starts_with("em ") {
             format!("E{}", &trimmed[1..])
         } else if trimmed.starts_with("<x ") {
             format!("<X{}", &trimmed[2..])
+        } else if trimmed.starts_with("PT ") {
+            unselected_point(trimmed)
         } else {
             trimmed.to_string()
         };
@@ -52,6 +74,19 @@ pub fn normalized(chunk: &str) -> String {
         }
     }
     out
+}
+
+/// An envelope point's line with its selection taken out: the fifth number cleared, and the numbers after the shape that
+/// are left at zero dropped, so a point that was never selected and one selected and let go read the same.
+fn unselected_point(line: &str) -> String {
+    let mut fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() > 5 {
+        fields[5] = "0";
+    }
+    while fields.len() > 4 && fields.last().and_then(|field| field.parse::<f64>().ok()) == Some(0.0) {
+        fields.pop();
+    }
+    fields.join(" ")
 }
 
 /// A short, stable word for what the chunk holds: two chunks that differ only in their view and selection share it.
@@ -113,8 +148,31 @@ mod tests {
         let looked_at = track.replacen("SEL 1\nIGUID", "SEL 0\nIGUID", 1);
         assert_ne!(track, looked_at);
         assert_eq!(print_of(&track), print_of(&looked_at));
-        // (a `SEL` right inside the track's own block is not an item's)
-        assert_ne!(print_of(&track), print_of(&track.replacen("NAME \"Vox\"\nSEL 1", "NAME \"Vox\"\nSEL 0", 1)));
+    }
+
+    #[test]
+    fn a_tracks_print_leaves_out_its_own_selection_its_heights_its_windows_and_which_points_are_selected() {
+        let envelope = "<VOLENV2\nEGUID {E}\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 1\nPT 0 0.14 0\nPT 2 0.5 5 0.25\n>\n";
+        let fx = "<FXCHAIN\nWNDRECT 24 52 699 416\nSHOW 0\nLASTSEL 0\nDOCKED 0\n>\n";
+        let track = format!("<TRACK {{X}}\nNAME \"Vox\"\nSEL 0\nTRACKHEIGHT 0 0 0 0 0 0 0\n{fx}{envelope}{ITEM}>\n");
+        let clicked = track
+            .replacen("SEL 0\nTRACKHEIGHT 0 0 0 0 0 0 0", "SEL 1\nTRACKHEIGHT 112 0 0 0 0 0 0", 1)
+            .replace("WNDRECT 24 52 699 416", "WNDRECT 80 80 600 400")
+            .replace("LANEHEIGHT 0 0", "LANEHEIGHT 90 0")
+            .replace("PT 0 0.14 0\n", "PT 0 0.14 0 0 1\n")
+            .replace("PT 2 0.5 5 0.25\n", "PT 2 0.5 5 0.25 1\n");
+        assert_ne!(track, clicked);
+        assert_eq!(print_of(&track), print_of(&clicked));
+        // What the producer changes still shows: a point moved, its shape or tension, the envelope shown or armed.
+        for changed in [
+            track.replace("PT 0 0.14 0\n", "PT 0 0.15 0\n"),
+            track.replace("PT 2 0.5 5 0.25\n", "PT 2 0.5 5 0.3\n"),
+            track.replace("PT 0 0.14 0\n", "PT 0 0.14 2\n"),
+            track.replace("VIS 1 1 1", "VIS 0 1 1"),
+            track.replace("ARM 1", "ARM 0"),
+        ] {
+            assert_ne!(print_of(&track), print_of(&changed), "{changed}");
+        }
     }
 
     #[test]

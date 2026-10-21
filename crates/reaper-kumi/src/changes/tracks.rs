@@ -414,11 +414,91 @@ pub(super) fn track_id_of(ctx: &Ctx, track: Track) -> TrackId {
 const MOST_MATERIAL: usize = 24 << 20;
 
 /// Every track's folder depth, by id, in order.
-fn folder_depths(ctx: &Ctx) -> Vec<(String, i64)> {
+pub(super) fn folder_depths(ctx: &Ctx) -> Vec<(String, i64)> {
     (0..ctx.reaper.track_count(ctx.proj))
         .filter_map(|at| ctx.reaper.track_at(ctx.proj, at))
         .map(|track| (ctx.reaper.track_guid(track), ctx.reaper.track_value(track, "I_FOLDERDEPTH") as i64))
         .collect()
+}
+
+/// Sets each track's folder depth back to what it was (`before`, from `folder_depths`), for a change that takes away again
+/// the tracks it made inside the call that made them: REAPER's deletes (and moves) mend some folders and not others.
+pub(super) fn put_folder_depths_back(ctx: &Ctx, before: &[(String, i64)]) {
+    let was: std::collections::HashMap<&str, i64> = before.iter().map(|(id, depth)| (id.as_str(), *depth)).collect();
+    for track in (0..ctx.reaper.track_count(ctx.proj)).filter_map(|at| ctx.reaper.track_at(ctx.proj, at)) {
+        let Some(depth) = was.get(ctx.reaper.track_guid(track).as_str()) else { continue };
+        if ctx.reaper.track_value(track, "I_FOLDERDEPTH") as i64 != *depth {
+            ctx.reaper.set_track_value(track, "I_FOLDERDEPTH", *depth as f64);
+        }
+    }
+}
+
+/// Each track's folder parent, by id.
+fn parents_by_id(ids: &[String], depths: &[i64]) -> std::collections::HashMap<String, Option<String>> {
+    let layout = folders::layout(depths);
+    ids.iter().enumerate().map(|(place, id)| (id.clone(), layout.parent[place].map(|parent| ids[parent].clone()))).collect()
+}
+
+/// Deletes tracks Kumi made, for an undo that takes them away again, keeping every other track in the folder it is in.
+/// REAPER's own delete mends some folders and not others (7.82 lab: a track that closes a folder takes its closing with it,
+/// so the tracks after it fall into that folder), so the depths are worked out before, as a track delete's are, and set
+/// after. The tracks of a folder that goes move up into the folder around it, and only those in `may_move_up` may (an
+/// added folder's own run; `None`, any, when Kumi is told to undo anyway): when another track would move out of its
+/// folder, nothing is deleted and the answer is `changed`.
+pub(super) fn delete_keeping_folders(ctx: &Ctx, gone: &[Track], may_move_up: Option<&[&str]>) -> Done<()> {
+    let reaper = ctx.reaper;
+    let before = folder_depths(ctx);
+    let mut ids: Vec<String> = before.iter().map(|(id, _)| id.clone()).collect();
+    let mut depths: Vec<i64> = before.iter().map(|(_, depth)| *depth).collect();
+    let parents_before = parents_by_id(&ids, &depths);
+    let mut places = Vec::with_capacity(gone.len());
+    for track in gone {
+        let id = reaper.track_guid(*track);
+        let place =
+            ids.iter().position(|other| *other == id).ok_or_else(|| failed("a track to delete isn't in the project's track list"))?;
+        places.push((place, *track));
+    }
+    places.sort_by_key(|(place, _)| std::cmp::Reverse(*place));
+    places.dedup_by_key(|(place, _)| *place);
+    // Last first: every place before it is still the one it was.
+    for (place, _) in &places {
+        depths = folders::after_delete(&depths, *place);
+        ids.remove(*place);
+    }
+    let parents_after = parents_by_id(&ids, &depths);
+    let may_move = |id: &str| may_move_up.is_none_or(|ids| ids.contains(&id));
+    if let Some(moved) = ids.iter().find(|id| parents_before[*id] != parents_after[*id] && !may_move(id)) {
+        let name = super::quoted(&name_of(ctx, moved));
+        return Err((
+            "changed".into(),
+            format!("taking it away would move {name} out of its folder: {name} went into a folder of Kumi's in REAPER since, so Kumi leaves both"),
+        ));
+    }
+    for (n, (_, track)) in places.iter().enumerate() {
+        if !reaper.delete_track(*track) {
+            return Err(if n == 0 {
+                failed("REAPER wouldn't delete the track")
+            } else {
+                ("uncertain".into(), "REAPER wouldn't delete one of the tracks: read the tracks".into())
+            });
+        }
+    }
+    // What REAPER left of the folders is made what they should be.
+    let left = folder_depths(ctx);
+    if left.len() != ids.len() || left.iter().zip(&ids).any(|((now, _), id)| now != id) {
+        return Err(("uncertain".into(), "REAPER deleted the tracks, but the track list isn't what Kumi expected: read the tracks".into()));
+    }
+    for (place, ((_, now), want)) in left.iter().zip(&depths).enumerate() {
+        if now != want {
+            if let Some(other) = reaper.track_at(ctx.proj, place as i32) {
+                reaper.set_track_value(other, "I_FOLDERDEPTH", *want as f64);
+            }
+        }
+    }
+    if folder_depths(ctx).iter().zip(&depths).any(|((_, now), want)| now != want) {
+        return Err(("uncertain".into(), "Kumi deleted the tracks but REAPER kept some folders as they were: read the tracks".into()));
+    }
+    Ok(())
 }
 
 /// A send or receive of the track, with everything that makes it the same one again.

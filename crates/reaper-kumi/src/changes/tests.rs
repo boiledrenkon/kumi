@@ -439,6 +439,91 @@ fn a_folder_is_a_track_added_before_the_run_it_holds_and_undo_closes_the_run_as_
     assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
 }
 
+/// Removes the track at `at` as REAPER's own Remove tracks does: the track before takes over its closing, and the sends
+/// after it close up.
+fn remove_as_reaper_does(at: usize) {
+    state(|s| {
+        let gone = s.tracks.remove(at);
+        if gone.folder < 0 && at > 0 {
+            s.tracks[at - 1].folder += gone.folder;
+        }
+        for track in s.tracks.iter_mut() {
+            track.sends.retain(|send| send.dest != at);
+            for send in track.sends.iter_mut().filter(|send| send.dest > at) {
+                send.dest -= 1;
+            }
+        }
+    });
+}
+
+#[test]
+fn undoing_an_added_track_that_took_over_a_folders_closing_leaves_every_other_track_in_its_folder() {
+    let lab = Lab::new();
+    super::tests_lab::drums_in_rhythm();
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    // Kumi adds Perc before Snare, in Drums; the producer removes Snare, and REAPER hands its closing of both folders to Perc.
+    let (preview, applied) = lab.make("track-add", json!({"name": "Perc", "index": 4}), "Kumi: Added track Perc (kadd7)");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Perc", "Snare", "Reverb"]);
+    remove_as_reaper_does(4);
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    lab.undo("track-add", &preview, &applied, "Kumi: undo (kund7)").unwrap();
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Reverb"]);
+    assert_eq!(depths(), [1, 1, -2, 0], "Kick closes both folders now, and Reverb stays out of them");
+}
+
+#[test]
+fn a_folder_kumi_made_is_taken_away_around_a_track_the_producer_put_in_it_only_when_told_to_discard() {
+    let lab = Lab::new();
+    let (preview, applied) =
+        lab.make("track-add", json!({"name": "Subgroup", "asFolderOf": [KICK, "r:track:{CCCC}"]}), "Kumi: Added folder Subgroup (kfol2)");
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    // The producer puts a track of theirs between Kick and Snare, inside Kumi's folder.
+    state(|s| {
+        s.tracks.insert(3, crate::reaper::fake::FakeTrack::new("{MINE}", "Mine"));
+        for track in s.tracks.iter_mut() {
+            for send in track.sends.iter_mut().filter(|send| send.dest >= 3) {
+                send.dest += 1;
+            }
+        }
+    });
+    let (code, message) = lab.undo("track-add", &preview, &applied, "Kumi: undo (kund8)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("“Mine”"), "{message}");
+    assert_eq!(names(), ["Drums", "Subgroup", "Kick", "Mine", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 1, 0, 0, -2, 0]);
+    // Told to undo anyway, the folder goes, and the producer's track moves up with Kick and Snare, still in Drums.
+    let mut params = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo (kund9)", "discard": true});
+    params["epoch"] = lab.reads.epoch().into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(names(), ["Drums", "Kick", "Mine", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 0, 0, -1, 0]);
+}
+
+#[test]
+fn a_folder_is_made_only_of_tracks_of_one_folder_each_with_all_of_its_tracks() {
+    let lab = Lab::new();
+    assert_eq!(depths(), [1, 0, -1, 0]);
+    for (refs, why) in [
+        // Drums alone: its tracks would go into the new folder without it.
+        (json!(["r:track:{AAAA}"]), "with all of its tracks"),
+        // Snare and Reverb: past the end of Drums.
+        (json!(["r:track:{CCCC}", "r:track:{DDDD}"]), "one folder"),
+    ] {
+        let (code, message) = lab.call("change_preview", json!({"kind": "track-add", "input": {"asFolderOf": refs}})).unwrap_err();
+        assert_eq!(code, "bad-params", "{refs}");
+        assert!(message.contains(why), "{refs}: {message}");
+    }
+    // Drums with its tracks, and Reverb after them: one folder's worth at the top.
+    let (preview, applied) = lab.make(
+        "track-add",
+        json!({"name": "Bus", "asFolderOf": ["r:track:{AAAA}", KICK, "r:track:{CCCC}", "r:track:{DDDD}"]}),
+        "Kumi: Added folder Bus (kfol3)",
+    );
+    assert_eq!(depths(), [1, 1, 0, -1, -1]);
+    lab.undo("track-add", &preview, &applied, "Kumi: undo (kund9)").unwrap();
+    assert_eq!(depths(), [1, 0, -1, 0]);
+}
+
 #[test]
 fn a_bad_add_is_refused_and_one_whose_place_moved_is_changed() {
     let lab = Lab::new();
@@ -828,6 +913,23 @@ fn a_marker_is_moved_renamed_and_coloured_and_each_goes_back() {
 }
 
 #[test]
+fn a_deleted_regions_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:region:{REG-1}"}), "Kumi: Deleted region Verse (kmd07)");
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 4.0, bpm: 90.0, num: 4, denom: 4, linear: false }));
+    let (code, message) = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund7)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert_eq!(state(|s| s.markers.len()), 1, "nothing made again");
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund8)");
+    params["kind"] = "marker-delete".into();
+    params["material"] = applied["material"].clone();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+}
+
+#[test]
 fn deleting_a_marker_keeps_it_to_make_again_with_a_new_id_and_its_number() {
     let lab = Lab::new();
     state(|s| s.markers[1].number = 7);
@@ -1115,7 +1217,7 @@ fn a_tempo_marker_is_made_where_asked_with_its_time_signature_and_undo_takes_tha
     assert_eq!(preview["prior"], json!({"exists": false}));
     assert_eq!(preview["target"]["kind"], "tempo-marker");
     assert_eq!(tempo_markers(), [before[0], (16.0, 140.0, 3, 4, false)]);
-    assert_eq!(applied["applied"], json!({"exists": true, "bpm": 140.0, "num": 3, "den": 4, "linear": false}));
+    assert_eq!(applied["applied"], json!({"exists": true, "bpm": 140.0, "num": 3, "den": 4, "linear": false, "qn": 32.0}));
     // The producer changed it since: undo is refused, unless discarded.
     state(|s| s.tempo_markers[1].bpm = 150.0);
     let mut params = restore_params(&preview, &applied, "Kumi: undo (kund1)");
@@ -1126,6 +1228,33 @@ fn a_tempo_marker_is_made_where_asked_with_its_time_signature_and_undo_takes_tha
     lab.call("change_restore", params.clone()).unwrap();
     assert_eq!(tempo_markers(), before);
     // Undone already.
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(tempo_markers(), before);
+}
+
+#[test]
+fn a_tempo_marker_kumi_made_is_found_by_its_beat_after_a_tempo_change_and_left_once_the_producer_dragged_it() {
+    let lab = Lab::new();
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false }));
+    let before = tempo_markers();
+    let (preview, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32.0, "bpm": 140.0}), "Kumi: Tempo 140 BPM (ktm07)");
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund7)");
+    params["kind"] = "tempo-marker-set".into();
+    // The producer drags it from bar 9 to bar 11: nothing is where Kumi put it, and Kumi's marker is elsewhere.
+    state(|s| s.tempo_markers[1].time = 20.0);
+    for discard in [false, true] {
+        params["discard"] = discard.into();
+        let (code, message) = lab.call("change_restore", params.clone()).unwrap_err();
+        assert_eq!(code, "changed", "discard {discard}: {message}");
+        assert!(message.contains("moved"), "{message}");
+        assert_eq!(tempo_markers()[1].0, 20.0, "the producer's tempo map stays");
+    }
+    params["discard"] = false.into();
+    // In beats timebase, a slower tempo before it moves it in seconds: it is found at its beat, and taken away.
+    state(|s| {
+        s.bpm = 60.0;
+        s.tempo_markers[1].time = 32.0;
+    });
     lab.call("change_restore", params).unwrap();
     assert_eq!(tempo_markers(), before);
 }
@@ -2149,6 +2278,29 @@ fn a_send_ref_read_before_the_producer_removed_one_and_added_one_is_refused_at_t
         assert!(message.contains("read them again"), "{message}");
         assert_eq!(send_volumes(), before, "no send was muted (poll between: {poll_between})");
     }
+}
+
+#[test]
+fn a_send_ref_read_before_kumi_set_that_sends_automation_mode_or_showed_its_envelope_still_names_it() {
+    let lab = Lab::new();
+    // (REAPER hands out each send's volume envelope, hidden and off until shown)
+    state(|s| {
+        let mut envelope = fake::FakeEnvelope::for_send("Send Volume: Reverb", 0, "<VOLENV", 0);
+        envelope.active = false;
+        envelope.visible = false;
+        envelope.pts = Some(vec![]);
+        s.tracks[1].envelopes.push(envelope);
+    });
+    let (first, _) = two_sends();
+    // Kumi's own writes to the first send outside the send kinds: its automation mode, its volume envelope shown.
+    let (preview, applied) = lab.make("send-automation-mode", json!({"ref": first, "mode": "touch"}), "Kumi: x (km001)");
+    let (shown_preview, shown) = lab.make("envelope-show", json!({"sendRef": first, "name": "volume"}), "Kumi: x (km002)");
+    // The ref read before both still names that send, for a change and for both undos.
+    assert_eq!(mute_through(&lab, &first), None);
+    assert!(state(|s| s.tracks[1].sends[0].mute && !s.tracks[1].sends[1].mute));
+    lab.undo("envelope-show", &shown_preview, &shown, "Kumi: undo (km003)").unwrap();
+    lab.undo("send-automation-mode", &preview, &applied, "Kumi: undo (km004)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends[0].extra.get("I_AUTOMODE").copied().unwrap_or(-1.0)), -1.0);
 }
 
 #[test]

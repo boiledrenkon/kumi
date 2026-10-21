@@ -906,6 +906,22 @@ fn shown_of(ctx: &Ctx, input: &Value) -> Done<Shown> {
     }
 }
 
+/// A write to an envelope, noted for the sends between two tracks when it is one of a send's: whether it is on is part of
+/// what a ref to one of several sends between the same tracks carries (`sends::noting_writes`).
+fn writing<T>(ctx: &Ctx, at: &EnvAt, write: impl FnOnce() -> T) -> T {
+    let reaper = ctx.reaper;
+    let send = match at.owner {
+        EnvOwner::Track(track) => (0..reaper.send_count(track, 0)).find_map(|index| {
+            SEND_ENVELOPES.iter().any(|(_, chunk)| reaper.send_envelope(track, index, chunk) == Some(at.envelope)).then_some((track, index))
+        }),
+        EnvOwner::Take(_) => None,
+    };
+    match send {
+        Some((track, index)) => super::sends::noting_writes(reaper, track, index, write),
+        None => write(),
+    }
+}
+
 /// The flags a show asks for: shown and on unless said otherwise; armed only when given.
 fn wanted_flags(input: &Value) -> Done<(Option<bool>, Option<bool>, Option<bool>)> {
     let flag = |key: &str| -> Done<Option<bool>> {
@@ -926,13 +942,33 @@ fn flags_of(reaper: &Reaper, envelope: Envelope) -> Value {
     json!({"visible": reaper.envelope_flag(envelope, "VISIBLE"), "active": reaper.envelope_flag(envelope, "ACTIVE"), "armed": reaper.envelope_flag(envelope, "ARM")})
 }
 
+/// What envelope-show fences: the envelope's flags, its points, and its automation items, each as its state keeps them
+/// (an undo writes the whole state from before back, items' places, lengths, loops and mutes among it).
 fn env_state(ctx: &Ctx, envelope: Envelope) -> Value {
     let lane_hash = {
         let count = ctx.reaper.env_point_count(envelope, -1);
         let points: Vec<EnvPoint> = (0..count).filter_map(|i| ctx.reaper.env_point(envelope, -1, i)).collect();
         points_hash(ctx.reaper, envelope, &points)
     };
-    json!({"flags": flags_of(ctx.reaper, envelope), "points": lane_hash, "items": ctx.reaper.ai_count(envelope)})
+    json!({
+        "flags": flags_of(ctx.reaper, envelope),
+        "points": lane_hash,
+        "items": ctx.reaper.ai_count(envelope),
+        "itemsPrint": items_print(ctx, envelope),
+    })
+}
+
+/// Whether the envelope's state now is the recorded one (a state recorded before items were kept by their print is
+/// compared without it).
+fn same_env(now: &Value, recorded: &Value) -> bool {
+    if recorded.get("itemsPrint").is_some() {
+        return now == recorded;
+    }
+    let mut now = now.clone();
+    if let Some(fields) = now.as_object_mut() {
+        fields.remove("itemsPrint");
+    }
+    now == *recorded
 }
 
 fn set_flags(reaper: &Reaper, envelope: Envelope, (visible, active, armed): (Option<bool>, Option<bool>, Option<bool>)) {
@@ -1079,7 +1115,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let (at, created) = match shown {
         Shown::Has(at) => {
-            if fence["exists"] == false || env_state(ctx, at.envelope) != fence["state"] {
+            if fence["exists"] == false || !same_env(&env_state(ctx, at.envelope), &fence["state"]) {
                 return Err(changed(format!("{label} changed since the preview")));
             }
             (at, None)
@@ -1116,7 +1152,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let unwritten = created.is_none()
         && [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().all(|(k, v)| v.is_none_or(|v| before[*k] == v));
     if !unwritten {
-        set_flags(reaper, at.envelope, flags);
+        writing(ctx, &at, || set_flags(reaper, at.envelope, flags));
     }
     let after = flags_of(reaper, at.envelope);
     if [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().any(|(k, v)| v.is_some_and(|v| after[*k] != v)) {
@@ -1150,11 +1186,12 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     let label = env_label(ctx, &at);
     let now = env_state(ctx, at.envelope);
-    if restore.prior["exists"] == true && now == restore.prior["state"] {
+    if restore.prior["exists"] == true && same_env(&now, &restore.prior["state"]) {
         return Ok(Restored { restored: now, display: json!({"title": format!("{label} is as it was")}), unwritten: true });
     }
-    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since)
-    if now != restore.applied["state"] {
+    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since,
+    // and put their automation items back where they were)
+    if !same_env(&now, &restore.applied["state"]) {
         return Err(changed(format!(
             "{label} has been changed in REAPER since Kumi showed it: putting it back as it was would write over those changes \
              too (its points and items), so Kumi leaves it, even with discard"
@@ -1163,15 +1200,19 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let mut display = json!({"title": format!("{label} put back as it was")});
     if restore.prior["exists"] == true {
         let chunk = restore.prior["chunk"].as_str().ok_or_else(|| bad("prior.chunk"))?;
-        reaper.set_env_chunk(at.envelope, chunk);
-        mark_envelope(reaper, at.envelope);
-        if env_state(ctx, at.envelope) != restore.prior["state"] {
-            return Err(failed(format!("REAPER wouldn't put {label} back")));
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, chunk);
+            mark_envelope(reaper, at.envelope);
+        });
+        if !same_env(&env_state(ctx, at.envelope), &restore.prior["state"]) {
+            return Err(("uncertain".into(), format!("REAPER didn't put {label} back exactly: read it")));
         }
     } else {
         let chunk = reaper.env_chunk(at.envelope).ok_or_else(|| failed("REAPER wouldn't give the envelope's state"))?;
-        reaper.set_env_chunk(at.envelope, &emptied(&chunk));
-        mark_envelope(reaper, at.envelope);
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, &emptied(&chunk));
+            mark_envelope(reaper, at.envelope);
+        });
         let flags = flags_of(reaper, at.envelope);
         if flags["visible"] == true || flags["active"] == true {
             return Err(failed(format!("REAPER kept {label}")));
@@ -1380,6 +1421,20 @@ pub fn item_add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let item = match find_item(ctx, &at, pool, position) {
         Ok(item) => item,
         Err(fault) if fault.0 == "failed" => {
+            // Not where Kumi put it. Gone only when no item of its pool is left beyond the ones that were there besides
+            // it: one more is Kumi's, moved, which can't be told from the others now (discard or not).
+            if let Some(then) = restore.applied["items"].as_array() {
+                let then = then.iter().filter(|item| item["pool"].as_i64() == Some(pool)).count();
+                let now = (0..ctx.reaper.ai_count(at.envelope))
+                    .filter(|i| ctx.reaper.ai_value(at.envelope, *i, "D_POOL_ID") as i64 == pool)
+                    .count();
+                if now >= then.max(1) {
+                    return Err(changed(format!(
+                        "the automation item Kumi added to {label} has been moved in REAPER since: Kumi leaves it, as it can't tell it \
+                         apart now"
+                    )));
+                }
+            }
             return Ok(Restored {
                 restored: json!({}),
                 display: json!({"title": format!("The automation item is gone from {label} already")}),
@@ -1837,8 +1892,9 @@ pub fn send_mode_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied>
         return Err(changed(format!("the automation mode of send {route} changed since the preview")));
     }
     if now != wanted
-        && (!ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
-            || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
+        && (!super::sends::noting_writes(ctx.reaper, track, index, || {
+            ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
+        }) || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
     {
         return Err(failed(format!("REAPER kept the automation mode of send {route}")));
     }
@@ -1858,7 +1914,7 @@ pub fn send_mode_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if !restore.discard && now != applied {
             return Err(changed(format!("the automation mode of send {route} has been changed in REAPER since Kumi set it")));
         }
-        if !ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64)
+        if !super::sends::noting_writes(ctx.reaper, track, index, || ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64))
             || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != prior
         {
             return Err(failed(format!("REAPER kept the automation mode of send {route}")));

@@ -875,7 +875,10 @@ unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_c
     }
     counted(|s| {
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // Neither its sends nor its selection are in a track's chunk (7.82 lab); equal states share a number, so the chunk
+        // reads the same until the track changes.
         t.sends.clear();
+        t.selected = false;
         let mut items = String::new();
         for item in &t.items {
             items += &format!("<ITEM\nPOSITION {}\nIGUID {}\n", item.position, item.guid);
@@ -884,16 +887,15 @@ unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_c
             }
             items += ">\n";
         }
-        let text = format!(
-            "<TRACK {}\nNAME \"{}\"\nTRACKID {}\nFAKECHUNK {}\n{}{}>\n",
-            t.guid,
-            t.name,
-            t.guid,
-            s.chunks.len(),
-            fx_chain_text(&t.fx),
-            items
-        );
-        s.chunks.push(t);
+        let n = match s.chunks.iter().position(|kept| *kept == t) {
+            Some(n) => n,
+            None => {
+                s.chunks.push(t.clone());
+                s.chunks.len() - 1
+            }
+        };
+        let text =
+            format!("<TRACK {}\nNAME \"{}\"\nTRACKID {}\nFAKECHUNK {n}\n{}{}>\n", t.guid, t.name, t.guid, fx_chain_text(&t.fx), items);
         write(buf, size, &text);
         true
     })

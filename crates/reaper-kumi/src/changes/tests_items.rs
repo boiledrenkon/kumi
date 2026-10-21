@@ -457,6 +457,25 @@ fn a_trim_moves_the_edges_and_the_takes_offsets_so_the_media_stays_in_place() {
 }
 
 #[test]
+fn a_start_trims_undo_leaves_an_item_the_producer_put_stretch_markers_on_since() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].items[0].extra.insert("B_LOOPSRC".into(), 0.0));
+    let (preview, applied) = lab.make("item-trim", json!({"ref": K1, "start": 0.5}));
+    // The producer warps the trimmed item.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.25, 0.75, 0.0)]);
+    for discard in [false, true] {
+        let (code, message) = lab.undo_with("item-trim", &preview, &applied, discard).unwrap_err();
+        assert_eq!(code, "changed", "discard {discard}");
+        assert!(message.contains("stretch markers"), "{message}");
+        assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.5, "the item is as the producer has it");
+    }
+    // Without markers, the start goes back.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch.clear());
+    lab.undo("item-trim", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.0);
+}
+
+#[test]
 fn a_trim_before_the_media_or_under_stretch_markers_is_refused_and_its_undo_fenced() {
     let lab = Lab::new();
     state(|s| {
@@ -597,6 +616,33 @@ fn items_are_grouped_in_a_new_group_and_put_back_in_theirs() {
 }
 
 // ----- deleting -----
+
+#[test]
+fn a_deleted_items_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // The producer adds a tempo change before where it was: at its old time it would sit at another bar.
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 90.0, num: 4, denom: 4, linear: false }));
+    let (code, message) = lab.undo("item-delete", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert!(item("{ITEM-K1}").is_none(), "nothing put back");
+    lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert!(item("{ITEM-K1}").is_some());
+}
+
+#[test]
+fn undoing_item_props_puts_back_only_kumis_fields_and_leaves_a_lock_the_producer_set_since() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-props", json!({"ref": K1, "mute": true}));
+    state(|s| {
+        s.tracks[1].items[0].extra.insert("C_LOCK".into(), 1.0);
+    });
+    lab.undo("item-props", &preview, &applied).unwrap();
+    let back = item("{ITEM-K1}").unwrap().1;
+    assert!(!back.mute, "Kumi's mute is taken back");
+    assert_eq!(back.extra.get("C_LOCK"), Some(&1.0), "the producer's lock stays");
+}
 
 #[test]
 fn a_deleted_item_comes_back_with_its_ids_from_its_chunk() {

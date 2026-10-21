@@ -737,7 +737,15 @@ pub(super) unsafe extern "C" fn set_take_stretch_marker(take: *mut MediaItem_Tak
                 -1
             } else {
                 let at = list.iter().position(|m| m.0 > pos).unwrap_or(list.len());
-                list.insert(at, (pos, given.unwrap_or(pos * rate + offs), 0.0));
+                // Without a source, the point that plays there now: between two markers, in proportion; past the
+                // last (or before the first), from it at the take's rate; with none, the offset plus the position.
+                let source = given.unwrap_or_else(|| match (at.checked_sub(1).map(|i| list[i]), list.get(at).copied()) {
+                    (Some(a), Some(b)) if b.0 > a.0 => a.1 + (pos - a.0) * (b.1 - a.1) / (b.0 - a.0),
+                    (Some(a), _) => a.1 + (pos - a.0) * rate,
+                    (None, Some(b)) => b.1 - (b.0 - pos) * rate,
+                    (None, None) => pos * rate + offs,
+                });
+                list.insert(at, (pos, source, 0.0));
                 at as c_int
             }
         } else if let Some(marker) = list.get(index as usize).copied() {
@@ -1329,8 +1337,12 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
             write(buf, size, &text);
             return true;
         }
-        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
+        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk. Its selection isn't in it
+        // either, and its height is a line of its own (7.82 lab: selecting the track changes nothing in its chunk, a
+        // height change moves `TRACKHEIGHT`).
         t.sends.clear();
+        t.selected = false;
+        let height = t.extra.remove("I_HEIGHTOVERRIDE").unwrap_or(0.0);
         let n = match s.chunks.iter().position(|kept| *kept == t) {
             Some(n) => n,
             None => {
@@ -1342,7 +1354,8 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
         let lanerec = if comping { "LANEREC -1 0 -1 0\n" } else { "LANEREC -1 -1 -1 0\n" };
         // (r-tracks) A track whose controls are locked says so in its state.
         let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
-        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}FAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
+        let text =
+            format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}TRACKHEIGHT {height} 0 0 0 0 0 0\nFAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
         write(buf, size, &text);
         true
     })

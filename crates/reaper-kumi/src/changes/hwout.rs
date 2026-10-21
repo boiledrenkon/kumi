@@ -592,6 +592,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if check && !same_state(&now, restore.applied) {
         return Err(changed(format!("the hardware output {} has been changed in REAPER since Kumi added it", label(ctx, &found))));
     }
+    // Its envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
+    let drawn = active_envelopes(ctx.reaper, found.track, found.index);
+    if !restore.discard && drawn > 0 {
+        return Err(changed(format!(
+            "the hardware output {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
+            label(ctx, &found)
+        )));
+    }
     let route = label(ctx, &found);
     if !ctx.reaper.remove_send(found.track, HW, found.index) {
         return Err(failed("REAPER wouldn't remove the hardware output"));

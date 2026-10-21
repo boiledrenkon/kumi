@@ -208,12 +208,44 @@ pub fn marker_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if let Some(base) = base {
         applied["base"] = base;
     }
+    // Where it is in beats: in beats timebase an earlier tempo change moves it in seconds, and its undo finds it there.
+    if let Some(qn) = reaper.quarter_notes_at(ctx.proj, plan.time) {
+        applied["qn"] = qn.into();
+    }
     Ok(Applied { applied, created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}), ..Default::default() })
+}
+
+/// Kumi's marker for an undo: at its time, else where its quarter note is now when the marker there is as Kumi left it
+/// (an earlier tempo change moved it in seconds, in beats timebase). `changed` when it is in neither place but a marker
+/// as Kumi left it is elsewhere: the producer moved it, and the undo can't tell it apart, discard or not.
+fn kumis_marker(ctx: &Ctx, restore: &Restore, time: f64) -> Done<(f64, Option<(i32, TempoMarker)>)> {
+    if let Some(found) = marker_at(ctx, time) {
+        return Ok((time, Some(found)));
+    }
+    if restore.applied["exists"] != true {
+        return Ok((time, None));
+    }
+    if let Some(moved) = restore.applied["qn"].as_f64().and_then(|qn| ctx.reaper.time_at_quarter_notes(ctx.proj, qn)) {
+        if let Some(found) = marker_at(ctx, moved).filter(|(_, m)| same_marker(&marker_state(Some(m)), restore.applied)) {
+            return Ok((moved, Some(found)));
+        }
+    }
+    let elsewhere = (0..ctx.reaper.tempo_marker_count(ctx.proj))
+        .filter_map(|i| ctx.reaper.tempo_marker(ctx.proj, i))
+        .any(|m| same_marker(&marker_state(Some(&m)), restore.applied));
+    if elsewhere {
+        return Err(changed(format!(
+            "the tempo marker Kumi set at {} isn't there any more: it was moved in REAPER since, so Kumi leaves the tempo map as \
+             it is, even with discard",
+            bar_text(ctx.reaper, ctx.proj, time)
+        )));
+    }
+    Ok((time, None))
 }
 
 pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let time = restore.target["time"].as_f64().ok_or_else(|| bad("target: the marker's time"))?;
-    let found = marker_at(ctx, time);
+    let (time, found) = kumis_marker(ctx, restore, time)?;
     let now = marker_state(found.as_ref().map(|(_, m)| m));
     let title = format!("Tempo marker at {} put back", bar_text(ctx.reaper, ctx.proj, time));
     if same_marker(&now, restore.prior) {

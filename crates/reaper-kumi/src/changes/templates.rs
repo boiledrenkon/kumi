@@ -289,13 +289,25 @@ fn routes_hash(reaper: &Reaper, track: Track) -> String {
     content_hash(&text)
 }
 
-/// The track's FX and its takes' FX, in order.
+/// The track's FX and its takes' FX, in order, each container followed by the FX inside it (at any depth).
 fn all_fx(reaper: &Reaper, track: Track) -> Vec<Fx> {
+    fn with_inside(reaper: &Reaper, fx: Fx, all: &mut Vec<Fx>) {
+        all.push(fx);
+        for child in reaper.fx_children(fx) {
+            with_inside(reaper, child, all);
+        }
+    }
     let mut owners = vec![FxOwner::Track(track)];
     for item in (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n)) {
         owners.extend((0..reaper.take_count(item)).filter_map(|n| reaper.take_at(item, n)).map(FxOwner::Take));
     }
-    owners.into_iter().flat_map(|owner| (0..reaper.fx_count(owner)).map(move |index| Fx { owner, index })).collect()
+    let mut all = Vec::new();
+    for owner in owners {
+        for index in 0..reaper.fx_count(owner) {
+            with_inside(reaper, Fx { owner, index }, &mut all);
+        }
+    }
+    all
 }
 
 /// What tells a track made from the template from how the insert left it: its state as the producer can change it (items
@@ -382,13 +394,15 @@ fn by_guid(ctx: &Ctx, guid: &str) -> Option<Track> {
     ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(guid.to_string())).ok()
 }
 
-/// Deletes these tracks, last first (what was made, taken away again inside the call that made it).
-fn delete_all(ctx: &Ctx, made: &[String]) {
+/// Deletes these tracks, last first (what was made, taken away again inside the call that made it), and puts the other
+/// tracks' folders back as they were (`depths`).
+fn delete_all(ctx: &Ctx, made: &[String], depths: &[(String, i64)]) {
     for guid in made.iter().rev() {
         if let Some(track) = by_guid(ctx, guid) {
             ctx.reaper.delete_track(track);
         }
     }
+    super::tracks::put_folder_depths_back(ctx, depths);
 }
 
 pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
@@ -407,6 +421,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let kept = selection(ctx);
     let before = guids(ctx);
+    let depths = super::tracks::folder_depths(ctx);
     let touched = touch_last(ctx);
     let opened = reaper.open_project(&path.to_string_lossy());
     put_touched(ctx, &touched);
@@ -426,7 +441,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let first_at = count - made.len() as i64;
     if at < first_at {
         if net != 0 {
-            delete_all(ctx, &made);
+            delete_all(ctx, &made, &depths);
             put_selection(ctx, &kept);
             return Err(bad("the template's tracks open a folder they don't close: insert it at the end (no index)"));
         }
@@ -437,7 +452,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             }
         }
         if !reaper.reorder_selected(at as i32, 0) {
-            delete_all(ctx, &made);
+            delete_all(ctx, &made, &depths);
             put_selection(ctx, &kept);
             return Err(failed("REAPER wouldn't move the template's tracks to their place: they are taken away again"));
         }
@@ -447,7 +462,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         made.iter().filter_map(|guid| by_guid(ctx, guid)).map(|t| reaper.track_value(t, "IP_TRACKNUMBER") as i64 - 1).collect();
     let in_place = placed.len() == made.len() && placed.iter().enumerate().all(|(n, p)| *p == at + n as i64);
     if !in_place {
-        delete_all(ctx, &made);
+        delete_all(ctx, &made, &depths);
         return Err(failed("REAPER put the template's tracks elsewhere than asked: they are taken away again"));
     }
     let tracks: Vec<Value> =
@@ -499,11 +514,10 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(changed("a track of the producer's is inside the template's folder now: Kumi won't delete the folder around it"));
     }
     let names: Vec<String> = present.iter().map(|(_, t)| super::track_name(reaper, *t)).collect();
-    for (_, track) in present.iter().rev() {
-        if !reaper.delete_track(*track) {
-            return Err(("uncertain".into(), "REAPER wouldn't delete one of the template's tracks: read the tracks".into()));
-        }
-    }
+    // Every other track stays in the folder it is in (template tracks that close a folder take that closing with them in a
+    // bare delete).
+    let tracks_now: Vec<Track> = present.iter().map(|(_, t)| *t).collect();
+    super::tracks::delete_keeping_folders(ctx, &tracks_now, Some(&[]))?;
     Ok(Restored {
         restored: json!({"deleted": made.len()}),
         display: json!({"title": format!("Template tracks {} taken away again", names.iter().map(|n| super::quoted(n)).collect::<Vec<_>>().join(", "))}),

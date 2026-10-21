@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use super::tests_items::{code, item, state, Lab, KICK};
+use super::tests_items::{code, item, state, Lab, KICK, SNARE};
 
 /// Kick with fixed lanes: two lanes, kick.wav on lane 0 and the second kick item moved under it on lane 1.
 fn lanes_lab() -> Lab {
@@ -51,6 +51,60 @@ fn fixed_lanes_go_on_and_their_undo_puts_the_track_back() {
     assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
     let again = lab.undo("track-lanes", &preview, &applied).unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
+#[test]
+fn a_lane_names_undo_is_refused_once_a_lane_went_in_above_it() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 1, "name": "Take 2"}));
+    // A comp lane goes in on top: every lane moves down one, and lane 2 is the unnamed one now.
+    state(|s| s.tracks[1].lane_names.insert(0, "C1".into()));
+    state(|s| s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 3.0));
+    for discard in [false, true] {
+        let (code_, message) = lab.undo_with("lane-name", &preview, &applied, discard).unwrap_err();
+        assert_eq!(code_, "changed", "discard {discard}");
+        assert!(message.contains("added or taken away"), "{message}");
+    }
+    assert_eq!(state(|s| s.tracks[1].lane_names.clone()), ["C1", "1", "Take 2"], "no lane renamed");
+}
+
+#[test]
+fn undoing_lanes_off_leaves_the_track_once_the_producer_added_an_item_while_they_were_off_unless_told_to_discard() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
+    // With lanes off, the producer records a new take on Kick.
+    state(|s| {
+        let take = crate::reaper::fake::FakeTake::wave("{TAKE-NEW}", "new.wav");
+        s.tracks[1].items.push(crate::reaper::fake::FakeItem::new("{ITEM-NEW}", 8.0, 2.0, vec![take]));
+    });
+    let before = state(|s| s.tracks[1].clone());
+    let (code_, message) = lab.undo("track-lanes", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed", "{message}");
+    assert!(state(|s| s.tracks[1].clone()) == before, "nothing written");
+    // Told to undo anyway: lanes are back, Kumi's items on their lanes and the producer's item kept.
+    lab.undo_with("track-lanes", &preview, &applied, true).unwrap();
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 2.0);
+    assert_eq!(item("{ITEM-K2}").unwrap().1.lane, 1);
+    assert!(item("{ITEM-NEW}").is_some());
+}
+
+#[test]
+fn undoing_a_move_off_a_track_whose_lanes_went_off_since_leaves_the_item_where_kumi_put_it() {
+    let lab = lanes_lab();
+    // Kick's second item, on lane 2, moved to Snare.
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K2}", "toRef": SNARE}));
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 2);
+    // The producer turns Kick's fixed lanes off: lane 2 is no place to go back to.
+    state(|s| {
+        s.tracks[1].extra.insert("I_FREEMODE".into(), 0.0);
+    });
+    let (code_, message) = lab.undo("item-move", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed", "{message}");
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 2, "still on Snare: nothing written");
+    // Told to undo anyway, it goes back to its place on Kick.
+    lab.undo_with("item-move", &preview, &applied, true).unwrap();
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 1);
 }
 
 #[test]
@@ -209,6 +263,22 @@ fn a_comp_makes_the_comp_lane_and_area_and_its_undo_puts_the_whole_track_back() 
     let (preview2, _) = lab.make("lane-comp", json!({"ref": KICK, "lane": 2, "start": 1.0, "end": 1.5}));
     assert!(preview2["display"].get("note").is_none());
     assert_eq!(state(|s| s.tracks[1].lane_names.len()), 3, "no second comp lane");
+}
+
+#[test]
+fn a_comps_undo_puts_the_track_back_after_the_producer_only_selected_or_resized_it() {
+    let lab = lanes_lab();
+    let before = state(|s| s.tracks[1].clone());
+    let (preview, applied) = lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5}));
+    // The producer clicks Kick and makes it taller: nothing they would want kept.
+    state(|s| {
+        s.tracks[1].selected = true;
+        s.tracks[1].extra.insert("I_HEIGHTOVERRIDE".into(), 120.0);
+    });
+    lab.undo("lane-comp", &preview, &applied).unwrap();
+    let kick = state(|s| s.tracks[1].clone());
+    assert_eq!((kick.items.len(), kick.lane_names.len()), (before.items.len(), before.lane_names.len()), "the comp is gone");
+    assert!(kick.selected, "the producer's selection stands");
 }
 
 #[test]

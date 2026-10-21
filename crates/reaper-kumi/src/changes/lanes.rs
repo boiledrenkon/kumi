@@ -74,17 +74,17 @@ fn lane_of(ctx: &Ctx, input: &Value, track: Track) -> Done<i64> {
 const MODES: [(&str, i64); 3] = [("normal", 0), ("free", 1), ("lanes", 2)];
 
 /// How a track positions its items and, with fixed lanes, how many lanes it has, how each plays and which lane each item is
-/// in (by GUID).
+/// in (by GUID). Without fixed lanes, its items by GUID alone: an undo that turns lanes on again puts those items on their
+/// lanes, and one the producer added or took away since is theirs.
 fn lanes_state(reaper: &Reaper, track: Track) -> Value {
     let mode = reaper.track_value(track, "I_FREEMODE") as i64;
+    let items = (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n));
     if mode != 2 {
-        return json!({"mode": mode, "lanes": null, "plays": null, "items": null});
+        let items: Vec<Value> = items.map(|item| json!([reaper.item_guid(item), null])).collect();
+        return json!({"mode": mode, "lanes": null, "plays": null, "items": items});
     }
     let count = (reaper.track_value(track, "I_NUMFIXEDLANES") as i64).max(1);
-    let items: Vec<Value> = (0..reaper.track_item_count(track))
-        .filter_map(|n| reaper.track_item(track, n))
-        .map(|item| json!([reaper.item_guid(item), reaper.item_value(item, "I_FIXEDLANE") as i64]))
-        .collect();
+    let items: Vec<Value> = items.map(|item| json!([reaper.item_guid(item), reaper.item_value(item, "I_FIXEDLANE") as i64])).collect();
     json!({"mode": mode, "lanes": count, "plays": plays_of(reaper, track, count), "all": all_of(reaper, track), "items": items})
 }
 
@@ -98,15 +98,29 @@ fn all_of(reaper: &Reaper, track: Track) -> i64 {
     reaper.track_value(track, "C_ALLLANESPLAY") as i64
 }
 
+/// A state's items, by GUID, with their lanes (none without fixed lanes), in GUID order.
+fn lane_items(state: &Value) -> Vec<(String, Option<i64>)> {
+    let mut list: Vec<(String, Option<i64>)> =
+        state["items"].as_array().into_iter().flatten().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_i64()))).collect();
+    list.sort();
+    list
+}
+
 /// Items compared by GUID, in any order (REAPER keeps a track's items in time order, which a move changes).
 fn same_lanes(a: &Value, b: &Value) -> bool {
-    let items = |v: &Value| {
-        let mut list: Vec<(String, i64)> =
-            v["items"].as_array().into_iter().flatten().filter_map(|e| Some((e[0].as_str()?.to_string(), e[1].as_i64()?))).collect();
-        list.sort();
-        list
-    };
-    a["mode"] == b["mode"] && a["lanes"] == b["lanes"] && a["plays"] == b["plays"] && a["all"] == b["all"] && items(a) == items(b)
+    a["mode"] == b["mode"] && a["lanes"] == b["lanes"] && a["plays"] == b["plays"] && a["all"] == b["all"] && lane_items(a) == lane_items(b)
+}
+
+/// Whether the lanes are as `state` says for what an undo writes back: the mode, the lanes and how they play, and the lane
+/// of each of its items that is there. (Told to undo anyway, an item the producer added since is left on the lane REAPER
+/// gives it.)
+fn put_as(now: &Value, state: &Value) -> bool {
+    let kept: std::collections::HashMap<String, Option<i64>> = lane_items(state).into_iter().collect();
+    now["mode"] == state["mode"]
+        && now["lanes"] == state["lanes"]
+        && now["plays"] == state["plays"]
+        && now["all"] == state["all"]
+        && lane_items(now).iter().all(|(guid, lane)| kept.get(guid).is_none_or(|kept| kept == lane))
 }
 
 /// The mode asked for. A lane count isn't asked: REAPER keeps as many lanes as its items use (it drops lanes left empty at
@@ -176,7 +190,11 @@ pub fn lanes_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let after = lanes_state(reaper, found.track);
     if after["mode"] != mode {
         put_lanes(ctx, found.track, &now);
-        return Err(failed("REAPER didn't take that lane setting; the track is as it was"));
+        return Err(if same_lanes(&lanes_state(reaper, found.track), &now) {
+            failed("REAPER didn't take that lane setting; the track is as it was")
+        } else {
+            ("uncertain".into(), "REAPER didn't take that lane setting, and Kumi could not put the track's lanes back: read it".into())
+        });
     }
     Ok(Applied { applied: after, display: json!({"title": title}), ..Default::default() })
 }
@@ -242,13 +260,23 @@ pub fn lanes_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if same_lanes(&now, restore.prior) {
         return Ok(Restored { restored: now, display: json!({"title": format!("{name}'s lanes are as they were")}), unwritten: true });
     }
+    // (its items too: with lanes off, items the producer added or took away since are theirs)
     if !restore.discard && !same_lanes(&now, restore.applied) {
-        return Err(changed(format!("{name}'s lanes have been changed in REAPER since Kumi set them")));
+        return Err(changed(format!("{name}'s lanes or items have been changed in REAPER since Kumi set its lanes")));
     }
     put_lanes(ctx, found.track, restore.prior);
     let after = lanes_state(ctx.reaper, found.track);
-    if !same_lanes(&after, restore.prior) {
-        return Err(failed(format!("REAPER didn't put {name}'s lanes back exactly")));
+    if !put_as(&after, restore.prior) {
+        // Written, so never a plain failure: put as Kumi left them, the lanes are as before this undo; else it's uncertain.
+        put_lanes(ctx, found.track, &now);
+        return Err(if put_as(&lanes_state(ctx.reaper, found.track), &now) {
+            failed(format!("REAPER didn't put {name}'s lanes back exactly; they are as Kumi left them"))
+        } else {
+            (
+                "uncertain".into(),
+                format!("REAPER didn't put {name}'s lanes back exactly, and Kumi could not leave them as they were: read it"),
+            )
+        });
     }
     Ok(Restored {
         restored: after,
@@ -367,6 +395,11 @@ fn name_wanted(input: &Value) -> Done<String> {
     }
 }
 
+/// Every lane's name, top first: a lane is told by its place, which a lane added or taken away above it moves.
+fn lane_names(reaper: &Reaper, track: Track) -> Vec<String> {
+    (0..lane_count(reaper, track).unwrap_or(0)).map(|lane| lane_name(reaper, track, lane)).collect()
+}
+
 pub fn name_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, &input["ref"], "lane-name")?;
     let lane = lane_of(ctx, input, found.track)?;
@@ -376,7 +409,7 @@ pub fn name_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if now == wanted {
         display["unchanged"] = true.into();
     }
-    let state = json!({"lane": lane, "name": now});
+    let state = json!({"lane": lane, "name": now, "names": lane_names(ctx.reaper, found.track)});
     Ok(Preview { target: target(&found.guid), prior: state.clone(), fence: state, display })
 }
 
@@ -385,13 +418,14 @@ pub fn name_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let lane = lane_of(ctx, input, found.track)?;
     let wanted = name_wanted(input)?;
     let now = lane_name(ctx.reaper, found.track, lane);
-    if fence["name"].as_str() != Some(now.as_str()) || fence["lane"].as_i64() != Some(lane) {
-        return Err(changed(format!("{}'s lane {} was renamed since the preview", named(ctx, found.track), lane + 1)));
+    let names_moved = fence.get("names").is_some_and(|names| *names != json!(lane_names(ctx.reaper, found.track)));
+    if fence["name"].as_str() != Some(now.as_str()) || fence["lane"].as_i64() != Some(lane) || names_moved {
+        return Err(changed(format!("{}'s lanes were added, taken away or renamed since the preview", named(ctx, found.track))));
     }
     let title = format!("{}: lane {} named {}", named(ctx, found.track), lane + 1, quoted(&wanted));
     if now == wanted {
         return Ok(Applied {
-            applied: json!({"lane": lane, "name": now}),
+            applied: json!({"lane": lane, "name": now, "names": lane_names(ctx.reaper, found.track)}),
             display: json!({"title": title}),
             unwritten: true,
             ..Default::default()
@@ -402,7 +436,11 @@ pub fn name_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     {
         return Err(failed("REAPER didn't take that lane name"));
     }
-    Ok(Applied { applied: json!({"lane": lane, "name": wanted}), display: json!({"title": title}), ..Default::default() })
+    Ok(Applied {
+        applied: json!({"lane": lane, "name": wanted, "names": lane_names(ctx.reaper, found.track)}),
+        display: json!({"title": title}),
+        ..Default::default()
+    })
 }
 
 pub fn name_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -414,6 +452,29 @@ pub fn name_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = lane_name(ctx.reaper, found.track, lane);
     let prior = restore.prior["name"].as_str().unwrap_or_default();
     let name = named(ctx, found.track);
+    // The lanes by their names: a lane added or taken away above it (a comp lane on top) moves every lane down or up, and
+    // the lane at its number is another one (as are "back already" and a rename there). Kept since lanes were.
+    let names = json!(lane_names(ctx.reaper, found.track));
+    if let (Some(prior_names), Some(applied_names)) = (restore.prior.get("names"), restore.applied.get("names")) {
+        if names == *prior_names {
+            return Ok(Restored {
+                restored: restore.prior.clone(),
+                display: json!({"title": format!("{name}'s lane {} has its name back already", lane + 1)}),
+                unwritten: true,
+            });
+        }
+        let count = |names: &Value| names.as_array().map_or(0, Vec::len);
+        if count(&names) != count(applied_names) {
+            return Err(changed(format!(
+                "{name}'s lanes have been added or taken away in REAPER since: lane {} isn't the lane Kumi named, so Kumi leaves \
+                 them, even with discard",
+                lane + 1
+            )));
+        }
+        if !restore.discard && names != *applied_names {
+            return Err(changed(format!("{name}'s lanes have been renamed in REAPER since")));
+        }
+    }
     if now == prior {
         return Ok(Restored {
             restored: restore.prior.clone(),
