@@ -431,12 +431,15 @@ async fn markers_and_the_tempo_change_and_come_back_in_logics_words() {
     assert_eq!(lab.script.undo_titles(), ["Undo Create Marker", "Undo Value Change", "Undo Value Change", "Undo Delete"]);
     assert_eq!(lab.script.epoch(), 1, "markers and the tempo never move the epoch");
 
-    // What the bridge can't make yet is refused saying why; what it makes beyond the simulator says so too.
+    // What the bridge can't make yet is refused saying why (a track moved or coloured among them: the headers can't be
+    // dragged, and a colour could never be read back); what it makes beyond the simulator says so too.
     for (kind, why) in [
         ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
         ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
         ("fx-param", "a plug-in's controls aren't reached yet"),
         ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
+        ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
+        ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
     ] {
         let (refused, is_error) = lab.try_preview(kind, json!({"ref": "1:marker:1"})).await;
         assert!(is_error && refused["code"] == "bad-params", "{kind}: {refused}");
@@ -527,7 +530,8 @@ async fn the_change_methods_on_the_wire() {
     lab.undo(&delete, "u7", false).await;
     assert_eq!((lab.script.epoch(), lab.script.track_count()), (8, 2), "every undo went through");
     // (M4) The project saved where it is and as a new package; a key command with and without a step; a region split,
-    // moved, resized and the cycle, a tempo change and a colour set, each undone; a MIDI file imported and undone.
+    // moved, resized, looped, renamed and deleted, the cycle, a tempo event made and one deleted, a signature, each
+    // undone; a MIDI file imported and undone; a Track Stack made and flattened, each undone.
     lab.tool("project_save", json!({"epoch": "8"})).await;
     lab.tool("project_save", json!({"epoch": "8", "path": "/Users/me/Music/Logic/Scratch Kumi.logicx"})).await;
     lab.make("key-command", json!({"command": "Select All"}), "a11").await;
@@ -539,16 +543,28 @@ async fn the_change_methods_on_the_wire() {
     lab.undo(&moved, "u10", false).await;
     let (resized, _) = lab.make("region-resize", json!({"ref": "12:region:1", "endBeats": 8}), "a15").await;
     lab.undo(&resized, "u11", false).await;
-    let (cycle, _) = lab.make("loop-range", json!({"startBeats": 0, "endBeats": 16}), "a16").await;
-    lab.undo(&cycle, "u12", false).await;
-    let (tempo, _) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 128}), "a17").await;
-    lab.undo(&tempo, "u13", false).await;
-    let (colour, _) = lab.make("track-color", json!({"ref": "12:track:1", "color": "#ff0000"}), "a18").await;
-    lab.undo(&colour, "u14", false).await;
+    let (looped, _) = lab.make("region-loop", json!({"ref": "14:region:1", "loop": true}), "a16").await;
+    lab.undo(&looped, "u12", false).await;
+    let (renamed, _) = lab.make("region-rename", json!({"ref": "14:region:1", "name": "Chords"}), "a17").await;
+    lab.undo(&renamed, "u13", false).await;
+    let (deleted, _) = lab.make("region-delete", json!({"ref": "16:region:1"}), "a18").await;
+    lab.undo(&deleted, "u14", false).await;
+    let (cycle, _) = lab.make("loop-range", json!({"startBeats": 16, "endBeats": 32}), "a19").await;
+    lab.undo(&cycle, "u15", false).await;
+    let (tempo, _) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 128}), "a20").await;
+    let (gone, _) = lab.make("tempo-marker-delete", json!({"positionBeats": 32}), "a21").await;
+    lab.undo(&gone, "u16", false).await;
+    lab.undo(&tempo, "u17", false).await;
+    let (signature, _) = lab.make("signature-set", json!({"positionBeats": 16, "timeSignature": [3, 4]}), "a22").await;
+    lab.undo(&signature, "u18", false).await;
     let notes: Vec<Value> = (0..4).map(|n| json!({"pitch": 60 + n, "start": n as f64 * 0.25, "length": 0.25})).collect();
-    let (imported, _) = lab.make("midi-import", json!({"ref": "12:track:2", "positionBeats": 32, "notes": notes}), "a19").await;
-    lab.undo(&imported, "u15", false).await;
-    assert_eq!((lab.script.epoch(), lab.script.track_count(), lab.script.regions().len()), (14, 2, 1), "every M4 undo went through");
+    let (imported, _) = lab.make("midi-import", json!({"ref": "18:track:2", "positionBeats": 32, "notes": notes}), "a23").await;
+    lab.undo(&imported, "u19", false).await;
+    let (stack, _) = lab.make("track-stack", json!({"refs": ["20:track:1", "20:track:2"], "kind": "summing"}), "a24").await;
+    let (flatten, _) = lab.make("track-stack-flatten", json!({"ref": "21:track:1"}), "a25").await;
+    lab.undo(&flatten, "u20", false).await;
+    lab.undo(&stack, "u21", false).await;
+    assert_eq!((lab.script.epoch(), lab.script.track_count(), lab.script.regions().len()), (24, 2, 1), "every M4 undo went through");
     let asked: Vec<String> = lab.script.asked().into_iter().map(|(method, _)| method).collect();
     for method in [
         "change_preview",
@@ -570,8 +586,9 @@ async fn the_change_methods_on_the_wire() {
 // ----- M4, the first slice -----
 
 /// (M4) Saving is no change: the package written where it is (Cmd-S), or as a new package (File > Save As… through the
-/// panel service), which the project is from then on; never over a package, and never a version (REAPER's); the
-/// epoch is checked as every call's is. Nothing is journaled.
+/// panel service), which the project is from then on; never as the project's own file, never over a file, and never
+/// a version (REAPER's), each refused in the bridge's words; the epoch is checked as every call's is. Nothing is
+/// journaled.
 #[tokio::test]
 async fn the_project_is_saved_where_it_is_or_as_a_new_package_and_never_versioned() {
     let mut lab = Lab::start().await;
@@ -581,10 +598,17 @@ async fn the_project_is_saved_where_it_is_or_as_a_new_package_and_never_versione
     let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
     assert_eq!(released["released"], 0, "nothing is kept for undo");
     for (arguments, words) in [
-        (json!({"epoch": "1", "version": true}), "Logic Pro keeps no versions: give path"),
-        (json!({"epoch": "1", "path": "/Users/me/Music/Logic/Scratch.logicx"}), "is there already: Kumi never saves over a package"),
+        (
+            json!({"epoch": "1", "version": true}),
+            "Logic Pro keeps no versions: give path (a .logicx that isn't there yet) to save a copy, or nothing to save in place",
+        ),
+        (
+            json!({"epoch": "1", "path": "/Users/me/Music/Logic/Scratch.logicx"}),
+            "that is the project's own file: save in place (no path), or give another path",
+        ),
         (json!({"epoch": "1", "path": "/Users/me/Music/Logic/Scratch Kumi.txt"}), "path must name a .logicx package"),
         (json!({"epoch": "1", "path": "Scratch Kumi.logicx"}), "whole path"),
+        (json!({"epoch": "1", "path": "/Users/me/Music/Logic/A:B.logicx"}), "path must end in a file name Logic Pro can save"),
         (json!({}), "epoch: the epoch the refs were read in"),
     ] {
         let (refused, is_error) = lab.tool("project_save", arguments.clone()).await;
@@ -605,69 +629,89 @@ async fn the_project_is_saved_where_it_is_or_as_a_new_package_and_never_versione
     assert_ne!(project["items"][0]["id"], "e805ab87b3ca9d66f0f62d47b97caa29", "another package is another id");
     assert_eq!(lab.script.project().path.as_deref(), Some(copy));
     let (again, is_error) = lab.tool("project_save", json!({"epoch": "1", "path": copy})).await;
-    assert!(is_error && again["error"].as_str().unwrap().contains("is there already"), "{again}");
+    assert!(is_error && again["error"].as_str().unwrap().contains("that is the project's own file"), "{again}");
+    // Saved as another: the first copy is a file there now, never saved over.
+    let other = "/Users/me/Music/Logic/Scratch Kumi 2.logicx";
+    lab.tool("project_save", json!({"epoch": "1", "path": other})).await;
+    let (again, is_error) = lab.tool("project_save", json!({"epoch": "1", "path": copy})).await;
+    assert!(is_error && again["error"] == format!("{copy} is there already: Kumi never saves over a file"), "{again}");
     let (saved, _) = lab.tool("project_save", json!({"epoch": "1"})).await;
-    assert_eq!(saved["saved"], copy, "saved where it is now");
+    assert_eq!(saved["saved"], other, "saved where it is now");
     lab.simulator.stop();
 }
 
-/// (M4) A key command runs as a change: one Logic keeps a step of (Create Marker, a split at the playhead) is a row
-/// only Logic's own undo takes back; a selection command keeps none and makes no row (the apply says so); the
-/// commands that open a dialog or leave the project, Logic's own undo and redo, and names Logic hasn't are refused.
+/// (M4) A key command runs as a change, as the bridge resolves it (by its English name or its id, from Logic's own
+/// names and the factory U.S. bindings): one Logic keeps a step of (Create Marker; a split at the playhead) is a row
+/// only Logic's own undo takes back; a selection command keeps none and makes no row (the apply says so); a command
+/// that saves, moves Logic's own undo history, opens a dialog or has no key is refused, and a name Logic hasn't is
+/// refused with the closest it has.
 #[tokio::test]
 async fn a_key_command_is_a_row_only_when_logic_keeps_a_step_of_it_and_only_logic_takes_it_back() {
     let mut lab = Lab::start().await;
     let preview = lab.preview("key-command", json!({"command": "Select All"})).await;
-    assert_eq!((preview["target"].clone(), preview["prior"].clone()), (json!({"kind": "action", "command": "Select All"}), json!({})));
-    assert_eq!(preview["display"]["title"], "Ran key command “Select All”");
-    assert!(
-        preview["display"]["note"].as_str().unwrap().starts_with("Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro)"),
-        "{preview}"
+    assert_eq!(
+        (preview["target"].clone(), preview["prior"].clone()),
+        (json!({"kind": "action", "command": 766, "name": "Select All"}), json!({}))
+    );
+    assert_eq!(
+        preview["display"],
+        json!({"title": "Ran key command “Select All” (⌘A)", "note": "Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro). It acts on what the producer has selected now."})
     );
     let (applied, is_error) = lab.apply(&preview, "a1").await;
     assert!(!is_error && applied["state"] == "applied", "{applied}");
-    assert_eq!(applied["applied"], json!({"command": "Select All", "changed": false}));
-    assert_eq!(applied["display"]["unchanged"], true);
+    assert_eq!(applied["applied"], json!({"command": 766, "name": "Select All", "key": "⌘A", "changed": false}));
+    assert_eq!((applied["display"]["unchanged"].clone(), applied["undo"]["entry"].clone()), (json!(true), json!(false)));
     assert!(applied["display"]["note"].as_str().unwrap().contains("no row in HISTORY"), "{applied}");
-    assert_eq!(applied["undo"]["entry"], false);
     assert!(lab.script.undo_titles().is_empty(), "no step of Logic's undo");
 
-    // Create Marker at the playhead: a step, and a marker Logic numbered; Kumi's undo of it is Logic's business.
+    // Create Marker at the playhead, by its id: a step, and a marker Logic numbered; Kumi's undo of it is Logic's.
     lab.tool("cursor_set", json!({"positionBeats": 16})).await;
-    let (created, applied) = lab.make("key-command", json!({"command": "Create Marker"}), "a2").await;
-    assert_eq!(created["display"]["title"], "Ran key command “Create Marker”");
+    let (created, applied) = lab.make("key-command", json!({"command": 513}), "a2").await;
+    assert_eq!(created["display"]["title"], "Ran key command “Create Marker” (⌥')");
     assert_eq!(
         (applied["applied"].clone(), applied["undo"]["title"].clone()),
-        (json!({"command": "Create Marker", "changed": true}), json!("Undo Create Marker"))
+        (json!({"command": 513, "name": "Create Marker", "key": "⌥'", "step": "Create Marker"}), json!("Undo Create Marker"))
     );
     assert_eq!(lab.script.markers(), [("Marker 2".to_string(), 16.0), ("Marker 1".to_string(), 32.0)]);
     let (refused, is_error) = lab.undo(&created, "u1", false).await;
     assert!(is_error && refused["code"] == "daw-only", "{refused}");
-    assert_eq!(refused["error"], "Kumi can't take back what a key command did: Logic Pro's own undo can take it back (Cmd-Z in Logic Pro)");
+    assert_eq!(refused["error"], "Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)");
     assert_eq!(lab.script.markers().len(), 2, "nothing changed");
 
-    // A split at the playhead: the selected region split when the playhead is inside it (a step), nothing when it isn't.
+    // A split at the playhead: every selected region (Select All selected them) the playhead is inside, split there (a
+    // step, and the epoch moves); nothing when it is inside none. A name is matched whatever its case or an ellipsis,
+    // an id as a number or as text.
     lab.tool("cursor_set", json!({"positionBeats": 8})).await;
-    let (_, split) = lab.make("key-command", json!({"command": "Split Regions/Events at Playhead"}), "a3").await;
+    let (_, split) = lab.make("key-command", json!({"command": "split regions/events at playhead position…"}), "a3").await;
     assert_eq!(
-        (split["applied"]["changed"].clone(), split["undo"]["title"].clone(), split["epoch"].clone()),
-        (json!(true), json!("Undo Split"), json!("2"))
+        (split["applied"]["step"].clone(), split["undo"]["title"].clone(), split["epoch"].clone()),
+        (json!("Split Regions"), json!("Undo Split Regions"), json!("2"))
     );
     assert_eq!(lab.script.regions().len(), 2);
     lab.tool("cursor_set", json!({"positionBeats": 40})).await;
-    let (_, nothing) = lab.make("key-command", json!({"command": "Split Regions/Events at Playhead"}), "a4").await;
+    let (_, nothing) = lab.make("key-command", json!({"command": "574"}), "a4").await;
     assert_eq!((nothing["applied"]["changed"].clone(), nothing["undo"]["entry"].clone()), (json!(false), json!(false)));
     assert_eq!(lab.script.regions().len(), 2);
 
-    // Refused before anything is sent to Logic: a dialog, leaving the project, Logic's undo, a name Logic hasn't.
+    // Refused before anything is sent to Logic, in the bridge's words: a save, Logic's own undo, a bounce through a
+    // dialog, a command with no key, a name Logic hasn't (with the closest it has), an id out of range, an empty name;
+    // and an id the simulated Logic doesn't model says so.
     for (command, words) in [
-        (json!("Save As…"), "opens a dialog or leaves the project"),
-        (json!("Quit Logic Pro"), "opens a dialog or leaves the project"),
-        (json!("Bounce Project or Section…"), "opens a dialog or leaves the project"),
-        (json!("Undo"), "moves Logic Pro's undo history under Kumi's HISTORY"),
-        (json!("Flim"), "Logic Pro has no key command named “Flim”"),
-        (json!(42), "Logic Pro has no key command with id 42"),
-        (json!(""), "command: a key command's English name"),
+        (json!(754), "key command 754 saves the project: use project_save: Kumi won't run it as a change"),
+        (json!("Undo"), "“Undo” moves Logic Pro's undo history under Kumi's HISTORY"),
+        (
+            json!("Bounce Tracks in Place"),
+            "“Bounce Tracks in Place” imports, exports or bounces through a dialog, which Kumi never runs unattended",
+        ),
+        (json!("Set Left Locator by Playhead"), "isn't bound to any key in Logic Pro's key command set"),
+        (json!("Save As…"), "Logic Pro has no key command named “Save As…”"),
+        (
+            json!("Split at Playhead"),
+            "Logic Pro has no key command named “Split at Playhead”; close: “Split Regions/Events at Playhead Position”",
+        ),
+        (json!(9999), "command: an id is a whole number from 1 to 4999"),
+        (json!(""), "command: a key command's name"),
+        (json!(42), "the simulated Logic Pro knows only the key commands"),
     ] {
         let (refused, is_error) = lab.try_preview("key-command", json!({"command": command})).await;
         assert!(is_error && refused["code"] == "bad-params" && refused["error"].as_str().unwrap().contains(words), "{command}: {refused}");
@@ -675,108 +719,149 @@ async fn a_key_command_is_a_row_only_when_logic_keeps_a_step_of_it_and_only_logi
     lab.simulator.stop();
 }
 
-/// (M4) Regions by their place in the Tracks area: moved (the epoch moves), resized, split (the right part's ref in
-/// `created`; whole again through Logic's own undo while that step is on top, else by value), looped, renamed and
-/// deleted (back only through Logic's own undo while on top), each undone, the refs carried by place.
+/// (M4) Regions by their place in the Tracks area, as the bridge makes them: moved in time (the epoch moves; a region's
+/// state is its edges, name, track and the Tracks area's `looped`), resized to whole beats by Logic's own Set Start and
+/// Set End to Playhead Position (the notes stay where they are in time), split on a beat (the right part's ref in
+/// `created`; whole again only through Logic's own undo while that step is on top), looped in the Region inspector
+/// (the rows never show it), renamed (the epoch moves) and deleted (back only through Logic's own undo while on top),
+/// each undone, the refs carried by place.
 #[tokio::test]
 async fn regions_move_resize_split_loop_rename_and_delete_and_come_back_by_their_place() {
     let mut lab = Lab::start().await;
+    let keys = |start: f64, end: f64| json!({"startBeats": start, "endBeats": end, "name": "Keys", "track": 2, "looped": false});
     let (page, _) = lab.tool("read", json!({"kind": "region"})).await;
     assert_eq!((page["total"].clone(), page["items"][0]["trackRef"].clone()), (json!(1), json!("1:track:2")));
     let (moved, applied) = lab.make("region-move", json!({"ref": "1:region:1", "positionBeats": 8}), "a1").await;
-    assert_eq!(moved["prior"], json!({"startBeats": 0.0, "endBeats": 16.0, "trackRef": "1:track:2"}));
-    assert_eq!(
-        (applied["epoch"].clone(), applied["applied"].clone()),
-        (json!("2"), json!({"startBeats": 8.0, "endBeats": 24.0, "trackRef": "2:track:2"}))
-    );
+    assert_eq!((moved["prior"].clone(), moved["target"].clone()), (keys(0.0, 16.0), json!({"ref": "1:region:1", "kind": "region"})));
+    assert_eq!((applied["epoch"].clone(), applied["applied"].clone()), (json!("2"), keys(8.0, 24.0)));
     assert_eq!(
         (applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
         (json!("Moved region “Keys” to bar 3"), json!("Undo Value Change"))
     );
     let (notes, _) = lab.tool("read", json!({"kind": "note", "parent": "2:region:1"})).await;
     assert_eq!(notes["items"][0]["position"], position(3, 1), "the notes moved with it: {notes}");
-    let (onto, applied) = lab.make("region-move", json!({"ref": "2:region:1", "toRef": "2:track:1"}), "a2").await;
-    assert_eq!(applied["display"]["title"], "Moved region “Keys” to bar 3 on “Vocal”");
-    assert_eq!((applied["applied"]["trackRef"].clone(), lab.script.regions()[0].1), (json!("3:track:1"), 1));
-    let (back, is_error) = lab.undo(&onto, "u1", false).await;
-    assert!(!is_error && back["restored"]["trackRef"] == "4:track:2" && back["epoch"] == "4", "{back}");
-    let (back, is_error) = lab.undo(&moved, "u2", false).await;
-    assert!(!is_error && back["restored"] == json!({"startBeats": 0.0, "endBeats": 16.0, "trackRef": "5:track:2"}), "{back}");
-    let (refused, is_error) = lab.try_preview("region-move", json!({"ref": "5:region:1"})).await;
-    assert!(is_error && refused["error"].as_str().unwrap().starts_with("pass positionBeats"), "{refused}");
+    for (input, words) in [
+        (
+            json!({"ref": "2:region:1", "toRef": "2:track:1"}),
+            "Logic Pro's Event List moves a region in time, not to another track: leave toRef out",
+        ),
+        (
+            json!({"ref": "2:region:1", "position": 4.0}),
+            "Logic Pro's bridge places regions by positionBeats (beats from the project's start), not seconds",
+        ),
+        (json!({"ref": "2:region:1"}), "positionBeats must be a number from 0: beats from the project's start"),
+    ] {
+        let (refused, _) = lab.try_preview("region-move", input).await;
+        assert_eq!(refused["error"], words);
+    }
+    let (back, is_error) = lab.undo(&moved, "u1", false).await;
+    assert!(!is_error && back["restored"] == keys(0.0, 16.0) && back["epoch"] == "3", "{back}");
+    assert_eq!(back["display"]["title"], "region “Keys” moved back to bar 1");
 
-    // Resized: no epoch move (its place holds); put back by value.
-    let (resized, applied) = lab.make("region-resize", json!({"ref": "5:region:1", "endBeats": 8}), "a3").await;
+    // Resized: the end at the playhead (Logic's step names it), put back by value; an edge off the beat is refused at
+    // the apply, before anything is written; both edges, the start first, the notes staying where they are in time.
+    let (resized, applied) = lab.make("region-resize", json!({"ref": "3:region:1", "endBeats": 8}), "a2").await;
     assert_eq!(
-        (applied["epoch"].clone(), applied["applied"].clone(), applied["display"]["title"].clone()),
-        (json!("5"), json!({"startBeats": 0.0, "endBeats": 8.0}), json!("Resized region “Keys”: bar 1 to bar 3"))
+        (applied["epoch"].clone(), applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
+        (json!("4"), keys(0.0, 8.0), json!("Trimmed region “Keys” to bar 1–bar 3"), json!("Undo Set End to Playhead Position"))
     );
-    let (refused, _) = lab.try_preview("region-resize", json!({"ref": "5:region:1", "startBeats": 9})).await;
+    let (refused, _) = lab.try_preview("region-resize", json!({"ref": "4:region:1", "startBeats": 9})).await;
     assert_eq!(refused["error"], "the region must end after it starts");
-    let (back, _) = lab.undo(&resized, "u3", false).await;
-    assert_eq!(back["restored"], json!({"startBeats": 0.0, "endBeats": 16.0}));
+    let (back, _) = lab.undo(&resized, "u2", false).await;
+    assert_eq!((back["restored"].clone(), back["display"]["title"].clone()), (keys(0.0, 16.0), json!("region “Keys” back to its length")));
+    let preview = lab.preview("region-resize", json!({"ref": "5:region:1", "endBeats": 12.5})).await;
+    let (refused, is_error) = lab.apply(&preview, "a3").await;
+    assert!(is_error && refused["error"] == "Logic Pro's playhead display places an edge on a beat: give whole beats", "{refused}");
+    assert_eq!((lab.script.regions()[0].3, lab.script.epoch()), (16.0, 5), "nothing written");
+    let (resized, applied) = lab.make("region-resize", json!({"ref": "5:region:1", "startBeats": 1, "endBeats": 12}), "a4").await;
+    assert_eq!(
+        (applied["applied"].clone(), applied["undo"]["title"].clone()),
+        (keys(1.0, 12.0), json!("Undo Set End to Playhead Position"))
+    );
+    let titles = lab.script.undo_titles();
+    assert_eq!(titles[titles.len() - 2..], ["Undo Set Start to Playhead Position", "Undo Set End to Playhead Position"]);
+    let (notes, _) = lab.tool("read", json!({"kind": "note", "parent": "6:region:1"})).await;
+    assert_eq!(notes["items"][1]["position"], position(1, 2), "the notes stay where they were: {notes}");
+    lab.undo(&resized, "u3", false).await;
 
-    // Split at bar 1 beat 3: the right part is a new region with the notes from there on; whole again through Logic's
-    // own undo while the split is on top.
-    let (split, applied) = lab.make("region-split", json!({"ref": "5:region:1", "positionBeats": 2}), "a4").await;
-    assert_eq!(split["display"]["title"], "Split region “Keys” at bar 1 beat 3");
+    // Split on a beat, at bar 1 beat 3: the right part is a new region with the notes from there on, which Logic leaves
+    // selected; whole again through Logic's own undo while the split is on top.
+    let (refused, _) = lab.try_preview("region-split", json!({"ref": "7:region:1", "positionBeats": 2.5})).await;
+    assert_eq!(refused["error"], "Logic Pro's playhead display splits on a beat: give whole beats");
+    let (split, applied) = lab.make("region-split", json!({"ref": "7:region:1", "positionBeats": 2}), "a5").await;
+    assert_eq!(
+        split["display"],
+        json!({"title": "Split region “Keys” at bar 1 beat 3", "note": "Logic Pro's own undo puts the region back whole while the split is its latest step."})
+    );
     assert_eq!(
         (applied["epoch"].clone(), applied["created"].clone(), applied["undo"]["title"].clone()),
-        (json!("6"), json!({"ref": "6:region:2", "kind": "region"}), json!("Undo Split"))
+        (json!("8"), json!({"ref": "8:region:2", "kind": "region"}), json!("Undo Split Regions"))
     );
-    assert_eq!(applied["applied"], json!({"left": {"startBeats": 0.0, "endBeats": 2.0}, "right": {"startBeats": 2.0, "endBeats": 16.0}}));
+    assert_eq!(applied["applied"], json!({"left": keys(0.0, 2.0), "right": keys(2.0, 16.0)}));
     assert_eq!((lab.script.notes_of(1), lab.script.notes_of(2)), (2, 2));
-    let (notes, _) = lab.tool("read", json!({"kind": "note", "parent": "6:region:2"})).await;
+    let (page, _) = lab.tool("read", json!({"kind": "region"})).await;
+    assert_eq!((page["items"][0]["selected"].clone(), page["items"][1]["selected"].clone()), (json!(false), json!(true)), "{page}");
+    let (notes, _) = lab.tool("read", json!({"kind": "note", "parent": "8:region:2"})).await;
     assert_eq!((notes["total"].clone(), notes["items"][0]["position"].clone()), (json!(2), position(1, 3)));
     let (timeline, _) = lab.tool("focus_body", json!({"kind": "timeline"})).await;
     assert_eq!(timeline["lanes"][1]["regions"].as_array().map(Vec::len), Some(2), "{timeline}");
-    let (refused, _) = lab.try_preview("region-split", json!({"ref": "6:region:1", "positionBeats": 2})).await;
-    assert!(refused["error"].as_str().unwrap().starts_with("positionBeats must be inside the region"), "{refused}");
+    let (refused, _) = lab.try_preview("region-split", json!({"ref": "8:region:1", "positionBeats": 2})).await;
+    assert_eq!(refused["error"], "that's not inside the region: it runs from bar 1 to bar 1 beat 3");
     let (whole, is_error) = lab.undo(&split, "u4", false).await;
-    assert!(!is_error && whole["restored"]["pressed"] == "Undo Split", "{whole}");
-    assert_eq!((lab.script.regions().len(), lab.script.notes_of(1), lab.script.epoch()), (1, 4, 7));
-    // Split again, then renamed: the split is no longer on top, so the undo joins the parts by value.
-    let (split, _) = lab.make("region-split", json!({"ref": "7:region:1", "positionBeats": 2}), "a5").await;
-    let (renamed, applied) = lab.make("region-rename", json!({"ref": "8:region:1", "name": "Chords"}), "a6").await;
-    assert_eq!(
-        (applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
-        (json!("Renamed region “Keys” → “Chords”"), json!("Undo Renaming"))
-    );
-    let (whole, is_error) = lab.undo(&split, "u5", false).await;
-    assert!(
-        !is_error && whole["restored"].get("pressed").is_none() && whole["display"]["title"] == "region “Chords” whole again",
-        "{whole}"
-    );
-    assert_eq!((lab.script.regions().len(), lab.script.notes_of(1)), (1, 4));
+    assert!(!is_error && whole["restored"]["pressed"] == "Undo Split Regions", "{whole}");
+    assert_eq!(whole["display"], json!({"title": "region “Keys” whole again", "note": "Put back with Logic Pro's own undo."}));
+    assert_eq!((lab.script.regions().len(), lab.script.notes_of(1), lab.script.epoch()), (1, 4, 9));
 
-    // Looped and unlooped; the name put back.
-    let (looped, applied) = lab.make("region-loop", json!({"ref": "9:region:1", "loop": true}), "a7").await;
+    // Split again: with a marker made since, the split isn't Logic's latest step, and nothing else makes it whole;
+    // with a part renamed, it isn't as the split left it.
+    let (split, _) = lab.make("region-split", json!({"ref": "9:region:1", "positionBeats": 2}), "a6").await;
+    lab.make("marker-add", json!({"positionBeats": 40}), "a7").await;
+    let (kept, is_error) = lab.undo(&split, "u5", false).await;
+    assert!(is_error && kept["error"].as_str().unwrap().contains("(its Edit menu says \"Undo Create Marker\")"), "{kept}");
+    let (renamed, applied) = lab.make("region-rename", json!({"ref": "10:region:1", "name": "Chords"}), "a8").await;
     assert_eq!(
-        (applied["applied"].clone(), applied["display"]["title"].clone()),
-        (json!({"looped": true}), json!("Region “Chords” looped"))
+        (applied["display"]["title"].clone(), applied["undo"]["title"].clone(), applied["epoch"].clone()),
+        (json!("Renamed region “Keys” → “Chords”"), json!("Undo Renaming"), json!("11"))
     );
-    let (region, _) = lab.tool("read", json!({"ref": "9:region:1"})).await;
-    assert_eq!(region["items"][0]["looped"], true);
-    let (back, _) = lab.undo(&looped, "u6", false).await;
-    assert_eq!(back["restored"], json!({"looped": false}));
-    let (back, _) = lab.undo(&renamed, "u7", false).await;
-    assert_eq!((back["restored"].clone(), lab.script.regions()[0].0.clone()), (json!({"name": "Keys"}), "Keys".to_string()));
+    let (kept, is_error) = lab.undo(&split, "u6", false).await;
+    assert!(is_error && kept["error"] == "one of the split's parts has been changed in Logic Pro since Kumi split it", "{kept}");
+    assert_eq!(lab.script.regions().len(), 2, "still split");
 
-    // Deleted: back through Logic's own undo while on top; with another step on top, Kumi can't.
-    let (delete, applied) = lab.make("region-delete", json!({"ref": "9:region:1"}), "a8").await;
-    assert_eq!(delete["display"]["note"], "It holds 4 note(s); only Logic Pro's own undo brings a deleted region back.");
+    // Looped through the Region inspector (a step of Logic's undo), which the Tracks area's rows never show; unlooped,
+    // and the name put back (the epoch moves).
+    let (looped, applied) = lab.make("region-loop", json!({"ref": "11:region:1", "loop": true}), "a9").await;
+    assert_eq!(
+        (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
+        (json!({"loop": true}), json!("region “Chords” looped"), json!("Undo Loop Parameter Change"))
+    );
+    let (region, _) = lab.tool("read", json!({"ref": "11:region:1"})).await;
+    assert_eq!(region["items"][0]["looped"], false, "{region}");
+    let (back, _) = lab.undo(&looped, "u7", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (json!({"loop": false}), json!("region “Chords” not looped (put back)"))
+    );
+    let (back, _) = lab.undo(&renamed, "u8", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone(), back["epoch"].clone()),
+        (json!({"name": "Keys"}), json!("Region named “Keys” again"), json!("12"))
+    );
+
+    // Deleted: back through Logic's own undo while on top, its notes with it; with another step on top, Kumi can't.
+    let (delete, applied) = lab.make("region-delete", json!({"ref": "12:region:1"}), "a10").await;
+    assert_eq!(delete["display"]["note"], "Only Logic Pro's own undo brings a deleted region back, while the deletion is its latest step.");
     assert_eq!(
         (applied["epoch"].clone(), applied["applied"].clone(), applied["undo"]["title"].clone()),
-        (json!("10"), json!({"deleted": true}), json!("Undo Delete"))
+        (json!("13"), json!({"deleted": true}), json!("Undo Delete"))
     );
     let (page, _) = lab.tool("read", json!({"kind": "region"})).await;
-    assert_eq!(page["total"], 0);
-    let (back, is_error) = lab.undo(&delete, "u8", false).await;
-    assert!(!is_error && back["restored"]["ref"] == "11:region:1" && back["restored"]["pressed"] == "Undo Delete", "{back}");
-    assert_eq!((lab.script.regions().len(), lab.script.notes_of(1)), (1, 4));
-    let (delete, _) = lab.make("region-delete", json!({"ref": "11:region:1"}), "a9").await;
-    lab.make("track-rename", json!({"ref": "12:track:1", "name": "Vox"}), "a10").await;
-    let (kept, is_error) = lab.undo(&delete, "u9", false).await;
+    assert_eq!(page["total"], 1);
+    let (back, is_error) = lab.undo(&delete, "u9", false).await;
+    assert!(!is_error && back["restored"] == json!({"ref": "14:region:1", "was": "12:region:1", "pressed": "Undo Delete"}), "{back}");
+    assert_eq!((lab.script.regions().len(), lab.script.notes_of(1)), (2, 2));
+    let (delete, _) = lab.make("region-delete", json!({"ref": "14:region:1"}), "a11").await;
+    lab.make("track-rename", json!({"ref": "15:track:1", "name": "Vox"}), "a12").await;
+    let (kept, is_error) = lab.undo(&delete, "u10", false).await;
     assert!(
         is_error && kept["code"] == "failed" && kept["error"].as_str().unwrap().contains("(its Edit menu says \"Undo Renaming\")"),
         "{kept}"
@@ -784,201 +869,319 @@ async fn regions_move_resize_split_loop_rename_and_delete_and_come_back_by_their
     lab.simulator.stop();
 }
 
-/// (M4) Many notes at once: a MIDI file Kumi writes, imported as a new region on a software instrument track (the
-/// epoch moves, its ref in `created`); taken away again through Logic's own undo while on top, else deleted by value
-/// while it is as the import left it.
+/// (M4) Many notes at once: a MIDI file the bridge writes (named by its bytes, as the bridge names it), which Logic
+/// imports onto a new software instrument track below the one named, as a region it names itself; the epoch moves,
+/// the region's ref and its track's in `created`. Taken away again, track and all, only through Logic's own undo while
+/// that step is on top.
 #[tokio::test]
 async fn many_notes_go_in_as_a_midi_file_and_come_out_again() {
     let mut lab = Lab::start().await;
+    for (note, words) in [
+        (json!({"pitch": 200, "start": 0, "length": 1}), "pitch must be a whole number from 0 to 127"),
+        (json!({"start": 0, "length": 1}), "every note needs a pitch (0 to 127)"),
+        (json!({"pitch": 60, "start": 0, "length": 0}), "every note needs a length above 0 (beats)"),
+    ] {
+        let (refused, _) = lab.try_preview("midi-import", json!({"ref": "1:track:2", "positionBeats": 32, "notes": [note]})).await;
+        assert_eq!(refused["error"], words);
+    }
     let notes: Vec<Value> =
         (0..64).map(|n| json!({"pitch": 48 + n % 12, "start": n as f64 * 0.25, "length": 0.25, "velocity": 96})).collect();
-    let (refused, is_error) = lab.try_preview("midi-import", json!({"ref": "1:track:1", "positionBeats": 32, "notes": notes})).await;
-    assert!(is_error && refused["error"].as_str().unwrap().contains("is an audio track"), "{refused}");
-    let (refused, _) = lab
-        .try_preview("midi-import", json!({"ref": "1:track:2", "positionBeats": 32, "notes": [{"pitch": 200, "start": 0, "length": 1}]}))
-        .await;
-    assert_eq!(refused["error"], "each note's pitch must be 0 to 127");
     let (import, applied) = lab.make("midi-import", json!({"ref": "1:track:2", "positionBeats": 32, "notes": notes}), "a1").await;
     assert_eq!(
-        (import["prior"].clone(), import["display"]["title"].clone()),
-        (json!({"regions": 1}), json!("Imported 64 notes on “Keys” at bar 9"))
+        (import["prior"].clone(), import["target"].clone()),
+        (json!({"tracks": 2, "regions": 1}), json!({"ref": "1:track:2", "kind": "track"}))
+    );
+    assert_eq!(
+        import["display"],
+        json!({"title": "Imported 64 notes on “Keys” at bar 9", "notes": 64, "note": "Logic Pro's own undo takes an import back (\"Import\"), while it is its latest step."})
     );
     assert_eq!(
         (applied["epoch"].clone(), applied["created"].clone(), applied["undo"]["title"].clone()),
-        (json!("2"), json!({"ref": "2:region:2", "kind": "region"}), json!("Undo Import"))
+        (json!("2"), json!({"ref": "2:region:2", "kind": "region", "track": "2:track:3", "trackAdded": true}), json!("Undo Import"))
     );
-    assert_eq!(applied["applied"], json!({"notes": 64, "startBeats": 32.0, "endBeats": 48.0, "trackRef": "2:track:2"}));
+    let file = applied["applied"]["file"].as_str().unwrap().to_string();
+    assert!(file.starts_with("/tmp/kumi-logic/kumi-") && file.ends_with(".mid"), "{file}");
+    assert_eq!(
+        applied["applied"],
+        json!({"notes": 64, "startBeats": 32.0, "endBeats": 48.0, "track": 3, "trackName": "Studio Grand", "file": file, "answered": []})
+    );
+    assert_eq!(applied["display"], json!({"title": "Imported 64 notes on “Studio Grand” at bar 9", "notes": 64}));
+    let (tracks, _) = lab.tool("read", json!({"kind": "track"})).await;
+    assert_eq!((tracks["items"][2]["name"].clone(), tracks["items"][2]["kind"].clone()), (json!("Studio Grand"), json!("instrument")));
+    let (regions, _) = lab.tool("read", json!({"kind": "region"})).await;
+    let new = &regions["items"][1];
+    assert_eq!(
+        (new["name"].clone(), new["trackRef"].clone(), new["selected"].clone(), regions["items"][0]["selected"].clone()),
+        (json!("MIDI Region"), json!("2:track:3"), json!(true), json!(false))
+    );
     let (notes_page, _) = lab.tool("read", json!({"kind": "note", "parent": "2:region:2", "limit": 200})).await;
     assert_eq!(
         (notes_page["total"].clone(), notes_page["items"][1]["position"].clone()),
         (json!(64), json!({"bar": 9, "beat": 1, "division": 2, "tick": 1}))
     );
-    let (regions, _) = lab.tool("read", json!({"kind": "region", "parent": "2:track:2"})).await;
-    assert_eq!(regions["items"][1]["name"], "Kumi Import");
     let (gone, is_error) = lab.undo(&import, "u1", false).await;
-    assert!(!is_error && gone["restored"]["pressed"] == "Undo Import", "{gone}");
-    assert_eq!(lab.script.regions().len(), 1);
-    // With a marker made since (a step on top), the region is deleted by value instead.
-    let (import, _) = lab.make("midi-import", json!({"ref": "3:track:2", "positionBeats": 32, "notes": notes}), "a2").await;
+    assert!(!is_error && gone["restored"] == json!({"deleted": "2:region:2", "pressed": "Undo Import"}), "{gone}");
+    assert_eq!(gone["display"], json!({"title": "Import taken back", "note": "Put back with Logic Pro's own undo."}));
+    assert_eq!((lab.script.regions().len(), lab.script.track_count(), lab.script.epoch()), (1, 2, 3), "the track went with the region");
+
+    // Four notes as the M4 gate imported them, onto the audio track: the file the bridge recorded (its name is its
+    // bytes'), the region on the beat (the preview says the division and tick go), the new track below the one named.
+    let gate = json!([
+        {"pitch": 60, "start": 0, "length": 1}, {"pitch": 64, "start": 1, "length": 1},
+        {"pitch": 67, "start": 2, "length": 1}, {"pitch": 72, "start": 3, "length": 1, "velocity": 110}
+    ]);
+    let (import, applied) = lab.make("midi-import", json!({"ref": "3:track:1", "positionBeats": 32.5, "notes": gate}), "a2").await;
+    assert_eq!(import["display"]["note"], "Logic Pro's playhead display places the region on a beat: the division and tick are dropped.");
+    assert_eq!(
+        (
+            applied["applied"]["file"].clone(),
+            applied["applied"]["startBeats"].clone(),
+            applied["applied"]["endBeats"].clone(),
+            applied["applied"]["track"].clone()
+        ),
+        (json!("/tmp/kumi-logic/kumi-05514ac43b39.mid"), json!(32.0), json!(36.0), json!(2))
+    );
+    // With a marker made since (a step on top), Kumi can't take the import back: Logic's own undo can, step by step.
     lab.make("marker-add", json!({"positionBeats": 16}), "a3").await;
-    let (gone, is_error) = lab.undo(&import, "u2", false).await;
-    assert!(!is_error && gone["restored"] == json!({"deleted": "4:region:2"}), "{gone}");
-    assert_eq!((lab.script.regions().len(), lab.script.undo_titles().last().map(String::as_str)), (1, Some("Undo Delete")));
+    let (kept, is_error) = lab.undo(&import, "u2", false).await;
+    assert!(is_error && kept["error"].as_str().unwrap().contains("(its Edit menu says \"Undo Create Marker\")"), "{kept}");
+    assert_eq!((lab.script.regions().len(), lab.script.track_count()), (2, 3));
     lab.simulator.stop();
 }
 
-/// (M4) The cycle (no step of Logic's undo), a track's colour, the Tempo and Signature Lists, Track Stacks and a track
-/// moved: each read back and put back, the stacks through Logic's own undo while on top.
+/// (M4) The cycle (no step of Logic's undo; an off cycle keeps its locators), the Tempo and Signature Lists (a tempo
+/// event made is two steps of Logic's undo), and Track Stacks (Logic names a stack and gathers its tracks; its own undo
+/// takes a stack apart while on top, else it is flattened by value; a flattened one comes back only through Logic's own
+/// undo): each read back and put back.
 #[tokio::test]
-async fn the_cycle_a_colour_the_tempo_and_signature_lists_track_stacks_and_a_track_moved_change_and_come_back() {
+async fn the_cycle_the_tempo_and_signature_lists_and_track_stacks_change_and_come_back() {
     let mut lab = Lab::start().await;
+    let off = |start: f64, end: f64| json!({"on": false, "startBeats": start, "endBeats": end});
     let (cycle, applied) = lab.make("loop-range", json!({"startBeats": 16, "endBeats": 32}), "a1").await;
-    assert_eq!(
-        (cycle["prior"].clone(), cycle["target"].clone()),
-        (json!({"cycle": false, "startBeats": 0.0, "endBeats": 0.0}), json!({"ref": null, "kind": "project"}))
-    );
+    assert_eq!((cycle["prior"].clone(), cycle["target"].clone()), (off(0.0, 16.0), json!({"ref": null, "kind": "project"})));
     assert_eq!(
         (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["entry"].clone()),
-        (json!({"cycle": true, "startBeats": 16.0, "endBeats": 32.0}), json!("Cycle bar 5 to bar 9"), json!(false))
+        (json!({"on": true, "startBeats": 16.0, "endBeats": 32.0}), json!("Cycle bar 5 to bar 9"), json!(false))
     );
     let (focus, _) = lab.tool("focus", json!({})).await;
     let (timeline, _) = lab.tool("focus_body", json!({"kind": "timeline"})).await;
-    assert_eq!(
-        (focus["transport"]["cycle"].clone(), timeline["cycle"].clone()),
-        (json!(true), json!({"on": true, "start": 16.0, "end": 32.0}))
-    );
-    let (off, applied) = lab.make("loop-range", json!({"startBeats": 0, "endBeats": 0}), "a2").await;
-    assert_eq!(
-        (applied["applied"].clone(), applied["display"]["title"].clone()),
-        (json!({"cycle": false, "startBeats": 16.0, "endBeats": 32.0}), json!("Cycle off"))
-    );
-    let (refused, _) = lab.try_preview("loop-range", json!({"startBeats": 8, "endBeats": 4})).await;
-    assert_eq!(refused["error"], "the cycle must end after it starts (0 and 0 turns it off)");
-    lab.undo(&off, "u1", false).await;
+    assert_eq!((focus["transport"]["cycle"].clone(), timeline.get("cycle")), (json!(true), None), "the timeline says nothing of the cycle");
+    let (cleared, applied) = lab.make("loop-range", json!({"startBeats": 0, "endBeats": 0}), "a2").await;
+    assert_eq!((applied["applied"].clone(), applied["display"]["title"].clone()), (off(16.0, 32.0), json!("Cycle off")));
+    for (input, words) in [
+        (json!({"startBeats": 8, "endBeats": 4}), "the cycle must end after it starts (0 and 0 turn it off)"),
+        (
+            json!({"start": 1.0, "end": 2.0}),
+            "Logic Pro's bridge places the cycle by startBeats and endBeats (beats from the project's start), not seconds",
+        ),
+        (json!({"endBeats": 4}), "pass startBeats (beats from the project's start) and endBeats; 0 and 0 turn the cycle off"),
+    ] {
+        let (refused, _) = lab.try_preview("loop-range", input).await;
+        assert_eq!(refused["error"], words);
+    }
+    let preview = lab.preview("loop-range", json!({"startBeats": 16.0001, "endBeats": 32})).await;
+    assert_eq!(preview["display"]["note"], "The locators sit on Logic Pro's ticks (960 to a beat): the range is rounded to them.");
+    lab.undo(&cleared, "u1", false).await;
     assert_eq!(lab.script.cycle(), (true, 16.0, 32.0));
-    lab.undo(&cycle, "u2", false).await;
-    assert_eq!(lab.script.cycle(), (false, 0.0, 0.0));
+    let (back, _) = lab.undo(&cycle, "u2", false).await;
+    assert_eq!((back["restored"].clone(), back["display"]["title"].clone()), (off(0.0, 16.0), json!("Cycle off (put back)")));
+    assert_eq!(lab.script.cycle(), (false, 0.0, 16.0));
     assert!(lab.script.undo_titles().is_empty(), "the cycle makes no step");
 
-    // A colour from the palette, a step of Logic's undo, shown in the row once set.
-    let (colour, applied) = lab.make("track-color", json!({"ref": "1:track:1", "color": "#FF0000"}), "a3").await;
-    assert_eq!(
-        (colour["prior"].clone(), applied["applied"].clone(), applied["undo"]["title"].clone()),
-        (json!({"color": "#8a8a8a"}), json!({"color": "#ff0000"}), json!("Undo Change Color"))
-    );
-    assert_eq!(applied["display"]["title"], "Vocal coloured #ff0000");
-    let (row, _) = lab.tool("read", json!({"ref": "1:track:1"})).await;
-    assert_eq!(row["items"][0]["color"], "#ff0000");
-    let (refused, _) = lab.try_preview("track-color", json!({"ref": "1:track:1", "color": "red"})).await;
-    assert_eq!(refused["error"], "color must be \"#rrggbb\"");
-    let (back, _) = lab.undo(&colour, "u3", false).await;
-    assert_eq!((back["restored"].clone(), lab.script.track_color(1).as_deref()), (json!({"color": "#8a8a8a"}), Some("#8a8a8a")));
-
-    // The Tempo List: a tempo change made, changed and deleted, each put back; the project's tempo at the start.
-    let (tempo, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 128}), "a4").await;
+    // The Tempo List: an event made (Insert Tempo, then its Tempo cell's Value Change), changed to a fraction of a BPM
+    // and deleted, each put back; the project's first tempo changed, never deleted. The tempo row lists no events.
+    let (tempo, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 128}), "a3").await;
     assert_eq!(
         (tempo["prior"].clone(), tempo["target"].clone()),
-        (json!({"exists": false}), json!({"ref": null, "kind": "tempo", "positionBeats": 32.0}))
+        (json!({"exists": false}), json!({"ref": null, "kind": "tempo-marker", "positionBeats": 32.0}))
     );
     assert_eq!(
         (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
-        (json!({"exists": true, "bpm": 128.0}), json!("Tempo 128 BPM at bar 9"), json!("Undo Create Tempo"))
+        (json!({"exists": true, "bpm": 128.0, "made": true}), json!("Tempo 128 BPM at bar 9"), json!("Undo Value Change"))
     );
-    let (read, _) = lab.tool("read", json!({"kind": "tempo"})).await;
-    assert_eq!(read["items"][0]["tempos"], json!([{"positionBeats": 0.0, "bpm": 160.0}, {"positionBeats": 32.0, "bpm": 128.0}]));
-    let (changed, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 100}), "a5").await;
-    assert_eq!(applied["undo"]["title"], "Undo Change Tempo");
-    let (delete, applied) = lab.make("tempo-marker-delete", json!({"positionBeats": 32}), "a6").await;
-    assert_eq!((applied["applied"].clone(), applied["undo"]["title"].clone()), (json!({"deleted": true}), json!("Undo Delete")));
+    assert_eq!(lab.script.undo_titles(), ["Undo Insert Tempo", "Undo Value Change"]);
     let (read, _) = lab.tool("read", json!({"kind": "tempo"})).await;
     assert!(read["items"][0].get("tempos").is_none(), "{read}");
-    let (refused, _) = lab.try_preview("tempo-marker-delete", json!({"positionBeats": 0})).await;
-    assert!(refused["error"].as_str().unwrap().contains("never delete it"), "{refused}");
-    let (refused, _) = lab.try_preview("tempo-marker-delete", json!({"positionBeats": 48})).await;
-    assert_eq!((refused["code"].clone(), refused["error"].clone()), (json!("failed"), json!("there is no tempo change at bar 13")));
-    lab.undo(&delete, "u4", false).await;
-    assert_eq!(lab.script.tempos(), [(0.0, 160.0), (32.0, 100.0)]);
-    lab.undo(&changed, "u5", false).await;
-    lab.undo(&tempo, "u6", false).await;
-    assert_eq!(lab.script.tempos(), [(0.0, 160.0)]);
-    let (_, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 0, "bpm": 150}), "a7").await;
-    assert_eq!((applied["undo"]["title"].clone(), lab.script.tempo()), (json!("Undo Change Tempo"), 150.0));
-
-    // The Signature List: a signature at bar 5, and the project's own at the start.
-    let (signature, applied) = lab.make("signature-set", json!({"positionBeats": 16, "timeSignature": [3, 4]}), "a8").await;
+    let (changed, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 100.5}), "a4").await;
     assert_eq!(
-        (signature["prior"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
-        (json!({"exists": false}), json!("Time signature 3/4 at bar 5"), json!("Undo Create Signature"))
+        (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
+        (json!({"exists": true, "bpm": 100.5, "made": false}), json!("Tempo 100.5 BPM at bar 9"), json!("Undo Value Change"))
+    );
+    let (delete, applied) = lab.make("tempo-marker-delete", json!({"positionBeats": 32}), "a5").await;
+    assert_eq!(
+        (delete["display"]["title"].clone(), applied["applied"].clone(), applied["undo"]["title"].clone()),
+        (json!("Deleted tempo event at bar 9"), json!({"deleted": true}), json!("Undo Delete"))
+    );
+    for (position, code, words) in [
+        (0, "bad-params", "the project's first tempo event stays: change it with tempo_marker_set"),
+        (48, "failed", "there is no tempo event at bar 13"),
+    ] {
+        let (refused, _) = lab.try_preview("tempo-marker-delete", json!({"positionBeats": position})).await;
+        assert_eq!((refused["code"].clone(), refused["error"].clone()), (json!(code), json!(words)));
+    }
+    let (back, _) = lab.undo(&delete, "u3", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"].clone()),
+        (
+            json!({"exists": true, "bpm": 100.5}),
+            json!({"title": "Tempo event at bar 9 put back", "note": "Put back with Logic Pro's own undo."})
+        )
+    );
+    let (back, _) = lab.undo(&changed, "u4", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (json!({"exists": true, "bpm": 128.0}), json!("Tempo at bar 9 put back"))
+    );
+    let (back, _) = lab.undo(&tempo, "u5", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (json!({"exists": false}), json!("Tempo event at bar 9 taken away again"))
+    );
+    assert_eq!(lab.script.tempos(), [(0.0, 160.0)]);
+    let (_, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 0, "bpm": 150}), "a6").await;
+    assert_eq!(
+        (applied["applied"]["made"].clone(), applied["undo"]["title"].clone(), lab.script.tempo()),
+        (json!(false), json!("Undo Value Change"), 150.0)
+    );
+
+    // The Signature List: a signature made at bar 5, and the project's own at the start (as {num, den}), each a step its
+    // Edit menu names "Value Change"; a signature changes on a bar.
+    let (signature, applied) = lab.make("signature-set", json!({"positionBeats": 16, "timeSignature": [3, 4]}), "a7").await;
+    assert_eq!(
+        (signature["prior"].clone(), signature["target"].clone()),
+        (json!({"exists": false}), json!({"ref": null, "kind": "signature", "positionBeats": 16.0}))
+    );
+    assert_eq!(
+        (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
+        (json!({"exists": true, "timeSignature": [3, 4], "made": true}), json!("Time signature 3/4 at bar 5"), json!("Undo Value Change"))
     );
     let (read, _) = lab.tool("read", json!({"kind": "tempo"})).await;
     assert_eq!(
         (read["items"][0]["signatures"].as_array().map(Vec::len), read["items"][0]["signatures"][1]["time"].clone()),
         (Some(2), json!("3/4"))
     );
-    let (start, applied) = lab.make("signature-set", json!({"positionBeats": 0, "timeSignature": [6, 8]}), "a9").await;
-    assert_eq!(applied["undo"]["title"], "Undo Change Signature");
+    let (start, applied) = lab.make("signature-set", json!({"positionBeats": 0, "timeSignature": {"num": 6, "den": 8}}), "a8").await;
+    assert_eq!((applied["applied"]["made"].clone(), applied["undo"]["title"].clone()), (json!(false), json!("Undo Value Change")));
     let (project, _) = lab.tool("read", json!({"kind": "project"})).await;
     let (focus, _) = lab.tool("focus", json!({})).await;
     assert_eq!((project["items"][0]["timeSignature"].clone(), focus["transport"]["beatsPerBar"].clone()), (json!("6/8"), json!(6)));
-    let (refused, _) = lab.try_preview("signature-set", json!({"positionBeats": 16, "timeSignature": [3, 5]})).await;
-    assert!(refused["error"].as_str().unwrap().starts_with("timeSignature must be"), "{refused}");
-    lab.undo(&start, "u7", false).await;
-    lab.undo(&signature, "u8", false).await;
+    for (input, words) in [
+        (
+            json!({"positionBeats": 16, "timeSignature": [3, 5]}),
+            "timeSignature must be [numerator, denominator]: 1 to 99 over 1, 2, 4, 8, 16 or 32",
+        ),
+        (json!({"positionBeats": 18, "timeSignature": [3, 4]}), "a time signature changes at a bar: give the bar's first beat"),
+    ] {
+        let (refused, _) = lab.try_preview("signature-set", input).await;
+        assert_eq!(refused["error"], words);
+    }
+    let (back, _) = lab.undo(&start, "u6", false).await;
+    assert_eq!(back["display"]["title"], "Time signature at bar 1 put back");
+    let (back, _) = lab.undo(&signature, "u7", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (json!({"exists": false}), json!("Time signature at bar 5 taken away again"))
+    );
     assert_eq!(lab.script.signatures(), [(0.0, (4, 4))]);
 
-    // A Track Stack of both tracks: its own track above them (the epoch moves); taken away through Logic's own undo
-    // while on top, else flattened; flattened by its own kind, and back through Logic's own undo.
-    let (stack, applied) =
-        lab.make("track-stack", json!({"refs": ["1:track:1", "1:track:2"], "kind": "folder", "name": "Band"}), "a10").await;
+    // A summing stack of both tracks: Logic names it Sum 1, its own track an aux fed by Bus 1 where the first track was,
+    // their outputs on that bus (the epoch moves); taken apart through Logic's own undo while that step is on top.
+    let (stack, applied) = lab.make("track-stack", json!({"refs": ["1:track:1", "1:track:2"], "kind": "summing"}), "a9").await;
     assert_eq!(
-        (stack["prior"].clone(), stack["display"]["title"].clone()),
-        (json!({"tracks": 2}), json!("Track Stack “Band” (folder) of “Vocal”, “Keys”"))
+        (stack["prior"].clone(), stack["target"].clone(), stack["display"].clone()),
+        (
+            json!({"tracks": 2}),
+            json!({"ref": null, "kind": "track"}),
+            json!({"title": "Summing stack of “Vocal” and “Keys”", "kind": "summing"})
+        )
     );
     assert_eq!(
         (applied["epoch"].clone(), applied["created"].clone(), applied["undo"]["title"].clone()),
-        (json!("2"), json!({"ref": "2:track:1", "kind": "track"}), json!("Undo Create Track Stack"))
+        (json!("2"), json!({"ref": "2:track:1", "kind": "track", "stack": "summing"}), json!("Undo Create Track Stack"))
     );
-    assert_eq!(applied["applied"], json!({"index": 1, "name": "Band", "kind": "folder", "tracks": ["Vocal", "Keys"]}));
+    assert_eq!(applied["applied"], json!({"index": 1, "name": "Sum 1", "kind": "summing", "tracks": ["2:track:2", "2:track:3"]}));
+    assert_eq!(applied["display"]["title"], "Summing stack “Sum 1” of “Vocal” and “Keys”");
     let (page, _) = lab.tool("read", json!({"kind": "track"})).await;
-    let kinds: Vec<&str> = page["items"].as_array().unwrap().iter().map(|row| row["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["folder", "audio", "instrument"]);
-    let (refused, _) = lab.try_preview("track-stack", json!({"refs": ["2:track:2"], "kind": "summing"})).await;
-    assert!(refused["error"].as_str().unwrap().contains("flatten it first"), "{refused}");
-    let (gone, is_error) = lab.undo(&stack, "u9", false).await;
-    assert!(!is_error && gone["restored"]["pressed"] == "Undo Create Track Stack" && lab.script.track_count() == 2, "{gone}");
-    let (stack, applied) = lab.make("track-stack", json!({"refs": ["3:track:1", "3:track:2"], "kind": "summing"}), "a11").await;
-    assert_eq!(applied["applied"]["name"], "Stack 1");
-    let (flatten, applied) = lab.make("track-stack-flatten", json!({"ref": "4:track:1"}), "a12").await;
+    let rows = page["items"].as_array().unwrap().clone();
     assert_eq!(
-        (flatten["prior"]["tracks"].clone(), applied["undo"]["title"].clone(), lab.script.track_count()),
-        (json!(["Vocal", "Keys"]), json!("Undo Flatten Track Stack"), 2)
+        (rows[0]["kind"].clone(), rows[0]["stack"].clone(), rows[0]["inputs"].clone(), rows[0]["output"].clone()),
+        (json!("aux"), json!(true), json!(["Bus 1"]), json!("Stereo Output"))
     );
-    let (back, is_error) = lab.undo(&flatten, "u10", false).await;
-    assert!(!is_error && back["restored"]["ref"] == "6:track:1" && back["restored"]["pressed"] == "Undo Flatten Track Stack", "{back}");
-    assert_eq!(lab.script.track_count(), 3);
-    // (the flatten's own undo put the stack's step back on top: Logic's own undo takes the stack away again)
-    let (gone, is_error) = lab.undo(&stack, "u11", false).await;
-    assert!(!is_error && gone["restored"] == json!({"flattened": "4:track:1", "pressed": "Undo Create Track Stack"}), "{gone}");
-    assert_eq!(lab.script.track_count(), 2);
-    // With a step on top, a stack is flattened by value instead.
-    let (stack, _) = lab.make("track-stack", json!({"refs": ["7:track:1", "7:track:2"], "kind": "folder", "name": "Band"}), "a13").await;
-    lab.make("marker-add", json!({"positionBeats": 16}), "a14").await;
-    let (flat, is_error) = lab.undo(&stack, "u12", false).await;
-    assert!(!is_error && flat["restored"] == json!({"flattened": "8:track:1"}), "{flat}");
-    assert_eq!((lab.script.track_count(), lab.script.undo_titles().last().map(String::as_str)), (2, Some("Undo Flatten Track Stack")));
-    let (refused, _) = lab.try_preview("track-stack", json!({"refs": ["9:track:2", "9:track:1"], "kind": "folder"})).await;
-    assert!(refused["error"].as_str().unwrap().contains("next to each other"), "{refused}");
+    assert_eq!((rows[1].get("stack"), rows[1]["output"].clone(), rows[2]["output"].clone()), (None, json!("Bus 1"), json!("Bus 1")));
+    let (refused, _) = lab.try_preview("track-stack", json!({"refs": ["2:track:1"], "kind": "folder"})).await;
+    assert_eq!(refused["error"], "track 1 is a Track Stack already; Logic Pro doesn't stack stacks from outside");
+    let (gone, is_error) = lab.undo(&stack, "u8", false).await;
+    assert!(!is_error && gone["restored"] == json!({"tracks": 2, "pressed": "Undo Create Track Stack"}), "{gone}");
+    assert_eq!(gone["display"], json!({"title": "Stack “Sum 1” taken apart again", "note": "Put back with Logic Pro's own undo."}));
 
-    // A track moved: its place in the Tracks area, the epoch moving; put back by value.
-    let (moved, applied) = lab.make("track-move", json!({"ref": "9:track:2", "index": 1}), "a15").await;
+    // A folder stack of one track, named: renamed once made, so "Renaming" is on top of its creation, and its undo
+    // flattens it by value.
+    let (folder, applied) = lab.make("track-stack", json!({"refs": ["3:track:2"], "kind": "folder", "name": "Keys Folder"}), "a10").await;
+    assert_eq!(folder["display"], json!({"title": "Folder stack of “Keys”", "kind": "folder", "name": "Keys Folder"}));
     assert_eq!(
-        (moved["prior"].clone(), applied["applied"].clone(), applied["display"]["title"].clone()),
-        (json!({"index": 2}), json!({"index": 1}), json!("Moved track “Keys” to place 1"))
+        (applied["applied"].clone(), applied["undo"]["title"].clone()),
+        (json!({"index": 2, "name": "Keys Folder", "kind": "folder", "tracks": ["4:track:3"]}), json!("Undo Renaming"))
     );
-    let (page, _) = lab.tool("read", json!({"kind": "track"})).await;
-    assert_eq!((page["items"][0]["name"].clone(), page["epoch"].clone()), (json!("Keys"), json!("10")));
-    let (back, _) = lab.undo(&moved, "u13", false).await;
-    assert_eq!((back["restored"].clone(), lab.script.track(1)["name"].clone()), (json!({"index": 2}), json!("Vocal")));
+    let titles = lab.script.undo_titles();
+    assert_eq!(titles[titles.len() - 2..], ["Undo Create Track Stack", "Undo Renaming"]);
+    let row = lab.script.track(2);
+    assert_eq!(
+        (row["name"].clone(), row["kind"].clone(), row["stack"].clone(), row["output"].clone()),
+        (json!("Keys Folder"), json!("external"), json!(true), json!(""))
+    );
+    let (flat, is_error) = lab.undo(&folder, "u9", false).await;
+    assert!(
+        !is_error && flat["restored"] == json!({"tracks": 2}) && flat["display"]["title"] == "Stack “Keys Folder” flattened again",
+        "{flat}"
+    );
+    assert_eq!(lab.script.undo_titles().last().map(String::as_str), Some("Undo Flatten Stack"));
+
+    // Tracks not next to each other: Logic gathers them under the stack, where the first of them was; its own undo puts
+    // them back where they were.
+    let names =
+        |lab: &Lab| (1..=lab.script.track_count()).map(|at| lab.script.track(at)["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    lab.make("track-add", json!({"name": "Pad"}), "a11").await;
+    let (gathered, applied) = lab.make("track-stack", json!({"refs": ["6:track:3", "6:track:1"], "kind": "summing"}), "a12").await;
+    assert_eq!(applied["applied"], json!({"index": 1, "name": "Sum 2", "kind": "summing", "tracks": ["7:track:2", "7:track:3"]}));
+    assert_eq!(names(&lab), ["Sum 2", "Vocal", "Pad", "Keys"]);
+    lab.undo(&gathered, "u10", false).await;
+    assert_eq!(names(&lab), ["Vocal", "Keys", "Pad"]);
+
+    // A stack flattened (its tracks stay where they are) comes back through Logic's own undo while that step is on top,
+    // which leaves the stack's creation on top again: Logic's own undo takes the stack apart too.
+    let (stack, _) = lab.make("track-stack", json!({"refs": ["8:track:1", "8:track:2"], "kind": "summing"}), "a13").await;
+    let (refused, _) = lab.try_preview("track-stack-flatten", json!({"ref": "9:track:2"})).await;
+    assert_eq!(refused["error"], "track 2 “Vocal” isn't a Track Stack");
+    let (flatten, applied) = lab.make("track-stack-flatten", json!({"ref": "9:track:1"}), "a14").await;
+    assert_eq!(
+        (flatten["prior"].clone(), flatten["display"]["title"].clone()),
+        (json!({"name": "Sum 3", "index": 1, "tracks": 4}), json!("Stack “Sum 3” flattened"))
+    );
+    assert_eq!(
+        (applied["applied"].clone(), applied["undo"]["title"].clone(), lab.script.track_count()),
+        (json!({"name": "Sum 3", "tracks": 3}), json!("Undo Flatten Stack"), 3)
+    );
+    let (back, is_error) = lab.undo(&flatten, "u11", false).await;
+    assert!(!is_error && back["restored"] == json!({"tracks": 4, "pressed": "Undo Flatten Stack", "ref": "11:track:1"}), "{back}");
+    assert_eq!(back["display"], json!({"title": "Stack “Sum 3” back", "note": "Put back with Logic Pro's own undo."}));
+    let (gone, is_error) = lab.undo(&stack, "u12", false).await;
+    assert!(!is_error && gone["restored"] == json!({"tracks": 3, "pressed": "Undo Create Track Stack"}), "{gone}");
+    assert_eq!(names(&lab), ["Vocal", "Keys", "Pad"]);
+
+    // With a step on top: a stack Kumi made is flattened by value instead, and a flattened one stays flat.
+    let (stack, _) = lab.make("track-stack", json!({"refs": ["12:track:1", "12:track:2"], "kind": "folder"}), "a15").await;
+    lab.make("marker-add", json!({"positionBeats": 16}), "a16").await;
+    let (flat, is_error) = lab.undo(&stack, "u13", false).await;
+    assert!(
+        !is_error && flat["restored"] == json!({"tracks": 3}) && flat["display"]["title"] == "Stack “Folder 2” flattened again",
+        "{flat}"
+    );
+    lab.make("track-stack", json!({"refs": ["14:track:1", "14:track:2"], "kind": "summing"}), "a17").await;
+    let (flatten, _) = lab.make("track-stack-flatten", json!({"ref": "15:track:1"}), "a18").await;
+    lab.make("marker-add", json!({"positionBeats": 20}), "a19").await;
+    let (kept, is_error) = lab.undo(&flatten, "u14", false).await;
+    assert!(is_error && kept["error"].as_str().unwrap().contains("(its Edit menu says \"Undo Create Marker\")"), "{kept}");
+    assert_eq!(lab.script.track_count(), 3);
     lab.simulator.stop();
 }
 
@@ -1010,9 +1213,9 @@ async fn a_cmd_z_on_a_split_is_named_back_to_the_host() {
     let mut lab = Lab::start().await;
     let (_, split) = lab.make("region-split", json!({"ref": "1:region:1", "positionBeats": 8}), "a1").await;
     let (_, moved) = lab.make("marker-move", json!({"ref": "2:marker:1", "positionBeats": 40}), "a2").await;
-    assert_eq!(lab.script.undo_titles(), ["Undo Split", "Undo Value Change"]);
+    assert_eq!(lab.script.undo_titles(), ["Undo Split Regions", "Undo Value Change"]);
     // Two presses of Cmd-Z: the marker's move, then the split, each named by its desc.
-    for (expected_title, change) in [("Undo Value Change", &moved), ("Undo Split", &split)] {
+    for (expected_title, change) in [("Undo Value Change", &moved), ("Undo Split Regions", &split)] {
         let (title, desc) = lab.script.undo_last().expect("a step");
         assert_eq!(title, expected_title);
         lab.simulator

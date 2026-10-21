@@ -1433,37 +1433,10 @@ mod tests {
         let logic = registered("crates/logic-kumi/src/changes", "", KIND);
         assert!(!logic.is_empty(), "Logic's bridge registers no kinds the pattern finds");
         for ((app, set), bridge) in sets().into_iter().zip([reaper, renoise, logic]) {
-            let mut ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
-            // (M4) A kind Kumi declares ahead of Logic's bridge counts once the bridge makes it.
-            if app == "Logic Pro" {
-                ours.retain(|kind| bridge.contains(kind) || !LOGIC_DECLARED_AHEAD.contains(&kind.as_str()));
-            }
+            let ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
             assert_eq!(ours, bridge, "{app}: Kumi's kinds against its bridge's");
         }
     }
-
-    /// (M4, the first slice) Logic's kinds Kumi declares ahead of its bridge, which makes them in parallel: the merge
-    /// prunes this list and `logic_changes.rs` to the kinds the bridge made (one line each), and the list goes once the
-    /// bridge registers every one of them.
-    const LOGIC_DECLARED_AHEAD: [&str; 17] = [
-        "key-command",
-        "region-move",
-        "region-resize",
-        "region-split",
-        "region-loop",
-        "region-rename",
-        "region-delete",
-        "notes-quantize",
-        "loop-range",
-        "track-color",
-        "tempo-marker-set",
-        "tempo-marker-delete",
-        "signature-set",
-        "midi-import",
-        "track-stack",
-        "track-stack-flatten",
-        "track-move",
-    ];
 
     #[test]
     fn the_host_knows_the_kinds_each_daws_undo_never_takes_back_as_kumi_does() {

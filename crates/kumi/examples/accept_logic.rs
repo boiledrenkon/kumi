@@ -739,10 +739,17 @@ impl Accept {
         Ok(())
     }
 
-    /// A tool of the observation run with `input`: whether it answered an error, and its text.
+    /// A change tool of the observation run with `input`, by its name, or, for a kind that is a make_changes step and no
+    /// tool of its own (the key command, the cycle), a plan of that one step: whether it answered an error, and its text.
     async fn run_tool(&self, observation: &Observation, name: &str, input: Value) -> Result<(bool, String), RuntimeError> {
-        let Some(tool) = tool_named(observation, name) else { return Ok((true, format!("no {name} tool"))) };
-        let result = tool.execute(input.as_object().cloned().unwrap_or_default(), signal()).await?;
+        let (tool, arguments) = match tool_named(observation, name) {
+            Some(tool) => (tool, input),
+            None => match tool_named(observation, "make_changes") {
+                Some(plan) => (plan, json!({"steps": [{"tool": name, "input": input}]})),
+                None => return Ok((true, format!("no {name} tool, and no make_changes to run it as a step"))),
+            },
+        };
+        let result = tool.execute(arguments.as_object().cloned().unwrap_or_default(), signal()).await?;
         Ok((result.is_error, result.text))
     }
 
@@ -975,6 +982,10 @@ impl Accept {
         }
 
         // A MIDI import of 64 sixteenths onto a software instrument track, a bar past every region, read back; undone.
+        // Logic lands the file on a new track below the one named. The bridge's note read lists only the Event List rows
+        // Logic shows (33 of 64 at the M4 gate), and its apply says so in the change's note ("lists its first N rows"), so
+        // the import counts when its region spans the 64 sixteenths (16 beats) and either the read holds the 64 notes or
+        // the answer says the Event List listed fewer rows.
         let look = self.observe().await?;
         let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
         let target = context["tracks"]
@@ -996,27 +1007,47 @@ impl Accept {
                 let (is_error, text) =
                     self.run_tool(&look, "midi_import", json!({"ref": track["ref"], "positionBeats": at, "notes": notes})).await?;
                 let ms = perf_now() - t0;
+                // The change tool's text: {"changed": "<title> (<the apply's note>)", "change": <its id>, "ref": <the region,
+                // short>}; the note names the Event List's rows when it listed fewer than the file's notes.
                 let created = serde_json::from_str::<Value>(&text).ok().and_then(|answer| answer["ref"].as_str().map(str::to_owned));
+                let listed = text.split("lists its first ").nth(1).and_then(|rest| rest.split(' ').next()?.parse::<u64>().ok());
                 let t1 = perf_now();
-                let held = match (&created, tool_named(&look, "logic_read")) {
+                let (held, span) = match (&created, tool_named(&look, "logic_read")) {
                     (Some(created), Some(read)) => {
-                        let page = read
-                            .execute(
-                                json!({"kind": "note", "parent": created, "limit": 200}).as_object().cloned().unwrap_or_default(),
-                                signal(),
-                            )
-                            .await?;
-                        serde_json::from_str::<Value>(&page.text).ok().and_then(|page| page["total"].as_u64()).unwrap_or(0)
+                        let page = |input: Value| read.execute(input.as_object().cloned().unwrap_or_default(), signal());
+                        let notes = page(json!({"kind": "note", "parent": created, "limit": 200})).await?;
+                        let held = serde_json::from_str::<Value>(&notes.text).ok().and_then(|page| page["total"].as_u64()).unwrap_or(0);
+                        let made = page(json!({"kind": "region", "limit": 200})).await?;
+                        let span = serde_json::from_str::<Value>(&made.text)
+                            .ok()
+                            .and_then(|page| {
+                                let row =
+                                    page["items"].as_array()?.iter().find(|row| row["ref"].as_str() == Some(created.as_str()))?.clone();
+                                Some(row["endBeats"].as_f64()? - row["startBeats"].as_f64()?)
+                            })
+                            .unwrap_or(0.0);
+                        (held, span)
                     }
-                    _ => 0,
+                    _ => (0, 0.0),
                 };
                 let read_ms = perf_now() - t1;
+                let spans = span + 1e-6 >= 16.0;
+                let shown = match listed {
+                    _ if held == 64 => " holds 64 notes".to_string(),
+                    Some(shown_rows) => format!(": the Event List listed {shown_rows} of 64 rows; the region spans {span} beats"),
+                    None => format!(" holds {held} notes; the region spans {span} beats"),
+                };
                 let what = if is_error {
                     format!("MIDI import of 64 notes on “{name}” at beat {at}: {}", short(&text, 200))
                 } else {
-                    format!("MIDI import of 64 notes on “{name}” at beat {at}: region {} holds {held} notes (read back in {}), {regions} → {} regions", created.as_deref().unwrap_or("unnamed"), seconds(read_ms), self.count("region").await)
+                    format!(
+                        "MIDI import of 64 notes on “{name}” at beat {at}: region {}{shown} (read back in {}), {regions} → {} regions",
+                        created.as_deref().unwrap_or("unnamed"),
+                        seconds(read_ms),
+                        self.count("region").await
+                    )
                 };
-                self.say(!is_error && held == 64, Some(ms), &what);
+                self.say(!is_error && spans && (held == 64 || listed.is_some_and(|shown_rows| shown_rows < 64)), Some(ms), &what);
                 if let Some(row) = self.change_since(rows, "Imported") {
                     let t0 = perf_now();
                     let result = undo.execute(json!({"change": row.id}).as_object().cloned().unwrap_or_default(), signal()).await?;

@@ -1454,23 +1454,23 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             assert_eq!(answered, ["/Users/me/Music/Logic/Scratch.logicx", copy]);
 
             // A key command Logic keeps no step of: no row, and the host forgets it; one it does: a row only Logic's own
-            // undo takes back, which Kumi's undo says, leaving the row Kept.
-            let key = tool(&observed, "key_command");
-            let selected = key.execute(input(json!({"command": "Select All"})), Signal::new()).await.unwrap();
-            assert!(
-                !selected.is_error && selected.text.contains("no row in HISTORY") && selected.text.contains("\"unchanged\":true"),
-                "{}",
-                selected.text
-            );
+            // undo takes back, which Kumi's undo says, leaving the row Kept. (A key command is a make_changes step, as
+            // REAPER's run_action is, not a tool of its own.)
+            let key_command = |command: &str| {
+                let steps = json!({"steps": [{"tool": "key_command", "input": {"command": command}}]});
+                plan.execute(input(steps), Signal::new())
+            };
+            let selected = key_command("Select All").await.unwrap();
+            assert!(!selected.is_error && selected.text.contains("no row in HISTORY"), "{}", selected.text);
             settle().await;
             assert!(told.borrow().is_empty(), "no row for it");
             let action = recorded
                 .last_transaction("change_apply", |answer| answer["display"]["unchanged"] == true)
                 .expect("an apply Logic kept no step of");
             assert!(recorded.released().contains(&action), "the host forgets it");
-            let marked = key.execute(input(json!({"command": "Create Marker"})), Signal::new()).await.unwrap();
+            let marked = key_command("Create Marker").await.unwrap();
             assert!(!marked.is_error && marked.text.contains("Ran key command “Create Marker”"), "{}", marked.text);
-            let made = row("Ran key command “Create Marker”").expect("a row");
+            let made = row("Ran key command “Create Marker” (⌥')").expect("a row");
             assert_eq!(made.state, ChangeState::Applied);
             assert!(
                 made.note.as_deref().is_some_and(|note| note.starts_with("Only Logic Pro's own undo can take this back")),
@@ -1482,19 +1482,14 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             let kept = undo.execute(input(json!({"change": made.id})), Signal::new()).await.unwrap();
             assert!(
                 kept.is_error
-                    && kept.text.contains(
-                        "Kumi can't take back what a key command did: Logic Pro's own undo can take it back (Cmd-Z in Logic Pro)"
-                    ),
+                    && kept.text.contains("Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)"),
                 "{}",
                 kept.text
             );
-            let made = row("Ran key command “Create Marker”").unwrap();
+            let made = row("Ran key command “Create Marker” (⌥')").unwrap();
             assert_eq!(
                 (made.state, made.note.as_deref()),
-                (
-                    ChangeState::Kept,
-                    Some("Kumi can't take back what a key command did: Logic Pro's own undo can take it back (Cmd-Z in Logic Pro)")
-                )
+                (ChangeState::Kept, Some("Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)"))
             );
 
             // A region split: the right part's ref comes back, short; whole again through Logic's own undo.
@@ -1515,7 +1510,8 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
                 (ChangeState::Undone, Some("Put back with Logic Pro's own undo."), 1)
             );
 
-            // A MIDI import of 64 notes: a new region, its notes read back; taken away again through Logic's own undo.
+            // A MIDI import of 64 notes: a new region on a new track Logic adds below Keys, its notes read back; taken away
+            // again, track and all, through Logic's own undo.
             let look = logic.observe(Signal::new(), None).await.unwrap();
             let keys =
                 serde_json::from_str::<Value>(&look.context).unwrap()["tracks"][1]["ref"].as_str().map(str::to_owned).unwrap_or(keys);
@@ -1527,28 +1523,35 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             assert!(!imported.is_error, "{}", imported.text);
             let created = serde_json::from_str::<Value>(&imported.text).unwrap()["ref"].as_str().unwrap().to_owned();
             assert!(created.starts_with("region:"), "{}", imported.text);
-            assert_eq!((script.regions().len(), script.notes_of(2)), (2, 64));
+            assert_eq!((script.regions().len(), script.notes_of(2), script.track_count()), (2, 64, 3));
             let read = tool(&look, "logic_read")
                 .execute(input(json!({"kind": "note", "parent": created, "limit": 100})), Signal::new())
                 .await
                 .unwrap();
             assert!(!read.is_error, "{}", read.text);
             assert_eq!(serde_json::from_str::<Value>(&read.text).unwrap()["total"], 64);
-            let import_row = row("Imported 64 notes on “Keys” at bar 9").expect("a row");
+            let import_row = row("Imported 64 notes on “Studio Grand” at bar 9").expect("a row");
             let gone = tool(&look, "undo_change").execute(input(json!({"change": import_row.id})), Signal::new()).await.unwrap();
             assert!(!gone.is_error, "{}", gone.text);
-            assert_eq!((row("Imported 64 notes on “Keys” at bar 9").unwrap().state, script.regions().len()), (ChangeState::Undone, 1));
+            assert_eq!(
+                (row("Imported 64 notes on “Studio Grand” at bar 9").unwrap().state, script.regions().len(), script.track_count()),
+                (ChangeState::Undone, 1, 2)
+            );
 
-            // The cycle: no step of Logic's undo, which the row says; undone by value. A tempo change in the Tempo List.
+            // The cycle (a make_changes step, as REAPER's loop_range is): no step of Logic's undo, which the row says;
+            // undone by value. A tempo change in the Tempo List.
             let look = logic.observe(Signal::new(), None).await.unwrap();
-            let cycle = tool(&look, "loop_range").execute(input(json!({"startBeats": 16, "endBeats": 32})), Signal::new()).await.unwrap();
+            let cycle = tool(&look, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "loop_range", "input": {"startBeats": 16, "endBeats": 32}}]})), Signal::new())
+                .await
+                .unwrap();
             assert!(!cycle.is_error, "{}", cycle.text);
             let cycle_row = row("Cycle bar 5 to bar 9").expect("a row");
             assert_eq!(cycle_row.note.as_deref(), Some("Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can."));
             assert_eq!(script.cycle(), (true, 16.0, 32.0));
             let undone = tool(&look, "undo_change").execute(input(json!({"change": cycle_row.id})), Signal::new()).await.unwrap();
             assert!(!undone.is_error, "{}", undone.text);
-            assert_eq!((row("Cycle bar 5 to bar 9").unwrap().state, script.cycle()), (ChangeState::Undone, (false, 0.0, 0.0)));
+            assert_eq!((row("Cycle bar 5 to bar 9").unwrap().state, script.cycle()), (ChangeState::Undone, (false, 0.0, 16.0)));
             let tempo = tool(&look, "make_changes")
                 .execute(input(json!({"steps": [{"tool": "tempo_marker_set", "input": {"positionBeats": 32, "bpm": 128}}]})), Signal::new())
                 .await
