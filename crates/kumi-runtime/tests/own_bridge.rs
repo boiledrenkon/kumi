@@ -461,7 +461,12 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut snapshot = reaper_snapshot();
-            snapshot["truncated"] = json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}});
+            // (review K38: REAPER sends at most 100 of its 1,250 markers, and names the total)
+            let markers: Vec<Value> =
+                (0..100).map(|n| json!({"ref": format!("r:marker:{{M{n}}}"), "name": format!("M{n}"), "position": n})).collect();
+            snapshot["markers"] = json!(markers);
+            snapshot["truncated"] =
+                json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}, "markers": {"total": 1250, "nextCursor": "c1.2.100"}});
             let host = Rc::new(Host {
                 answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
                 asked: RefCell::default(),
@@ -470,6 +475,8 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
             reaper.start(Signal::new()).await.unwrap();
             let context: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
             assert_eq!(context["moreTracks"], "1,000 tracks in all, 2 listed here; reaper_read kind track pages through every one");
+            assert_eq!(context["markers"].as_array().map(Vec::len), Some(30));
+            assert_eq!(context["moreMarkers"], "1,220 more markers; reaper_read kind marker pages through every one");
 
             let renoise_snapshot = json!({
                 "epoch": "3", "moreTracks": true,

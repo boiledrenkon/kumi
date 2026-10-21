@@ -970,14 +970,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         } else if snapshot.get("moreTracks") == Some(&Value::Bool(true)) {
             context["moreTracks"] = json!(format!("Not every track is listed here; {read_tool} kind track pages through every one"));
         }
-        // Markers within the look's budget: the rest are read.
+        // Markers within the look's budget: the rest are read. REAPER's snapshot holds some of them, and names how many
+        // there are in all.
         if let Some(all) = markers.as_array() {
-            if all.len() > MARKERS_SHOWN {
-                context["markers"] = json!(all[..MARKERS_SHOWN]);
-                context["moreMarkers"] =
-                    json!(format!("{} more markers; {read_tool} kind marker pages through every one", all.len() - MARKERS_SHOWN));
-            } else {
-                context["markers"] = markers;
+            let total =
+                snapshot.pointer("/truncated/markers/total").and_then(Value::as_u64).map_or(0, |total| total as usize).max(all.len());
+            let shown = all.len().min(MARKERS_SHOWN);
+            context["markers"] = json!(all[..shown]);
+            if total > shown {
+                context["moreMarkers"] = json!(format!(
+                    "{} more markers; {read_tool} kind marker pages through every one",
+                    crate::notation::thousands(total - shown)
+                ));
             }
         } else if !markers.is_null() {
             context["markers"] = markers;
