@@ -23,6 +23,8 @@ use crate::rows::Position;
 pub const FOLDER: &str = "/tmp/kumi-logic";
 /// The most notes one import takes.
 const MOST_NOTES: usize = 10000;
+/// How long the panel may take to read the file and enable Open, when its first press didn't take.
+const OPEN_WAIT: Duration = Duration::from_secs(3);
 /// How often Logic's windows are looked at for a question after the import (it comes at once when it comes), and
 /// the pause between looks: a fixed count, so a replay asks exactly what the recording did.
 const QUESTION_POLLS: usize = 8;
@@ -204,7 +206,12 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         panel::cancel(ctx.ax, &the_panel);
         return Err(fault);
     }
-    if !panel::gone(ctx.ax, panel::PANEL_WAIT)? {
+    // The panel reads the file it was taken to before its Open button takes a press, and pressed while it was still
+    // reading, the panel stays up (the M6 gate's second run, once in several): the press is made again once Open is
+    // enabled. A run where the first press took (every recorded scene) asks nothing more.
+    let took = panel::gone(ctx.ax, panel::PANEL_WAIT)?
+        || (panel::press_when_enabled(ctx.ax, &the_panel, "OKButton", OPEN_WAIT).is_ok() && panel::gone(ctx.ax, panel::PANEL_WAIT)?);
+    if !took {
         panel::cancel(ctx.ax, &the_panel);
         return Err(failed(format!("Logic Pro's import panel stayed up: it didn't take {}", file.display())));
     }
