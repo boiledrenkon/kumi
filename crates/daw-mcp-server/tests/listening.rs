@@ -306,6 +306,50 @@ async fn at_the_end_of_input_a_running_render_is_stopped_without_waiting_for_req
 }
 
 #[tokio::test]
+async fn each_daws_tools_say_what_they_write_in_its_own_words() {
+    async fn listed(lab: &mut Lab) -> Vec<Value> {
+        lab.session.call(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await["result"]["tools"].as_array().unwrap().clone()
+    }
+    fn tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+        tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no {name}"))
+    }
+    let script = ReaperScript::new(3, 0);
+    let mut lab = Lab::reaper(&script).await;
+    let tools = listed(&mut lab).await;
+    // A save that may write over a file on request is destructive; a render writes files and changes render settings.
+    assert_eq!(tool(&tools, "fx_chain_save")["annotations"]["destructiveHint"], true);
+    for name in ["render", "audio_file"] {
+        assert_eq!(tool(&tools, name)["annotations"]["readOnlyHint"], false, "{name}");
+    }
+    let play = &tool(&tools, "transport_play")["inputSchema"]["properties"];
+    assert!(play.get("sequence").is_none() && play.get("line").is_none(), "REAPER plays from where it is: {play}");
+    let script = RenoiseScript::new();
+    let mut lab = Lab::renoise(&script).await;
+    let tools = listed(&mut lab).await;
+    for name in ["instrument_save", "preset_save"] {
+        assert_eq!(tool(&tools, name)["annotations"]["destructiveHint"], true, "{name}");
+    }
+    for name in ["render", "audio_file"] {
+        assert_eq!(tool(&tools, name)["annotations"]["readOnlyHint"], false, "{name}");
+    }
+    let said = [
+        tool(&tools, "read").to_string(),
+        tool(&tools, "status").to_string(),
+        tool(&tools, "snapshot").to_string(),
+        tool(&tools, "focus_body")["description"].to_string(),
+    ]
+    .join(" ");
+    for reapers in ["open project", "Renoise project", "FX", "track's items", "the take", "items or sends"] {
+        assert!(!said.contains(reapers), "{reapers:?} in Renoise's words: {said}");
+    }
+    assert!(tool(&tools, "transport_play")["inputSchema"]["properties"].get("sequence").is_some());
+    // A field and its …Ref naming different things: one of the two.
+    let (answer, is_error) = lab.tool("select", json!({"track": "1:track:1", "trackRef": "1:track:2"})).await;
+    assert!(is_error && answer["error"].as_str().unwrap().contains("pass one of the two"), "{answer}");
+    assert!(!script.asked().iter().any(|(method, _)| method == "select"), "the tool wasn't asked");
+}
+
+#[tokio::test]
 async fn an_items_audio_is_its_source_file_and_a_midi_item_says_it_has_none() {
     let script = ReaperScript::new(3, 0);
     script.listening().set_silent_ref("r:item:{I-T0002}");
