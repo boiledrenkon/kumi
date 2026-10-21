@@ -90,7 +90,9 @@ and migration checks do not replace a new real-Live acceptance run.
   undo Logic answered uncertain), and the acceptance run gains the M4 checks
   (`--files <dir>` names the folder a save as goes under; a MIDI import counts
   when its region spans the notes, since Logic's Event List lists only the rows
-  on its screen).
+  on its screen). The M4 gate on this Mac, every check passed after six runs
+  that each found something to fix, is recorded in
+  `docs/evidence/logic-m4-gate-2026-10-21.md`.
 
 ## Evidence
 
@@ -148,11 +150,10 @@ bridge, the version given is the one in the commit that added it.
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: the M4 gate with `accept_logic --files <dir>` on this Mac (the
-  first slice: a save as, key commands, a split, an import, the cycle, the
-  Tempo List), the declaration pruned to what the bridge made; then the second
-  slice (sends, plug-in insertion, presets and patches from the Library, Smart
-  Controls, automation, bounce and export, the instructions addendum).
+- Logic Pro: M4's second slice (sends, plug-in insertion, presets and patches
+  from the Library, Smart Controls, automation, bounce and export, the
+  instructions addendum), and reading a region's notes past the rows the Event
+  List shows on its screen.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
