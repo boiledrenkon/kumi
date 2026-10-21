@@ -197,11 +197,14 @@ end)
 
 test("bridge: two Renoise started in the same second start their epochs apart", function()
   setup({ real_random = true })
-  local first = KUMI_BRIDGE.bridge.epoch_n
+  local first, first_run = KUMI_BRIDGE.bridge.epoch_n, KUMI_BRIDGE.bridge.run
   setup({ real_random = true })
-  local second = KUMI_BRIDGE.bridge.epoch_n
+  local second, second_run = KUMI_BRIDGE.bridge.epoch_n, KUMI_BRIDGE.bridge.run
   ok(first ~= second, "both start at " .. first)
-  ok(first < 2 ^ 28 and second < 2 ^ 28 and first == math.floor(first), "below 2^28, whole")
+  ok(first < 2 ^ 44 and second < 2 ^ 44 and first == math.floor(first), "44 random bits, whole")
+  -- (#361 N-S10: the place logs carry each run's own name, so a mark kept in one run never resolves in another's)
+  ok(first_run ~= second_run and #first_run == 8, "each run names its logs apart: " .. tostring(first_run) .. ", " .. tostring(second_run))
+  ok(KUMI_BRIDGE.bridge.ilog.id:sub(1, 8) == second_run, "the instruments' log is this run's: " .. tostring(KUMI_BRIDGE.bridge.ilog.id))
   -- (without /dev/urandom, as on Windows: from the nonce's hash)
   mock.urandom = false
   local wire = T.load_payload_module("wire")
