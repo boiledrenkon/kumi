@@ -152,6 +152,15 @@ pub struct PromptVocab {
     /// What to do with a MIDI file given as groove's reference: "put it on a MIDI track in Live (drag it in) and give that
     /// clip as reference".
     pub midi_file_import: &'static str,
+    /// The tools a found sound's path goes to, as find_sounds' results name them: "load_sample and the other sample tools".
+    pub sample_tools: &'static str,
+    /// How a found preset is loaded, by its kind, for a DAW whose presets aren't Browser items, after find_presets'
+    /// results ("" for Live's, which load by their Browser items).
+    pub preset_loading: &'static str,
+    /// The kinds of the DAW's own presets find_presets names, as the model asks for them.
+    pub preset_kinds: &'static [&'static str],
+    /// The preset files the DAW loads, by the format the library keeps; a format no DAW names is Live's.
+    pub preset_formats: &'static [&'static str],
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -620,6 +629,9 @@ pub struct Capabilities {
     pub browser_items: bool,
     /// Plug-in parameters the DAW exposes only once configured.
     pub configured_plugin_params: bool,
+    /// The DAW's own presets, found and loaded (find_presets): Live's Browser items and preset files, REAPER's and
+    /// Renoise's library files.
+    pub presets: bool,
     /// Listens render the part offline (faster than it plays) and play it out loud after, rather than hearing it as
     /// it plays: REAPER's and Renoise's bridges.
     pub renders_to_listen: bool,
@@ -692,6 +704,10 @@ impl DawProfile {
             move_notes_tool: "the tool that moves notes",
             swing_tool: "the tool that swings notes",
             midi_file_import: "put it on a MIDI track in the DAW (drag it in) and give that clip as reference",
+            sample_tools: "the sample tools",
+            preset_loading: "",
+            preset_kinds: &[],
+            preset_formats: &[],
         },
     };
 
@@ -736,6 +752,7 @@ impl DawProfile {
             manual: true,
             browser_items: true,
             configured_plugin_params: true,
+            presets: true,
             // (Live hears as it plays, through Kumi Ears or a recording)
             renders_to_listen: false,
         },
@@ -791,6 +808,11 @@ impl DawProfile {
             move_notes_tool: crate::live_word!(move_notes_tool),
             swing_tool: crate::live_word!(swing_tool),
             midi_file_import: crate::live_word!(midi_file_import),
+            sample_tools: "load_sample and the other sample tools",
+            preset_loading: "",
+            preset_kinds: &["instrument", "audio effect", "midi effect", "drum rack", "plug-in"],
+            // (and every format no other DAW names: its .adv, .adg and .amxd files, plug-ins' own presets)
+            preset_formats: &["vstpreset"],
         },
     };
 
@@ -817,6 +839,7 @@ impl DawProfile {
             goal_rig: true,
             audio_file: true,
             renders_to_listen: true,
+            presets: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -871,6 +894,11 @@ impl DawProfile {
             move_notes_tool: "notes_change",
             swing_tool: "notes_change (the off-beat notes later)",
             midi_file_import: "put it on a track in REAPER (drag it in) and give that item as reference",
+            sample_tools: "item_import, drum_kit and the other sample steps",
+            preset_loading: ". Load one by its kind: an fx chain with fx_chain_load (file: its path); a track template with track_template_insert (path); a jsfx with fx_add (name: its add, \"JS: midi/midi_choke\"); fx presets are one plug-in's presets (in presets): add that FX, then fx_preset by one's name; a plug-in preset with fx_preset on that plug-in (preset: its path); a project template is a whole project to start from, opened in REAPER",
+            preset_kinds: &["fx chain", "track template", "project template", "jsfx", "fx presets", "plug-in"],
+            // (a VST3 preset's path goes to fx_preset)
+            preset_formats: &["vstpreset", "rfxchain", "rtracktemplate", "rpp", "jsfx", "ini"],
         },
     };
 
@@ -896,6 +924,7 @@ impl DawProfile {
             renders_to_listen: true,
             status_line: true,
             catch_up: true,
+            presets: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -950,6 +979,10 @@ impl DawProfile {
             move_notes_tool: "notes_write: their lines and delays",
             swing_tool: "notes_write (the off-beat lines' delays)",
             midi_file_import: "import it into Renoise (drag it in) and give the pattern track it lands on as reference",
+            sample_tools: "sample_load, instrument_kit and the other sample steps",
+            preset_loading: ". Load one by its kind, with its path: an instrument or a multi-sample with instrument_load; an effect preset is for one device (device): add that device with device_add, then device_preset_data (ref: the new device, path); an effect chain onto a track with device_chain_load (trackRef, path; a track that has devices needs replace: true, and they are replaced); a phrase into an instrument with phrase_load (ref, path); a modulation set into an instrument with modset_load (ref, path); a phrase script into a phrase with phrase_script (ref: the phrase, path), after phrase_add when the instrument needs a new one",
+            preset_kinds: &["instrument", "multi-sample", "effect chain", "effect preset", "phrase", "phrase script", "modulation set"],
+            preset_formats: &["xrni", "xrnt", "xrdp", "xrnz", "xrno", "lua", "sfz"],
         },
     };
 
@@ -1015,6 +1048,7 @@ impl Capabilities {
         manual: false,
         browser_items: false,
         configured_plugin_params: false,
+        presets: false,
         renders_to_listen: false,
     };
 }
