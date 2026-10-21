@@ -172,6 +172,27 @@ test("sequence: a slot moves with its section and mutes, and goes back to the ga
   H.no_dialogs()
 end)
 
+test("sequence: a slot moved between slots that play the same pattern goes back with its section and mutes, not \"back already\" (#361 N-S6)", function()
+  local _, peer = K.setup(nil, { sequence = { 1, 1, 2, 3 }, sequence_length = 4 })
+  local sequencer = mock.song.sequencer
+  mock.run_callback(function()
+    sequencer:set_sequence_is_start_of_section(1, true)
+    sequencer:set_sequence_section_name(1, "Intro")
+    sequencer:set_track_sequence_slot_is_muted(2, 1, true)
+  end)
+  mock.data.undo.stack = {}
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-move", { ref = K.ref(E, "seq", 1), index = 2 }, "Kumi: move (ks61)")
+  eq(seq(), "1,1,2,3", "the list of patterns is the same")
+  ok(sequencer:sequence_is_start_of_section(2) and sequencer:track_sequence_slot_is_muted(2, 2), "the section and mute went with it")
+  local undone = K.restore(peer, record)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(undone.result.undo.entry, true, "a move back, not back already")
+  ok(sequencer:sequence_is_start_of_section(1) and sequencer:sequence_section_name(1) == "Intro", "the section is on slot 1 again")
+  ok(sequencer:track_sequence_slot_is_muted(2, 1) and not sequencer:track_sequence_slot_is_muted(2, 2), "and the mute")
+  H.no_dialogs()
+end)
+
 test("sequence: a moved slot is followed through what the producer made or deleted since, and a sequence that can't tell is stale", function()
   local _, peer = setup()
   local E = K.place(peer)

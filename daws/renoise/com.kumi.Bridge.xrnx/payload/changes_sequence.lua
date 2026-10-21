@@ -323,6 +323,22 @@ local function moved(list, from, to)
   return out
 end
 
+-- The states (section start and name, mutes) of slots `first` to `last`: what a move between slots that play one pattern
+-- changes when the list of patterns stays the same.
+local function states_of(song, first, last)
+  local out = {}
+  for s = first, math.min(last, slot_count(song)) do out[#out + 1] = state_of(song, s) end
+  return out
+end
+
+local function same_states(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
+  for k = 1, #a do
+    if not same_state(a[k], b[k]) then return false end
+  end
+  return true
+end
+
 local function move_plan(song, env, input)
   local s = seq_of(song, env, input.ref, "slot-move")
   local to = input.index
@@ -355,6 +371,8 @@ local function move_apply(song, env, input, fence, desc)
     display.unchanged = true
     return { applied = { index = to }, display = display, undo = { desc = desc, entry = false }, prior = { index = s } }
   end
+  local low, high = math.min(s, to), math.max(s, to)
+  local states_before = states_of(song, low, high)
   song:describe_undo(desc)
   move_to(song, s, to)
   local after = sequence_of(song)
@@ -364,6 +382,7 @@ local function move_apply(song, env, input, fence, desc)
   local prior, applied = journal_fields(before, after)
   prior.index, applied.index, applied.from = s, to, s
   applied.pool = env.pattern_mark and env.pattern_mark() or nil
+  applied.states = { low = low, before = states_before, after = states_of(song, low, high) }
   return {
     applied = applied, target = song_target(env), display = display, undo = { desc = desc, entry = true },
     prior = prior, place = {}, follows = "sequence",
@@ -379,7 +398,15 @@ local function move_restore(song, env, restore, desc)
   local kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool)
   if not kept or not before then stale("moved the slot") end
   if same_list(now, before) then
-    return { restored = { index = applied.from }, display = { title = "The slot is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    -- (slots that play one pattern: the list alone can't tell the move from no move; their sections and mutes can)
+    local states = type(applied.states) == "table" and applied.states or nil
+    local now_states = states and states_of(song, states.low, states.low + #states.before - 1)
+    if not states or not same_list(before, kept) or same_states(now_states, states.before) then
+      return { restored = { index = applied.from }, display = { title = "The slot is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    end
+    if not restore.discard and not same_states(now_states, states.after) then
+      fail("changed", "the sections or mutes of the slots Kumi moved changed in Renoise since: Kumi left them")
+    end
   end
   local at = base.follow_slot(kept, now, applied.index)
   -- (where it goes back: the gap it left, followed through what the producer made or deleted since, among the slots without it)
