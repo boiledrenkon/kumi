@@ -798,6 +798,16 @@ test("devices m4: a made Doofer's undo refuses a knob turned inside it since, wh
   eq(paths(2), "EQ 5, Gainer, *LFO")
 end)
 
+test("devices m4: a Doofer's preset data with a routing device inside is refused before the container is made, leaving no step (#361 N-N2)", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  local bad_xml = DOOFER_XML:gsub("</Devices>", "<SendDevice type=\"SendDevice\"/>\n      </Devices>", 1)
+  local refused = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" }, { presetData = bad_xml })
+  failure(refused, "bad-params", "routing")
+  eq(paths(2), "EQ 5, Gainer, *LFO", "nothing made")
+  eq(steps(), 0, "no step in Renoise's undo")
+end)
+
 test("devices m4: a Doofer isn't made of a device with automation, or one something outside aims at; a meta device inside keeps its aim", function()
   local _, peer = make_song()
   local epoch = place(peer)

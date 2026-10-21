@@ -914,6 +914,12 @@ base.register({
       bad(string.format("index must be a whole number from 2 (after the mixer device) to %d", #track.devices + 1))
     end
     if type(input.presetData) ~= "string" or #input.presetData > M.MAX_PRESET_BYTES then bad("presetData: the container's preset data") end
+    -- (what can be told of the data before the container is made: a refusal after it would leave a step in Renoise's undo,
+    -- which clears the producer's redo)
+    local slot = path == CONTAINER_PATHS.splitter and "SplitterDevice" or "DooferDevice"
+    if preset_kind(input.presetData).slot ~= slot then bad("presetData isn't a " .. (input.type or "doofer") .. "'s preset data (" .. slot .. ")") end
+    local trouble = container_trouble(input.presetData)
+    if trouble then bad("that preset data won't go into the " .. (input.type or "doofer") .. ": " .. trouble) end
     -- What goes back on the undo: each device as it is (ascending places), and which of the others each meta device aims at.
     local by_place = {}
     for i, m in ipairs(list) do by_place[i] = m end
