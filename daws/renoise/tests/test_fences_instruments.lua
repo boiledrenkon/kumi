@@ -64,16 +64,16 @@ local FENCES = {
   { "instrument-rename", "plain", function(E) return { ref = iref(E, 2), name = "Acid" } end, function() data(2).name = "Other" end },
   { "instrument-set", "plain", function(E) return { ref = iref(E, 2), transpose = 5 } end, function() data(2).transpose = 3 end },
   { "instrument-macro", "plain", function(E) return { ref = iref(E, 2), macro = 1, value = 0.9 } end, function() data(2).macros[1].value = 0.2 end },
-  { "instrument-add", "plain", function() return { index = 1, name = "New" } end, function() mock.ops.insert_instrument({ name = "Theirs" }) end },
+  { "instrument-add", "plain", function() return { index = 0, name = "New" } end, function() mock.ops.insert_instrument({ name = "Theirs" }) end },
   { "instrument-delete", "plain", function(E) return { ref = iref(E, 2) } end, function() data(2).name = "Other" end },
-  { "instrument-load", "plain", function() return { path = xrni_file(), index = 1 } end, function() mock.ops.insert_instrument({ name = "Theirs" }) end },
+  { "instrument-load", "plain", function() return { path = xrni_file(), index = 0 } end, function() mock.ops.insert_instrument({ name = "Theirs" }) end },
   { "instrument-load", "plain", function(E) return { path = xrni_file(), ref = iref(E, 3) } end, function() data(3).name = "Theirs" end },
   { "instrument-duplicate", "plain", function(E) return { ref = iref(E, 2) } end, function() data(2).name = "Other" end },
-  { "instrument-move", "plain", function(E) return { ref = iref(E, 2), index = 3 } end, function(peer)
+  { "instrument-move", "plain", function(E) return { ref = iref(E, 2), index = 2 } end, function(peer)
     -- (Kumi read again after the producer made an instrument before it: the same instrument, by a ref of now)
     mock.ops.insert_instrument_at(1, { name = "New" })
     local E = place(peer)
-    return { ref = iref(E, 3), index = 3 }, E
+    return { ref = iref(E, 3), index = 2 }, E
   end },
   { "sample-set", "plain", function(E) return { ref = sref(E, 2, 1), volumeDb = -6 } end, function() data(2).samples[1].volume = 0.5 end },
   { "keyzone-set", "plain", function(E) return { ref = sref(E, 1, 1), baseNote = 60 } end, function() data(1).samples[1].base_note = 50 end },
@@ -91,7 +91,7 @@ local FENCES = {
     song():instrument(2):insert_phrase_mapping_at(1, song():instrument(2):phrase(1))
   end },
   { "phrase-playback", "plain", function(E) return { ref = iref(E, 2), mode = "keymap" } end, function() data(2).phrase_playback_mode = 1 end },
-  { "phrase-write", "plain", function(E) return { ref = pref(E, 2, 1), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } } end,
+  { "phrase-write", "plain", function(E) return { ref = pref(E, 2, 1), lines = { { line = 0, notes = { { col = 1, note = "C-4" } } } } } end,
     function() mock.ops.set_phrase_note(2, 1, 1, 1, { note = 50 }) end },
   { "phrase-clear", "lines", function(E) return { ref = pref(E, 2, 1) } end, function() mock.ops.set_phrase_note(2, 1, 2, 1, { note = 50 }) end },
   { "phrase-script", "plain", function(E) return { ref = pref(E, 2, 1), code = "return cycle(\"c4\")" } end, function() data(2).phrases[1].script.paragraphs = { "-- mine" } end },

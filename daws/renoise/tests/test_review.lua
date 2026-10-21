@@ -285,7 +285,7 @@ test("review M-7: a restore asked behind a dialog is busy too, and writes nothin
   failure(restore(peer, "track-volume", { target = previewed.target, prior = previewed.prior, applied = done.result.applied }, "Kumi: undo v (kr09)", epoch, layout), "busy")
   mock.stall_timers = false
   eq(steps(), before)
-  ok(mock.data.tracks[1].volume < 1, "still at -6 dB")
+  ok((mock.data.tracks[1].post_volume or 1) < 1, "still at -6 dB")
   H.no_dialogs()
 end)
 
@@ -343,15 +343,15 @@ test("review M-3: an apply that locates another track than the preview did is re
   failure(wrong, "changed")
   ok(wrong.error.message:find("\226\128\156Bass\226\128\157 isn't at that place any more", 1, true), "it names the track that was previewed: " .. wrong.error.message)
   ok(not wrong.error.message:find("Hat", 1, true), "and not the one at its place now: " .. wrong.error.message)
-  eq(mock.data.tracks[3].volume, 1, "Hat was not changed")
-  eq(mock.data.tracks[4].volume, 1)
+  eq(mock.data.tracks[3].post_volume or 1, 1, "Hat was not changed")
+  eq(mock.data.tracks[4].post_volume or 1, 1)
   eq(steps(), 0)
   -- paired as Kumi asked (its own layout), the ref is carried to Bass
   local right = call(peer, "change_apply", { kind = "track-volume", input = input, fence = previewed.fence, desc = "Kumi: v (kr13)",
     epoch = epoch, layout = layout })
   ok(right.result, json.encode(right.error or {}))
-  ok(math.abs(mock.data.tracks[4].volume - 10 ^ (-6 / 20)) < 1e-6, "Bass")
-  eq(mock.data.tracks[3].volume, 1)
+  ok(math.abs((mock.data.tracks[4].post_volume or 1) - 10 ^ (-6 / 20)) < 1e-6, "Bass")
+  eq(mock.data.tracks[3].post_volume or 1, 1)
   eq(right.result.target.ref, track_ref(right.result.epoch, 4), "the answer names the track it located, in its own layout")
   H.no_dialogs()
 end)
@@ -361,7 +361,7 @@ test("review M-3: notes written under the wrong pairing go to no other track", f
   local epoch, layout = place(peer)
   local input = {
     pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
-    lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } },
+    lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00" } } } },
   }
   mock.ops.insert_track(1, { name = "New" })
   H.tick(2)
@@ -489,7 +489,7 @@ end)
 
 local function write_notes(peer, cells, desc)
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 1, notes = cells } } }
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 0, notes = cells } } }
   local previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   if not previewed.result then return previewed end
   return apply(peer, "notes-write", input, desc, previewed.result.fence, epoch, layout)
@@ -518,7 +518,7 @@ test("review N-5: letter commands in the volume, panning and effect columns are 
   local epoch, layout = place(peer)
   local input = {
     pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
-    lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00", volume = "G3", panning = "U4", fx = "ZB10" } } } },
+    lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00", volume = "G3", panning = "U4", fx = "ZB10" } } } },
   }
   local previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   ok(previewed.result, json.encode(previewed.error or {}))
@@ -541,7 +541,7 @@ test("review N-5: letter commands in the volume, panning and effect columns are 
     "Kumi: undo n (kr37)", undone.result.epoch, undone.result.layout), "changed")
   epoch, layout = place(peer)
   input.pattern, input.track = pattern_ref(epoch, 1), track_ref(epoch, 3)
-  input.lines[1].line = 2
+  input.lines[1].line = 1
   previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   done = apply(peer, "notes-write", input, "Kumi: n (kr38)", previewed.result.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -558,7 +558,7 @@ test("review M-1: a sliced notes restore stops when the producer makes a track b
   local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) })
   local epoch, layout = place(peer)
   local lines = {}
-  for l = 1, 12 do lines[l] = { line = l, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
+  for l = 1, 12 do lines[l] = { line = l - 1, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: many (kr38)", previewed.fence, epoch, layout)
@@ -1124,7 +1124,7 @@ test("review S-7: one notes-write is no more than a callback's budget", function
     for l = first, last do
       local notes = {}
       for c = 1, 12 do notes[c] = { col = c, note = "C-4", instrument = "00" } end
-      out[#out + 1] = { line = l, notes = notes }
+      out[#out + 1] = { line = l - 1, notes = notes }
     end
     return out
   end
@@ -1738,7 +1738,7 @@ end
 local function bass_notes(peer, first, last, tag)
   local epoch, layout = place(peer)
   local lines = {}
-  for l = first, last do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "C-4", instrument = "00" } } } end
+  for l = first, last do lines[#lines + 1] = { line = l - 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: n (" .. tag .. ")", previewed.fence, epoch, layout)
@@ -1923,6 +1923,45 @@ test("run-lua: a chunk that runs too long is stopped where it is, inside its tim
   failure(run_lua(peer, "return 1", "Kumi: Ran Lua (kl07)", { timeoutMs = 5000 }), "bad-params")
 end)
 
+test("run-lua: the time limit stops a chunk whose calls fire the tool's notifiers, and each notifier runs whole (#361 N4)", function()
+  local env, peer = setup()
+  local patterns = #mock.data.patterns
+  mock.clock_step_ms = 1
+  local done = run_lua(peer, "for i = 1, 3000 do song.sequencer:insert_new_pattern_at(1) end", "Kumi: Ran Lua (kl10)", { timeoutMs = 20 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 20 ms", 1, true), json.encode(done.result.applied.failed or {}))
+  ok(#mock.data.patterns - patterns < 3000, "stopped part way: " .. (#mock.data.patterns - patterns) .. " made")
+end)
+
+test("run-lua: code a chunk loads itself is under the time limit too: the JIT is off while it runs (#361 N18)", function()
+  local env, peer = setup()
+  mock.clock_step_ms = 1
+  local code = "local f = loadstring('local n = 0 for i = 1, 2e8 do n = n + i % 7 end return n') return f()"
+  local done = run_lua(peer, code, "Kumi: Ran Lua (kl11)", { timeoutMs = 50 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 50 ms", 1, true), json.encode(done.result.applied))
+  ok(not jit or jit.status(), "the JIT is on again")
+end)
+
+test("run-lua: a chunk that sets a parameter changed the song; one that only mutes makes no Renoise step; one that reads changed nothing (#361 N8)", function()
+  local env, peer = setup()
+  local done = run_lua(peer, "song:track(1).postfx_volume.value = 0.5", "Kumi: Ran Lua (kl12)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.changed, true, "a parameter no notifier tells")
+  eq(done.result.undo.entry, true)
+  eq(done.result.display.unchanged, nil)
+  local muted = run_lua(peer, "song:track(2).mute_state = renoise.Track.MUTE_STATE_MUTED", "Kumi: Ran Lua (kl13)")
+  ok(muted.result, json.encode(muted.error or {}))
+  eq(muted.result.applied.changed, true)
+  eq(muted.result.undo.entry, false, "Renoise makes no step of a mute")
+  ok(muted.result.display.note:find("nothing Renoise's undo takes back", 1, true), muted.result.display.note)
+  local read = run_lua(peer, "local t = {}\nt.name = song:track(1).name:upper() -- t.x = 1\nt['k'] = \"a = b.c\"\nreturn t", "Kumi: Ran Lua (kl14)")
+  ok(read.result, json.encode(read.error or {}))
+  eq(read.result.display.unchanged, true, "it set only its own table's fields")
+  eq(read.result.undo.entry, false)
+end)
 
 test("places, names × a pattern or an instrument renamed is the same one: the lines go back into it, playing it", function()
   local env, peer = setup(nil, INSTRUMENTS)
@@ -2316,8 +2355,8 @@ test("review MUST 5: a row inserted among the lines a write emptied, the empty s
     bass_set({ 103 }, G4)
     bass_set({ 110 }, D4)
     local epoch, layout = place(peer)
-    local lines = { { line = 100, notes = { { col = 1, note = "C-4", instrument = "00" } } } }
-    for l = 101, 103 do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "---", instrument = ".." } } } end
+    local lines = { { line = 99, notes = { { col = 1, note = "C-4", instrument = "00" } } } }
+    for l = 101, 103 do lines[#lines + 1] = { line = l - 1, notes = { { col = 1, note = "---", instrument = ".." } } } end
     local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
     local previewed = preview(peer, "notes-write", input)
     local done = apply(peer, "notes-write", input, "Kumi: n (km5e)", previewed.fence, epoch, layout)
@@ -2335,7 +2374,7 @@ test("review MUST 5: a row deleted in Kumi's column alone, where only that colum
   bass_set({ 104 }, D4, 1) -- (the whole line differs at 104: only column 2's run reaches 105)
   local epoch, layout = place(peer)
   local lines = {}
-  for l = 100, 103 do lines[#lines + 1] = { line = l, notes = { { col = 2, note = "C-4", instrument = "00" } } } end
+  for l = 100, 103 do lines[#lines + 1] = { line = l - 1, notes = { { col = 2, note = "C-4", instrument = "00" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: n (km5g)", previewed.fence, epoch, layout)
@@ -2362,7 +2401,7 @@ test("plain rule: an edit in another pattern, or Kumi's change there, doesn't bl
   local previewed, done = bass_notes(peer, 100, 103, "km5k")
   mock.song:pattern(2):track(3):line(100):note_column(1).note_string = "E-4"
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 3), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "D-4", instrument = "00" } } } } }
+  local input = { pattern = pattern_ref(epoch, 3), track = track_ref(epoch, 3), lines = { { line = 0, notes = { { col = 1, note = "D-4", instrument = "00" } } } } }
   local other = preview(peer, "notes-write", input)
   ok(apply(peer, "notes-write", input, "Kumi: n (km5l)", other.fence, epoch, layout).result)
   H.tick(2)
@@ -2573,7 +2612,7 @@ test("aliases: Kumi doesn't write lines through an alias (they are the pattern's
   mock.ops.alias(2, 3, 1)
   H.tick(2)
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
+  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
   local response = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   ok(response.error and response.error.message:find("alias", 1, true), json.encode(response))
 end)

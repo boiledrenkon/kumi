@@ -308,7 +308,7 @@ const AU_UNDO: &str = "Renoise's undo history goes empty now and then once AU pl
 static CASES: &[Case] = &[
     // Mixer, names, structure (M3 kinds, now through the whole stack)
     case("track_volume", TRACK, r#"{"ref":"$E:track:$t","volumeDb":-6}"#, "local tr = song:track($t) return {tr.prefx_volume.value, tr.postfx_volume.value}"),
-    case("track_pan", TRACK, r#"{"ref":"$E:track:$t","pan":-0.5}"#, "return song:track($t).prefx_panning.value"),
+    case("track_pan", TRACK, r#"{"ref":"$E:track:$t","pan":-0.5}"#, "return song:track($t).postfx_panning.value"),
     case("track_mute", TRACK, r#"{"ref":"$E:track:$t","mute":true}"#, "return song:track($t).mute_state"),
     case("track_solo", TRACK, r#"{"ref":"$E:track:$t","solo":true}"#, "local out = {} for _, tr in ipairs(song.tracks) do if tr.type ~= R.Track.TRACK_TYPE_MASTER then out[#out + 1] = tr.mute_state .. (tr.solo_state and '*' or '') end end return out"),
     case("track_rename", TRACK, r#"{"ref":"$E:track:$t","name":"K renamed"}"#, "return song:track($t).name"),
@@ -325,7 +325,7 @@ static CASES: &[Case] = &[
     case("device_move", "return {t = new_track('K device', {'Audio/Effects/Native/Delay', 'Audio/Effects/Native/Gainer'})}", r#"{"ref":"$E:device:$t.2","index":3}"#, "return paths($t)"),
     case("device_bypass", "return {t = new_track('K device', {'Audio/Effects/Native/Delay'})}", r#"{"ref":"$E:device:$t.2","bypass":true}"#, "return song:track($t):device(2).is_active"),
     case("device_param", GAINER, r#"{"ref":"$E:device:$t.2","param":1,"value":0.5}"#, "return values(song:track($t):device(2))"),
-    case("notes_write", TRACK, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","lines":[{"line":1,"notes":[{"col":1,"note":"C-4","instrument":0}]},{"line":5,"notes":[{"col":1,"note":"E-4","instrument":0}]}]}"#, "return notes(1, $t, 8)").note(LINES_REDO),
+    case("notes_write", TRACK, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","lines":[{"line":0,"notes":[{"col":1,"note":"C-4","instrument":0}]},{"line":4,"notes":[{"col":1,"note":"E-4","instrument":0}]}]}"#, "return notes(1, $t, 8)").note(LINES_REDO),
     case("notes_clear", TWO_NOTES, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t"}"#, "return notes(1, $t, 4)").note(LINES_REDO),
     case("slot_insert", "local q, p = new_slot() return {q = q + 1, p = p}", r#"{"index":"$q","patternRef":"$E:pattern:$p"}"#, "return seq()"),
     case("slot_delete", SLOT, r#"{"ref":"$E:seq:$q"}"#, "return {seq(), #song.patterns}"),
@@ -362,17 +362,18 @@ static CASES: &[Case] = &[
     case("slot_move", "local q = new_slot() local q2 = new_slot() return {q = q, q2 = q2}", r#"{"ref":"$E:seq:$q","index":"$q2"}"#, "return seq()"),
     case("slot_unique", "local q, p = new_slot() local q2 = new_slot(p) put(p, 1, 1, 'D-4') return {q = q, q2 = q2}", r#"{"ref":"$E:seq:$q","lastRef":"$E:seq:$q2"}"#, "return {seq(), #song.patterns}"),
     case("pattern_alias", "local t = new_track('K alias') local _, p = new_slot() local _, p2 = new_slot() put(p, t, 1, 'C-4') put(p2, t, 3, 'G-4') return {t = t, p = p, p2 = p2}", r#"{"ref":"$E:pattern:$p2","trackRef":"$E:track:$t","aliasRef":"$E:pattern:$p"}"#, "return {song:pattern($p2):track($t).alias_pattern_index, notes($p2, $t, 4)}"),
-    case("automation_write", "local t = new_track('K automation', {'Audio/Effects/Native/Gainer'}) local _, p = new_slot() return {t = t, p = p}", r#"{"ref":"$E:device:$t.2","param":1,"patternRef":"$E:pattern:$p","points":[{"line":1,"value":0.2},{"line":9,"value":0.8}]}"#, "local a = song:pattern($p):track($t):find_automation(song:track($t):device(2):parameter(1)) if not a then return false end local out = {a.playmode} for _, pt in ipairs(a.points) do out[#out + 1] = pt.time .. '=' .. pt.value end return out"),
+    case("automation_write", "local t = new_track('K automation', {'Audio/Effects/Native/Gainer'}) local _, p = new_slot() return {t = t, p = p}", r#"{"ref":"$E:device:$t.2","param":1,"patternRef":"$E:pattern:$p","points":[{"line":0,"value":0.2},{"line":8,"value":0.8}]}"#, "local a = song:pattern($p):track($t):find_automation(song:track($t):device(2):parameter(1)) if not a then return false end local out = {a.playmode} for _, pt in ipairs(a.points) do out[#out + 1] = pt.time .. '=' .. pt.value end return out"),
     case("notes_transpose", TWO_NOTES, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","semitones":2}"#, "return notes(1, $t, 4)").note(LINES_REDO),
     case("notes_humanize", TWO_NOTES, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","delay":16,"volume":10,"seed":7}"#, "return notes(1, $t, 4)").note(LINES_REDO),
-    case("lines_copy", TWO_NOTES, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","first":1,"last":4,"line":9}"#, "return notes(1, $t, 16)").note(LINES_REDO),
+    case("lines_copy", TWO_NOTES, r#"{"patternRef":"$E:pattern:1","trackRef":"$E:track:$t","first":0,"last":3,"line":8}"#, "return notes(1, $t, 16)").note(LINES_REDO),
     // Instruments
     case("instrument_set", INSTRUMENT, r#"{"ref":"$E:instrument:$i","volumeDb":-6,"transpose":2}"#, "local ins = song:instrument($i) return {ins.volume, ins.transpose}"),
-    case("instrument_add", "return {n = #song.instruments + 1}", r#"{"index":"$n","name":"K added"}"#, "return inames()"),
+    // (instruments by Renoise's numbers, from 0: the end is the count)
+    case("instrument_add", "return {n = #song.instruments}", r#"{"index":"$n","name":"K added"}"#, "return inames()"),
     case("instrument_delete", "return {i = new_instrument('K delete', 1)}", r#"{"ref":"$E:instrument:$i"}"#, "return inames()"),
-    case("instrument_load", "local i = new_instrument('K xrni', 1) song.selected_instrument_index = i renoise.app():save_instrument('$dir/k.xrni') return {n = #song.instruments + 1}", r#"{"path":"$dir/k.xrni","index":"$n"}"#, "return inames()"),
+    case("instrument_load", "local i = new_instrument('K xrni', 1) song.selected_instrument_index = i renoise.app():save_instrument('$dir/k.xrni') return {n = #song.instruments}", r#"{"path":"$dir/k.xrni","index":"$n"}"#, "return inames()"),
     case("instrument_duplicate", "return {i = new_instrument('K duplicate', 1)}", r#"{"ref":"$E:instrument:$i"}"#, "return inames()"),
-    case("instrument_move", "local a = new_instrument('K move A', 1) local b = new_instrument('K move B', 1) return {a = a, b = b}", r#"{"ref":"$E:instrument:$a","index":"$b"}"#, "return inames()"),
+    case("instrument_move", "local a = new_instrument('K move A', 1) local b = new_instrument('K move B', 1) return {a = a, b = b - 1}", r#"{"ref":"$E:instrument:$a","index":"$b"}"#, "return inames()"),
     case("keyzone_overlap", "return {i = new_instrument('K overlap', 2)}", r#"{"ref":"$E:instrument:$i","mode":"cycle"}"#, "return song:instrument($i).sample_mapping_overlap_mode"),
     case("keyzone_drumkit", "return {i = new_instrument('K kit', 3)}", r#"{"ref":"$E:instrument:$i"}"#, "local out = {} for k, s in ipairs(song:instrument($i).samples) do local m = s.sample_mapping out[k] = m.note_range[1] .. '-' .. m.note_range[2] .. '@' .. m.base_note end return out"),
     case("sample_load", "local i = new_instrument('K load', 1) song:instrument(i):sample(1).sample_buffer:save_as('$dir/k.wav', 'wav') return {i = i}", r#"{"ref":"$E:instrument:$i","path":"$dir/k.wav"}"#, "return snames($i)"),
@@ -399,7 +400,7 @@ static CASES: &[Case] = &[
     case("phrase_set", PHRASE, r#"{"ref":"$E:phrase:$i.1","lpb":8,"name":"K ph2"}"#, "local ph = song:instrument($i):phrase(1) return {ph.name, ph.lpb}"),
     case("phrase_map", PHRASE, r#"{"ref":"$E:phrase:$i.1","noteRange":[48,59]}"#, "local m = song:instrument($i):phrase(1).mapping return m and {m.note_range[1], m.note_range[2]} or false"),
     case("phrase_playback", PHRASE, r#"{"ref":"$E:instrument:$i","mode":"keymap"}"#, "return song:instrument($i).phrase_playback_mode"),
-    case("phrase_write", PHRASE, r#"{"ref":"$E:phrase:$i.1","lines":[{"line":2,"notes":[{"col":1,"note":"C-4"}]}]}"#, "return phnotes($i, 1, 4)").note(LINES_REDO),
+    case("phrase_write", PHRASE, r#"{"ref":"$E:phrase:$i.1","lines":[{"line":1,"notes":[{"col":1,"note":"C-4"}]}]}"#, "return phnotes($i, 1, 4)").note(LINES_REDO),
     case("phrase_clear", "local i = new_instrument('K phrase', 1) local ph = song:instrument(i):insert_phrase_at(1) ph:line(2):note_column(1).note_string = 'C-4' return {i = i}", r#"{"ref":"$E:phrase:$i.1"}"#, "return phnotes($i, 1, 4)").note(LINES_REDO),
     case("phrase_script", PHRASE, r#"{"ref":"$E:phrase:$i.1","code":"return pattern { unit = \"1/8\", event = { \"c4\", \"e4\" } }"}"#, "local ph = song:instrument($i):phrase(1) return {ph.playback_mode, table.concat(ph.script.paragraphs, '\\n')}"),
     case("phrase_render", "local i = new_instrument('K render', 1) local ph = song:instrument(i):insert_phrase_at(1) ph.playback_mode = R.InstrumentPhrase.PLAY_SCRIPT ph.script.paragraphs = {'return pattern { unit = \"1/8\", event = { \"c4\", \"e4\", \"g4\" } }'} ph.script:commit() return {i = i}", r#"{"ref":"$E:phrase:$i.1"}"#, "local ph = song:instrument($i):phrase(1) return {ph.playback_mode, ph.number_of_lines, phnotes($i, 1, 8)}"),
@@ -1157,7 +1158,7 @@ mod extras {
         let dir = lab.vars["dir"].as_str().unwrap_or_default().to_owned();
         match name {
             "play" => {
-                let said = lab.tool("play", json!({"sequence": 1, "line": 1})).await;
+                let said = lab.tool("play", json!({"sequence": 1, "line": 0})).await;
                 out.apply_ms = Some(said.ms);
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 let playing = read(lab, "return song.transport.playing").await;
@@ -1189,7 +1190,8 @@ mod extras {
                 let Ok(vars) = fresh(lab, "return {t = new_track('K select'), q = #song.sequencer.pattern_sequence}").await else {
                     return out.fail("setup", "");
                 };
-                let args = input(r#"{"trackRef":"$E:track:$t","sequenceRef":"$E:seq:$q","line":5,"frame":"mixer"}"#, &vars);
+                // (Renoise's line 04 is its fifth: Lua's index 5)
+                let args = input(r#"{"trackRef":"$E:track:$t","sequenceRef":"$E:seq:$q","line":4,"frame":"mixer"}"#, &vars);
                 let said = lab.tool("select", args).await;
                 out.apply_ms = Some(said.ms);
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1325,14 +1327,14 @@ mod extras {
         let (host, t) = (lab.host.clone(), vars["t"].clone());
         let edit: Hook = Box::new(move || {
             async move {
-                lua_on(&host, &format!("song:track({t}).prefx_volume.value = 0.3")).await.ok();
+                lua_on(&host, &format!("song:track({t}).postfx_volume.value = 0.3")).await.ok();
             }
             .boxed_local()
         });
         lab.hooked.before("change_apply", 0, edit);
         let (said, added) =
             lab.plan(json!([{"tool": "track_volume", "input": input(r#"{"ref":"$E:track:$t","volumeDb":-6}"#, &vars)}])).await;
-        let now = read(lab, &fill_lua("return song:track($t).prefx_volume.value", &vars)).await;
+        let now = read(lab, &fill_lua("return song:track($t).postfx_volume.value", &vars)).await;
         out.step("refused", said.error && added.is_empty(), short(&said.text, 140));
         out.step("producer's value kept", same(&now, &json!(0.3)), format!("{now}"));
         out.step("edit made", !lab.hooked.armed(), "");
@@ -1369,7 +1371,7 @@ mod extras {
         let probe = fill_lua("return {notes($p, $t, 4), song:pattern($p2):track($t).alias_pattern_index}", &vars);
         let before = read(lab, &probe).await;
         lab.pause().await;
-        let write = r#"{"patternRef":"$E:pattern:$p2","trackRef":"$E:track:$t","lines":[{"line":3,"notes":[{"col":1,"note":"A-4","instrument":0}]}]}"#;
+        let write = r#"{"patternRef":"$E:pattern:$p2","trackRef":"$E:track:$t","lines":[{"line":2,"notes":[{"col":1,"note":"A-4","instrument":0}]}]}"#;
         let (said, added) = lab.plan(json!([{"tool": "notes_write", "input": input(write, &vars)}])).await;
         let after = read(lab, &probe).await;
         out.info("answer", short(&said.text, 160));
@@ -1395,7 +1397,7 @@ mod extras {
         out.step("note columns refused", columns.error, short(&columns.text, 100));
         let (delete, _) = lab.plan(json!([{"tool": "track_delete", "input": input(r#"{"ref":"$E:track:$g"}"#, &vars)}])).await;
         out.step("delete refused", delete.error, short(&delete.text, 100));
-        let probe = fill_lua("return song:track($g).prefx_volume.value", &vars);
+        let probe = fill_lua("return song:track($g).postfx_volume.value", &vars);
         let before = read(lab, &probe).await;
         let (said, added) =
             lab.plan(json!([{"tool": "track_volume", "input": input(r#"{"ref":"$E:track:$g","volumeDb":-4}"#, &vars)}])).await;

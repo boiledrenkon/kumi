@@ -147,11 +147,19 @@ function M.log_error(where, err)
   log.write("error", where .. ": " .. tostring(err))
 end
 
+-- How deep in the tool's notifiers the code running now is: a run-lua chunk's time limit (a count hook) stops the chunk only
+-- outside them, so every notifier runs whole (setting the hook aside instead would restart its count at each notifier).
+local guarded = 0
+
+-- A notifier, run whole and never raising. One that failed may have left the song half watched: it is watched anew.
 local function guard(where, fn)
   return function(...)
+    guarded = guarded + 1
     local ok, result = xpcall(fn, debug.traceback, ...)
+    guarded = guarded - 1
     if not ok then
       M.log_error(where, result)
+      if b then b.reattach = true end
       return nil
     end
     return result
@@ -1189,6 +1197,7 @@ local function change_env()
     watch_undo = watch_undo, -- (n-instruments)
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
+    in_notifier = function() return guarded > 0 end,
     -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
     -- instrument file into slot i that the places log doesn't take for a delete.
     work_dir = function()
@@ -1196,6 +1205,8 @@ local function change_env()
       return dir and (dir:gsub("[/\\][^/\\]*[/\\]?$", "") .. "/work") or nil
     end,
     replacing_instrument = function(i, fn)
+      -- (the instrument loaded in its place takes on the logs it had, so the places Kumi's records keep inside it follow)
+      local kept = place_env.logs_of("instrument", { i })
       b.replacing = { i = i, insert = true, remove = true }
       local ok, err = pcall(fn)
       -- (told now or on a later pass: kept for those two ops for a moment)
@@ -1204,6 +1215,7 @@ local function change_env()
         b.replacing = nil
         error(err, 0)
       end
+      if kept then place_env.adopt("instrument", { i }, kept) end
     end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end
@@ -1284,7 +1296,7 @@ function handlers.transport_stop()
 end
 
 -- Play: from where the pattern is (no arguments), or from a line of a sequence slot, or of the pattern being edited when only
--- `line` is given. Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
+-- `line` is given (Renoise's number, from 0). Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
 -- may name the epoch it was read in.
 function handlers.transport_play(params)
   local song = rows.the_song()
@@ -1303,11 +1315,11 @@ function handlers.transport_play(params)
       bad(string.format("sequence is a sequence slot from 1 to %d", slots))
     end
     local pattern = sequence and song:pattern(song.sequencer:pattern(sequence)) or song:pattern(song.selected_pattern_index)
-    if line == nil then line = 1 end
-    if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > pattern.number_of_lines then
-      bad(string.format("line is a line of that pattern, from 1 to %d", pattern.number_of_lines))
+    if line == nil then line = 0 end
+    if type(line) ~= "number" or line ~= math.floor(line) or line < 0 or line >= pattern.number_of_lines then
+      bad(string.format("line is a line of that pattern, from 0 to %d", pattern.number_of_lines - 1))
     end
-    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line)) else transport:start_at(line) end
+    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line + 1)) else transport:start_at(line + 1) end
     started = true
   elseif not transport.playing then
     transport:start(renoise.Transport.PLAYMODE_CONTINUE_PATTERN)
@@ -1316,7 +1328,7 @@ function handlers.transport_play(params)
   local position = transport.playback_pos
   return {
     epoch = epoch(), layout = layout_now(), started = started, playing = transport.playing,
-    sequence = sequence or position.sequence, line = sequence and line or (line or position.line),
+    sequence = sequence or position.sequence, line = sequence and line or (line or position.line - 1),
   }
 end
 

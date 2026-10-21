@@ -37,7 +37,7 @@ end
 
 local function pattern_label(song, p)
   local name = song:pattern(p).name
-  if name == nil or name == "" then name = string.format("Pattern %02X", p - 1) end
+  if name == nil or name == "" then name = string.format("Pattern %02d", p - 1) end
   return name
 end
 

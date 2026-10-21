@@ -108,7 +108,8 @@ fn value_lines(value: &PictureValue, cols: usize) -> Vec<Vec<Span>> {
 /// A tracker's line before and after, in the DAW's text: "  9 E-4 01 40 .. .. → OFF .. .. .. ..", or on two rows
 /// where that doesn't fit (the line before, then what it is now under it).
 fn tracker_lines(line: &PictureLine, cols: usize) -> Vec<Vec<Span>> {
-    let number = format!("{:>3} ", line.line);
+    // (as the tracker shows it: two digits at least, 00 the first line)
+    let number = format!("{:>3} ", format!("{:02}", line.line));
     let side = |text: &str| if text.is_empty() { "(empty)".to_string() } else { text.to_string() };
     let (before, after) = (side(&line.before), side(&line.after));
     let one = text_width(&number) + text_width(&before) + 3 + text_width(&after);

@@ -7,7 +7,7 @@
 
                                                                                                                     NOW
                                                                                                                     ✓ Wrote 3 lines in “Drop” on “Bass”
-                                                                                                                      1 --- .. .. .. .. ....
+                                                                                                                     00 --- .. .. .. .. ....
                                                                                                                       → C-4 01 80 .. .. 0A10
 
                                           ██                          ▀▀
@@ -21,10 +21,10 @@
 
                                                         Try                                                         HISTORY 1 ────────────────────────────────
                                               “What's on this track?”                                               ✓ Wrote 3 lines in “Drop” on “Bass”   undo
-                                              “Set the tempo to 124”                                                    1 --- .. .. .. .. ....
+                                              “Set the tempo to 124”                                                   00 --- .. .. .. .. ....
                                         “Why might my low end sound muddy?”                                             → C-4 01 80 .. .. 0A10
-                                                                                                                        9 E-4 01 40 .. .. → OFF .. .. .. ..
-                      Kumi keeps each song's conversations: /conversations goes back to one.                           13 --- .. .. .. .. → G-4 01 60 .. ..
+                                                                                                                       08 E-4 01 40 .. .. → OFF .. .. .. ..
+                      Kumi keeps each song's conversations: /conversations goes back to one.                           12 --- .. .. .. .. → G-4 01 60 .. ..
 
 
 

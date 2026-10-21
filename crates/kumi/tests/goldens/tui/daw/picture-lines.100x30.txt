@@ -7,7 +7,7 @@
 
                  ██                          ▀▀                   NOW
                  ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██                   ✓ Wrote 3 lines in “Drop” on “B…
-                 ██▀█▄   ██  ██  ██  ██  ██  ██                     1 --- .. .. .. .. ....
+                 ██▀█▄   ██  ██  ██  ██  ██  ██                    00 --- .. .. .. .. ....
                  ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀                     → C-4 01 80 .. .. 0A10
 
                  ░▒▓████████████████████████▓▒░
@@ -17,11 +17,11 @@
                                Try                                HISTORY 1 ──────────────────────
                      “What's on this track?”                      ✓ Wrote 3 lines in “Drop”   undo
                      “Set the tempo to 124”                         on “Bass”
-               “Why might my low end sound muddy?”                    1 --- .. .. .. .. ....
+               “Why might my low end sound muddy?”                   00 --- .. .. .. .. ....
                                                                       → C-4 01 80 .. .. 0A10
-   Kumi keeps each song's conversations: /conversations goes …        9 E-4 01 40 .. ..
+   Kumi keeps each song's conversations: /conversations goes …       08 E-4 01 40 .. ..
                                                                       → OFF .. .. .. ..
-                                                                     13 --- .. .. .. ..
+                                                                     12 --- .. .. .. ..
                                                                       → G-4 01 60 .. ..
 
 

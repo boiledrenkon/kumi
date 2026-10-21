@@ -24,6 +24,9 @@ local function track_reread(song, place)
   return nil
 end
 
+-- (a title names the pre-FX stage; the post-FX fader is the one the producer knows as the track's volume and pan)
+local function stage_text(state) return state.stage == "pre" and " pre-FX" or "" end
+
 local function prop(spec)
   spec.locate = function(song, env, input)
     local index, track = find(song, env, input.ref, spec.kind)
@@ -58,7 +61,7 @@ prop {
     (state.stage == "post" and track.postfx_volume or track.prefx_volume).value = state.volume
   end,
   same = function(a, b) return a.stage == b.stage and close(a.volume, b.volume) end,
-  title = function(name, _, to) return name .. " volume " .. base.db_text(to.volumeDb) .. " dB" end,
+  title = function(name, _, to) return name .. stage_text(to) .. " volume " .. base.db_text(to.volumeDb) .. " dB" end,
 }
 
 prop {
@@ -78,7 +81,7 @@ prop {
     (state.stage == "post" and track.postfx_panning or track.prefx_panning).value = (state.pan + 1) / 2
   end,
   same = function(a, b) return a.stage == b.stage and close(a.pan, b.pan) end,
-  title = function(name, _, to) return name .. " pan " .. base.pan_text(to.pan) end,
+  title = function(name, _, to) return name .. stage_text(to) .. " pan " .. base.pan_text(to.pan) end,
 }
 
 prop {
@@ -1445,6 +1448,14 @@ local columns_spec = base.settings({
   kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
 })
 columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+-- (the undo hides columns again: what they held when Kumi showed them may be hidden again, but what the producer wrote in
+-- them since is refused, unless discard)
+columns_spec.keep = function(loc, before) return { heldHidden = hidden_note(loc, before) ~= nil } end
+columns_spec.before_restore = function(loc, _, prior, applied)
+  if type(applied) == "table" and applied.heldHidden == false and hidden_note(loc, prior) ~= nil then
+    fail("changed", loc.name .. "'s columns Kumi showed hold notes written since: hiding them again would hide those, so Kumi left them")
+  end
+end
 prop(columns_spec)
 
 -- A note column's name and mute: the column is part of what the change is about, so the record keeps it (`col`).

@@ -31,7 +31,7 @@ end
 local function delay_text(value)
   if value == "" or value == ".." then return ".." end
   if type(value) == "number" then
-    if value < 0 or value > 255 or value ~= math.floor(value) then bad("delay: a whole number from 0 to 255, or two hex digits") end
+    if value < 0 or value > 255 or value ~= math.floor(value) then bad("delay: a whole number from 0 to 255 (decimal: 128 is half a line), or two hex digits as Renoise shows them (\"80\")") end
     return value == 0 and ".." or string.format("%02X", value)
   end
   local text = text_of(value, "delay", "10 or ..")
@@ -42,7 +42,11 @@ end
 local function hex2(value, name, empty)
   if value == "" or value == ".." then return empty end
   if type(value) == "number" then
-    if value < 0 or value > 254 or value ~= math.floor(value) then bad(name .. ": a whole number from 0 to 254, or two hex digits") end
+    -- (255 is the instrument's "none"; an effect's amount goes to FF)
+    local top = empty == ".." and 254 or 255
+    if value < 0 or value > top or value ~= math.floor(value) then
+      bad(string.format("%s: a whole number from 0 to %d (decimal: 10 is 0A), or two hex digits as Renoise shows them", name, top))
+    end
     return string.format("%02X", value)
   end
   local text = text_of(value, name, "01 or ..")
@@ -331,14 +335,14 @@ end
 
 local function pattern_label(pattern, p)
   local name = pattern.name
-  if name == nil or name == "" then name = string.format("Pattern %02X", p - 1) end
+  if name == nil or name == "" then name = string.format("Pattern %02d", p - 1) end
   return name
 end
 
 local function pattern_track_of(song, p, index)
   local pattern_track = song:pattern(p):track(index)
   if pattern_track.is_alias then
-    bad(string.format("that track in pattern %d is an alias of pattern %d: its lines are that pattern's, so write them there", p, pattern_track.alias_pattern_index))
+    bad(string.format("that track in pattern %02d is an alias of pattern %02d: its lines are that pattern's, so write them there", p - 1, pattern_track.alias_pattern_index - 1))
   end
   return pattern_track
 end
@@ -354,14 +358,28 @@ local function locate(song, env, input, kind)
   return p, index, track, pattern_track_of(song, p, index), song:pattern(p)
 end
 
-local function check_line(pattern, line)
-  if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > pattern.number_of_lines then
-    bad(string.format("line must be a whole number from 1 to %d (this pattern's lines)", pattern.number_of_lines))
+-- A line as a request names it, by Renoise's number (from 0), to its place in the pattern (from 1).
+local function line_at(pattern, line)
+  if type(line) ~= "number" or line ~= math.floor(line) or line < 0 or line >= pattern.number_of_lines then
+    bad(string.format("line must be a whole number from 0 to %d (this pattern's lines, numbered as Renoise shows them)", pattern.number_of_lines - 1))
   end
+  return line + 1
 end
 
+-- The lines `first` to `last` a request names by Renoise's numbers (the whole pattern when left out), as places from 1.
+local function line_range(input, lines)
+  local first, last = input.first or 0, input.last or lines - 1
+  for _, value in ipairs({ first, last }) do
+    if type(value) ~= "number" or value ~= math.floor(value) or value < 0 or value >= lines then
+      bad(string.format("first and last are line numbers from 0 to %d", lines - 1))
+    end
+  end
+  if first > last then bad("first must not come after last") end
+  return first + 1, last + 1
+end
+
+-- (`line` is a place from 1)
 local function cell_at(pattern, track, line, kind, col)
-  check_line(pattern, line)
   if type(col) ~= "number" or col ~= math.floor(col) then bad("col must be a whole number") end
   if kind == "note" then
     if track.max_note_columns == 0 then bad("that track has no note columns: only sequencer tracks do") end
@@ -375,11 +393,21 @@ end
 -- The cells a request names, with what it gives for each (`given`) and whether to clear first: [key] = want.
 local function key_of(at) return at.line * 100 + (at.kind == "note" and 0 or 50) + at.col end
 
-local function parse_cells(pattern, track, input)
+-- A note's instrument named by its ref (a pattern's notes only: `env` is there), as the two hex digits Renoise shows.
+local function instrument_of_ref(env, reference)
+  if env == nil then bad("instrumentRef is for a pattern's notes: give instrument") end
+  if type(reference) ~= "string" then bad("instrumentRef must be an instrument ref") end
+  local index = refs.expect(reference, "instrument", 1, env.epoch())[1]
+  if index > #the_song().instruments then fail("gone", "that instrument isn't in the song any more") end
+  return string.format("%02X", index - 1)
+end
+
+-- (`env` for refs inside the cells: a pattern's notes may name their instrument by its ref)
+local function parse_cells(pattern, track, input, env)
   local wants, count = {}, 0
   local function add(at, given, clear)
     local key = key_of(at)
-    if wants[key] then bad(string.format("line %d %s column %d is given twice", at.line, at.kind, at.col)) end
+    if wants[key] then bad(string.format("line %02d %s column %d is given twice", at.line - 1, at.kind, at.col)) end
     wants[key] = { at = at, given = given, clear = clear }
     count = count + 1
   end
@@ -387,58 +415,62 @@ local function parse_cells(pattern, track, input)
   local seen = {}
   for _, entry in ipairs(input.lines) do
     if type(entry) ~= "table" then bad("each of lines is an object {line, notes?, effects?, clear?}") end
-    check_line(pattern, entry.line)
-    if seen[entry.line] then bad("line " .. tostring(entry.line) .. " is given twice: put its cells in one entry") end
-    seen[entry.line] = true
+    local line = line_at(pattern, entry.line)
+    if seen[line] then bad(string.format("line %02d is given twice: put its cells in one entry", entry.line)) end
+    seen[line] = true
     local any = false
     for _, cell in ipairs(entry.notes or {}) do
-      if type(cell) ~= "table" then bad("each of notes is an object {col, note?, instrument?, volume?, panning?, delay?, fx?, clear?}") end
-      local at = cell_at(pattern, track, entry.line, "note", cell.col)
+      if type(cell) ~= "table" then bad("each of notes is an object {col, note?, instrument? (or instrumentRef), volume?, panning?, delay?, fx?, clear?}") end
+      local at = cell_at(pattern, track, line, "note", cell.col)
       local given = {}
       if cell.note ~= nil then given.note = note_text(cell.note) end
+      if cell.instrument ~= nil and cell.instrumentRef ~= nil then bad("give instrument or instrumentRef, not both") end
       if cell.instrument ~= nil then given.instrument = hex2(cell.instrument, "instrument", "..") end
+      if cell.instrumentRef ~= nil then given.instrument = instrument_of_ref(env, cell.instrumentRef) end
       if cell.volume ~= nil then given.volume = column_text(cell.volume, "volume") end
       if cell.panning ~= nil then given.panning = column_text(cell.panning, "panning") end
       if cell.delay ~= nil then given.delay = delay_text(cell.delay) end
       if cell.fx ~= nil then given.fx = fx_text(cell.fx) end
-      if next(given) == nil and cell.clear ~= true then bad(string.format("line %d note column %d says nothing to write: give a field, or clear: true", at.line, at.col)) end
+      if next(given) == nil and cell.clear ~= true then bad(string.format("line %02d note column %d says nothing to write: give a field, or clear: true", entry.line, at.col)) end
       add(at, given, cell.clear == true)
       any = true
     end
     for _, cell in ipairs(entry.effects or {}) do
       if type(cell) ~= "table" then bad("each of effects is an object {col, number?, amount?, clear?}") end
-      local at = cell_at(pattern, track, entry.line, "effect", cell.col)
+      local at = cell_at(pattern, track, line, "effect", cell.col)
       local given = {}
       if cell.number ~= nil then
         given.number = text_of(cell.number, "number", "0A")
         if not given.number:match("^%w%w$") then bad("number: two characters such as 0A; got " .. cell.number) end
       end
       if cell.amount ~= nil then given.amount = hex2(cell.amount, "amount", "00") end
-      if next(given) == nil and cell.clear ~= true then bad(string.format("line %d effect column %d says nothing to write: give a field, or clear: true", at.line, at.col)) end
+      if next(given) == nil and cell.clear ~= true then bad(string.format("line %02d effect column %d says nothing to write: give a field, or clear: true", entry.line, at.col)) end
       add(at, given, cell.clear == true)
       any = true
     end
     if entry.clear ~= true and not any then
-      bad("line " .. tostring(entry.line) .. " says nothing to write: give notes or effects, or clear: true")
+      bad(string.format("line %02d says nothing to write: give notes or effects, or clear: true", entry.line))
     end
   end
   return wants, count
 end
 
--- The cells a clear of whole lines takes: every cell with something in it, in all columns (hidden ones too).
+-- The cells a clear of whole lines takes: every cell with something in it, in all columns (hidden ones too). (After
+-- parse_cells, which checks the lines.)
 local function add_cleared(pattern_track, input, wants)
   for _, entry in ipairs(input.lines) do
     if entry.clear == true then
-      local line = pattern_track:line(entry.line)
+      local place = entry.line + 1
+      local line = pattern_track:line(place)
       if not line.is_empty then
         for c = 1, 12 do
-          local at = { line = entry.line, kind = "note", col = c }
+          local at = { line = place, kind = "note", col = c }
           if not wants[key_of(at)] and not line:note_column(c).is_empty then
             wants[key_of(at)] = { at = at, given = {}, clear = true }
           end
         end
         for c = 1, 8 do
-          local at = { line = entry.line, kind = "effect", col = c }
+          local at = { line = place, kind = "effect", col = c }
           if not wants[key_of(at)] and not line:effect_column(c).is_empty then
             wants[key_of(at)] = { at = at, given = {}, clear = true }
           end
@@ -509,7 +541,7 @@ local function preview_of(song, env, input, kind, verb, planner)
   if planner then
     prior, after, title = planner({ p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern }, input)
   else
-    local wants = parse_cells(pattern, track, input)
+    local wants = parse_cells(pattern, track, input, env)
     add_cleared(pattern_track, input, wants)
     prior, after = plan_of(pattern_track, wants, input.merge == true)
   end
@@ -583,7 +615,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb, planner)
       -- (Renoise read the text as something else: nothing half-done stays)
       for j = 1, #plan.after do write_cell(plan.pattern_track, plan.prior[j]) end
       set_columns(plan.track, plan.columns)
-      fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col))
+      fail("failed", string.format("Renoise didn't keep line %02d column %d as written", cell.line - 1, cell.col))
     end
   end
   local columns = read_columns(plan.track)
@@ -622,7 +654,7 @@ local function restore_plan(pattern_track, restore, lines, changed)
     local now = read_cell(pattern_track, prior[i])
     if not same_cell(now, prior[i]) then
       if not same_cell(now, applied[i]) then
-        fail("changed", string.format("line %d was changed in Renoise since Kumi wrote it", prior[i].line))
+        fail("changed", string.format("line %02d was changed in Renoise since Kumi wrote it", prior[i].line - 1))
       end
       todo[#todo + 1] = prior[i]
     end
@@ -774,16 +806,11 @@ register("notes-write", "Wrote", "Lines")
 -- notes-clear: the cells with something in them in a range of lines (all lines when none is given), in every column.
 local function clear_input(song, env, input, kind)
   local p, _, _, pattern_track, pattern = locate(song, env, input, kind)
-  local first, last = input.first or 1, input.last or pattern.number_of_lines
-  for _, value in ipairs({ first, last }) do
-    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > pattern.number_of_lines then
-      bad(string.format("first and last are line numbers from 1 to %d", pattern.number_of_lines))
-    end
-  end
-  if first > last then bad("first must not come after last") end
+  local first, last = line_range(input, pattern.number_of_lines)
   local lines = {}
+  -- (as notes-write takes them: by Renoise's numbers)
   for l = first, last do
-    if not pattern_track:line(l).is_empty then lines[#lines + 1] = { line = l, clear = true } end
+    if not pattern_track:line(l).is_empty then lines[#lines + 1] = { line = l - 1, clear = true } end
   end
   return { pattern = input.pattern, track = input.track, lines = lines, epoch = input.epoch }, p
 end
@@ -829,14 +856,7 @@ local function note_name(value) return NOTE_NAMES[value % 12 + 1] .. math.floor(
 -- The lines a request names (`first`, `last`: the whole pattern when left out) and the note columns (`columns`, the shown
 -- ones when left out).
 local function range_of(ctx, input)
-  local lines = ctx.pattern.number_of_lines
-  local first, last = input.first or 1, input.last or lines
-  for _, value in ipairs({ first, last }) do
-    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > lines then
-      bad(string.format("first and last are line numbers from 1 to %d", lines))
-    end
-  end
-  if first > last then bad("first must not come after last") end
+  local first, last = line_range(input, ctx.pattern.number_of_lines)
   local track = ctx.track
   if track.max_note_columns == 0 or track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
     bad("that track has no note columns: only sequencer tracks do")
@@ -880,7 +900,7 @@ local function transpose_planner(ctx, input)
         if value <= 119 then
           local moved = value + semitones
           if moved < 0 or moved > 119 then
-            bad(string.format("line %d column %d: %s %+d semitones is outside C-0 to B-9, so nothing was transposed", l, c, note_name(value), semitones))
+            bad(string.format("line %02d column %d: %s %+d semitones is outside C-0 to B-9, so nothing was transposed", l - 1, c, note_name(value), semitones))
           end
           local now = read_cell(ctx.pattern_track, { line = l, kind = "note", col = c })
           local target = {}
@@ -919,7 +939,9 @@ local function seed_of(input, ctx)
     end
     return input.seed
   end
-  local text = table.concat({ ctx.p, ctx.index, input.first or 0, input.last or 0, input.delay or 0, input.volume or 0 }, ":")
+  -- (the lines by their places from 1, as before Kumi took Renoise's numbers: the same request draws the same)
+  local function place(line) return type(line) == "number" and line + 1 or 0 end
+  local text = table.concat({ ctx.p, ctx.index, place(input.first), place(input.last), input.delay or 0, input.volume or 0 }, ":")
   local hash = 5381
   for i = 1, #text do hash = (hash * 33 + text:byte(i)) % 2147483647 end
   return hash
@@ -977,26 +999,26 @@ local function block_of(song, env, input)
   local to_index, to_track = index, track
   if input.toTrack ~= nil then to_index, to_track = base.find(song, env, input.toTrack, "lines-copy") end
   local pattern, to_pattern = song:pattern(p), song:pattern(to_p)
-  local first, last = input.first or 1, input.last or pattern.number_of_lines
-  for _, value in ipairs({ first, last }) do
-    if type(value) ~= "number" or value ~= math.floor(value) or value < 1 or value > pattern.number_of_lines then
-      bad(string.format("first and last are line numbers from 1 to %d", pattern.number_of_lines))
-    end
-  end
-  if first > last then bad("first must not come after last") end
-  local at = input.line or first
+  local first, last = line_range(input, pattern.number_of_lines)
   local count = last - first + 1
-  if type(at) ~= "number" or at ~= math.floor(at) or at < 1 or at + count - 1 > to_pattern.number_of_lines then
-    bad(string.format("the block is %d lines: line is where it goes, from 1 to %d in that pattern", count, to_pattern.number_of_lines - count + 1))
+  local at = first
+  if input.line ~= nil then
+    local line = input.line
+    if type(line) ~= "number" or line ~= math.floor(line) or line < 0 or line + count > to_pattern.number_of_lines then
+      bad(string.format("the block is %d lines: line is where it goes, from 0 to %d in that pattern", count, to_pattern.number_of_lines - count))
+    end
+    at = line + 1
+  elseif at + count - 1 > to_pattern.number_of_lines then
+    bad(string.format("the block is %d lines: line is where it goes, from 0 to %d in that pattern", count, to_pattern.number_of_lines - count))
   end
   local to_pattern_track = to_pattern:track(to_index)
   if to_pattern_track.is_alias then
-    bad(string.format("that track in pattern %d is an alias of pattern %d: its lines are that pattern's, so write them there", to_p, to_pattern_track.alias_pattern_index))
+    bad(string.format("that track in pattern %02d is an alias of pattern %02d: its lines are that pattern's, so write them there", to_p - 1, to_pattern_track.alias_pattern_index - 1))
   end
   if input.move ~= nil and type(input.move) ~= "boolean" then bad("move must be true or false") end
   local move = input.move == true
   if move and pattern:track(index).is_alias then
-    bad(string.format("that track in pattern %d is an alias of pattern %d: move its lines there", p, pattern:track(index).alias_pattern_index))
+    bad(string.format("that track in pattern %02d is an alias of pattern %02d: move its lines there", p - 1, pattern:track(index).alias_pattern_index - 1))
   end
   if p == to_p and index == to_index and at == first then bad("the block is where it would go") end
   return {
@@ -1076,13 +1098,14 @@ end
 local function block_title(block, count)
   local verb = block.move and "Moved" or "Copied"
   local from = string.format("%s on %s", q(pattern_label(block.pattern, block.p)), q(base.named(block.index, block.track)))
-  local lines = string.format("lines %d to %d", block.first, block.last)
-  if block.first == block.last then lines = "line " .. block.first end
+  -- (lines by Renoise's numbers, as it shows them)
+  local lines = string.format("lines %02d to %02d", block.first - 1, block.last - 1)
+  if block.first == block.last then lines = string.format("line %02d", block.first - 1) end
   local to
   if block.p == block.to_p and block.index == block.to_index then
-    to = "line " .. block.at
+    to = string.format("line %02d", block.at - 1)
   else
-    to = string.format("line %d of %s on %s", block.at, q(pattern_label(block.to_pattern, block.to_p)), q(base.named(block.to_index, block.to_track)))
+    to = string.format("line %02d of %s on %s", block.at - 1, q(pattern_label(block.to_pattern, block.to_p)), q(base.named(block.to_index, block.to_track)))
   end
   return string.format("%s %s of %s to %s", verb, lines, from, to)
 end
@@ -1141,7 +1164,7 @@ local function block_apply(song, env, input, fence, desc)
   local to_result, from_result = {}, {}
   for i, cell in ipairs(to_after) do
     to_result[i] = read_cell(block.to_pattern_track, cell)
-    if not same_cell(to_result[i], cell) then back() fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col)) end
+    if not same_cell(to_result[i], cell) then back() fail("failed", string.format("Renoise didn't keep line %02d column %d as written", cell.line - 1, cell.col)) end
   end
   for i, cell in ipairs(from_after) do from_result[i] = read_cell(block.pattern_track, cell) end
   local columns = read_columns(block.to_track)
@@ -1215,7 +1238,7 @@ M.CHANGED = CHANGED
 
 -- n-instruments: the cells' text, plan and writes, for a phrase's lines (changes_phrases.lua): a phrase's lines are PatternLines.
 M.cells = {
-  parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
+  line_range = line_range, parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
   same_cell = same_cell, same_cells = same_cells, is_empty_cell = is_empty_cell, fingerprint = fingerprint, writes_of = writes_of,
   counts_of = counts_of, needs_of = needs_of, lines_in = lines_in,
 }

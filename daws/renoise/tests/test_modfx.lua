@@ -337,3 +337,98 @@ test("places, chain device × the producer's device made before it: Kumi's undo 
   mock.song:instrument(1):sample_device_chain(1):delete_device_at(3)
   failure(restore(peer, "chaindevice-bypass", record), "gone")
 end)
+
+test("modfx: Kumi's undo of a chain device's move refuses it moved again in Renoise since, unless discard (#361 N12)", function()
+  local env, peer, epoch = setup_modfx()
+  local chain = instrument(1).chains[1]
+  -- Mixer, EQ 5, Gainer, Delay.
+  ok(change(peer, "chaindevice-add", { ref = chain_ref(epoch, 1, 1), path = "Gainer" }))
+  ok(change(peer, "chaindevice-add", { ref = chain_ref(place(peer), 1, 1), path = "Delay" }))
+  local moved = change(peer, "chaindevice-move", { ref = chaindevice_ref(place(peer), 1, 1, 2), index = 4 })
+  eq(chain.devices[4].path, "Audio/Effects/Native/EQ 5")
+  -- The producer moves it to place 3.
+  mock.song:instrument(1):sample_device_chain(1):swap_devices_at(3, 4)
+  T.harness.tick(2)
+  eq(chain.devices[3].path, "Audio/Effects/Native/EQ 5")
+  failure(restore(peer, "chaindevice-move", moved), "changed", "moved in Renoise")
+  eq(chain.devices[3].path, "Audio/Effects/Native/EQ 5", "nothing moved")
+  ok(restore(peer, "chaindevice-move", moved, nil, { discard = true }).result)
+  eq(chain.devices[2].path, "Audio/Effects/Native/EQ 5")
+end)
+
+test("modfx: an LFO's waveform, a Fader's scaling and a Velocity Tracking's mode are set, and come back with a deleted device or set (#361 N14)", function()
+  local env, peer, epoch = setup_modfx()
+  local set = instrument(1).sets[1]
+  ok(change(peer, "moddevice-add", { ref = modset_ref(epoch, 1, 1), path = "LFO", target = "pitch" }))
+  ok(change(peer, "moddevice-add", { ref = modset_ref(place(peer), 1, 1), path = "Fader", target = "volume" }))
+  ok(change(peer, "moddevice-add", { ref = modset_ref(place(peer), 1, 1), path = "Velocity Tracking", target = "volume" }))
+  local lfo, fader, velocity = #set.devices - 2, #set.devices - 1, #set.devices
+  local setting = change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, lfo), waveform = "random" })
+  eq(set.devices[lfo].mode, 4)
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, fader), scaling = "exp fast" }))
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, velocity), mode = "scale" }))
+  eq(set.devices[fader].scaling, 5)
+  eq(set.devices[velocity].mode, 2)
+  ok(restore(peer, "moddevice-set", setting).result)
+  eq(set.devices[lfo].mode, 1, "Kumi's undo puts the sine back")
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, lfo), waveform = "pulse" }))
+  failure(call(peer, "change_preview", { kind = "moddevice-set", input = { ref = moddevice_ref(place(peer), 1, 1, fader), waveform = "saw" }, epoch = place(peer) }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "moddevice-set", input = { ref = moddevice_ref(place(peer), 1, 1, lfo), mode = "clamp" }, epoch = place(peer) }), "bad-params")
+  -- deleted alone, then with its set: each comes back as it was
+  local deleted = change(peer, "moddevice-delete", { ref = moddevice_ref(place(peer), 1, 1, lfo) })
+  ok(restore(peer, "moddevice-delete", deleted).result)
+  eq(set.devices[lfo].mode, 3, "the pulse wave is back")
+  local whole = change(peer, "modset-delete", { ref = modset_ref(place(peer), 1, 1) })
+  ok(restore(peer, "modset-delete", whole).result)
+  set = instrument(1).sets[1]
+  eq(set.devices[lfo].mode, 3)
+  eq(set.devices[fader].scaling, 5)
+  eq(set.devices[velocity].mode, 2)
+end)
+
+test("modfx: a settings change Renoise refuses part way puts back what it wrote first and fails, naming Renoise's words (#361 N-S2)", function()
+  -- (Kumi's own check let through, so that Renoise's refusal is what stops it)
+  local env, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_modfx.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local loose, count = text:gsub("v <= %(stepper and 256 or 6144%)", "v <= 6144")
+    assert(count == 1)
+    f = assert(io.open(path, "wb"))
+    f:write(loose)
+    f:close()
+  end })
+  mock.fire(mock.tool.app_new_document_observable)
+  local epoch = modfx_song(peer)
+  mock.fire(mock.tool.app_new_document_observable)
+  epoch = place(peer)
+  ok(change(peer, "moddevice-add", { ref = modset_ref(epoch, 1, 1), path = "Stepper", target = "pitch" }))
+  local set = instrument(1).sets[1]
+  local stepper = #set.devices
+  local name = set.devices[stepper].display_name
+  local before = steps()
+  local input = { ref = moddevice_ref(place(peer), 1, 1, stepper), name = "Steps", length = 300 }
+  local previewed, e, layout = preview(peer, "moddevice-set", input)
+  local refused = apply(peer, "moddevice-set", input, "Kumi: set (km01)", previewed.fence, e, layout)
+  failure(refused, "failed", "Renoise refused")
+  eq(set.devices[stepper].display_name, name, "the name it took first is put back")
+  ok(steps() <= before + 1, "at most the one step Renoise made of it")
+end)
+
+test("modfx: a chain or chain device deleted with a meta device's aim comes back saying the aim isn't put back (#361 N-S22)", function()
+  local env, peer, epoch = setup_modfx()
+  mock.device_catalog["Audio/Effects/Native/*LFO"] = { { name = "Dest. Effect", value = -1, min = -1, max = 16 } }
+  local chain = instrument(1).chains[1]
+  chain.devices[3] = { name = "*LFO", path = "Audio/Effects/Native/*LFO", params = { { name = "Dest. Effect", value = 1, min = -1, max = 16 } }, active = true, preset_data = "<lfo/>" }
+  mock.fire(mock.tool.app_new_document_observable)
+  local lfo = change(peer, "chaindevice-delete", { ref = chaindevice_ref(place(peer), 1, 1, 3) })
+  local back = restore(peer, "chaindevice-delete", lfo)
+  ok(back.result, json.encode(back.error or {}))
+  ok((back.result.display.note or ""):find("aimed at nothing", 1, true), tostring(back.result.display.note))
+  instrument(1).chains[1].devices[3].params[1].value = 1
+  local whole = change(peer, "chain-delete", { ref = chain_ref(place(peer), 1, 1) })
+  local again = restore(peer, "chain-delete", whole)
+  ok(again.result, json.encode(again.error or {}))
+  ok((again.result.display.note or ""):find("aimed at nothing", 1, true), tostring(again.result.display.note))
+end)

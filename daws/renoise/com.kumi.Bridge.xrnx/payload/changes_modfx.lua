@@ -62,7 +62,10 @@ end
 
 -- Modulation devices: their state, as a delete keeps it and a restore writes it.
 
-local POINT_FIELDS = { "length", "play_mode", "loop_mode", "loop_start", "loop_end", "sustain_enabled", "sustain_position", "fade_amount", "play_step" }
+-- (and the plain fields of a type that aren't parameters: an LFO's waveform and a Velocity Tracking's mode (`mode`), a
+-- Fader's `scaling`; each read where the device has it)
+local POINT_FIELDS = { "length", "play_mode", "loop_mode", "loop_start", "loop_end", "sustain_enabled", "sustain_position", "fade_amount", "play_step",
+  "mode", "scaling" }
 
 local function points_of(device)
   local ok, points = pcall(function() return device.points end)
@@ -478,8 +481,11 @@ local function device_in_list(spec)
     -- (the device Kumi deleted, at its place again: what was kept by its place before the delete follows it)
     if env.back then env.back(spec.list, n[1], n[2], material.after, at) end
     base.note_restored_at(env.journal, spec.kind, places_.journal_place(spec.of, { n[1], n[2], at }))
+    local note = spec.restore_note
+    if type(note) == "function" then note = note(state) end
     return {
-      restored = { ref = places_.ref_of(env, spec.of, { n[1], n[2], at }) }, display = { title = label .. " put back", note = spec.restore_note },
+      restored = { ref = places_.ref_of(env, spec.of, { n[1], n[2], at }) },
+      display = { title = label .. " put back", note = note },
       undo = { desc = desc, entry = true },
     }
   end
@@ -599,6 +605,29 @@ base.register({
 
 local PLAY_MODES = named({ points = 1, lines = 2, curves = 3 })
 local ENV_LOOPS = named({ off = 1, forward = 2, reverse = 3, pingpong = 4 })
+-- (Renoise's own constants where it has them; 3.5's numbers otherwise)
+local function constant(class, name, fallback)
+  local ok, value = pcall(function() return renoise[class][name] end)
+  return ok and type(value) == "number" and value or fallback
+end
+local LFO, FADER, VELOCITY = "SampleLfoModulationDevice", "SampleFaderModulationDevice", "SampleVelocityTrackingModulationDevice"
+local LFO_WAVES = named({ sine = constant(LFO, "MODE_SIN", 1), saw = constant(LFO, "MODE_SAW", 2), pulse = constant(LFO, "MODE_PULSE", 3),
+  random = constant(LFO, "MODE_RANDOM", 4) })
+local VELOCITY_MODES = named({ clamp = constant(VELOCITY, "MODE_CLAMP", 1), scale = constant(VELOCITY, "MODE_SCALE", 2) })
+local FADER_SCALINGS = named({ ["log fast"] = constant(FADER, "SCALING_LOG_FAST", 1), ["log slow"] = constant(FADER, "SCALING_LOG_SLOW", 2),
+  linear = constant(FADER, "SCALING_LINEAR", 3), ["exp slow"] = constant(FADER, "SCALING_EXP_SLOW", 4), ["exp fast"] = constant(FADER, "SCALING_EXP_FAST", 5) })
+
+-- A field only one type of device has, by its names (`map`) both ways.
+local function typed_field(kind, field, map, says, text)
+  return {
+    get = function(d)
+      local ok, value = pcall(function() return d[field] end)
+      return ok and map.get(value) or nil
+    end,
+    set = function(d, v) d[field] = map.parse(v) end, field = field,
+    check = function(v, d) return M.moddevice_type(d.name) == kind and map.parse(v) ~= nil end, says = says, text = text,
+  }
+end
 
 local function has_field(device, field) return pcall(function() return device[field] end) end
 
@@ -625,7 +654,10 @@ local MODDEVICE_FIELDS = {
   active = { get = function(d) return d.is_active end, set = function(d, v) d.is_active = v end, field = "is_active", check = is_boolean, says = "active is true or false", text = function(v) return v and "on" or "bypassed" end },
   name = { get = function(d) return d.display_name end, set = function(d, v) d.display_name = v end, field = "display_name",
     check = function(v) return type(v) == "string" and #v <= 64 and not v:find("[%c]") end, says = "name must be one line of text", text = function(v) return "named " .. q(v) end },
-  length = device_field("length", function(v) return type(v) == "number" and v == math.floor(v) and v >= 1 and v <= 6144 end, "length is the envelope's length in points (Envelope 6-6144, Stepper 1-256)", function(v) return "length " .. v end),
+  length = device_field("length", function(v, d)
+    local stepper = M.moddevice_type(d.name) == "Stepper"
+    return type(v) == "number" and v == math.floor(v) and v >= (stepper and 1 or 6) and v <= (stepper and 256 or 6144)
+  end, "length is the envelope's length in points (Envelope 6-6144, Stepper 1-256)", function(v) return "length " .. v end),
   playMode = { get = function(d) return PLAY_MODES.get(d.play_mode) end, set = function(d, v) d.play_mode = PLAY_MODES.parse(v) end, field = "play_mode",
     check = function(v, d) return has_field(d, "play_mode") and PLAY_MODES.parse(v) ~= nil end, says = "playMode is points, lines or curves (Envelope and Stepper)", text = function(v) return "plays " .. v end },
   loopMode = { get = function(d) return ENV_LOOPS.get(d.loop_mode) end, set = function(d, v) d.loop_mode = ENV_LOOPS.parse(v) end, field = "loop_mode",
@@ -636,6 +668,9 @@ local MODDEVICE_FIELDS = {
   sustainPosition = device_field("sustain_position", whole(1, 6144), "sustainPosition is a point of the envelope", function(v) return "sustain at " .. v end),
   fade = device_field("fade_amount", whole(0, 4095), "fade is from 0 to 4095 (a volume Envelope)", function(v) return "fade " .. v end),
   playStep = device_field("play_step", whole(-1, 16), "playStep is from -1 (random) to 16 (Stepper)", function(v) return v == -1 and "random steps" or ("step " .. v) end),
+  waveform = typed_field("LFO", "mode", LFO_WAVES, "waveform is sine, saw, pulse or random (LFO)", function(v) return v .. " wave" end),
+  mode = typed_field("Velocity Tracking", "mode", VELOCITY_MODES, "mode is clamp or scale (Velocity Tracking)", function(v) return v .. " mode" end),
+  scaling = typed_field("Fader", "scaling", FADER_SCALINGS, "scaling is log fast, log slow, linear, exp slow or exp fast (Fader)", function(v) return v .. " scaling" end),
   points = {
     get = function(d) return points_of(d) end, set = function(d, v) d.points = v end, field = "points",
     check = function(v, d)
@@ -652,7 +687,7 @@ local MODDEVICE_FIELDS = {
     text = function(v) return #v .. " points" end,
   },
 }
-local MODDEVICE_ORDER = { "name", "active", "operator", "bipolar", "tempoSynced", "length", "playMode", "loopMode", "loopStart", "loopEnd", "sustain", "sustainPosition", "fade", "playStep", "points" }
+local MODDEVICE_ORDER = { "name", "active", "operator", "bipolar", "tempoSynced", "waveform", "mode", "scaling", "length", "playMode", "loopMode", "loopStart", "loopEnd", "sustain", "sustainPosition", "fade", "playStep", "points" }
 
 local moddevice_set = instruments_.settings_kind({
   kind = "moddevice-set", of = "moddevice", noun = "settings", undoable = true, order = MODDEVICE_ORDER, fields = MODDEVICE_FIELDS,
@@ -715,7 +750,7 @@ M.parameter_number = parameter_number
 function M.param_kind(spec)
   local device_param = base.KINDS["device-param"]
   local kind = {
-    kind = spec.kind, of = spec.of, noun = "parameter", undoable = true, by_place = true,
+    kind = spec.kind, of = spec.of, noun = "parameter", undoable = true, by_place = true, restore_by_id = true,
     read = function(parameter) return { value = parameter.value, valueString = parameter.value_string } end,
     wanted = device_param.wanted, write = device_param.write, same = device_param.same, title = device_param.title,
     observables = function(parameter) return { parameter.value_observable } end, shown = device_param.shown,
@@ -746,7 +781,10 @@ function M.param_kind(spec)
     if spec.param_of then target.ref = places_.ref_of(env, spec.param_of, (function() local all = {} for j, v in ipairs(n) do all[j] = v end all[#all + 1] = k return all end)()) end
     local place = places_.journal_place(spec.of, n)
     place.param = k
-    return { object = parameter, name = label .. " " .. parameter.name, place = place, target = target }
+    -- (what it is, not only where: the device's type (a plug-in's path) and the parameter's name)
+    local ok, path = pcall(function() return device.device_path end)
+    local id = tostring(ok and path or device.name) .. "/" .. tostring(parameter.name)
+    return { object = parameter, name = label .. " " .. parameter.name, place = place, target = target, id = id }
   end
   kind.reread = function(song, place)
     local numbers = {}
@@ -766,13 +804,30 @@ M.param_kind({ kind = "moddevice-param", of = "moddevice", device_of = function(
 
 -- Sample FX chains
 
+-- How many destinations a meta device in a chain aims at (its "… Effect" parameters set): a device made again from its
+-- settings aims at nothing (Renoise, measured on tracks), so its undo says so.
+local function aims_of(device)
+  local ok, path = pcall(function() return device.device_path end)
+  if not ok or type(path) ~= "string" or not path:find("/Native/*", 1, true) then return 0 end
+  local count = 0
+  for k = 1, #device.parameters do
+    local parameter = device:parameter(k)
+    if parameter.name:match("Effect$") and parameter.value >= 0 then count = count + 1 end
+  end
+  return count
+end
+local AIMS_NOTE = "Its meta devices come back aimed at nothing (Renoise gives a device made from its settings no destination): aim them again."
+
 local function chain_state(chain)
-  local devices = {}
-  for d = 2, #chain.devices do devices[#devices + 1] = material_.read_device(chain:device(d)) end
+  local devices, aimed = {}, 0
+  for d = 2, #chain.devices do
+    devices[#devices + 1] = material_.read_device(chain:device(d))
+    aimed = aimed + aims_of(chain:device(d))
+  end
   local mixer = {}
   local first = chain:device(1)
   for k = 1, #first.parameters do mixer[k] = first:parameter(k).value end
-  return { name = chain.name, routing = chain.output_routing, devices = devices, mixer = mixer }
+  return { name = chain.name, routing = chain.output_routing, devices = devices, mixer = mixer, aimed = aimed > 0 or nil }
 end
 
 function M.chain_print(chain)
@@ -842,6 +897,7 @@ local function write_chain(chain, state)
   for d, device in ipairs(state.devices or {}) do
     if not pcall(material_.restore_device, chain, d + 1, device) then notes[#notes + 1] = "A device of it (" .. tostring(device.path) .. ") couldn't be made again." end
   end
+  if state.aimed then notes[#notes + 1] = AIMS_NOTE end
   return notes
 end
 
@@ -969,9 +1025,15 @@ device_in_list({
   kind = "chaindevice-delete", of = "chaindevice", owner = "chain", list = "chaindevices", first = 2,
   check = function(n) if n[3] == 1 then bad("a chain's first device is its mixer: it stays") end end,
   note = function(instrument) return "Kumi keeps its settings (its preset data) to put back." .. (has_mappings(instrument) and (" " .. MAPPING_NOTE) or "") end,
-  print = chaindevice_print, back_print = chaindevice_back_print, state = function(device) return material_.read_device(device) end,
+  print = chaindevice_print, back_print = chaindevice_back_print,
+  state = function(device)
+    local state = material_.read_device(device)
+    if aims_of(device) > 0 then state.aimed = true end
+    return state
+  end,
   print_of_state = function(state) return { path = state.path, active = state.active ~= false, display = state.display } end,
   make = function(chain, at, state) return material_.restore_device(chain, at, state) end,
+  restore_note = function(state) return state.aimed and "It comes back aimed at nothing (Renoise gives a device made from its settings no destination): aim it again." or nil end,
 })
 
 -- chaindevice-move {ref: chaindevice, index}: by swaps; the device ends at index.
@@ -1023,6 +1085,8 @@ base.register({
     local objects = places_.resolve(song, "chaindevice", n)
     local label = places_.label_of("chaindevice", n, objects)
     if n[3] == prior.index then return { restored = { index = n[3] }, display = { title = label .. " is at its place already" }, undo = { desc = desc, entry = false }, unwritten = true } end
+    -- (moved again by the producer since: their order stays, unless discard)
+    if not restore.discard and n[3] ~= (restore.applied or {}).index then fail("changed", label .. " was moved in Renoise since Kumi moved it") end
     if prior.index > #objects.chain.devices or prior.index < 2 then fail("changed", "place " .. prior.index .. " isn't in the chain any more") end
     song:describe_undo(desc)
     swap_along(objects.chain, n[3], prior.index)

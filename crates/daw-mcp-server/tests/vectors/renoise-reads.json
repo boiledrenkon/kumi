@@ -438,6 +438,7 @@
             {
               "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 0,
               "patternRef": "1:pattern:1",
               "positionBeats": 0,
               "ref": "1:seq:1",
@@ -446,6 +447,7 @@
             {
               "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 1,
               "patternRef": "1:pattern:2",
               "positionBeats": 8,
               "ref": "1:seq:2",
@@ -456,6 +458,7 @@
               "mutedTracks": [
                 2
               ],
+              "pattern": 0,
               "patternRef": "1:pattern:1",
               "positionBeats": 16,
               "ref": "1:seq:3",
@@ -464,6 +467,7 @@
             {
               "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 2,
               "patternRef": "1:pattern:3",
               "positionBeats": 24,
               "ref": "1:seq:4",
@@ -490,20 +494,23 @@
               "aliases": {},
               "lines": 32,
               "name": "",
+              "number": 0,
               "ref": "1:pattern:1"
             },
             {
               "aliases": {
-                "2": 1
+                "2": 0
               },
               "lines": 32,
               "name": "",
+              "number": 1,
               "ref": "1:pattern:2"
             },
             {
               "aliases": {},
               "lines": 32,
               "name": "",
+              "number": 2,
               "ref": "1:pattern:3"
             }
           ],
@@ -526,7 +533,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -536,7 +543,7 @@
               ]
             },
             {
-              "line": 5,
+              "line": 4,
               "notes": [
                 {
                   "col": 1,
@@ -568,7 +575,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -598,7 +605,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -608,7 +615,7 @@
               ]
             },
             {
-              "line": 5,
+              "line": 4,
               "notes": [
                 {
                   "col": 1,
@@ -640,7 +647,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 3,
+              "line": 2,
               "notes": [
                 {
                   "col": 1,
@@ -672,7 +679,7 @@
           "items": [
             {
               "chainCount": 0,
-              "index": 1,
+              "index": 0,
               "kind": "sample",
               "macros": [
                 {
@@ -723,7 +730,7 @@
             },
             {
               "chainCount": 0,
-              "index": 2,
+              "index": 1,
               "kind": "plugin",
               "macros": [
                 {
@@ -799,7 +806,7 @@
               "fineTune": 0,
               "frames": 0,
               "fxChainRef": null,
-              "index": 1,
+              "index": 0,
               "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
@@ -827,7 +834,7 @@
               "fineTune": 0,
               "frames": 0,
               "fxChainRef": null,
-              "index": 2,
+              "index": 1,
               "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
@@ -876,8 +883,8 @@
               "keyRange": null,
               "keyTracking": "none",
               "lines": 16,
-              "loopEnd": 16,
-              "loopStart": 1,
+              "loopEnd": 15,
+              "loopStart": 0,
               "looping": true,
               "lpb": 4,
               "name": "Phrase 1",
@@ -1122,7 +1129,7 @@
             "cursor": {
               "column": 1,
               "columnKind": "note",
-              "line": 1,
+              "line": 0,
               "sequence": 1,
               "track": 1
             },
@@ -1130,7 +1137,7 @@
             "deviceRef": "1:device:1.2",
             "instrumentName": "Kit",
             "instrumentRef": "1:instrument:1",
-            "line": 1,
+            "line": 0,
             "patternName": "",
             "patternRef": "1:pattern:1",
             "phraseRef": "1:phrase:1.1",
@@ -1341,7 +1348,7 @@
             "bpm": 128,
             "editMode": false,
             "followPlayer": false,
-            "line": 1,
+            "line": 0,
             "loop": {
               "block": false,
               "end": 16,
@@ -1376,7 +1383,7 @@
             "cursor": {
               "column": 1,
               "columnKind": "note",
-              "line": 1,
+              "line": 0,
               "sequence": 1,
               "track": 1
             },
@@ -1384,7 +1391,7 @@
             "deviceRef": "1:device:1.2",
             "instrumentName": "Kit",
             "instrumentRef": "1:instrument:1",
-            "line": 1,
+            "line": 0,
             "patternName": "",
             "patternRef": "1:pattern:1",
             "phraseRef": "1:phrase:1.1",
@@ -1404,7 +1411,7 @@
             "bpm": 128,
             "editMode": false,
             "followPlayer": false,
-            "line": 1,
+            "line": 0,
             "loop": {
               "block": false,
               "end": 16,

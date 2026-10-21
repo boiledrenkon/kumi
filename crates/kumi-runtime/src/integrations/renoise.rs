@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions Renoise's turns carry (M7 brings the full instruction pack).
-const INSTRUCTIONS: &str = "You work in Renoise through Kumi's tool. Read the song with renoise_read before you describe it: its tracks (sequencer, group, send and master), the pattern sequence and its patterns, a pattern's lines in Renoise's own notation, instruments with their samples, keyzones and phrases, and each track's devices and their parameters. A ref such as track:3 is this turn's: pass it back as parent (a pattern for its lines, with track) to read what's inside.";
+const INSTRUCTIONS: &str = "You work in Renoise through Kumi's tool. Read the song with renoise_read before you describe it: its tracks (sequencer, group, send and master), the pattern sequence and its patterns, a pattern's lines in Renoise's own notation, instruments with their samples, keyzones and phrases, and each track's devices and their parameters. A ref such as track:3 is this turn's name for something, not Renoise's number for it: pass it back as parent (a pattern for its lines, with track) to read what's inside. Numbers are Renoise's own: lines, patterns, instruments and samples from 0 (00 the first), tracks, phrases and sequence slots from 1.";
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::RENOISE,
@@ -27,7 +27,7 @@ pub const DAW: OwnDaw = OwnDaw {
     host_flag: "renoise",
     instructions: INSTRUCTIONS,
     read_tool: "renoise_read",
-    read_description: "Read Renoise: the song, its tracks, and what's in them (the sequence, patterns and their lines, instruments, samples, phrases, devices and parameters; an instrument's modulation sets and sample FX chains, and the parameters of their devices and of a plug-in instrument), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. A track's groupRef is the group it's in; pan runs -1 to 1. Lines list only lines with something on them, numbered from 1. A note column: note (C-4, OFF), instrument (hex, 00 the first), volume (hex 00-80, 80 full, or a column effect), panning (hex 00-80, 40 centre), delay (hex 00-FF, 256ths of a line), fx (the column's own effect: two characters, then a hex amount). effects are the line's effect columns: number and amount (0A and 20 is 0A20). A pattern is lines long, at the song's lines per beat. A pattern's automation (parent the pattern, with track) lists each automated parameter's points: time in lines from 1, value 0 to 1 of the parameter's range.",
+    read_description: "Read Renoise: the song, its tracks, and what's in them (the sequence, patterns and their lines, instruments, samples, phrases, devices and parameters; an instrument's modulation sets and sample FX chains, and the parameters of their devices and of a plug-in instrument), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. A track's groupRef is the group it's in; pan runs -1 to 1. A pattern's number, an instrument's and a sample's index and a line's number count from 0, as Renoise shows them (instruments and samples in hex: index 10 is 0A); tracks, phrases and sequence slots from 1. Lines list only lines with something on them. A note column: note (C-4, OFF), instrument (hex, 00 the first), volume (hex 00-80, 80 full, or a column effect), panning (hex 00-80, 40 centre), delay (hex 00-FF, 256ths of a line), fx (the column's own effect: two characters, then a hex amount). effects are the line's effect columns: number and amount (0A and 20 is 0A20). A pattern is lines long, at the song's lines per beat. A pattern's automation (parent the pattern, with track) lists each automated parameter's points: time in lines from 0, value 0 to 1 of the parameter's range.",
     read_kinds: &["song", "track", "sequence", "pattern", "line", "automation", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
     project_kind: "song",
     fill_focus,
@@ -62,12 +62,15 @@ pub const CATCH_UP: CatchUpWords = CatchUpWords {
             ("device_params", serde_json::json!({"values": values}).as_object().cloned().unwrap_or_default())
         },
         mixer: &[
-            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read },
-            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read },
-            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read },
+            // (the watch reads both stages: the pre-FX Vol/Pan as volume and pan, the mixer's faders as postVolume and postPan)
+            Mixer { what: "mixer.volume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[("stage", "pre")] },
+            Mixer { what: "mixer.pan", tool: "track_pan", field: "pan", value: as_read, with: &[("stage", "pre")] },
+            Mixer { what: "mixer.postVolume", tool: "track_volume", field: "volumeDb", value: as_read, with: &[("stage", "post")] },
+            Mixer { what: "mixer.postPan", tool: "track_pan", field: "pan", value: as_read, with: &[("stage", "post")] },
+            Mixer { what: "mixer.width", tool: "track_width", field: "width", value: as_read, with: &[] },
             // (Renoise's mute states: active plays, muted and off don't)
-            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: |state| state.as_str().map(|state| Value::Bool(state != "active")) },
-            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read },
+            Mixer { what: "mixer.mute", tool: "track_mute", field: "mute", value: |state| state.as_str().map(|state| Value::Bool(state != "active")), with: &[] },
+            Mixer { what: "mixer.solo", tool: "track_solo", field: "solo", value: as_read, with: &[] },
         ],
     },
     watch_description: "Learn a routine the producer does by hand in Renoise: action start just before they do it (Kumi notes the song as it is; nothing in Renoise changes), then action stop when they say they're done. Stop gives what changed: tracks added (with their mixer and routing), devices added (with the parameters they moved after adding them), patterns' lines, instruments and settings changed, each with its track; and recipeSteps, a draft of the steps that would redo it in your change kinds, with $blanks for the tracks they worked on (the one they selected is $track). Save it at once with save_recipe from those steps, fixing the draft where it's off and leaving out anything clearly unrelated. Then say in a few words what the recipe does. The producer can ask you to change it.",
@@ -238,8 +241,8 @@ fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
     })
 }
 
-/// Renoise's refs: `<epoch>:<kind>:<numbers>`, numbered as Renoise shows them (from 1). A track inserted or deleted
-/// moves the tracks after it, and the devices and parameters on them.
+/// Renoise's refs: `<epoch>:<kind>:<numbers>`, each number a Lua index (from 1; what the model sees is a short ref, and Renoise's
+/// own numbers are in the rows). A track inserted or deleted moves the tracks after it, and the devices and parameters on them.
 #[derive(Default)]
 pub struct RenoiseRefs;
 
@@ -359,6 +362,27 @@ pub fn create_renoise_integration(options: OwnOptions) -> Rc<dyn Integration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// U3: the producer rides the mixer's (post-FX) fader; watch_me drafts it as the step that moves that fader.
+    #[test]
+    fn a_watched_fader_move_is_drafted_on_the_stage_it_was_made_on() {
+        use serde_json::json;
+        let detail = |what: &str, to: f64| json!({"facet": "mixer", "what": what, "from": 0.0, "to": to});
+        let answer = json!({"changes": [{"change": "changed", "kind": "track", "before": {"name": "Bass", "order": 2},
+            "after": {"name": "Bass", "order": 2},
+            "details": [detail("mixer.postVolume", -6.0), detail("mixer.postPan", 0.5), detail("mixer.volume", -3.0)]}],
+            "selected": [{"name": "Bass"}]});
+        let reply = super::super::own_catchup::watched(&answer, &CATCH_UP);
+        assert_eq!(
+            reply["recipeSteps"]["steps"],
+            json!([
+                {"tool": "track_volume", "input": {"ref": "$track", "volumeDb": -6.0, "stage": "post"}},
+                {"tool": "track_pan", "input": {"ref": "$track", "pan": 0.5, "stage": "post"}},
+                {"tool": "track_volume", "input": {"ref": "$track", "volumeDb": -3.0, "stage": "pre"}},
+            ]),
+            "{reply:?}"
+        );
+    }
 
     /// m6-places: each phrase's steps in a song as the look found it.
     #[test]
