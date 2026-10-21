@@ -1985,6 +1985,20 @@ test("run-lua: a stop never lands in the guard around the tool's notifiers, befo
   for _, err in ipairs(mock.errors) do ok(not err:find("^notifier"), err) end
 end)
 
+test("run-lua: a loop whose turns all take the same count, the hook's always landing in a notifier, is stopped too (#361 N4, final review)", function()
+  local env, peer = setup()
+  -- (one of these shapes, measured, meets the 1000-count hook inside the tool's bpm notifier on every turn)
+  for pad = 0, 19 do
+    mock.clock_step_ms = 1
+    local code = "local x = 0\nfor i = 1, 20000 do " .. string.rep("x = x + 1 ", pad) .. "song.transport.bpm = 120 + i % 2 end"
+    local done = run_lua(peer, code, string.format("Kumi: Ran Lua (kt%02d)", pad), { timeoutMs = 5 })
+    mock.clock_step_ms = nil
+    ok(done.result, json.encode(done.error or {}))
+    ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 5 ms", 1, true), "shape " .. pad .. ": " .. json.encode(done.result.applied.failed or {}))
+  end
+  for _, err in ipairs(mock.errors) do ok(not err:find("^notifier"), err) end
+end)
+
 test("run-lua: a chunk's loop in a coroutine of its own is stopped too", function()
   local env, peer = setup()
   mock.clock_step_ms = 1

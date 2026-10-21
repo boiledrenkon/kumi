@@ -274,11 +274,23 @@ local function apply(song, env, input, fence, desc)
   -- (the chunk runs under a frame of the tool's that stays on the stack whatever the chunk does: its own `return f()` is a
   -- tail call, which takes the chunk's frame away)
   local function run() return (chunk()) end
-  debug.sethook(function()
-    if env.now_ms() > deadline and not in_notifier() and stoppable(2, run, thread, is_guard) then
+  -- (past the deadline where a stop can't land, inside a notifier, the hook looks again at every instruction: a loop whose
+  -- turns all take the same count would otherwise meet the 1000-count hook in the same notifier every time, and never stop)
+  local late, every = false, false
+  local function hook()
+    if not late then
+      if env.now_ms() <= deadline then return end
+      late = true
+    end
+    if not in_notifier() and stoppable(2, run, thread, is_guard) then
       error(string.format("Kumi stopped it: it ran longer than %d ms", limit), 2)
     end
-  end, "", 1000)
+    if not every then
+      every = true
+      debug.sethook(hook, "", 1)
+    end
+  end
+  debug.sethook(hook, "", 1000)
   local ok, result = pcall(run)
   debug.sethook()
   if jitted then jit.on() end
