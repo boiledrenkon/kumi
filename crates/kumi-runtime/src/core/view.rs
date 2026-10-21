@@ -642,7 +642,7 @@ pub struct Route {
     pub volume_db: Option<f64>,
     #[serde(default)]
     pub muted: bool,
-    /// Where it taps the track: post-fader, pre-FX, pre-fader.
+    /// Where it taps the track: post-fader, pre-FX, pre-fader, pre-receive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tap: Option<String>,
 }

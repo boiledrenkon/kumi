@@ -390,6 +390,7 @@ pub fn routing(track_ref: &str, body: &Value) -> RoutingView {
                 0 => Some("post-fader".to_owned()),
                 1 => Some("pre-FX".to_owned()),
                 3 => Some("pre-fader".to_owned()),
+                8 => Some("pre-receive".to_owned()),
                 _ => None,
             });
             Route { kind, other: text(route, "otherName"), volume_db: number(route, "volumeDb"), muted: flag(route, "mute"), tap }
@@ -505,6 +506,19 @@ pub fn body_args(kind: &str, reference: Option<&str>) -> JsonObject {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_routes_tap_is_named_for_every_send_mode_reaper_has() {
+        // A send in pre-receive mode (8) showed no tap (review U15).
+        let body = json!({"routes": [
+            {"category": 0, "otherName": "Bus", "mode": 0},
+            {"category": 0, "otherName": "Verb", "mode": 1},
+            {"category": 0, "otherName": "Comp", "mode": 3},
+            {"category": 0, "otherName": "Sampler", "mode": 8},
+        ]});
+        let taps: Vec<Option<String>> = routing("r:track:{A}", &body).routes.into_iter().map(|route| route.tap).collect();
+        assert_eq!(taps, ["post-fader", "pre-FX", "pre-fader", "pre-receive"].map(|tap| Some(tap.to_owned())));
+    }
 
     #[test]
     fn a_timeline_keeps_hidden_tracks_marked_and_says_where_its_page_starts() {
