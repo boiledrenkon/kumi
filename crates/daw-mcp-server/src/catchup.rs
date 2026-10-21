@@ -194,11 +194,11 @@ impl Store {
     }
 
     /// Keeps the snapshot as the project's latest. Another file of the song seen before, and still there, keeps its own.
-    /// Returns false when it's too big to keep.
-    pub fn save(&self, key: &Key, snapshot: &Snapshot) -> Result<bool, String> {
+    /// Not when it's too big to keep (it says so, with its size).
+    pub fn save(&self, key: &Key, snapshot: &Snapshot) -> Result<Saved, String> {
         let text = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
         if text.len() > MAX_SNAPSHOT_BYTES {
-            return Ok(false);
+            return Ok(Saved::TooBig(text.len()));
         }
         let failed = |e: std::io::Error| format!("Kumi couldn't keep the project's snapshot: {e}");
         match key {
@@ -222,7 +222,32 @@ impl Store {
                 let _ = std::fs::remove_file(sets.join(format!("{}.json", file_key(path))));
             }
         }
-        Ok(true)
+        Ok(Saved::Kept)
+    }
+}
+
+/// What became of a snapshot to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    Kept,
+    /// Over what Kumi keeps (its size in bytes): catch-up has nothing to compare with next time.
+    TooBig(usize),
+}
+
+impl Saved {
+    /// `saved` in a tool's answer, and why not.
+    fn tell(self, answer: &mut Value) {
+        answer["saved"] = (self == Saved::Kept).into();
+        if let Saved::TooBig(bytes) = self {
+            const MIB: f64 = 1024.0 * 1024.0;
+            answer["why"] = format!(
+                "the project's snapshot is {:.1} MiB, over the {} MiB Kumi keeps: catch-up can't remember this project, and \
+                 starts afresh each time",
+                bytes as f64 / MIB,
+                MAX_SNAPSHOT_BYTES as f64 / MIB
+            )
+            .into();
+        }
     }
 }
 
@@ -490,10 +515,10 @@ impl Host {
         })
     }
 
-    fn keep(&self, key: &Key, snapshot: &Snapshot) -> Result<bool, String> {
+    fn keep(&self, key: &Key, snapshot: &Snapshot) -> Result<Saved, String> {
         let state = self.catchup();
         let saved = state.store.save(key, &kept(snapshot))?;
-        if saved {
+        if saved == Saved::Kept {
             if let Key::Saved { .. } = key {
                 // An unsaved project saved now: its snapshot by identity is the place's from here.
                 state.store.forget_unsaved(&snapshot.identity);
@@ -540,7 +565,7 @@ impl Host {
             }
         }
         match self.keep(&key, &now) {
-            Ok(saved) => answer["saved"] = saved.into(),
+            Ok(saved) => saved.tell(&mut answer),
             Err(why) => answer["saveError"] = why.into(),
         }
         self.catchup().caught_up.lock().unwrap_or_else(|e| e.into_inner()).insert((key, now.identity.clone()));
@@ -573,10 +598,12 @@ impl Host {
             caught_up.insert((key.clone(), now.identity.clone()));
         }
         match self.keep(&key, &now) {
-            Ok(saved) => (
-                json!({"saved": saved, "place": place, "records": now.records.len(), "changed": now.changed, "ms": began.elapsed().as_millis() as u64}),
-                false,
-            ),
+            Ok(saved) => {
+                let mut answer =
+                    json!({"place": place, "records": now.records.len(), "changed": now.changed, "ms": began.elapsed().as_millis() as u64});
+                saved.tell(&mut answer);
+                (answer, false)
+            }
             Err(why) => (json!({"error": why, "place": place}), true),
         }
     }
@@ -782,7 +809,7 @@ mod tests {
         let (v1, v2) = (v1.to_string_lossy().to_string(), v2.to_string_lossy().to_string());
         let key = |path: &str| Key::Saved { place: "reaper-0123456789abcdef0123456789abcdef".into(), path: path.into() };
         assert!(store.load(&key(&v1)).is_none());
-        assert!(store.save(&key(&v1), &snapshot(&v1, "1:1", 120.0)).unwrap());
+        assert_eq!(store.save(&key(&v1), &snapshot(&v1, "1:1", 120.0)).unwrap(), Saved::Kept);
         assert_eq!(store.load(&key(&v1)).unwrap().facts["tempo"], 120.0);
         // Another file of the same song, both still there: a version first seen here has none, and keeps its own.
         assert!(store.load(&key(&v2)).is_none());
@@ -799,6 +826,24 @@ mod tests {
             let file = home.path().join("snapshots/reaper-0123456789abcdef0123456789abcdef/last-seen.json");
             assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600, "owner only");
         }
+    }
+
+    // Review H9: a snapshot too big to keep says so, with its size, and nothing is written.
+    #[test]
+    fn a_snapshot_too_big_to_keep_says_why_with_its_size() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path().to_path_buf());
+        let mut big = snapshot("", "5:1", 120.0);
+        big.name = "x".repeat(MAX_SNAPSHOT_BYTES + 512 * 1024);
+        let key = Key::Unsaved { identity: "5:1".into() };
+        let saved = store.save(&key, &big).unwrap();
+        assert!(matches!(saved, Saved::TooBig(bytes) if bytes > MAX_SNAPSHOT_BYTES), "{saved:?}");
+        assert!(store.load(&key).is_none());
+        let mut answer = json!({});
+        saved.tell(&mut answer);
+        assert_eq!(answer["saved"], false);
+        let why = answer["why"].as_str().unwrap();
+        assert!(why.starts_with("the project's snapshot is 8.5 MiB, over the 8 MiB Kumi keeps"), "{why}");
     }
 
     #[test]
