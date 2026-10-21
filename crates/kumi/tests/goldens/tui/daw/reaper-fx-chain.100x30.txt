@@ -4,9 +4,9 @@
                                                                   ■  Drums
                                                                     3 more
                                                                   │ ├ □  VST3: ReaComp (Cockos)
-                                                                  │ ├ □  VST3: ReaXcomp (Cockos)
+                                                                  │ ├ □  ReaXcomp · parallel
                  ██                          ▀▀                   │ └ □  JS: Limiter · bypassed
-                 ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██                   └ □  VST3: ReaVerbate (Cockos)
+                 ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██                   └ □  ReaVerbate · offline
                  ██▀█▄   ██  ██  ██  ██  ██  ██
                  ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀
                                                                   NOW

@@ -6,9 +6,9 @@
                                                                                   ├ □  VST3: ReaEQ (Cockos)
                                                                                   ├ ▣  Bus glue
                                                                                   │ ├ □  VST3: ReaComp (Cockos)
-                                                                                  │ ├ □  VST3: ReaXcomp (Cockos) · pa…
+                                                                                  │ ├ □  ReaXcomp · parallel
                                                                                   │ └ □  JS: Limiter · bypassed
-                         ██                          ▀▀                           └ □  VST3: ReaVerbate (Cockos) · of…
+                         ██                          ▀▀                           └ □  ReaVerbate · offline
                          ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██
                          ██▀█▄   ██  ██  ██  ██  ██  ██
                          ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀                           NOW

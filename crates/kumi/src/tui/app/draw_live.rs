@@ -923,7 +923,9 @@ impl TuiApp {
             let count = item.count.filter(|n| *n > 0).map(|n| format!(" ({n})")).unwrap_or_default();
             let note = item.note.as_ref().map(|note| format!(" · {note}")).unwrap_or_default();
             let room = (x + width - column - text_width(&count) - if label.is_empty() { 0 } else { text_width(label) + 1 }).max(1);
-            let name = truncate(&item.name, room);
+            // The name gives way first (a plug-in's format and maker go, then its end), so what the DAW says of it stays.
+            let named = (room - text_width(&note)).max(room.min(8));
+            let name = if text_width(&item.name) <= named { item.name.clone() } else { truncate(short_name(&item.name), named) };
             column = screen.put(column, row, &name, &style);
             if !count.is_empty() {
                 column = screen.put(column, row, &count, &st::FAINT);
@@ -1300,5 +1302,15 @@ impl TuiApp {
             line(vec![sp(tokens.strip_prefix(" · ").unwrap_or(&tokens), st::FAINT)]);
         }
         rows
+    }
+}
+
+/// A plug-in's name without what REAPER writes around it: its format ("VST3: ") and its maker ("(Cockos)").
+fn short_name(name: &str) -> &str {
+    const FORMATS: &[&str] = &["VST", "VSTi", "VST3", "VST3i", "AU", "AUi", "CLAP", "CLAPi", "LV2", "LV2i", "DX", "DXi", "JS"];
+    let Some((_, name)) = name.split_once(": ").filter(|(format, _)| FORMATS.contains(format)) else { return name };
+    match name.rfind(" (") {
+        Some(at) if at > 0 && name.ends_with(')') => &name[..at],
+        _ => name,
     }
 }
