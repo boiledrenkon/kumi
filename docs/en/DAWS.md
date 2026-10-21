@@ -62,6 +62,20 @@ missing.
 
 Through Kumi's extension (`reaper_kumi`). Tested on REAPER 7.82 on macOS.
 
+### Your setup
+
+Each time Kumi looks, it reads how you set REAPER up and works with it, not
+with REAPER's factory defaults:
+
+- new items' fades (or none), loop source for new items, a new track's
+  volume, the project's timebase;
+- which of SWS, ReaPack, ReaImGui and js_ReaScriptAPI are installed (it uses
+  one only when it's there);
+- the render settings in use (source, bounds, format, sample rate, file
+  pattern), which it tells you about before changing.
+
+A file Kumi imports loops its source only when your imported media does.
+
 ### What Kumi can change
 
 Each change is one step of REAPER's undo, and a whole plan is one step. Every
@@ -141,6 +155,13 @@ next version), track templates and FX chains.
 
 Through Kumi's tool (`com.kumi.Bridge.xrnx`). Tested on Renoise 3.5.4 on
 macOS.
+
+### Your setup
+
+Each time Kumi looks, it reads how the song is set up and follows it: BPM
+(a 2× or 4× convention stays), LPB, TPL, edit step, the length most patterns
+run, the groups and their colours, and the tools installed (Paketti among
+them).
 
 ### What Kumi can change
 

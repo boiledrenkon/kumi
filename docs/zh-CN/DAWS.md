@@ -55,6 +55,16 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 
 通过 Kumi 的扩展（`reaper_kumi`）工作。已在 macOS 上的 REAPER 7.82 验证。
 
+### 你的设置
+
+Kumi 每次查看时都会读取你对 REAPER 的设置，并按它工作，而不是按 REAPER 的出厂默认：
+
+- 新对象的淡入淡出（或没有）、新对象是否循环源、新轨道的音量、工程的时基；
+- 装了 SWS、ReaPack、ReaImGui 和 js_ReaScriptAPI 中的哪些（只在装了时才使用）；
+- 正在使用的渲染设置（来源、范围、格式、采样率、文件名模式），修改之前会先告诉你。
+
+Kumi 导入的文件，只在你导入的媒体会循环时才循环其源。
+
 ### Kumi 能修改什么
 
 每项修改都是 REAPER 撤销中的一步，整个计划也是一步。全部工具见 [KUMI_CHANGES](KUMI_CHANGES.md#kumi-能在-reaper-中修改什么)。
@@ -97,6 +107,10 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 ## Renoise
 
 通过 Kumi 的工具（`com.kumi.Bridge.xrnx`）工作。已在 macOS 上的 Renoise 3.5.4 验证。
+
+### 你的设置
+
+Kumi 每次查看时都会读取这首歌曲的设置并照着做：BPM（2 倍或 4 倍的惯例保持不变）、LPB、TPL、Edit Step、大多数模式的长度、编组及其颜色，以及已安装的工具（包括 Paketti）。
 
 ### Kumi 能修改什么
 
