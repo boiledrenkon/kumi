@@ -692,6 +692,47 @@ fn an_fx_is_copied_to_another_track_a_take_and_a_container_and_undo_takes_the_co
 }
 
 #[test]
+fn deleting_an_fx_says_the_links_and_macros_that_follow_it_and_its_undo_makes_them_again() {
+    let lab = chains_lab();
+    let _dir = resource();
+    // Kick: ReaComp, then a ReaEQ whose first parameter follows the ReaComp's second at half.
+    state(|s| {
+        let mut eq = plugin("{K-EQ}", "VST: ReaEQ (Cockos)");
+        for (key, value) in
+            [("mod.active", "1"), ("plink.active", "1"), ("plink.effect", "0"), ("plink.param", "1"), ("plink.scale", "0.5")]
+        {
+            eq.config.insert(format!("param.0.{key}"), value.into());
+        }
+        s.tracks[1].fx.push(eq);
+    });
+    let link =
+        |key: &str| state(|s| s.tracks[1].fx.iter().find(|f| f.guid == "{K-EQ}").unwrap().config.get(&format!("param.0.{key}")).cloned());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{K-MAIN}")}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 parameter link(s) of other FX follow it"), "{}", preview["display"]);
+    assert_eq!(link("plink.active").as_deref(), Some("0"), "REAPER clears the link with its source");
+    lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert_eq!(state(|s| guids(&s.tracks[1].fx)), ["{K-MAIN}", "{K-EQ}"]);
+    assert_eq!(
+        (link("plink.active"), link("plink.effect"), link("plink.param"), link("plink.scale")),
+        (Some("1".into()), Some("0".into()), Some("1".into()), Some("0.5".into())),
+        "the link follows the ReaComp again"
+    );
+    // A container's macro that maps the FX deleted from it is mapped again by the undo.
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let proj = reaper.current_project().unwrap().ptr;
+    let container = crate::reaper::Fx { owner: crate::reaper::FxOwner::Track(reaper.track_at(proj, 0).unwrap()), index: 1 };
+    reaper.fx_config(container, "container_map.add.0.1");
+    let mapped = || reaper.fx_config(container, "container_map.get.0.1").is_some();
+    assert!(mapped());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{FX-COMP}")}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 macro(s) of its container"), "{}", preview["display"]);
+    assert!(!mapped(), "the macro goes with it");
+    lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert!(mapped(), "mapped again");
+}
+
+#[test]
 fn a_copied_containers_undo_leaves_it_once_the_producer_changed_an_fx_inside_it() {
     let lab = chains_lab();
     let _dir = resource();

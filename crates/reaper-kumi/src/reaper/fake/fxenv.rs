@@ -517,6 +517,32 @@ pub(super) fn chain_block(s: &mut State, owner: u64, name: &str, chain: &[FakeFx
 
 // ----- adds, deletes, copies -----
 
+/// REAPER keeps a parameter link's source by its place in the chain and follows it as FX come and go (7.82 lab): a link
+/// to an FX that is deleted is cleared, one to an FX after a place that changed moves with it.
+fn follow_links(chain: &mut [FakeFx], place: usize, inserted: Option<usize>) {
+    for fx in chain.iter_mut() {
+        let linked: Vec<String> = fx.config.keys().filter(|k| k.ends_with(".plink.effect")).cloned().collect();
+        for key in linked {
+            let Some(effect) = fx.config.get(&key).and_then(|v| v.parse::<i64>().ok()).filter(|e| *e >= 0) else { continue };
+            let effect = effect as usize;
+            let moved = match inserted {
+                Some(count) if effect >= place => Some(effect + count),
+                Some(_) => None,
+                None if effect == place => {
+                    fx.config.insert(key.replace(".plink.effect", ".plink.active"), "0".into());
+                    fx.config.insert(key.clone(), "-1".into());
+                    None
+                }
+                None if effect > place => Some(effect - 1),
+                None => None,
+            };
+            if let Some(moved) = moved {
+                fx.config.insert(key, moved.to_string());
+            }
+        }
+    }
+}
+
 /// Puts FX into a chain at an address (REAPER's `-1000 - address`, or the end): the place in its chain the first went to.
 fn insert(s: &mut State, owner: u64, input: bool, address: Option<i32>, made: Vec<Parsed>) -> c_int {
     let path = match address {
@@ -529,6 +555,9 @@ fn insert(s: &mut State, owner: u64, input: bool, address: Option<i32>, made: Ve
     let place = {
         let Some((chain, place)) = holder_mut(s, owner, input, &path) else { return -1 };
         let place = place.min(chain.len());
+        if path.len() == 1 {
+            follow_links(chain, place, Some(made.len()));
+        }
         for (n, parsed) in made.into_iter().enumerate() {
             envelopes.extend(parsed.envelopes);
             chain.insert(place + n, parsed.fx);
@@ -602,6 +631,9 @@ fn delete(owner: u64, index: c_int) -> bool {
             return false;
         }
         let removed = chain.remove(place);
+        if path.len() == 1 {
+            follow_links(chain, place, None);
+        }
         drop_envelopes(s, owner, &removed);
         prune_all(s);
         s.undo_dirty = true;
