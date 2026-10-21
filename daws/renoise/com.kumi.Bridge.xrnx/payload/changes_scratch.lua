@@ -38,8 +38,8 @@ M.LINES_BUDGET = 100000
 -- (the shown columns) and automation. nil when its lines are past LINES_BUDGET.
 local function content_print(song, index, track)
   local h = -2128831035
-  local function feed(text)
-    text = tostring(text)
+  local function feed(value)
+    local text = tostring(value) or ""
     for i = 1, #text do
       h = bxor(h, byte(text, i))
       h = tobit(lshift(h, 24) + lshift(h, 8) + h * 147)

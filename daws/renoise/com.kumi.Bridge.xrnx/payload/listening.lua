@@ -131,14 +131,26 @@ end
 
 -- The timeline: every slot's lines with their beats and seconds
 
+-- How long the timeline reads patterns in one request (rule 6: well under Renoise's 10 s watchdog): past it the request is
+-- answered busy, and what was read is kept for the next. A read job's timeline waits for its next turn every YIELD_MS instead.
+-- While nothing else runs, the bridge's ticks read the song's patterns ahead (WARM_MS a tick, every WARM_EVERY_MS).
+M.SCAN_MS = 800
+M.YIELD_MS = 8
+M.WARM_MS = 15
+M.WARM_EVERY_MS = 200
+
+-- The clock (os.clock in ms): Renoise's is a high-precision timer.
+local function clock_ms() return os.clock() * 1000 end
+
 -- The global commands of a pattern that move time, in any track's effect columns (they act from the line they are on, measured:
--- a ZL08 on line 1 makes line 17 two beats): {line = {lpb?, bpm?}}, and whether it breaks or delays its lines (ZB, ZD), which
--- this timeline doesn't follow.
-local function scan_pattern(song, p, tracks)
+-- a ZL08 on line 1 makes line 17 two beats): into `into.changes` ({line = {lpb?, bpm?}}), and `into.irregular` when it breaks or
+-- delays its lines (ZB, ZD), which this timeline doesn't follow. Read a track at a time from `into.next_t`; `over()` after each
+-- says the slice is used up: then the next track to read is kept in `into.next_t` and it answers false (true when all is read).
+local function scan_pattern(song, p, tracks, into, over)
   local pattern = song:pattern(p)
   local lines = pattern.number_of_lines
-  local changes, irregular = {}, false
-  for t = 1, tracks do
+  local changes = into.changes
+  for t = into.next_t or 1, tracks do
     local columns = song:track(t).visible_effect_columns
     if columns > 0 then
       local pattern_track = pattern:track(t)
@@ -159,7 +171,7 @@ local function scan_pattern(song, p, tracks)
                   changes[l] = changes[l] or {}
                   changes[l].bpm = amount
                 elseif number == "ZB" or number == "ZD" then
-                  irregular = true
+                  into.irregular = true
                 end
               end
             end
@@ -167,19 +179,61 @@ local function scan_pattern(song, p, tracks)
         end
       end
     end
+    if t < tracks and over() then
+      into.next_t = t + 1
+      return false
+    end
   end
-  return changes, irregular
+  into.next_t = nil
+  return true
 end
 
--- A pattern's commands, from the cache while its lines haven't changed (`mark_of(p)`: the count of its changed lines, by the
--- bridge's line notifiers; nil when unknown, which scans again).
-local function pattern_changes(song, p, tracks, mark_of)
+-- Pattern p's cache entry while its lines haven't changed (`mark_of(p)`: the count of its changed lines, by the bridge's line
+-- notifiers; nil when unknown, which reads again), whole or part read; nil when there's none.
+local function cached_changes(p, tracks, mark_of)
   local mark = mark_of and mark_of(p) or nil
   local cached = S and S.zcache[p]
-  if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached.changes, cached.irregular end
-  local changes, irregular = scan_pattern(song, p, tracks)
-  if mark and S then S.zcache[p] = { mark = mark, tracks = tracks, changes = changes, irregular = irregular } end
-  return changes, irregular
+  if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached end
+  return nil, mark
+end
+
+-- A pattern's commands, from the cache, else read, going on from where a slice stopped. nil when `over()` stopped it part way.
+local function pattern_changes(song, p, tracks, mark_of, over)
+  local cached, mark = cached_changes(p, tracks, mark_of)
+  if cached and not cached.next_t then return cached.changes, cached.irregular end
+  local reading = cached or { mark = mark, tracks = tracks, changes = {}, irregular = false }
+  local done = scan_pattern(song, p, tracks, reading, over)
+  if mark and S then S.zcache[p] = reading end
+  if not done then return nil end
+  return reading.changes, reading.irregular
+end
+
+-- Reads the song's patterns ahead into the cache (in the sequence's order), WARM_MS at a time while nothing else runs, once
+-- listening has asked for the timeline in this song: a render, an audition or a scratch copy then finds them read (every pattern
+-- is read again after a song opens or is watched again). Stops when all are read, until the timeline is asked for again.
+function M.warm(mark_of)
+  if not S or not S.warm_wanted or not mark_of then return end
+  local now = clock_ms()
+  if S.warmed_ms and now - S.warmed_ms < M.WARM_EVERY_MS then return end
+  S.warmed_ms = now
+  local song = renoise.song()
+  if not song or song.rendering then return end
+  local stop = now + M.WARM_MS
+  local function over() return clock_ms() >= stop end
+  local tracks = rows.track_count(song)
+  local sequencer = song.sequencer
+  local seen = {}
+  for s = 1, #sequencer.pattern_sequence do
+    local p = sequencer:pattern(s)
+    if not seen[p] then
+      seen[p] = true
+      local cached = cached_changes(p, tracks, mark_of)
+      if not cached or cached.next_t then
+        if pattern_changes(song, p, tracks, mark_of, over) == nil or over() then return end
+      end
+    end
+  end
+  S.warm_wanted = false
 end
 
 -- The song's timeline: `slots[s] = {pattern, lines, segments = {...}, beat, second, endBeat, endSecond}` in sequence order, a
@@ -189,6 +243,8 @@ end
 -- transport's LPB and BPM until the first commands; `first_lpb`, `first_bpm` are the song's first ZL and ZT values (a render
 -- starts at them: see render_state). `irregular` when a pattern breaks or delays its lines, or the song keeps Renoise's old speed
 -- timing: then the lines' times are Renoise's own and only said, not checked.
+-- Read a slice at a time: inside a read job (a coroutine) it waits for the job's next turn every YIELD_MS; a request answers busy
+-- past SCAN_MS (what was read is kept, so asking again goes on from there).
 function M.timeline(song, mark_of)
   local transport = song.transport
   local speed = transport.timing_model == renoise.Transport.TIMING_MODEL_SPEED
@@ -197,6 +253,26 @@ function M.timeline(song, mark_of)
   local tracks = rows.track_count(song)
   local sequencer = song.sequencer
   local count = #sequencer.pattern_sequence
+  local patterns = #song.patterns
+  if S then S.warm_wanted = true end
+  local over
+  if coroutine.running() then
+    local slice_end = clock_ms() + M.YIELD_MS
+    over = function()
+      if clock_ms() < slice_end then return false end
+      coroutine.yield()
+      -- (the song may have changed while the job waited)
+      local now = renoise.song()
+      if not now or rows.track_count(now) ~= tracks or #now.patterns ~= patterns or #now.sequencer.pattern_sequence ~= count then
+        fail("changed", "tracks or patterns changed while Renoise read the song's tempo commands: read again")
+      end
+      slice_end = clock_ms() + M.YIELD_MS
+      return false
+    end
+  else
+    local stop = clock_ms() + M.SCAN_MS
+    over = function() return clock_ms() >= stop end
+  end
   local slots, beat, second = {}, 0, 0
   local irregular = speed
   local lpb_met, bpm_met = false, false
@@ -204,7 +280,10 @@ function M.timeline(song, mark_of)
   for s = 1, count do
     local p = sequencer:pattern(s)
     local lines = song:pattern(p).number_of_lines
-    local changes, broken = pattern_changes(song, p, tracks, mark_of)
+    local changes, broken = pattern_changes(song, p, tracks, mark_of, over)
+    if not changes then
+      return fail("busy", string.format("Renoise is still reading the song's tempo commands for Kumi (pattern %d of %d in the sequence): ask again in a moment", s, count))
+    end
     if broken then irregular = true end
     local slot = { pattern = p, lines = lines, segments = {}, beat = beat, second = second }
     local from = 1
@@ -944,6 +1023,11 @@ end
 -- A job's state now. A render that reads as ended with no callback for a while stopped (cancelled in Renoise, or failed).
 function M.check(env)
   local job = M.active()
+  if not job then
+    -- (never raises: this runs before every request)
+    local ok, err = pcall(M.warm, env.pattern_mark)
+    if not ok then log.write("error", "listening: reading the tempo commands ahead: " .. tostring(err)) end
+  end
   if not job or not job.rendering then return end
   local song = renoise.song()
   if not song or env.document() ~= job.document then

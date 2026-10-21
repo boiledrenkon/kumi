@@ -888,6 +888,54 @@ test("listening: read spans says where each track plays, in beats: muted columns
   H.no_dialogs()
 end)
 
+-- The song's tempo commands are read a slice at a time (every look at the clock costs 100 ms here, so a slice is a few tracks).
+local function cold(sequence)
+  local env, peer = setup(nil, { patterns = #sequence, sequence_length = #sequence, sequence = sequence })
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  -- (ZL08 on pattern 9's line 1: its 16 lines are 2 beats, and slot 10 starts at beat 34, at LPB 8)
+  mock.ops.set_effect(9, 2, 1, 1, command("ZL"), 8)
+  -- (as after a song opens: nothing read yet, and the tool's ticks not reading ahead until told)
+  bridge().listen.zcache = {}
+  bridge().listen.warmed_ms = math.huge
+  mock.clock_step_ms = 100
+  return env, peer
+end
+local twelve = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }
+
+test("listening: a render waits for the song's tempo commands: answered busy past a slice, read on between, then it renders", function()
+  local env, peer = cold(twelve)
+  local before = states()
+  failure((start(peer, "jt1", { { id = "mix", what = "master" } }, { fromBeat = 34, beats = 1 })), "busy", "tempo commands")
+  eq(#mock.renders, 0, "nothing rendered")
+  eq(states(), before, "nothing written")
+  -- (the tool's ticks read the rest ahead, a little at a time)
+  bridge().listen.warmed_ms = nil
+  mock.clock_step_ms = 5
+  for _ = 1, 100 do H.tick(1) end
+  eq(bridge().listen.warm_wanted, false, "all read")
+  local answer = result((start(peer, "jt1", { { id = "mix", what = "master" } }, { fromBeat = 34, beats = 1 })), "render_start")
+  mock.clock_step_ms = 0
+  local r = mock.renders[1]
+  eq(r.options.start_pos.sequence, 10, "beat 34 is slot 10 (pattern 9 is 2 beats at LPB 8)")
+  eq(r.options.end_pos.line, 8, "a beat at LPB 8 is 8 lines")
+  ok(math.abs(answer.seconds - 0.5) < 1e-9, answer.seconds)
+  mock.finish_render()
+  H.no_dialogs()
+end)
+
+test("listening: a sequence read reads the song's tempo commands across its turns, and says where each slot plays", function()
+  local env, peer = cold(twelve)
+  local page = result(call(peer, "read", { kind = "sequence" }, 4000), "sequence")
+  mock.clock_step_ms = 0
+  eq(page.items[9].positionBeats, 32)
+  eq(page.items[9].lengthBeats, 2)
+  eq(page.items[10].positionBeats, 34)
+  H.no_dialogs()
+end)
+
 test("listening: sequence rows say where each slot plays in beats, its ZL changes included (contract §9)", function()
   local env, peer = setup()
   local function command(text)
