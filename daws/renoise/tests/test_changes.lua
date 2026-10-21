@@ -2630,3 +2630,121 @@ test("changes: soloing a track that reads soloed only along with its group's sol
   local previewed = preview(peer, "track-solo", { ref = track_ref(epoch, 1), solo = true })
   ok((previewed.display.note or ""):find("exclusive", 1, true), "it says what ends: " .. tostring(previewed.display.note))
 end)
+
+test("changes: Kumi's undo of a track it made refuses once the producer automated it or set its levels, and discard removes it", function()
+  local env, peer = setup()
+  local function made()
+    local epoch, layout = place(peer)
+    local input = { type = "sequencer", name = "Lead", index = 3 }
+    local previewed = preview(peer, "track-add", input)
+    local done = apply(peer, "track-add", input, "Kumi: add track (kt11)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    return { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }, done
+  end
+  -- (only its volume automated in one pattern: no lines, so `is_empty` reads true)
+  local record, done = made()
+  local automation = mock.song:pattern(1):track(3):create_automation(mock.song:track(3):device(1):parameter(5))
+  automation.points = { { time = 1, value = 0.2, scaling = 0 }, { time = 9, value = 0.8, scaling = 0 } }
+  H.tick(2)
+  eq(mock.song:pattern(1):track(3).is_empty, true)
+  failure(restore(peer, "track-add", record, "Kumi: undo add (kt12)", done.result.epoch, done.result.layout), "changed")
+  eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1", "their automated track stays")
+  local forced = restore(peer, "track-add", record, "Kumi: undo add (kt13)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  -- (its fader set, nothing else)
+  record, done = made()
+  mock.song:track(3):device(1):parameter(5).value = 0.5
+  H.tick(2)
+  failure(restore(peer, "track-add", record, "Kumi: undo add (kt14)", done.result.epoch, done.result.layout), "changed")
+  eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1")
+  H.no_dialogs()
+end)
+
+test("changes: Kumi's undo of a slot it made with a new pattern refuses once the producer wrote into that pattern, and discard removes it", function()
+  local env, peer = setup()
+  local function made()
+    local epoch, layout = place(peer)
+    local previewed = preview(peer, "slot-insert", { index = 2 })
+    local done = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw21)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    return { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created }, done
+  end
+  local record, done = made()
+  local p = mock.data.sequence[2]
+  mock.ops.set_note(p, 1, 1, 1, { note = 48, instrument = 0 }) -- the producer's line in the new pattern
+  H.tick(2)
+  failure(restore(peer, "slot-insert", record, "Kumi: undo (kw22)", done.result.epoch, done.result.layout), "changed")
+  eq(mock.data.sequence[2], p, "the slot that plays their pattern stays")
+  local forced = restore(peer, "slot-insert", record, "Kumi: undo (kw23)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(seq_text(), "1,2,1,3")
+  -- (one left empty goes as before)
+  record, done = made()
+  ok(restore(peer, "slot-insert", record, "Kumi: undo (kw24)", done.result.epoch, done.result.layout).result)
+  eq(seq_text(), "1,2,1,3")
+  H.no_dialogs()
+end)
+
+test("changes: Kumi's undo of columns it showed refuses to hide them when the track is too big to look through, then or now; discard hides them (#361 N-S7, final review)", function()
+  local env, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_tracks.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local lowered, n = text:gsub("M%.HIDDEN_READS = %d+", "M.HIDDEN_READS = 20")
+    assert(n == 1, "HIDDEN_READS was not found to set")
+    f = assert(io.open(path, "wb"))
+    f:write(lowered)
+    f:close()
+  end })
+  -- (more lines than the look reads: some in a pattern it never reaches)
+  for p = 1, 3 do
+    for k = 1, 16 do mock.ops.set_note(p, 3, k, 1, { note = 48 }) end
+  end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3), noteColumns = 4 }
+  local previewed = preview(peer, "track-columns", input)
+  local done = apply(peer, "track-columns", input, "Kumi: columns (kc81)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.heldHidden, "unknown")
+  mock.ops.set_note(3, 3, 16, 4, { note = 52 }) -- the producer's chord note, past where the look reads
+  H.tick(2)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied }
+  local refused = restore(peer, "track-columns", record, "Kumi: undo columns (kc82)", done.result.epoch, done.result.layout)
+  failure(refused, "changed")
+  ok(refused.error.message:find("too big", 1, true), refused.error.message)
+  eq(mock.song:track(3).visible_note_columns, 4, "still shown")
+  local forced = restore(peer, "track-columns", record, "Kumi: undo columns (kc83)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(mock.song:track(3).visible_note_columns, 2)
+end)
+
+test("changes: the producer's redo of a Kumi change is told after they clicked a track, pressed play or muted one meanwhile", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local ref = track_ref(epoch, 1)
+  local previewed, _, layout = preview(peer, "track-volume", { ref = ref, volumeDb = -6 })
+  local desc = "Kumi: Kick volume \226\136\1466 dB (k7f9)"
+  apply(peer, "track-volume", { ref = ref, volumeDb = -6 }, desc, previewed.fence, epoch, layout)
+  H.tick(2)
+  peer.events = {}
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  eq(H.events(peer, "undone_in_daw")[1].data.how, "undo")
+  -- (none of these is a step of Renoise's undo: its redo is still there)
+  mock.song.selected_track_index = 2
+  mock.song.transport:start(renoise.Transport.PLAYMODE_RESTART_PATTERN)
+  mock.ops.mute_track(2, 3)
+  H.tick(3)
+  drain(peer)
+  mock.song:redo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1, "the redo is told")
+  eq(told[1].data.how, "redo")
+  eq(told[1].data.descs[1], desc)
+end)

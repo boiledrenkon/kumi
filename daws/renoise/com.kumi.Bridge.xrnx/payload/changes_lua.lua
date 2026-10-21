@@ -34,8 +34,16 @@ for name in ([[mute_state solo_state selected_track_index selected_instrument_in
   selected_sample_index selected_phrase_index selected_track_device_index selected_note_column_index selected_effect_column_index
   follow_player edit_mode edit_step octave loop_pattern loop_block_enabled loop_range loop_sequence_range metronome_enabled
   metronome_precount_enabled metronome_precount_bars record_quantize_enabled record_quantize_lines wrapped_pattern_edit
-  single_track_edit_mode keyboard_velocity_enabled keyboard_velocity record_parameter_mode]]):gmatch("%S+") do UNKEPT_FIELDS[name] = true end
-local UNKEPT_METHODS = { start = true, stop = true, start_at = true, panic = true, show_status = true }
+  single_track_edit_mode keyboard_velocity_enabled keyboard_velocity record_parameter_mode playback_pos playback_pos_beats
+  edit_pos edit_pos_beats loop_block_range_coeff octave_enabled selection_in_pattern selection_in_phrase
+  selected_phrase_line_index selected_phrase_note_column_index selected_phrase_effect_column_index
+  selected_sample_device_chain_index selected_sample_device_index selected_sample_modulation_set_index]]):gmatch("%S+") do UNKEPT_FIELDS[name] = true end
+-- (mute and solo, notes played, playback and its schedule, the block loop and the selection: none is a step of Renoise's undo)
+local UNKEPT_METHODS = {}
+for name in ([[start stop start_at panic show_status mute unmute solo trigger_instrument_note_on trigger_instrument_note_off
+  trigger_sample_note_on trigger_sample_note_off trigger_pattern_line trigger_sequence add_scheduled_sequence
+  set_scheduled_sequence loop_block_move_forwards loop_block_move_backwards select_next_track
+  select_previous_track]]):gmatch("%S+") do UNKEPT_METHODS[name] = true end
 
 -- The code with its comments blanked and its strings emptied (so nothing in them reads as code).
 local function blanked(code)
@@ -168,13 +176,58 @@ local function plain(value, depth)
   if kind == "nil" or kind == "boolean" or kind == "string" then return value end
   if kind == "number" then return (value == value and value ~= math.huge and value ~= -math.huge) and value or tostring(value) end
   if kind ~= "table" or depth > 6 then return tostring(value) end
-  local out, n = {}, 0
+  -- (a list 1..n stays a list; any other table is an object with its keys as text: kept as they were, a list with gaps,
+  -- a 0 key or names among the numbers would make no JSON at all)
+  local count, top, list = 0, 0, true
+  for k in pairs(value) do
+    count = count + 1
+    if list and type(k) == "number" and k >= 1 and k % 1 == 0 then top = math.max(top, k) else list = false end
+  end
+  local out = {}
+  if list and top == count then
+    for i = 1, math.min(count, 1000) do out[i] = plain(value[i], depth + 1) end
+    return out
+  end
+  local n = 0
   for k, v in pairs(value) do
     n = n + 1
     if n > 1000 then break end
-    out[type(k) == "number" and k or tostring(k)] = plain(v, depth + 1)
+    out[tostring(k)] = plain(v, depth + 1)
   end
   return out
+end
+
+-- A value's text for an answer, which nothing in it can make raise (an error object's own __tostring may).
+local function said(value)
+  local ok, text = pcall(tostring, value)
+  return ok and text or "(a value Kumi can't read)"
+end
+
+-- Lua's own functions: an error raised in code one of them called (table.sort's comparator, pcall's function) goes back
+-- to the Lua that called it. Any other C function (Renoise's, firing notifiers) may catch it itself: it shows an error and
+-- disables the notifier.
+local LIBRARY = {}
+for _, t in ipairs({ _G, string, table, math, os, io, coroutine, debug, rawget(_G, "bit"), rawget(_G, "jit"), package }) do
+  if type(t) == "table" then
+    for _, v in pairs(t) do
+      if type(v) == "function" then LIBRARY[v] = true end
+    end
+  end
+end
+
+-- Whether a stop raised in the code the count hook interrupted (the hook's caller, `level` 2 from it) reaches `run`, the
+-- function run-lua's pcall runs the chunk in: only through the chunk's code and Lua's functions, never through one of the
+-- tool's guards (its notifiers run whole) or a C function of Renoise's. Code outside `run` (run-lua's own, after the chunk
+-- ended) is never stopped; a coroutine the chunk made is stopped where it is: its error goes to its resumer.
+local function stoppable(level, run, thread, is_guard)
+  while true do
+    local info = debug.getinfo(level + 1, "fS")
+    if not info then return coroutine.running() ~= thread end
+    local fn = info.func
+    if fn == run then return true end
+    if is_guard(fn) or (info.what == "C" and not LIBRARY[fn]) then return false end
+    level = level + 1
+  end
 end
 
 local NOTE = "Only Renoise's own undo can take back what it did (Edit > Undo); Kumi can't."
@@ -214,12 +267,19 @@ local function apply(song, env, input, fence, desc)
     jit.off()
     jit.flush()
   end
-  -- (inside the tool's own notifiers the stop waits for the chunk's code: they run whole)
+  -- (inside the tool's own notifiers, their guards included, the stop waits for the chunk's code: they run whole)
   local in_notifier = env.in_notifier or function() return false end
+  local is_guard = env.is_guard or function() return false end
+  local thread = coroutine.running()
+  -- (the chunk runs under a frame of the tool's that stays on the stack whatever the chunk does: its own `return f()` is a
+  -- tail call, which takes the chunk's frame away)
+  local function run() return (chunk()) end
   debug.sethook(function()
-    if env.now_ms() > deadline and not in_notifier() then error(string.format("Kumi stopped it: it ran longer than %d ms", limit), 2) end
+    if env.now_ms() > deadline and not in_notifier() and stoppable(2, run, thread, is_guard) then
+      error(string.format("Kumi stopped it: it ran longer than %d ms", limit), 2)
+    end
   end, "", 1000)
-  local ok, result = pcall(chunk)
+  local ok, result = pcall(run)
   debug.sethook()
   if jitted then jit.on() end
   local told = (env.changes and env.changes() or 0) ~= before
@@ -230,13 +290,20 @@ local function apply(song, env, input, fence, desc)
   local note = unkept and UNKEPT_NOTE or NOTE
   if changed and not unkept and not told then note = "It may have changed the song: Kumi can't see all a chunk does. " .. NOTE end
   local display = { title = "Ran Lua: " .. first_line(input.code), note = note }
+  -- (the chunk has run: nothing from here raises, or the answer would say it wrote nothing and a retry would run it again)
   if ok then
-    local value = plain(result, 0)
-    if #json.encode({ v = value }) > MOST_RESULT then value = "(a value of more than 256 KB, not sent)" end
+    local read, value = pcall(plain, result, 0)
+    if not read then value = "(a value Kumi couldn't read: " .. said(value) .. ")" end
+    local text, why = json.encode({ v = value })
+    if not text then
+      value = "(a value Kumi couldn't send: " .. said(why) .. ")"
+    elseif #text > MOST_RESULT then
+      value = "(a value of more than 256 KB, not sent)"
+    end
     applied.result = value
   else
-    applied.failed = { message = tostring(result) }
-    display.note = string.format("It stopped with an error (%s)%s. %s", tostring(result),
+    applied.failed = { message = said(result) }
+    display.note = string.format("It stopped with an error (%s)%s. %s", said(result),
       changed and "; what it changed before that stays" or "", unkept and UNKEPT_NOTE or NOTE)
   end
   if not changed then display.unchanged = true end

@@ -13,10 +13,12 @@ function M.new(ctx)
   return setmetatable({ ctx = ctx, list = {}, last_run_ms = 0 }, M)
 end
 
--- fn(job) does the work, calling job.slice() between steps, and returns the answer or raises {code, message}.
-function M:add(record, request, fn)
+-- fn(job) does the work, calling job.slice() between steps, and returns the answer or raises {code, message}. `wrote` says
+-- what a job wrote before it was made (a change written in its request's callback that then waits for Renoise), as
+-- `job.wrote` does once a job writes.
+function M:add(record, request, fn, wrote)
   local ctx = self.ctx
-  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), shape = ctx.shape(), deadline = 0 }
+  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), shape = ctx.shape(), deadline = 0, wrote = wrote }
   -- Whether the song is still the one the request was made against; raises the error to answer with if it isn't.
   function job.check()
     if ctx.epoch() ~= job.epoch then
@@ -105,9 +107,13 @@ function M:run(budget)
       local ok, value, ended
       if not job.started then
         -- A job is made when its request is handled and first runs on a later turn: what it names is checked before it reads.
+        -- (One whose change is written already runs on whatever the producer did meanwhile: ended here, it would answer as if
+        -- nothing was written.)
         job.started = true
-        ok, value = pcall(job.check)
-        ended = not ok
+        if not job.wrote then
+          ok, value = pcall(job.check)
+          ended = not ok
+        end
       end
       if not ended then
         ok, value = coroutine.resume(job.co, job)

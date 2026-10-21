@@ -136,6 +136,8 @@ local function pattern_print(song, p)
   return base.hash(table.concat(parts, "|"))
 end
 
+M.pattern_print = pattern_print
+
 local function keep_pattern(song, env, p)
   return { print = pattern_print(song, p), touch = env.pattern_touch_mark and env.pattern_touch_mark(p) or nil }
 end

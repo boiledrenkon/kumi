@@ -342,6 +342,30 @@ test("listening: ZL and ZT commands in any track move the lines' beats and secon
   H.no_dialogs()
 end)
 
+test("listening: a ZL in a pattern that another's track shows as an alias moves that pattern's lines too, read before and after", function()
+  -- (slot 1 plays pattern 2, whose Hat track shows pattern 1's Hat lines)
+  local env, peer = setup(nil, { sequence = { 2, 1, 3 } })
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  mock.ops.alias(2, 2, 1)
+  H.tick(2)
+  -- (a first render reads the whole song into the cache)
+  result((start(peer, "j70", { { id = "mix", what = "master" } }, { fromBeat = 0, beats = 12 })))
+  mock.finish_render()
+  eq(status(peer, "j70").state, "done")
+  -- (then a ZL08 on line 9 of pattern 1's Hat: Renoise tells pattern 1's line notifiers only, though slot 1 shows it too)
+  mock.ops.set_effect(1, 2, 9, 1, command("ZL"), 8)
+  H.tick(2)
+  result((start(peer, "j71", { { id = "mix", what = "master" } }, { fromBeat = 3, beats = 1 })))
+  local r = mock.renders[2]
+  eq(r.options.start_pos.sequence, 2, "slot 1 is 8 lines at LPB 4 and 8 at LPB 8: 3 beats")
+  eq(r.options.start_pos.line, 1)
+  mock.finish_render()
+  H.no_dialogs()
+end)
+
 test("listening: a render times its lines as Renoise renders them: before the song's first ZT it runs at that ZT's tempo, and says so", function()
   local env, peer = setup()
   local function command(text)

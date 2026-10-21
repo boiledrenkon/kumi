@@ -150,10 +150,13 @@ end
 -- How deep in the tool's notifiers the code running now is: a run-lua chunk's time limit (a count hook) stops the chunk only
 -- outside them, so every notifier runs whole (setting the hook aside instead would restart its count at each notifier).
 local guarded = 0
+-- The guards themselves, by identity: a stop must not land in one either, before its count goes up or after it goes down
+-- (raised there, it would reach Renoise's notifier dispatch, which disables the notifier behind an error dialog).
+local guards = setmetatable({}, { __mode = "k" })
 
 -- A notifier, run whole and never raising. One that failed may have left the song half watched: it is watched anew.
 local function guard(where, fn)
-  return function(...)
+  local function guarded_fn(...)
     guarded = guarded + 1
     local ok, result = xpcall(fn, debug.traceback, ...)
     guarded = guarded - 1
@@ -164,6 +167,8 @@ local function guard(where, fn)
     end
     return result
   end
+  guards[guarded_fn] = true
+  return guarded_fn
 end
 
 local function show_status(message)
@@ -286,6 +291,13 @@ local TRANSPORT_OBSERVABLES = {
   "playing_observable", "bpm_observable", "lpb_observable", "tpl_observable", "edit_mode_observable",
   "follow_player_observable", "loop_pattern_observable",
 }
+-- (what Renoise's undo doesn't keep, measured in 3.5.4: no step, and Renoise's redo stays as it was)
+local UNKEPT = {}
+for name in ([[playing_observable edit_mode_observable follow_player_observable loop_pattern_observable metronome_enabled_observable
+  metronome_precount_enabled_observable metronome_precount_bars_observable edit_step_observable octave_observable
+  record_quantize_enabled_observable record_quantize_lines_observable wrapped_pattern_edit_observable
+  single_track_edit_mode_observable keyboard_velocity_enabled_observable keyboard_velocity_observable
+  record_parameter_mode_observable mute_state_observable solo_state_observable]]):gmatch("%S+") do UNKEPT[name] = true end
 -- M4 (n-song): the song's settings Kumi changes (the groove, the metronome, the editing settings, the headroom), counted, and
 -- asked on the producer's undo.
 local SETTING_OBSERVABLES = {
@@ -327,8 +339,8 @@ local function watch_track(song, i)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
-    observers:watch_changes(track.mute_state_observable)
-    observers:watch_changes(track.solo_state_observable)
+    observers:watch_changes(track.mute_state_observable, UNKEPT.mute_state_observable)
+    observers:watch_changes(track.solo_state_observable, UNKEPT.solo_state_observable)
     observers:watch_changes(track.visible_note_columns_observable)
     observers:watch_changes(track.visible_effect_columns_observable)
     for c = 1, track.max_note_columns do
@@ -485,10 +497,10 @@ local function attach(song)
   for t = 1, tracks do b.groups.tracks[t] = group() end
   for p = 1, #song.patterns do b.groups.patterns[p] = group() end
   for i = 1, #song.instruments do b.groups.instruments[i] = group() end
-  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
-  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
+  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection", true) end
+  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport", UNKEPT[name]) end
   observers:watch(song.name_observable, "project")
-  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name]) end
+  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name], UNKEPT[name]) end
   observers:watch_changes(song.artist_observable)
   observers:watch_changes(song.comments_observable)
   observers:watch_tracks(song.tracks_observable)
@@ -1201,6 +1213,7 @@ local function change_env()
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
     in_notifier = function() return guarded > 0 end,
+    is_guard = function(fn) return guards[fn] == true end,
     -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
     -- instrument file into slot i that the places log doesn't take for a delete.
     work_dir = function()
@@ -1549,7 +1562,7 @@ function M.start(h, reloading)
     end,
     identity = identity,
     on_request = M.handle,
-    start_job = function(record, request, work) return jobs:add(record, request, work) end,
+    start_job = function(record, request, work, wrote) return jobs:add(record, request, work, wrote) end,
     cancel_jobs = function(record) jobs:cancel(record) end,
     on_authenticated = function(record)
       log.write("info", "Kumi connected from " .. record.key)

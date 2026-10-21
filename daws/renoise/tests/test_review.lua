@@ -1942,6 +1942,58 @@ test("run-lua: the time limit stops a chunk whose calls fire the tool's notifier
   ok(#mock.data.patterns - patterns < 3000, "stopped part way: " .. (#mock.data.patterns - patterns) .. " made")
 end)
 
+test("run-lua: a returned table with gaps, a 0 key or names among its numbers is answered, not lost after the chunk wrote", function()
+  local env, peer = setup()
+  local done = run_lua(peer, "song.transport.bpm = 141\nlocal t = {}\nt[3] = 'C-4'\nreturn t", "Kumi: Ran Lua (ks01)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(mock.song.transport.bpm, 141)
+  eq(done.result.applied.changed, true)
+  eq(done.result.applied.result["3"], "C-4")
+  local mixed = run_lua(peer, "return { [0] = 'zero', 'a', 'b', name = 'x', [2.5] = 'half', [true] = 'yes' }", "Kumi: Ran Lua (ks02)")
+  ok(mixed.result, json.encode(mixed.error or {}))
+  local r = mixed.result.applied.result
+  eq(r["0"], "zero")
+  eq(r["1"], "a")
+  eq(r["2"], "b")
+  eq(r.name, "x")
+  eq(r["2.5"], "half")
+  eq(r["true"], "yes")
+  local list = run_lua(peer, "return { 'a', { 1, 2, 3 }, { x = { [5] = 1 } } }", "Kumi: Ran Lua (ks03)")
+  ok(list.result, json.encode(list.error or {}))
+  eq(list.result.applied.result[1], "a")
+  eq(list.result.applied.result[2][3], 3)
+  eq(list.result.applied.result[3].x["5"], 1)
+  -- (an error whose own text can't be made is still answered)
+  local odd = run_lua(peer, "song.transport.bpm = 142\nerror(setmetatable({}, { __tostring = function() error('no text') end }))", "Kumi: Ran Lua (ks04)")
+  ok(odd.result, json.encode(odd.error or {}))
+  eq(mock.song.transport.bpm, 142)
+  ok(odd.result.applied.failed, json.encode(odd.result.applied))
+end)
+
+test("run-lua: a stop never lands in the guard around the tool's notifiers, before or after the notifier's own code (#361 N4, final review)", function()
+  local env, peer = setup()
+  -- (a different count of the chunk's own instructions each round moves where the hook's count runs out)
+  for pad = 0, 59 do
+    mock.clock_step_ms = 1
+    local code = "local x = 0\nfor i = 1, 3000 do " .. string.rep("x = x + 1 ", pad) .. "song.sequencer:insert_new_pattern_at(1) end"
+    local done = run_lua(peer, code, string.format("Kumi: Ran Lua (kq%02d)", pad), { timeoutMs = 5 })
+    mock.clock_step_ms = nil
+    ok(done.result, json.encode(done.error or {}))
+    ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 5 ms", 1, true), json.encode(done.result.applied.failed or {}))
+  end
+  -- (Renoise disables a notifier that raises behind an error dialog: the mock records it and takes the notifier off)
+  for _, err in ipairs(mock.errors) do ok(not err:find("^notifier"), err) end
+end)
+
+test("run-lua: a chunk's loop in a coroutine of its own is stopped too", function()
+  local env, peer = setup()
+  mock.clock_step_ms = 1
+  local done = run_lua(peer, "local co = coroutine.wrap(function() local n = 0 while true do n = n + 1 end end)\nco()", "Kumi: Ran Lua (kq90)", { timeoutMs = 20 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 20 ms", 1, true), json.encode(done.result.applied.failed or {}))
+end)
+
 test("run-lua: code a chunk loads itself is under the time limit too: the JIT is off while it runs (#361 N18)", function()
   local env, peer = setup()
   mock.clock_step_ms = 1
@@ -1969,6 +2021,32 @@ test("run-lua: a chunk that sets a parameter changed the song; one that only mut
   ok(read.result, json.encode(read.error or {}))
   eq(read.result.display.unchanged, true, "it set only its own table's fields")
   eq(read.result.undo.entry, false)
+end)
+
+test("run-lua: mute, unmute and solo calls, notes played and playback scheduled make no Renoise step (#361 N8, final review)", function()
+  local env, peer = setup(nil, { instruments = 1 })
+  local codes = {
+    "song:track(2):mute()", "song:track(2):unmute()", "song:track(1):solo()",
+    "song:trigger_instrument_note_on(1, 1, 48, 1)\nsong:trigger_instrument_note_off(1, 1, 48)",
+    "song.transport:trigger_sequence(1)", "song.transport:add_scheduled_sequence(2)\nsong.transport:set_scheduled_sequence(1)",
+  }
+  for k, code in ipairs(codes) do
+    local before = steps()
+    local done = run_lua(peer, code, string.format("Kumi: Ran Lua (kr%02d)", k))
+    ok(done.result, json.encode(done.error or {}))
+    eq(done.result.applied.failed, nil, code)
+    eq(done.result.applied.writes, "unkept", code)
+    eq(done.result.undo.entry, false, code .. ": Renoise makes no step of it")
+    if done.result.applied.changed then
+      ok(done.result.display.note:find("nothing Renoise's undo takes back", 1, true), done.result.display.note)
+    end
+    eq(steps(), before, code)
+  end
+  eq(mock.data.tracks[1].solo, true, "the solo was played")
+  -- (with a write Renoise's undo keeps, it is a step again)
+  local mixed = run_lua(peer, "song:track(2):mute()\nsong.transport.bpm = 99", "Kumi: Ran Lua (kr10)")
+  ok(mixed.result, json.encode(mixed.error or {}))
+  eq(mixed.result.undo.entry, true)
 end)
 
 test("places, names × a pattern or an instrument renamed is the same one: the lines go back into it, playing it", function()

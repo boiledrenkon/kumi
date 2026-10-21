@@ -168,16 +168,18 @@ local function chain_apply(song, env, input, fence, desc)
   for k, value in ipairs(levels) do
     if k <= #mixer.parameters then pcall(function() mixer:parameter(k).value = value end) end
   end
-  local kept, states, names = {}, {}, {}
+  local kept, states, names, contents = {}, {}, {}, {}
   for d = 2, #track.devices do
     local device = track:device(d)
     kept[#kept + 1] = devices_.device_kept(env, index, d, device)
     states[#states + 1] = material_.device_state(device)
     names[#names + 1] = devices_.label(device)
+    -- (a Doofer's or a Splitter's devices inside, a Notepad's text, a plug-in's state: false for a device with none)
+    contents[#contents + 1] = material_.content_fence(device) or false
   end
   material.loaded = kept
   return {
-    applied = { count = #kept, devices = names, states = states }, material = material, target = base.target(env, index),
+    applied = { count = #kept, devices = names, states = states, contents = contents }, material = material, target = base.target(env, index),
     display = { title = chain_title(plan, #kept) }, undo = { desc = desc, entry = true },
     -- (the journal tells Renoise's own undo and redo of it by the track's devices: those it replaced, or those it loaded)
     prior = paths_of_replaced(replaced), journal_applied = chain_read(track), place = { track = index },
@@ -237,7 +239,9 @@ local function chain_restore(song, env, restore, desc)
     local moved = {}
     for _, f in ipairs(found) do
       local now, was = material_.device_state(track:device(f.d)), (applied.states or {})[f.j] or {}
-      if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active then
+      local content = (applied.contents or {})[f.j]
+      if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active
+        or (content and material_.content_fence(track:device(f.d)) ~= content) then
         moved[#moved + 1] = devices_.label(track:device(f.d))
       end
     end
@@ -322,6 +326,7 @@ base.register({
     local i = plan.n[1]
     local instrument = song:instrument(i)
     local selected_i, selected_p = song.selected_instrument_index, song.selected_phrase_index
+    local program_before = phrases_.program_of(instrument)
     song:describe_undo(desc)
     instrument:insert_phrase_at(plan.index)
     -- (Renoise loads a phrase file into the selected phrase: the new one)
@@ -338,11 +343,14 @@ base.register({
     end
     local phrase = instrument.phrases[plan.index]
     local m = { i, plan.index }
+    -- (the program plays the phrase it played before the new one came)
+    local program_place, program_after = phrases_.keep_program(env, instrument, i, program_before, plan.index)
     -- (whether it plays as the program now: Renoise's doing, so Kumi's undo may take it; see changes_phrases.lua's in_use)
     local program = instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == plan.index
     return {
       applied = { index = plan.index, print = phrases_.phrase_print(phrase), program = program or nil }, created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase" },
-      material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
+      material = { made = places_.place_of(env, "phrase", m), program = program_place, programAfter = program_after },
+      target = places_.target_of(env, "phrase", m),
       display = {
         title = string.format("Loaded the phrase %s into %s", q(places_.phrase_label(plan.index, phrase)), q(plan.label)),
         before = { phrases = plan.count }, after = { phrases = plan.count + 1 },

@@ -443,7 +443,8 @@ local function add_apply(song, env, input, fence, desc)
   end
   local state = material_.device_state(device)
   return {
-    applied = { index = at, path = info.path, state = state },
+    -- (a Doofer's or a Splitter's devices inside, a Notepad's text, a plug-in's state: what its parameters don't show)
+    applied = { index = at, path = info.path, state = state, content = material_.content_fence(device) },
     created = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     target = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     -- (where its undo finds it: its place, followed through the devices made, deleted and moved since)
@@ -476,6 +477,9 @@ local function add_restore(song, env, restore, desc)
   local title = (device.display_name ~= "" and device.display_name or device.name) .. " on " .. base.named(index, track)
   if not restore.discard and (now.path ~= applied.path or now.state ~= (applied.state or {}).state or now.active ~= (applied.state or {}).active) then
     fail("changed", title .. " changed in Renoise since Kumi made it")
+  end
+  if not restore.discard and applied.content ~= nil and material_.content_fence(device) ~= applied.content then
+    fail("changed", title .. " changed in Renoise since Kumi made it (what's inside it, its text or its state)")
   end
   local device_name, track_name = M.label(device), base.named(index, track)
   song:describe_undo(desc)

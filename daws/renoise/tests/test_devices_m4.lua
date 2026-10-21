@@ -1920,3 +1920,69 @@ test("devices m4: device-params reads a big plug-in's parameter names once a req
   ok(previewed, "previewed")
   ok(mock.parameter_name_reads < 2 * 400, "names read about once each: " .. mock.parameter_name_reads)
 end)
+
+-- #361 final review: what a Doofer, a Splitter, a Notepad or a plug-in holds beyond its parameters is the producer's work too:
+-- Kumi's undo of making one refuses once that changed (discard deletes it anyway).
+local INNER = "<GainerDevice type=\"GainerDevice\">\n          <Volume>\n            <Value>1.0</Value>\n          </Volume>\n        </GainerDevice>"
+
+local function deep_catalog()
+  local macros = {}
+  for k = 1, 8 do macros[k] = { name = "Macro " .. k, value = 50, min = 0, max = 100, element = "Macro" .. (k - 1) } end
+  mock.device_catalog = { ["Audio/Effects/Native/Doofer"] = macros, ["Audio/Effects/Native/Gainer"] = gainer().params }
+  mock.device_slots = { ["Audio/Effects/Native/Doofer"] = { slot = "DooferDevice", body = DOOFER_BODY }, ["Audio/Effects/Native/Gainer"] = { slot = "GainerDevice" } }
+end
+
+test("devices m4: Kumi's undo of a Doofer it added refuses once the producer put a device inside it, and discard deletes it anyway", function()
+  local _, peer = setup()
+  deep_catalog()
+  local record = change(peer, "device-add", { ref = place(peer) .. ":track:1", path = "Audio/Effects/Native/Doofer" })
+  eq(names_on(1), "Doofer")
+  local data = device_data(1, 2)
+  data.preset_data = mock.song:track(1):device(2).active_preset_data:gsub("</Devices>", INNER .. "\n      </Devices>", 1)
+  local before = steps()
+  failure(restore(peer, "device-add", record), "changed", "inside it")
+  eq(names_on(1), "Doofer", "what they put inside stays")
+  eq(steps(), before)
+  local forced = restore(peer, "device-add", record, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(names_on(1), "")
+  -- (one nobody touched goes as before)
+  local again = change(peer, "device-add", { ref = place(peer) .. ":track:1", path = "Audio/Effects/Native/Doofer" })
+  ok(restore(peer, "device-add", again).result)
+  eq(names_on(1), "")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: Kumi's undo of a device chain it loaded refuses once the producer changed what a Doofer in it holds", function()
+  local env, peer = setup()
+  deep_catalog()
+  local text = '<?xml version="1.0" encoding="UTF-8"?>\n<RenoiseDeviceChain doc_version="21">\n  <Devices>\n    <DooferDevice type="DooferDevice">\n'
+    .. '    </DooferDevice>\n  </Devices>\n</RenoiseDeviceChain>\n'
+  local file = library_file(env, "Doofed.xrnt", text)
+  local record = change(peer, "device-chain-load", { trackRef = place(peer) .. ":track:1", file = file, fileName = "Doofed" })
+  eq(names_on(1), "Doofer")
+  local data = device_data(1, 2)
+  data.preset_data = mock.song:track(1):device(2).active_preset_data:gsub("</Devices>", INNER .. "\n      </Devices>", 1)
+  failure(restore(peer, "device-chain-load", record), "changed", "Doofer")
+  eq(names_on(1), "Doofer")
+  ok(restore(peer, "device-chain-load", record, nil, { discard = true }).result)
+  eq(names_on(1), "")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: what a Doofer shows (folded, its devices shown or not, where its editor sits) is no change to what it holds: Kumi's undo of adding one goes", function()
+  local _, peer = setup()
+  deep_catalog()
+  mock.device_slots["Audio/Effects/Native/Doofer"].body = DOOFER_BODY
+    .. "\n    <ShowDevices>true</ShowDevices>\n    <PluginEditorWindowPosition>0,0</PluginEditorWindowPosition>"
+  local record = change(peer, "device-add", { ref = place(peer) .. ":track:1", path = "Audio/Effects/Native/Doofer" })
+  local data = device_data(1, 2)
+  -- (the producer folds it, hides its devices and moves its editor: Renoise writes the view into its preset data)
+  data.preset_data = mock.song:track(1):device(2).active_preset_data:gsub("<IsMaximized>true</IsMaximized>", "<IsMaximized>false</IsMaximized>", 1)
+    :gsub("<ShowDevices>true</ShowDevices>", "<ShowDevices>false</ShowDevices>", 1)
+    :gsub("<PluginEditorWindowPosition>0,0</PluginEditorWindowPosition>", "<PluginEditorWindowPosition>120,80</PluginEditorWindowPosition>", 1)
+  local back = restore(peer, "device-add", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(names_on(1), "")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)

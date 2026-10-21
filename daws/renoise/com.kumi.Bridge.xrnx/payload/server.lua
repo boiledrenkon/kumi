@@ -310,7 +310,7 @@ function M:answer(record, request)
   -- A long read comes back as a job to be run a slice at a time; the connection's later requests wait behind it, so
   -- answers keep their order.
   if ok and type(result) == "table" and result.kumi_job then
-    record.job = self.ctx.start_job(record, request, result.kumi_job)
+    record.job = self.ctx.start_job(record, request, result.kumi_job, result.kumi_wrote)
     return
   end
   self:respond(record, request, ok, result)
