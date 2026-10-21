@@ -205,7 +205,8 @@ fn a_media_file_is_imported_in_place_and_a_missing_or_unreadable_one_is_refused(
     let unreadable = std::env::temp_dir().join(format!("kumi-items-{}-notes.txt", std::process::id()));
     std::fs::write(&unreadable, b"hello").unwrap();
     for (path, needle) in [
-        ("/nowhere/at/all.wav".to_string(), "no file"),
+        // (a full path on every system: "/nowhere" has no drive on Windows)
+        (std::env::temp_dir().join("nowhere").join("at").join("all.wav").to_string_lossy().into_owned(), "no file"),
         (std::env::temp_dir().to_string_lossy().into_owned(), "no file"),
         ("relative.wav".to_string(), "full path"),
         (unreadable.to_string_lossy().into_owned(), "reads nothing"),
