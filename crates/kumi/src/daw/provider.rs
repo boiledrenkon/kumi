@@ -176,6 +176,12 @@ pub trait DawProvider {
     fn running_now(&self) -> bool {
         false
     }
+    /// Whether the DAW is on this computer, from files alone (installed, or opened once): with no bridge installed yet,
+    /// the DAW a first run sets up.
+    fn here(&self, env: &Env) -> bool {
+        let _ = env;
+        false
+    }
     fn watch_words(&self) -> WatchWords;
     /// The step setup shows for the producer to tell the DAW to use Kumi's bridge; None when it needs none.
     fn enable_step(&self) -> Option<EnableStep>;

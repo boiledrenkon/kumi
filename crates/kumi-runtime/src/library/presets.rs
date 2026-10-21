@@ -48,23 +48,19 @@ pub enum PresetCategory {
     ModulationSet,
 }
 
-/// The kinds find_presets names for each DAW, as the model asks for them.
-pub fn categories_for(daw: DawId) -> &'static [&'static str] {
-    match daw {
-        DawId::Ableton => &["instrument", "audio effect", "midi effect", "drum rack", "plug-in"],
-        DawId::Reaper => &["fx chain", "track template", "project template", "jsfx", "fx presets", "plug-in"],
-        DawId::Renoise => &["instrument", "multi-sample", "effect chain", "effect preset", "phrase", "phrase script", "modulation set"],
-    }
-}
-
-/// The DAWs a preset of this format is offered in (its format, as the library keeps it): Live's own files only in Live,
-/// REAPER's and Renoise's only in theirs, plug-ins' presets where the DAW can load them (REAPER takes a VST3 preset's path).
-pub fn preset_daws(format: &str) -> &'static [DawId] {
-    match format {
-        "vstpreset" => &[DawId::Ableton, DawId::Reaper],
-        "rfxchain" | "rtracktemplate" | "rpp" | "jsfx" | "ini" => &[DawId::Reaper],
-        "xrni" | "xrnt" | "xrdp" | "xrnz" | "xrno" | "lua" | "sfz" => &[DawId::Renoise],
-        _ => &[DawId::Ableton],
+/// The DAWs a preset of this format is offered in (its format, as the library keeps it): the DAWs whose profiles name it
+/// (REAPER takes a VST3 preset's path, as Live does), and Live for a format no DAW names (its own files, plug-ins'
+/// presets).
+pub fn preset_daws(format: &str) -> Vec<DawId> {
+    let named: Vec<DawId> = crate::integrations::REGISTERED
+        .iter()
+        .filter(|profile| profile.vocab.preset_formats.contains(&format))
+        .filter_map(|profile| profile.id)
+        .collect();
+    if named.is_empty() {
+        vec![DawId::Ableton]
+    } else {
+        named
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

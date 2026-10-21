@@ -277,8 +277,17 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
+    fn here(&self, env: &Env) -> bool {
+        match self.daw {
+            Daw::Reaper => !detected(env, detect::detect_reaper).is_empty(),
+            Daw::Renoise => {
+                let found = detected(env, detect::detect_renoise);
+                !found.apps.is_empty() || !found.prefs.is_empty()
+            }
+        }
+    }
     fn running_now(&self) -> bool {
-        !detect::running(self.daw).is_empty()
+        super::processes().iter().any(|(_, name)| detect::process_is(self.daw, name))
     }
     fn app_open(&self, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let daw = self.daw;

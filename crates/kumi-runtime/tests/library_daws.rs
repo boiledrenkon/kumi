@@ -400,3 +400,33 @@ fn find_presets_names_only_steps_the_daw_has_and_lives_text_stays() {
     let live = description(&DawProfile::ABLETON);
     assert!(live.contains("load_device takes as itemId") && !live.contains("device_preset_data") && !live.contains("fx_chain_load"));
 }
+
+/// A DAW's library text comes from its profile alone (review L5): a profile Kumi's library code has never heard of, with
+/// presets in its capabilities and its own sample steps, preset kinds and loading words in its vocabulary, gets
+/// find_presets in its words, its kinds offered, and find_sounds naming its sample steps.
+#[test]
+fn a_dawss_library_words_come_from_its_profile_alone() {
+    use kumi_runtime::core::daw::{Capabilities, PromptVocab};
+    const ANOTHER: DawProfile = DawProfile {
+        id: None,
+        caps: Capabilities { presets: true, ..Capabilities::NONE },
+        vocab: PromptVocab {
+            sample_tools: "clip_drop and the other sample steps",
+            preset_loading: ". Load one with preset_drop (path)",
+            preset_kinds: &["patch", "chain"],
+            ..DawProfile::UNKNOWN.vocab
+        },
+        ..DawProfile::UNKNOWN
+    };
+    let access = Rc::new(Learned { presets: vec![] });
+    let tools = library_tools_for(&ANOTHER, access, LibraryToolsOptions::default());
+    let presets = tools.iter().find(|t| t.name() == "find_presets").expect("find_presets: the profile says it has presets");
+    assert!(presets.description().contains("Load one with preset_drop (path)"), "{}", presets.description());
+    assert_eq!(presets.input_schema()["properties"]["kind"]["enum"], json!(["patch", "chain"]));
+    let sounds = tools.iter().find(|t| t.name() == "find_sounds").unwrap();
+    let said = format!("{} {}", sounds.description(), Value::Object(sounds.input_schema()));
+    assert!(said.contains("clip_drop and the other sample steps"), "{said}");
+    // A DAW Kumi doesn't know: no presets, as before.
+    let unknown = library_tools_for(&DawProfile::UNKNOWN, Rc::new(Learned { presets: vec![] }), LibraryToolsOptions::default());
+    assert!(!unknown.iter().any(|t| t.name() == "find_presets"));
+}

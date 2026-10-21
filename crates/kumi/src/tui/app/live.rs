@@ -456,8 +456,9 @@ impl TuiApp {
         if let Some(at) = self.beat_now(perf_now()).filter(|_| !self.0.state.borrow().closing) {
             let phase = at.beat - at.beat.floor();
             let beat_edge = if phase < 0.25 { 0.25 - phase } else { 1. - phase };
-            // (a bar that starts between beats, 7/8's, lights and dims on its own edges too)
-            let bar_edge = at.beats_per_bar.filter(|bar| *bar > 0. && bar.fract() != 0.).map_or(f64::INFINITY, |bar| {
+            // (a bar that starts between beats, 7/8's, lights and dims on its own edges too; Live's light is as it always
+            // was, on whole beats alone)
+            let bar_edge = at.beats_per_bar.filter(|bar| *bar > 0. && bar.fract() != 0. && !lives_light()).map_or(f64::INFINITY, |bar| {
                 let into = at.beat.rem_euclid(bar);
                 if into < 0.25 {
                     0.25 - into
@@ -482,8 +483,13 @@ impl TuiApp {
     pub(super) fn beat_light(&self) -> Option<(String, Style)> {
         let at = self.beat_now(perf_now())?;
         let phase = at.beat - at.beat.floor();
-        // The bar's first beat, wherever it falls: a bar of 3.5 beats (7/8) starts between quarter notes.
-        let down = at.beats_per_bar.filter(|bar| *bar > 0.).is_some_and(|bar| (at.beat + 1e-6).rem_euclid(bar) < 0.25);
+        // The bar's first beat, wherever it falls: a bar of 3.5 beats (7/8) starts between quarter notes. Live's light is as
+        // it always was: only a bar of whole beats has a bright first beat.
+        let down = if lives_light() {
+            phase < 0.25 && at.beats_per_bar.filter(|bar| bar.fract() == 0.).is_some_and(|bar| (at.beat + 1e-6).floor() % bar == 0.)
+        } else {
+            at.beats_per_bar.filter(|bar| *bar > 0.).is_some_and(|bar| (at.beat + 1e-6).rem_euclid(bar) < 0.25)
+        };
         let color = if down {
             palette::BEAT
         } else if phase < 0.25 {
@@ -495,6 +501,12 @@ impl TuiApp {
         let meter = at.meter.map(|meter| format!(" · {meter}")).unwrap_or_default();
         Some((format!("{tempo} BPM{meter}"), Style::fg(color)))
     }
+}
+
+/// Whether the beat light is Live's, which keeps its lights on whole beats (a 7/8 bar's start between beats isn't lit):
+/// the other DAWs light a bar's first beat wherever it falls.
+fn lives_light() -> bool {
+    crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton
 }
 
 /// The kind of view the producer works in.

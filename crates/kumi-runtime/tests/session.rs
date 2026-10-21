@@ -478,7 +478,53 @@ local_test!(uncooperative_timeout_is_bounded_and_quarantines_kernel, {
     assert_eq!(h.record.created.borrow().len(), 2);
     h.session.close().await.unwrap();
 });
+// Live's test as on main; on Windows, whose timer ticks every 15.6 ms, the same with wider margins (below).
+#[cfg(not(windows))]
 local_test!(progress_refreshes_quiet_timer_and_tool_work_suspends_it, {
+    for tool in [false, true] {
+        let h = harness(
+            Some(Rc::new(move |_, _, emit| {
+                async move {
+                    if tool {
+                        emit(KernelEvent::ToolStart { id: "t1".into(), name: "make_changes".into() })?;
+                        delay(120).await;
+                        emit(KernelEvent::ToolEnd { id: "t1".into(), name: "make_changes".into(), elapsed_ms: 120, is_error: false })?;
+                    } else {
+                        for _ in 0..8 {
+                            delay(15).await;
+                            emit(KernelEvent::Text { text: ".".into() })?;
+                        }
+                    }
+                    Ok(complete())
+                }
+                .boxed_local()
+            })),
+            |o| o.idle_timeout_ms = Some(40),
+        );
+        h.session.start().await.unwrap();
+        h.session.submit("work", None).await.unwrap();
+        assert!(!h.error(""), "{:?}", h.events.borrow());
+        h.session.close().await.unwrap();
+    }
+    let h = harness(
+        Some(Rc::new(|_, signal, _| {
+            async move {
+                signal.cancelled().await;
+                Ok(cancelled())
+            }
+            .boxed_local()
+        })),
+        |o| o.idle_timeout_ms = Some(40),
+    );
+    h.session.start().await.unwrap();
+    h.session.submit("think", None).await.unwrap();
+    assert!(h.error("Kumi stopped after 1 second without progress."));
+    assert_eq!(h.record.created.borrow().len(), 1);
+    h.session.close().await.unwrap();
+});
+// On Windows, the same test with wider margins.
+#[cfg(windows)]
+local_test!(progress_refreshes_quiet_timer_and_tool_work_suspends_it_with_windows_timer_margins, {
     // The quiet timer (100 ms) is well past the gap between two pieces of progress (15 ms asked, about 31 ms on Windows,
     // whose timer ticks every 15.6 ms), and the work outlasts it three times over, so only the refreshes keep it going.
     for tool in [false, true] {

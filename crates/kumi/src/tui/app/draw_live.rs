@@ -207,10 +207,15 @@ impl TuiApp {
         let mut column = screen.put(x + 3, y, &truncate(&track.name, (((width - 6) as f64 / 2.).floor() as i32).max(1)), &st::TEXT);
         column = screen.put(column, y, " › ", &st::FAINT);
         column = screen.put(column, y, &clip_mark.text, &clip_mark.style) + 1;
+        // An unnamed one in the DAW's word: Live's clip, REAPER's take.
+        let untitled = match self.0.state.borrow().focus.as_ref().and_then(|focus| focus.item.as_ref()).map(|item| item.kind) {
+            Some(kind) if crate::daw::current().id() != kumi_runtime::core::daw::DawId::Ableton => format!("Untitled {}", kind.word()),
+            _ => "Untitled clip".to_string(),
+        };
         screen.put(
             column,
             y,
-            &truncate(if clip.name.is_empty() { "Untitled clip" } else { &clip.name }, (x + width - column).max(1)),
+            &truncate(if clip.name.is_empty() { &untitled } else { &clip.name }, (x + width - column).max(1)),
             &st::BRIGHT,
         );
         // Braille may not show on a basic console: the bars and notes are said below.

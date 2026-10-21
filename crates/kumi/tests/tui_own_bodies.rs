@@ -700,3 +700,47 @@ case!(the_header_says_the_daws_time_beside_the_tempo, async {
         h.close().await;
     }
 });
+
+// Live's beat light is as it always was in odd meters: a 7/8 bar (3.5 beats) starting between beats isn't lit bright;
+// REAPER's lights it (review L6).
+case!(lives_beat_light_keeps_whole_beats_in_odd_meters_and_reapers_lights_the_bar_between_them, async {
+    use kumi::tui::style::{palette, style_key, Style};
+    use kumi_runtime::integrations::own_views;
+    for (daw, bright) in [(DawId::Ableton, false), (DawId::Reaper, true)] {
+        work_with(daw);
+        let h = Harness::new(160, 40);
+        h.start().await;
+        h.connect();
+        // At 20 BPM a quarter of a beat is 750 ms: the light is read well inside it.
+        let transport = json!({"playing": true, "tempo": 20.0, "beat": 3.5, "beatsPerBar": 3.5});
+        let read = own_views::transport(&json!({"transport": transport}), kumi_common::time::perf_now()).unwrap();
+        h.emit(json!({"type": "transport", "transport": serde_json::to_value(read).unwrap()}));
+        shows(&h, "20 BPM").await;
+        let light = h.style_before(" 20 BPM").expect("the light");
+        let want = style_key(&Style::fg(if bright { palette::BEAT } else { palette::OFFBEAT }));
+        // (its foreground: the header's background is the screen's)
+        assert_eq!(light.split('|').next(), want.split('|').next(), "{daw:?}");
+        h.close().await;
+    }
+    work_with(DawId::Ableton);
+});
+
+// An unnamed REAPER take in FOCUS is an "Untitled take", never Live's "Untitled clip" (review L9).
+case!(an_unnamed_reaper_take_is_an_untitled_take, async {
+    work_with(DawId::Reaper);
+    let h = Harness::with(120, 36, Rc::new(Control::default()), |_| {});
+    h.start().await;
+    h.connect();
+    let body = json!({"ref": "r:take:{T1}", "itemRef": "r:item:{I1}", "name": "", "length": 4.0, "beatsPerBar": 4.0, "noteCount": 1,
+        "notes": [{"pitch": 36, "start": 0.0, "length": 1.0, "velocity": 100, "selected": false}], "ccLanes": []});
+    let request = BodyRequest::Notes { item_ref: "r:take:{T1}".into() };
+    let Some(FocusBody::Notes(view)) = (reaper::DAW.to_body)(&request, &body) else { panic!() };
+    *h.control.clip.borrow_mut() = Some(view);
+    let focus = json!({"view": "midi", "selection": {"track": {"name": "Bass", "type": "midi"}, "trackRef": "r:track:{B}",
+        "takeRef": "r:take:{T1}", "itemRef": "r:item:{I1}"}});
+    h.emit(focus_of(reaper::DAW.fill_focus, focus));
+    shows(&h, "Untitled take").await;
+    assert!(!h.screen().join("\n").contains("Untitled clip"));
+    h.close().await;
+    work_with(DawId::Ableton);
+});

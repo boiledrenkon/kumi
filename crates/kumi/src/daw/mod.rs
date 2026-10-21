@@ -18,7 +18,9 @@ use kumi_runtime::{
     },
     system::Env,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Each registered DAW's provider: Live's first, then the DAWs whose bridges are Kumi's own.
 pub fn providers() -> [&'static dyn DawProvider; 3] {
@@ -34,7 +36,8 @@ pub fn provider(id: DawId) -> Option<&'static dyn DawProvider> {
 /// 1. the one asked for (with --daw or KUMI_DAW);
 /// 2. the only DAW whose bridge is installed (a producer who uses Live alone starts in Live, as always);
 /// 3. with several installed: the one running now, else the one used last, else Live, else the first;
-/// 4. with none installed, chatting without a DAW in Live's words.
+/// 4. with none installed, the DAW on this computer, for first-run setup to set up: the only one here, else the one
+///    the producer picked last, else Live, else the first (setup asks which, `to_ask`); with none here, Live's words.
 pub fn chosen(asked: Option<DawId>, env: &Env) -> (&'static dyn DawProvider, Option<String>) {
     chosen_with(asked, env, &|provider| provider.running_now())
 }
@@ -45,6 +48,35 @@ pub fn chosen_with(
     env: &Env,
     running: &dyn Fn(&dyn DawProvider) -> bool,
 ) -> (&'static dyn DawProvider, Option<String>) {
+    chosen_among(asked, env, running, &|provider| provider.here(env))
+}
+
+/// The DAWs on this computer whose bridge isn't installed yet, as `here` says.
+fn found_here(env: &Env, here: &dyn Fn(&dyn DawProvider) -> bool) -> Vec<&'static dyn DawProvider> {
+    if providers().into_iter().any(|provider| provider.bridge_config(env).is_some()) {
+        return vec![];
+    }
+    providers().into_iter().filter(|provider| here(*provider)).collect()
+}
+
+/// The DAWs a first run asks the producer to choose among ("Which DAW do you work in?"): with no bridge installed,
+/// several DAWs here, and none of them picked before.
+pub fn to_ask(env: &Env, here: &dyn Fn(&dyn DawProvider) -> bool) -> Vec<DawId> {
+    let found = found_here(env, here);
+    let picked = last_used(env);
+    if found.len() < 2 || found.iter().any(|provider| Some(provider.id()) == picked) {
+        return vec![];
+    }
+    found.into_iter().map(|provider| provider.id()).collect()
+}
+
+/// `chosen_with`, with whether each DAW is on this computer given too.
+pub fn chosen_among(
+    asked: Option<DawId>,
+    env: &Env,
+    running: &dyn Fn(&dyn DawProvider) -> bool,
+    here: &dyn Fn(&dyn DawProvider) -> bool,
+) -> (&'static dyn DawProvider, Option<String>) {
     if let Some(provider) = asked.and_then(provider) {
         return (provider, provider.bridge_config(env));
     }
@@ -52,7 +84,21 @@ pub fn chosen_with(
         providers().into_iter().filter_map(|provider| provider.bridge_config(env).map(|config| (provider, config))).collect();
     let pick = |provider: &'static dyn DawProvider, config: &str| (provider, Some(config.to_string()));
     match installed.as_slice() {
-        [] => (&ableton::provider::Ableton, None),
+        [] => {
+            let found = found_here(env, here);
+            let picked = last_used(env);
+            let first = match found.as_slice() {
+                [] => &ableton::provider::Ableton as &'static dyn DawProvider,
+                [one] => *one,
+                several => several
+                    .iter()
+                    .find(|provider| Some(provider.id()) == picked)
+                    .or_else(|| several.iter().find(|provider| provider.id() == DawId::Ableton))
+                    .copied()
+                    .unwrap_or(several[0]),
+            };
+            (first, None)
+        }
         [(provider, config)] => pick(*provider, config),
         several => {
             let running: Vec<&(&'static dyn DawProvider, String)> = several.iter().filter(|(provider, _)| running(*provider)).collect();
@@ -92,6 +138,43 @@ pub fn also_running_words(chosen: DawId, others: &[&'static dyn DawProvider], en
         many => (format!("{} are open too", many.join(" and ")), "/daw <name> switches".into()),
     };
     Some(format!("{open}: Kumi works with {chosen_name}{why}. {switch}."))
+}
+
+/// How long one process listing answers for every DAW: a start (choosing among several bridges, then saying which
+/// others are open) lists the processes once.
+const LISTING_MS: u64 = 2_000;
+
+thread_local! {
+    static LISTING: RefCell<Option<(Instant, Rc<Vec<(u32, String)>>)>> = const { RefCell::new(None) };
+    static LISTINGS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The processes running now (pid and name), from one listing (`ps`, `tasklist` on Windows) that every DAW's
+/// `running_now` matches against; a listing is reused for a moment, then made again.
+pub fn processes() -> Rc<Vec<(u32, String)>> {
+    if let Some((at, listed)) = LISTING.with(|listing| listing.borrow().clone()) {
+        if at.elapsed() < Duration::from_millis(LISTING_MS) {
+            return listed;
+        }
+    }
+    let output = if cfg!(windows) {
+        std::process::Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output()
+    } else {
+        std::process::Command::new("ps").args(["-axo", "pid=,comm="]).output()
+    };
+    LISTINGS.with(|count| count.set(count.get() + 1));
+    let listed = Rc::new(
+        output
+            .map(|output| daw_bridge::detect::parse_processes(&String::from_utf8_lossy(&output.stdout), cfg!(windows)))
+            .unwrap_or_default(),
+    );
+    LISTING.with(|listing| *listing.borrow_mut() = Some((Instant::now(), listed.clone())));
+    listed
+}
+
+/// How many process listings this Kumi has made (`processes`).
+pub fn process_listings() -> u64 {
+    LISTINGS.with(Cell::get)
 }
 
 /// A DAW as `/daw` takes it: "live", "reaper", "renoise".
@@ -176,11 +259,14 @@ pub fn words() -> &'static kumi_runtime::core::daw::DawWords {
 }
 
 /// Whether the doctor speaks of `provider` on this computer: Live's checks always, unless the producer uses other DAWs
-/// alone (Live's bridge isn't in, and another DAW's is); another DAW's say nothing until its folders are there.
+/// alone (Live's bridge isn't in, and another DAW's is); another DAW's once its bridge is in, or when the doctor is about
+/// that DAW (`--daw renoise doctor`, or the DAW a first run would set up): a Live producer who only opened REAPER or
+/// Renoise once sees the doctor as before (review L7).
 pub fn in_use(provider: &dyn DawProvider, env: &Env) -> bool {
-    provider.id() != DawId::Ableton
-        || provider.bridge_installed(env)
-        || !providers().into_iter().any(|other| other.id() != DawId::Ableton && other.bridge_installed(env))
+    if provider.id() != DawId::Ableton {
+        return provider.bridge_installed(env) || current().id() == provider.id();
+    }
+    provider.bridge_installed(env) || !providers().into_iter().any(|other| other.id() != DawId::Ableton && other.bridge_installed(env))
 }
 
 /// The DAWs the producer works with here, by name, for the doctor's heading: those whose bridge is in (Live when none

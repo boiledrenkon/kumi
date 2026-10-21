@@ -62,14 +62,11 @@ impl DawProvider for Ableton {
         async move { live_app::open_live(&bridge_setup::default_run(), kumi_runtime::system::platform(), &env).await.is_some() }
             .boxed_local()
     }
+    fn here(&self, env: &Env) -> bool {
+        live_here() && live_app::installed(env, kumi_runtime::system::platform()) != crate::daw::provider::Installed::Missing
+    }
     fn running_now(&self) -> bool {
-        let listing = if cfg!(windows) {
-            std::process::Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output()
-        } else {
-            std::process::Command::new("ps").args(["-axo", "pid=,comm="]).output()
-        };
-        let Ok(output) = listing else { return false };
-        daw_bridge::detect::parse_processes(&String::from_utf8_lossy(&output.stdout), cfg!(windows)).iter().any(|(_, name)| {
+        crate::daw::processes().iter().any(|(_, name)| {
             let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
             name == "Live" || (name.starts_with("Ableton Live") && name.ends_with(".exe"))
         })

@@ -738,8 +738,8 @@ async fn a_reaper_only_doctor_never_speaks_lives_words() {
     kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
 }
 
-/// A Live producer who has opened Renoise once (its preferences folder is there) but never put Kumi's tool in gets a
-/// note about it, never a fix: `kumi doctor` still ends with 0, as before REAPER and Renoise.
+/// A Live producer who has opened Renoise once (its preferences folder is there) but never put Kumi's tool in sees the
+/// doctor as before REAPER and Renoise (review L7); `kumi --daw renoise doctor` gets a note about it, never a fix.
 #[tokio::test(flavor = "current_thread")]
 async fn a_live_producer_who_opened_renoise_once_gets_a_note_not_a_fix() {
     kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
@@ -753,8 +753,15 @@ async fn a_live_producer_who_opened_renoise_once_gets_a_note_not_a_fix() {
     fs::create_dir_all(prefs.join("V3.5.4")).unwrap();
     io.env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
     let after = doctor_checks(&io).await.unwrap();
-    assert_eq!(fixes(&before), fixes(&after), "no fix for a DAW never set up");
-    let note = find(&after, "Kumi's tool isn't in Renoise");
+    let texts = |checks: &[Check]| checks.iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+    assert_eq!(texts(&before), texts(&after), "Live's doctor as before: no rows for a DAW never set up");
+    assert!(!texts(&after).iter().any(|text| text.contains("Renoise")), "{:?}", texts(&after));
+    // Asked about Renoise (`--daw renoise doctor`): a note, never a fix.
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Renoise);
+    let asked = doctor_checks(&io).await.unwrap();
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
+    assert_eq!(fixes(&before), fixes(&asked), "no fix for a DAW never set up");
+    let note = find(&asked, "Kumi's tool isn't in Renoise");
     assert_eq!(note.status, CheckStatus::Note);
     assert!(note.next.as_deref().is_some_and(|next| next.contains("--daw renoise bridge")), "{note:?}");
 }

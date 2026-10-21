@@ -140,11 +140,7 @@ fn steps(value: Option<&Value>) -> Vec<JsonObject> {
 /// one of its own, so a recipe named like another DAW's is a recipe of its own, and a Kumi that knows only Live never
 /// takes another DAW's recipe for one of Live's.
 fn daw_folder(daw: DawId) -> Option<&'static str> {
-    match daw {
-        DawId::Ableton => None,
-        DawId::Reaper => Some("reaper"),
-        DawId::Renoise => Some("renoise"),
-    }
+    (daw != DawId::Ableton).then(|| daw.as_str())
 }
 impl FileRecipeStore {
     fn file(&self, name: &str) -> Result<PathBuf, RuntimeError> {
@@ -188,7 +184,7 @@ impl RecipeStore for FileRecipeStore {
     async fn list(&self) -> Result<Vec<Recipe>, RuntimeError> {
         let mut recipes = vec![];
         // Live's folder first, then each other DAW's (a recipe there is that DAW's, whatever its file says).
-        for daw in [DawId::Ableton, DawId::Reaper, DawId::Renoise] {
+        for daw in DawId::ALL {
             let folder = self.folder(daw);
             let Ok(mut entries) = tokio::fs::read_dir(&folder).await else { continue };
             let mut names = vec![];

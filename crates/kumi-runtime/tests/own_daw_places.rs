@@ -833,3 +833,31 @@ async fn renoises_unsaved_song_is_renoise_unsaved_and_a_saved_songs_notes_jobs_a
         })
         .await;
 }
+
+/// A REAPER session lists only REAPER's conversations (and imported ones); another DAW's is still found by its id, and
+/// taking it up says whose it is and how to open it there (review L4).
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_session_leaves_lives_conversations_to_live() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let store = create_conversation_store_in(dir.path().join("projects"), None, PLACES);
+                store.save(SONG_B, "mf1a2b3c4d5e1", &kept_conversation(1_760_000_000_000, "A Live Set's mix")).await.unwrap();
+                store.save("imported", "mf1a2b3c4d5e2", &kept_conversation(1_760_000_000_001, "From a file")).await.unwrap();
+            }
+            let script = ReaperScript::new(2, 0);
+            script.set_project(Some(SONG_A), "/lab/A.rpp", "sim:a", "A.rpp");
+            let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
+            own.session.submit("Hello.", None).await.unwrap();
+            kept_once(dir.path(), &format!("reaper-{SONG_A}"), 1).await;
+            let listed: Vec<String> = own.session.all_conversations().await.unwrap().into_iter().map(|row| row.place).collect();
+            assert!(!listed.contains(&SONG_B.to_string()), "Live's isn't listed: {listed:?}");
+            assert!(listed.contains(&"imported".to_string()) && listed.contains(&format!("reaper-{SONG_A}")), "{listed:?}");
+            assert!(matches!(own.session.find_conversation("mf1a2b3c4d5e1").await.unwrap(), ConversationMatch::One(_)));
+            let refused = own.session.resume_conversation("mf1a2b3c4d5e1").await.unwrap_err();
+            assert_eq!(refused.message(), "That conversation is about a Live Set: open Kumi with Live (/daw live) to carry it on there.");
+            own.close().await;
+        })
+        .await;
+}

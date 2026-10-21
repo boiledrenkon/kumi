@@ -1215,6 +1215,14 @@ fn an_updates_bridge_step_asks_nothing_more_and_waits_for_no_live() {
         assert_eq!(envs.get(key).cloned().flatten().as_deref(), Some(value), "{key}");
     }
 }
+/// Live's update ends with `kumi bridge` in a child Kumi: KUMI_DAW, which chooses the DAW sessions work with, is taken
+/// out of its environment, so the child sets up Live's bridge whatever the producer exported (review L1).
+#[test]
+fn an_updates_bridge_step_is_lives_whatever_kumi_daw_says() {
+    let command = kumi::install::bridge_command("/kumi/app", "/kumi");
+    let removed = command.as_std().get_envs().find(|(name, _)| *name == "KUMI_DAW").map(|(_, value)| value);
+    assert_eq!(removed, Some(None), "KUMI_DAW taken out of the child's environment");
+}
 /// After an update, with no bridge in Live: how to connect it where Live runs, and on Linux nothing about Live at all.
 fn says_no_bridge_yet(said: &str) {
     match kumi::install::no_bridge_yet(system::platform()) {

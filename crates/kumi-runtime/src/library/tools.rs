@@ -1,4 +1,4 @@
-use super::presets::{categories_for, preset_daws, PresetCategory};
+use super::presets::{preset_daws, PresetCategory};
 use super::{
     classify::{SoundClass, SoundKind},
     features::MeasureOptions,
@@ -118,31 +118,23 @@ pub(crate) const LIBRARY_PHRASES: &[AssetPhrase] = &[
 
 /// The tools a found sound's path goes to, in the DAW's words.
 fn sample_tools(profile: &DawProfile) -> &'static str {
-    match profile.id {
-        Some(DawId::Ableton) => "load_sample and the other sample tools",
-        Some(DawId::Reaper) => "item_import, drum_kit and the other sample steps",
-        Some(DawId::Renoise) => "sample_load, instrument_kit and the other sample steps",
-        None => "the sample tools",
-    }
+    profile.vocab.sample_tools
 }
 
 /// How a found preset is loaded, by its kind, for a DAW whose presets aren't Browser items.
 fn preset_loading(profile: &DawProfile) -> &'static str {
-    match profile.id {
-        Some(DawId::Reaper) => ". Load one by its kind: an fx chain with fx_chain_load (file: its path); a track template with track_template_insert (path); a jsfx with fx_add (name: its add, \"JS: midi/midi_choke\"); fx presets are one plug-in's presets (in presets): add that FX, then fx_preset by one's name; a plug-in preset with fx_preset on that plug-in (preset: its path); a project template is a whole project to start from, opened in REAPER",
-        Some(DawId::Renoise) => ". Load one by its kind, with its path: an instrument or a multi-sample with instrument_load; an effect preset is for one device (device): add that device with device_add, then device_preset_data (ref: the new device, path); an effect chain onto a track with device_chain_load (trackRef, path; a track that has devices needs replace: true, and they are replaced); a phrase into an instrument with phrase_load (ref, path); a modulation set into an instrument with modset_load (ref, path); a phrase script into a phrase with phrase_script (ref: the phrase, path), after phrase_add when the instrument needs a new one",
-        _ => "",
-    }
+    profile.vocab.preset_loading
 }
 
 /// The library tools' definitions in the DAW's words, find_presets' kinds the DAW's own.
 fn definitions_in(profile: &DawProfile) -> Vec<Definition> {
     let value: Value = serde_json::from_str(include_str!("tool-definitions.json")).unwrap();
     let mut value = asset_in_words(value, profile, LIBRARY_PHRASES);
-    if let Some(daw) = profile.id.filter(|daw| *daw != DawId::Ableton) {
+    // (Live's are the asset's own; another DAW's from its profile)
+    if profile.id != Some(DawId::Ableton) && !profile.vocab.preset_kinds.is_empty() {
         for definition in value.as_array_mut().into_iter().flatten() {
             if definition["name"] == FIND_PRESETS_TOOL {
-                definition["inputSchema"]["properties"]["kind"]["enum"] = json!(categories_for(daw));
+                definition["inputSchema"]["properties"]["kind"]["enum"] = json!(profile.vocab.preset_kinds);
             }
         }
     }
@@ -444,7 +436,11 @@ impl LibraryTool {
             &PresetQuery {
                 words: strings(input.get("words")),
                 device: input.get("device").and_then(Value::as_str).map(str::to_owned),
-                category: input.get("kind").and_then(Value::as_str).filter(|s| categories_for(daw).contains(s)).map(str::to_owned),
+                category: input
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .filter(|s| self.profile.vocab.preset_kinds.contains(s))
+                    .map(str::to_owned),
                 limit: limit_of(input.get("limit"), 20, 50),
             },
         );
@@ -567,8 +563,9 @@ pub fn library_tools(library: Rc<dyn LibraryAccess>, options: LibraryToolsOption
 /// `library_tools`, saying the DAW's words.
 pub fn library_tools_for(profile: &DawProfile, library: Rc<dyn LibraryAccess>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
     let definitions = definitions_in(profile);
-    // Presets are Live's (Browser items and its preset files), REAPER's and Renoise's own: not for a DAW Kumi doesn't know.
-    let presets = profile.caps.browser_items || matches!(profile.id, Some(DawId::Reaper | DawId::Renoise));
+    // Presets are a DAW's own (Live's Browser items and preset files, REAPER's and Renoise's library files): not for a DAW
+    // Kumi doesn't know.
+    let presets = profile.caps.presets;
     [FIND_SOUNDS_TOOL, FIND_PRESETS_TOOL, MY_SETS_TOOL]
         .into_iter()
         .filter(|name| *name != FIND_PRESETS_TOOL || presets)
