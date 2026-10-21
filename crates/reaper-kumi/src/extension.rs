@@ -374,8 +374,11 @@ impl Extension {
         self.listening.tick(&self.reaper(), &self.reads, busy.is_none() && !blocked, &self.snapshot, &*self.out);
         if busy.is_none() {
             self.poll_focus();
-            // The producer's undo of Kumi's changes; a plan left open.
-            self.changes.tick(&self.reaper(), &self.reads, &*self.out);
+            // The producer's undo of Kumi's changes; a plan left open. An undo or redo may bring back scratch copies Kumi
+            // dropped (they were bare edits inside the producer's points): they're swept again.
+            if self.changes.tick(&self.reaper(), &self.reads, &*self.out) {
+                self.listening.undo_moved(&self.reaper(), &*self.out);
+            }
         }
         self.flush_events();
         self.refresh_snapshot(busy);

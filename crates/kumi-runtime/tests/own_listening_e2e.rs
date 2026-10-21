@@ -680,6 +680,16 @@ async fn reaper_says_what_it_noted_when_a_render_fails_and_a_capture_is_split_wh
             }
             let swept: Vec<String> = told.borrow().iter().filter(|said| said.contains("an earlier session left")).cloned().collect();
             assert_eq!(swept, ["REAPER removed Kumi's scratch copy an earlier session left in the project: “Kumi · try ab12 1”"]);
+            // Copies REAPER's undo brought back after Kumi dropped them, removed again.
+            simulator.emit("scratch_swept", json!({"count": 2, "names": ["Kumi · try cd34 1", "Kumi · try cd34 2"], "why": "undo"}));
+            for _ in 0..50 {
+                if told.borrow().iter().any(|said| said.contains("brought back")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let back: Vec<String> = told.borrow().iter().filter(|said| said.contains("brought back")).cloned().collect();
+            assert_eq!(back, ["REAPER's undo brought back Kumi's scratch copies “Kumi · try cd34 1”, “Kumi · try cd34 2”, which Kumi had removed: removed them again"]);
             assert_ours(&told.borrow());
             reaper.close().await.unwrap();
             simulator.stop();

@@ -414,7 +414,7 @@ impl Listening {
             self.run_pending(reaper, reads, snapshot, out);
             if !self.swept.get() && self.folder.borrow().is_some() {
                 self.swept.set(true);
-                self.sweep(reaper, &reaper.projects(), out);
+                self.sweep(reaper, &reaper.projects(), out, false);
             }
         }
     }
@@ -589,13 +589,22 @@ impl Listening {
         true
     }
 
-    /// Scratch copies an earlier session left in these projects are removed, and the host told.
-    fn sweep(&self, reaper: &Reaper, projects: &[ProjectInfo], out: &dyn Outbox) {
+    /// Scratch copies an earlier session left in these projects (or, `undo`, that REAPER's undo or redo brought back after
+    /// Kumi dropped them) are removed, and the host told.
+    fn sweep(&self, reaper: &Reaper, projects: &[ProjectInfo], out: &dyn Outbox, undo: bool) {
         let Some(folder) = self.folder.borrow().clone() else { return };
         let names = self.scratch.borrow_mut().sweep(reaper, &folder, projects);
         if !names.is_empty() {
-            crate::log::line(&format!("swept {} scratch copies an earlier session left", names.len()));
-            out.event(SWEPT, json!({"count": names.len(), "names": names}));
+            crate::log::line(&format!(
+                "swept {} scratch copies ({})",
+                names.len(),
+                if undo { "REAPER's undo brought them back" } else { "an earlier session left them" }
+            ));
+            let mut event = json!({"count": names.len(), "names": names});
+            if undo {
+                event["why"] = "undo".into();
+            }
+            out.event(SWEPT, event);
             let mut swept = self.swept_names.borrow_mut();
             swept.extend(names);
             let over = swept.len().saturating_sub(64);
@@ -606,7 +615,17 @@ impl Listening {
     /// Another project came to the front (a tab, a load): copies an earlier session left in it are swept.
     pub fn project_changed(&self, reaper: &Reaper, out: &dyn Outbox) {
         if let Some(info) = reaper.current_project() {
-            self.sweep(reaper, &[info], out);
+            self.sweep(reaper, &[info], out, false);
+        }
+    }
+
+    /// The producer's undo or redo moved the project in front: copies it brought back after Kumi dropped them are swept.
+    pub fn undo_moved(&self, reaper: &Reaper, out: &dyn Outbox) {
+        if !self.scratch.borrow().has_leftovers() {
+            return;
+        }
+        if let Some(info) = reaper.current_project() {
+            self.sweep(reaper, &[info], out, true);
         }
     }
 

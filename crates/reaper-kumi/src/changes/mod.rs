@@ -722,7 +722,8 @@ impl Changes {
 
     /// Once a tick: a plan left open too long, or across a change of project, is closed (a block left open would swallow
     /// every edit the producer makes after it); and the producer's own undo and redo of Kumi's points are noticed.
-    pub fn tick(&self, reaper: &Reaper, reads: &Reads, out: &dyn Outbox) {
+    /// True when the producer's undo or redo moved the project in front since the last tick.
+    pub fn tick(&self, reaper: &Reaper, reads: &Reads, out: &dyn Outbox) -> bool {
         let stale = self.plan.borrow().as_ref().is_some_and(|plan| plan.started.elapsed() > PLAN_MAX || plan.epoch != reads.epoch());
         if stale {
             if let Some(plan) = self.plan.borrow_mut().take() {
@@ -731,12 +732,12 @@ impl Changes {
         }
         // (r-tracks, NIT-7) The FX Kumi looked at lately are looked at again for parameters that move by themselves.
         volatile::tick(reaper, reads);
-        let Some(info) = reaper.current_project() else { return };
+        let Some(info) = reaper.current_project() else { return false };
         // A plan's block is open: its points are not the producer's undo either.
         if self.plan.borrow().is_some() {
-            return;
+            return false;
         }
-        self.watch.borrow_mut().poll(reaper, info.ptr, &reads.epoch(), out);
+        self.watch.borrow_mut().poll(reaper, info.ptr, &reads.epoch(), out)
     }
 
     /// The hooks said REAPER ran an action: look at the history at once.

@@ -42,6 +42,8 @@ struct Rig {
     tx: Sender<Job>,
     snapshot: Arc<Mutex<Snapshot>>,
     dir: tempfile::TempDir,
+    /// What the extension sent the host (events).
+    out: Recorder,
 }
 
 thread_local! {
@@ -84,7 +86,7 @@ impl Rig {
         ext.tick(Driver::Timer);
         INSIDE.with(|i| i.borrow_mut().clear());
         CANCEL_INSIDE.with(|c| c.set(false));
-        Rig { ext, tx, snapshot, dir }
+        Rig { ext, tx, snapshot, dir, out }
     }
 
     /// Lets the fake's render tick this rig's extension, as REAPER's timer does inside a render.
@@ -1342,7 +1344,12 @@ fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_cha
     );
     // A copy the producer kept: the project stays marked changed.
     assert!(fake::with(|s| s.dirty));
-    assert!(scratch::read_journal(&rig.folder()).is_empty());
+    // The journal keeps the copies Kumi removed (an undo may bring them back), not the one the producer kept.
+    let journal = scratch::read_journal(&rig.folder());
+    assert_eq!(
+        journal.iter().flat_map(|e| e.copies.iter().map(|(_, name)| name.clone())).collect::<Vec<_>>(),
+        ["Kumi · try s6 1", "Kumi · try s6 3"]
+    );
     let _ = made;
     // Asked again: nothing stands.
     assert_eq!(
@@ -1355,6 +1362,35 @@ fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_cha
     fake::with(|s| s.dirty = true);
     rig.ask("scratch", json!({"action": "drop", "scratchId": "s7"})).unwrap();
     assert!(!fake::with(|s| s.dirty));
+}
+
+#[test]
+fn copies_reapers_undo_brings_back_after_a_drop_are_swept_again_and_the_host_told() {
+    let rig = Rig::new();
+    let kick = copyable();
+    make(&rig, "s5", &kick, 2);
+    // The producer moves a fader: REAPER's point holds the whole state, copies included.
+    fake::with(|s| {
+        s.undo_entries += 1;
+        s.undo_cur = None;
+    });
+    rig.tick();
+    let with_copies: Vec<fake::FakeTrack> = fake::with(|s| s.tracks.clone());
+    rig.ask("scratch", json!({"action": "drop", "scratchId": "s5"})).unwrap();
+    assert_eq!(fake::with(|s| s.tracks.len()), 4);
+    // Cmd-Z for the fader brings the copies back with it.
+    fake::with(|s| {
+        s.tracks = with_copies.clone();
+        s.undo_cur = Some(s.undo_entries - 2);
+    });
+    rig.tick();
+    assert_eq!(fake::with(|s| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()), ["Drums", "Kick", "Snare", "Reverb"]);
+    let swept: Vec<Value> = rig.out.events().into_iter().filter(|(name, _)| name == "scratch_swept").map(|(_, data)| data).collect();
+    assert_eq!(swept, [json!({"count": 2, "names": ["Kumi · try s5 1", "Kumi · try s5 2"], "why": "undo"})]);
+    // A redo with them gone: nothing more to sweep, nothing told.
+    fake::with(|s| s.undo_cur = None);
+    rig.tick();
+    assert_eq!(rig.out.events().iter().filter(|(name, _)| name == "scratch_swept").count(), 1);
 }
 
 #[test]
