@@ -548,6 +548,19 @@ local function display_from(given, fallback)
   return { title = fallback }
 end
 
+-- A container's prints, from a few texts seen last: the journal polls each journalled container about once a second and on
+-- every undo, and a text read again unchanged is the same Lua string, so its two byte-by-byte prints are made once.
+local PRINTS_KEPT = 16
+local prints_seen, prints_count = {}, 0
+local function read_prints(xml)
+  local seen = prints_seen[xml]
+  if seen then return { shape = seen.shape, content = seen.content } end
+  if prints_count >= PRINTS_KEPT then prints_seen, prints_count = {}, 0 end
+  seen = { shape = M.shape_of(xml), content = M.content_of(xml) }
+  prints_seen[xml], prints_count = seen, prints_count + 1
+  return { shape = seen.shape, content = seen.content }
+end
+
 for _, spec in ipairs(XML_KINDS) do
   local kind = spec.kind
   local function write_checked(song, env, t, d, track, device, xml, shape, desc)
@@ -595,10 +608,7 @@ for _, spec in ipairs(XML_KINDS) do
       }
     end,
     reread = reread,
-    read = function(device)
-      local xml = device.active_preset_data
-      return { shape = M.shape_of(xml), content = M.content_of(xml) }
-    end,
+    read = function(device) return read_prints(device.active_preset_data) end,
     -- (by content where both say it: a value inside changes it, which no shape tells)
     same = function(a, b)
       if a.content and b.content then return a.content == b.content end

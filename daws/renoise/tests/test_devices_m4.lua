@@ -425,6 +425,37 @@ test("devices m4: a host-made Doofer edit is written whole if its shape holds, a
   ok(device_data(3, 2).preset_data:find("<Name>Macro 1</Name>", 1, true))
 end)
 
+test("devices m4: the journal's poll of a Doofer it keeps prints its text once while the text stays the same (#361 N-S16)", function()
+  KUMI_PRINTS = 0
+  local env = H.setup({ song = {
+    name = "Lab", file_name = "/s/lab.xrns", bpm = 120, lpb = 4, mixer_device = true,
+    tracks = { { name = "Kick" }, { name = "Bass", devices = { eq5(), gainer() } }, { name = "Pad", devices = { doofer() } } },
+    send_tracks = 1, patterns = 2, pattern_lines = 16, instruments = 1,
+  }, patch = function(env_)
+    local path = env_.bundle .. "payload/changes_presets.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local counted, n = text:gsub("  seen = { shape = M%.shape_of%(xml%)", "  KUMI_PRINTS = (KUMI_PRINTS or 0) + 1\n  seen = { shape = M.shape_of(xml)")
+    assert(n == 1)
+    f = assert(io.open(path, "wb"))
+    f:write(counted)
+    f:close()
+  end })
+  local peer = H.connect(env)
+  H.frames(peer)
+  local epoch, layout = place(peer)
+  local read = call(peer, "preset_read", { ref = epoch .. ":device:3.2", epoch = epoch, layout = layout }).result
+  local edited = read.presetData:gsub("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)
+  local input = { ref = epoch .. ":device:3.2", presetData = edited, shape = read.shape, display = { title = "Doofer on Pad: macro 1 named “Drive”" } }
+  local done = call(peer, "change_apply", { kind = "doofer-macro", input = input, fence = { id = read.id }, desc = "Kumi: macro (kp16)", epoch = epoch, layout = layout })
+  ok(done.result, json.encode(done.error or {}))
+  local after_apply = KUMI_PRINTS
+  for _ = 1, 5 do mock.advance(1100) end -- five polls
+  ok(KUMI_PRINTS - after_apply <= 1, "printed once for the unchanged text, not on each poll: " .. (KUMI_PRINTS - after_apply))
+  KUMI_PRINTS = nil
+end)
+
 test("devices m4: Renoise's own undo and redo of a value inside a Doofer (no notifier tells them) are told within a second or so", function()
   local _, peer = setup()
   local epoch, layout = place(peer)
