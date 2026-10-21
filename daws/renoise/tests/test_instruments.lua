@@ -420,6 +420,38 @@ test("instruments: an instrument too big to keep isn't deleted, and the only ins
   failure(call(peer, "change_preview", { kind = "instrument-delete", input = { ref = iref(place(peer), 1) }, epoch = place(peer) }), "bad-params")
 end)
 
+-- A setup whose payload has `from` replaced with `to` in `file` (a cap lowered for a test).
+local function patched(file, from, to)
+  return setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/" .. file
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local changed, count = text:gsub(from, to)
+    assert(count == 1, from .. " isn't in " .. file)
+    f = assert(io.open(path, "wb"))
+    f:write(changed)
+    f:close()
+  end })
+end
+
+test("instruments: a delete whose notes are more than its undo can write back, or too many to keep, refuses before anything is written (#361 N1, N16)", function()
+  for _, cap in ipairs({ { "changes_instruments.lua", "M%.MAX_KEPT_NOTES = 3500", "M.MAX_KEPT_NOTES = 1", "put back in one go" },
+    { "changes_base.lua", "M%.MAX_MATERIAL_BYTES = 8 %* 1024 %* 1024", "M.MAX_MATERIAL_BYTES = 200", "too many notes" } }) do
+    local env, peer = patched(cap[1], cap[2], cap[3])
+    note_at(1, 1)
+    note_at(5, 1)
+    local previewed, epoch, layout = preview(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+    local refused = apply(peer, "instrument-delete", { ref = iref(epoch, 2) }, "Kumi: d (k1)", previewed.fence, epoch, layout)
+    failure(refused, "failed")
+    ok(refused.error.message:find(cap[4], 1, true), refused.error.message)
+    ok(refused.error.message:find("delete it in Renoise", 1, true), "it says what the producer can do: " .. refused.error.message)
+    eq(#mock.data.instruments, 3, "the instrument is still there")
+    eq(note_value(1), 1, "its notes too")
+    eq(steps(), 0, "nothing written")
+  end
+end)
+
 test("instruments: a big song is looked through in slices before the delete, which is one step; a pattern changed meanwhile is looked at again", function()
   local env, peer = setup({ patch = function(env_)
     local path = env_.bundle .. "payload/changes_instruments.lua"

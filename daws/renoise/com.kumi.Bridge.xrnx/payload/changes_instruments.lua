@@ -25,6 +25,9 @@ M.MAX_INSTRUMENT_BYTES = 64 * 1024 * 1024
 M.MAX_LOAD_BYTES = 96 * 1024 * 1024
 -- The most swaps one move makes (each renumbers the notes of the whole song).
 M.MAX_MOVE_SWAPS = 64
+-- The most notes a delete keeps: its undo writes them back in the callback that loads the instrument (seven fields a note, about
+-- 47 µs a write in the lab: about a second, beside the load's ≤ 1.75 s).
+M.MAX_KEPT_NOTES = 3500
 
 -- Property kinds of an instrument (and its macros): found by their place on a restore.
 
@@ -541,6 +544,22 @@ local function delete_write(song, env, input, fence, desc, notes)
   if bytes > M.MAX_INSTRUMENT_BYTES then
     fail("failed", string.format("%s holds %.0f MB, more than Kumi can keep to put it back, so it won't delete it", q(label), bytes / 1048576))
   end
+  -- Everything that can refuse does so before anything is written: what's kept must fit, and the undo must write it back in one
+  -- callback.
+  if #notes > M.MAX_KEPT_NOTES then
+    fail("failed", string.format("%s plays %d notes, more than Kumi can put back in one go (%d), so it didn't delete it: delete it in Renoise, whose own undo brings it back with its notes",
+      q(label), #notes, M.MAX_KEPT_NOTES))
+  end
+  local patterns = {}
+  for _, note in ipairs(notes) do patterns[note.p] = true end
+  local material_ = import("changes_material")
+  local pool = material_.keep_pool(song, env, patterns)
+  -- (its lists' logs, for the one Kumi puts back to take on: the places kept in it before then follow)
+  local logs = env.logs_of and env.logs_of("instrument", { i }) or nil
+  local material = { print = print_of_fence(fence), name = instrument.name, index = i, notes = notes, pool = pool, logs = logs }
+  if #json.encode(material) > base.MAX_MATERIAL_BYTES then
+    fail("failed", string.format("%s plays too many notes for Kumi to keep them all, so it didn't delete it: delete it in Renoise, whose own undo brings it back", q(label)))
+  end
   -- (saved first: if Renoise can't save it, nothing is deleted)
   local file = places_.temp_file(".xrni")
   local saved = with_selected(song, i, function() return renoise.app():save_instrument(file) end)
@@ -548,24 +567,11 @@ local function delete_write(song, env, input, fence, desc, notes)
     fail("failed", "Renoise wouldn't save " .. q(label) .. " to keep it, so Kumi didn't delete it")
   end
   local stat = io.stat(file)
-  local patterns = {}
-  for _, note in ipairs(notes) do patterns[note.p] = true end
-  local material_ = import("changes_material")
-  local pool = material_.keep_pool(song, env, patterns)
-  local name = instrument.name
-  -- (its lists' logs, for the one Kumi puts back to take on: the places kept in it before then follow)
-  local logs = env.logs_of and env.logs_of("instrument", { i }) or nil
+  material.file, material.bytes = file, stat and stat.size or nil
   song:describe_undo(desc)
   song:delete_instrument_at(i)
   -- (the place it goes back to: after the instrument before it, followed from here)
-  local material = {
-    file = file, bytes = stat and stat.size or nil, print = print_of_fence(fence), name = name, index = i,
-    after = env.instrument_mark and env.instrument_mark() or nil, notes = notes, pool = pool, logs = logs,
-  }
-  if #json.encode(material) > base.MAX_MATERIAL_BYTES then
-    -- (too many notes to keep: the instrument goes back, and nothing is lost)
-    fail("failed", string.format("%s plays too many notes for Kumi to keep them all: it won't delete it", q(label)))
-  end
+  material.after = env.instrument_mark and env.instrument_mark() or nil
   local note = #notes > 0 and string.format("Renoise cleared the %d %s that played it; Kumi puts %s back with it.", #notes, #notes == 1 and "note" or "notes", #notes == 1 and "it" or "them") or nil
   return {
     applied = { deleted = true }, material = material, target = song_target(env),
