@@ -403,6 +403,7 @@ local function shell_quote(s)
 end
 
 local real_time = os.time
+local real_open = io.open
 local real_popen = io.popen
 local real_rename, real_remove = os.rename, os.remove
 
@@ -412,6 +413,14 @@ local function ansi_blind(path)
 end
 
 local function install_os_shims()
+  -- /dev/urandom gives M.urandom's bytes when it is set (zeros by default, so epochs start at 0 as the vectors were made).
+  io.open = function(path, mode)
+    if path == "/dev/urandom" and M.urandom then
+      local bytes = M.urandom
+      return { read = function(_, n) return bytes:sub(1, n) end, close = function() end }
+    end
+    return real_open(path, mode)
+  end
   -- Wall time follows the mock clock, from a fixed start.
   os.time = function(t)
     if t then return real_time(t) end
@@ -499,6 +508,7 @@ function M.reset(options)
   -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
+  M.urandom = not options.real_random and string.rep("\0", 32) or nil
   M.song = nil
   M.name_first = false
   M.platform = options.platform or "MACINTOSH"

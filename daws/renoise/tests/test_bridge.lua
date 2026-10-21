@@ -49,7 +49,7 @@ local function setup(options)
   if not options.no_reference then reference(env, options.reference) end
   if options.patch then options.patch(env) end
   mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers,
-    move_replaces = options.move_replaces, temp_dir = env.dir })
+    move_replaces = options.move_replaces, temp_dir = env.dir, real_random = options.real_random })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
   dofile(env.bundle .. "main.lua")
@@ -192,6 +192,21 @@ test("bridge: listens on 127.0.0.1:9780 and writes the discovery file", function
   ok(discovery.startedMs > 1.7e12, "unix ms")
   eq(#mock.popen_calls, 1, "the pid is looked up once")
   ok(read(env.log_file()):find("listening on 127.0.0.1:9780"), "logged")
+  no_dialogs()
+end)
+
+test("bridge: two Renoise started in the same second start their epochs apart", function()
+  setup({ real_random = true })
+  local first = KUMI_BRIDGE.bridge.epoch_n
+  setup({ real_random = true })
+  local second = KUMI_BRIDGE.bridge.epoch_n
+  ok(first ~= second, "both start at " .. first)
+  ok(first < 2 ^ 28 and second < 2 ^ 28 and first == math.floor(first), "below 2^28, whole")
+  -- (without /dev/urandom, as on Windows: from the nonce's hash)
+  mock.urandom = false
+  local wire = T.load_payload_module("wire")
+  local n = wire.random28()
+  ok(n >= 0 and n < 2 ^ 28 and n == math.floor(n), "from the hash: " .. n)
   no_dialogs()
 end)
 

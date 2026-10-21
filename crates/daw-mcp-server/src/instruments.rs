@@ -577,7 +577,7 @@ impl crate::host::Host {
             "fence": {"print": export.get("print").cloned().unwrap_or(Value::Null), "chains": chains_print(chains)},
             "display": display,
         });
-        match self.journal().previewed(KIND, input, &answer, layout) {
+        match self.journal().previewed(KIND, input, &answer, layout, pick.clone()) {
             Ok(record) => {
                 let mut prior = record.prior.clone();
                 if let Some(fields) = prior.as_object_mut() {
@@ -596,12 +596,7 @@ impl crate::host::Host {
     /// written beside it for the tool to load.
     pub(crate) async fn mapping_apply_params(&self, record: &crate::changes::Record) -> Result<Value, Value> {
         let (export, bytes, text) = self
-            .instrument_file(
-                json!({"ref": record.input["ref"]}),
-                record.epoch.as_deref(),
-                record.input_layout,
-                &crate::host::Pick::default(),
-            )
+            .instrument_file(json!({"ref": record.input["ref"]}), record.epoch.as_deref(), record.input_layout, &record.instance)
             .await?;
         let chains = chains_print(export.get("chains").unwrap_or(&Value::Null));
         if export.get("print") != record.fence.get("print") || record.fence.get("chains").and_then(Value::as_str) != Some(chains.as_str()) {
@@ -639,7 +634,7 @@ impl crate::host::Host {
                 json!({"at": material.get("at").cloned().unwrap_or(Value::Null)}),
                 record.epoch.as_deref(),
                 record.layout,
-                &crate::host::Pick::default(),
+                &record.instance,
             )
             .await?;
         let m = macro_number(&record.input).map_err(|r| refusal_answer(&r))?;

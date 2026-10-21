@@ -42,6 +42,9 @@ pub struct Record {
     pub id: String,
     pub kind: String,
     pub input: Value,
+    /// The DAW the change was previewed in (its pid and resource folder): its apply and undo go there, or are refused when
+    /// it isn't running, and never reach another instance.
+    pub instance: crate::host::Pick,
     pub epoch: Option<String>,
     /// The layout the DAW's refs are at as the DAW last answered (the preview's, then the apply's): `target` is in it.
     pub layout: Option<u64>,
@@ -166,7 +169,14 @@ impl Journal {
     }
 
     /// Keeps a previewed change (the bridge's `change_preview` answer): its id and confirmation.
-    pub fn previewed(&self, kind: &str, input: &Value, answer: &Value, layout: Option<u64>) -> Result<Record, Refusal> {
+    pub fn previewed(
+        &self,
+        kind: &str,
+        input: &Value,
+        answer: &Value,
+        layout: Option<u64>,
+        instance: crate::host::Pick,
+    ) -> Result<Record, Refusal> {
         let mut inner = self.inner.lock().expect("journal lock");
         inner.next += 1;
         let seed = inner.next ^ now_ms();
@@ -179,6 +189,7 @@ impl Journal {
             id: format!("t{}{}", inner.next, token(seed ^ 0x5bd1)),
             kind: kind.to_string(),
             input: input.clone(),
+            instance,
             epoch: answer.get("epoch").and_then(Value::as_str).map(str::to_owned),
             layout: answer.get("layout").and_then(Value::as_u64).or(layout),
             input_layout: layout,
@@ -634,6 +645,11 @@ impl crate::host::Host {
         };
         // (M4 n-devices: the Doofer, Splitter and Notepad edits are made here from the device's preset data, and an
         // instrument's macro mappings added or removed from its file)
+        // The instance the change is previewed in: its apply and undo go there.
+        let pick = match self.pin(&pick).await {
+            Ok(pinned) => pinned,
+            Err(error) => return (self.call_error(&error), true),
+        };
         if crate::presets::host_makes(self.daw(), &kind, input) {
             return self.preset_preview(&pick, &kind, input, arguments.get("epoch").and_then(Value::as_str), layout).await;
         }
@@ -643,7 +659,7 @@ impl crate::host::Host {
             Ok(answer) => answer,
             Err(error) => return (self.call_error(&error), true),
         };
-        match self.journal().previewed(&kind, input, &answer, layout) {
+        match self.journal().previewed(&kind, input, &answer, layout, pick) {
             Ok(record) => {
                 let mut reply = json!({"transactionId": record.id, "confirmation": record.confirmation, "prior": record.prior, "display": record.display, "target": record.target});
                 place(&mut reply, record.epoch.as_deref(), record.layout);
@@ -666,6 +682,9 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
+        if let Some(answer) = self.elsewhere(&record.instance) {
+            return self.journal().end_apply(&id, &key, Err((&answer, false)));
+        }
         let params = if crate::presets::host_makes(self.daw(), &record.kind, &record.input) {
             match self.preset_apply_params(&record).await {
                 Ok(params) => params,
@@ -675,7 +694,7 @@ impl crate::host::Host {
         } else {
             apply_params(&record)
         };
-        match self.call("change_apply", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+        match self.call("change_apply", params, &record.instance, CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
             // The bridge took it and couldn't say how it ended (a job it claimed and didn't finish in time): it may have
             // changed the DAW.
@@ -705,6 +724,9 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
+        if let Some(answer) = self.elsewhere(&record.instance) {
+            return self.journal().end_undo(&id, &key, Err(&answer));
+        }
         let discard = arguments.get("discard") == Some(&Value::Bool(true));
         let params = if crate::presets::composes_undo(self.daw(), &record.kind, &record.input) {
             match self.preset_restore_params(&record, &desc, discard).await {
@@ -729,7 +751,7 @@ impl crate::host::Host {
             place(&mut params, record.epoch.as_deref(), record.layout);
             params
         };
-        match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+        match self.call("change_restore", params, &record.instance, CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
             // Sent, and no answer (or the bridge couldn't say how it ended): the restore may have run. Kumi won't undo it
             // blindly again.
@@ -941,10 +963,11 @@ impl crate::host::Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::Pick;
 
     fn preview(journal: &Journal) -> Record {
         let answer = json!({"epoch": "e1", "target": {"ref": "r:track:{A}", "kind": "track"}, "prior": {"volumeDb": 0.0}, "fence": {"volumeDb": 0.0}, "display": {"title": "Bass volume −6 dB"}});
-        journal.previewed("track-volume", &json!({"ref": "r:track:{A}", "volumeDb": -6.0}), &answer, None).unwrap()
+        journal.previewed("track-volume", &json!({"ref": "r:track:{A}", "volumeDb": -6.0}), &answer, None, Pick::default()).unwrap()
     }
 
     #[test]
@@ -986,7 +1009,7 @@ mod tests {
     fn an_undo_is_asked_from_the_epoch_and_layout_the_apply_answered() {
         let journal = Journal::default();
         let answer = json!({"epoch": "e1", "layout": 4, "target": {"ref": "e1:track:3", "kind": "track"}, "prior": {"deleted": false}, "fence": {}, "display": {"title": "Deleted track Bass"}});
-        let record = journal.previewed("track-delete", &json!({"ref": "e1:track:3"}), &answer, Some(4)).unwrap();
+        let record = journal.previewed("track-delete", &json!({"ref": "e1:track:3"}), &answer, Some(4), Pick::default()).unwrap();
         let Ok(Ok(_)) = journal.begin_apply(&record.id, &record.confirmation, "a1", None) else { panic!("applying") };
         // Deleting the track moved Renoise's layout from 4 to 5 (and a device list, in another change, would move the epoch).
         journal.end_apply(
@@ -1039,7 +1062,7 @@ mod tests {
         }
         let answer = json!({"prior": {}, "fence": {}});
         let make = || {
-            let newer = journal.previewed("track-volume", &json!({}), &answer, None).unwrap();
+            let newer = journal.previewed("track-volume", &json!({}), &answer, None, Pick::default()).unwrap();
             journal.begin_apply(&newer.id, &newer.confirmation, "k", None).unwrap().unwrap();
             journal.end_apply(&newer.id, "k", Ok(&json!({"applied": {}})));
         };
@@ -1059,7 +1082,8 @@ mod tests {
         let journal = Journal::default();
         // Kumi read Bass as track 3 at layout 0; the producer inserted a track, so the preview answered at layout 1.
         let answer = json!({"epoch": "e1", "layout": 1, "target": {"ref": "e1:track:4", "kind": "track"}, "prior": {"volumeDb": 0.0}, "fence": {}, "display": {"title": "Bass volume −6 dB"}});
-        let record = journal.previewed("track-volume", &json!({"ref": "e1:track:3", "volumeDb": -6.0}), &answer, Some(0)).unwrap();
+        let record =
+            journal.previewed("track-volume", &json!({"ref": "e1:track:3", "volumeDb": -6.0}), &answer, Some(0), Pick::default()).unwrap();
         let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
         let params = apply_params(&applying);
         assert_eq!((&params["input"]["ref"], &params["layout"]), (&json!("e1:track:3"), &json!(0)), "the DAW carries it again");
@@ -1108,8 +1132,8 @@ mod tests {
         journal.step(Some(label.clone()));
         let volume = preview(&journal);
         let repeat_answer = json!({"epoch": "e1", "target": {"ref": "r:project", "kind": "project"}, "prior": {"on": false}, "fence": {}, "display": {"title": "Repeat on"}});
-        let unanswered = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None).unwrap();
-        let unflagged = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None).unwrap();
+        let unanswered = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None, Pick::default()).unwrap();
+        let unflagged = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None, Pick::default()).unwrap();
         journal.begin_apply(&volume.id, &volume.confirmation, "a", None).unwrap().unwrap();
         journal.end_apply(&volume.id, "a", Ok(&json!({"applied": {}, "undo": {"entry": null, "inPlan": true}})));
         // One repeat is sent and never answered; the other is answered without saying whether the plan's point covers it.
@@ -1124,8 +1148,8 @@ mod tests {
         assert_eq!(journal.get(&unflagged.id).unwrap().state, State::Applied);
         // Renoise's mutes, solos and loops alike; its other kinds are in its undo.
         let renoise = Journal::for_daw(daw_bridge::Daw::Renoise);
-        assert!(!renoise.previewed("track-mute", &json!({}), &repeat_answer, None).unwrap().in_daw_undo);
-        assert!(renoise.previewed("track-volume", &json!({}), &repeat_answer, None).unwrap().in_daw_undo);
+        assert!(!renoise.previewed("track-mute", &json!({}), &repeat_answer, None, Pick::default()).unwrap().in_daw_undo);
+        assert!(renoise.previewed("track-volume", &json!({}), &repeat_answer, None, Pick::default()).unwrap().in_daw_undo);
     }
 
     #[test]
@@ -1139,7 +1163,7 @@ mod tests {
         let material = "x".repeat(MAX_BYTES - 64 * 1024);
         journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": material}})));
         let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
-        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None, Pick::default()).is_ok());
         assert!(journal.get(&big.id).is_none() && journal.get(&small.id).is_some(), "the big delete went, the older small change stays");
     }
 
@@ -1161,7 +1185,7 @@ mod tests {
         journal.begin_apply(&big.id, &big.confirmation, "a", None).unwrap().unwrap();
         journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": "x".repeat(MAX_BYTES - 64 * 1024)}})));
         let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
-        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None, Pick::default()).is_ok());
         assert!(journal.get(&big.id).is_none(), "the big delete went");
         assert!(small.iter().all(|record| journal.get(&record.id).is_some()), "every small undone change stays");
     }
@@ -1182,7 +1206,7 @@ mod tests {
         journal.begin_apply(&big.id, &big.confirmation, "a", None).unwrap().unwrap();
         journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": "x".repeat(MAX_BYTES - 64 * 1024)}})));
         let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
-        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None, Pick::default()).is_ok());
         assert!(journal.get(&big.id).is_none(), "the big delete went");
         assert!(small.iter().all(|record| journal.get(&record.id).is_some()), "every small change stays");
     }

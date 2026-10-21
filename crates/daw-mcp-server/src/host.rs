@@ -287,10 +287,8 @@ impl Host {
         });
         let (alive, _, _) = self.instances();
         if !reusable {
-            if let Some(open) = current.take() {
-                open.client.close().await;
-            }
             let secret = self.secret()?;
+            // (a pick that matches nothing leaves the connection there is: the calls without a pick go on using it)
             let Some(discovery) = alive.iter().find(|discovery| pick.matches(discovery)) else {
                 return Err(if alive.is_empty() {
                     format!("no {} with Kumi's bridge is running", self.daw)
@@ -298,6 +296,9 @@ impl Host {
                     format!("no running {} matches that pid or folder", self.daw)
                 });
             };
+            if let Some(open) = current.take() {
+                open.client.close().await;
+            }
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
                     self.forward_events(&client);
@@ -382,6 +383,28 @@ impl Host {
             Err(error) => result["busy"] = busy_word(&error).into(),
         }
         result
+    }
+
+    /// The instance a pick means now (connected to, if it wasn't), as a pick of that one alone: what a change is previewed
+    /// in, so its apply and undo go there and never to another one.
+    pub(crate) async fn pin(&self, pick: &Pick) -> Result<Pick, CallError> {
+        let mut current = self.current.lock().await;
+        self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
+        let open = current.as_ref().expect("connected above");
+        Ok(Pick { pid: Some(open.pid), resource: Some(open.resource.clone()) })
+    }
+
+    /// The refusal for a change whose instance isn't running any more (another one may be: the change isn't made there).
+    pub(crate) fn elsewhere(&self, instance: &Pick) -> Option<Value> {
+        let pid = instance.pid?;
+        if self.instances().0.iter().any(|discovery| instance.matches(discovery)) {
+            return None;
+        }
+        let folder = instance.resource.as_deref().map(|resource| format!(", {resource}")).unwrap_or_default();
+        Some(json!({
+            "error": format!("this change was made in another {} (pid {pid}{folder}), which isn't running now: preview it again", self.daw),
+            "code": "stale",
+        }))
     }
 
     /// Asks the chosen instance's bridge for one of its answers (`read`, `snapshot`, `focus`, `focus_body`). The
