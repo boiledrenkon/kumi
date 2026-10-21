@@ -46,14 +46,16 @@ fn title(code: &str) -> String {
     format!("Ran Lua: {clipped}{more}")
 }
 
-/// A long bracket that the code doesn't close: `[==[` … `]==]` with enough `=`.
+/// A long bracket that the code doesn't close: `[==[` … `]==]` with enough `=`, a space before the closing one (a chunk
+/// ending in `]`, as `return t[1]` does, would otherwise close a `]]` with its own last character; a space, not a line,
+/// keeps the line an error at the end names).
 fn long_string(code: &str) -> String {
     let mut level = 0;
     while code.contains(&format!("]{}]", "=".repeat(level))) {
         level += 1;
     }
     let eq = "=".repeat(level);
-    format!("[{eq}[\n{code}]{eq}]")
+    format!("[{eq}[\n{code} ]{eq}]")
 }
 
 /// The ReaScript that runs `code` (or only compiles it, `check`) and leaves its answer in the ext state `token`.
@@ -216,7 +218,9 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         // (REAPER was asked to run it and nothing came back: whether it ran, and what it did, can't be told)
         return Err((
             "uncertain".into(),
-            "REAPER was asked to run the chunk and it gave no answer: whatever it did, REAPER's undo takes back".into(),
+            "REAPER was asked to run the chunk and it gave no answer (if REAPER showed an error in the script around it, that is \
+             Kumi's own wrapper failing, not the chunk): whatever it did, REAPER's undo takes back"
+                .into(),
         ));
     };
     if ran["compiled"] != true {

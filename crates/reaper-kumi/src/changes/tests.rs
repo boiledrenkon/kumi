@@ -3452,8 +3452,11 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert_eq!((&failed["ok"], &failed["error"]["line"], &failed["error"]["message"]), (&json!(false), &json!(2), &json!("boom")));
     let looped = run("while true do end", 50, false);
     assert!(looped["error"]["message"].as_str().unwrap().contains("stopped after 50 ms"), "{looped}");
-    // A chunk that closes the wrapper's own long bracket is still one string.
+    // A chunk that closes the wrapper's own long bracket is still one string, and so is one that ends in `]` or `]=`.
     assert_eq!(run("return ']]'", 1000, false)["result"], "]]");
+    assert_eq!(run("local t = {5}\nreturn t[1]", 1000, false)["result"], 5);
+    assert_eq!(run("local t = {5}\nreturn t[#t]", 1000, false)["result"], 5);
+    assert_eq!(run("local s = 'a]='\nreturn s", 1000, false)["result"], "a]=");
 }
 
 // ----- sidechains: a send's channels, a track's channels, an FX's pins (S8) -----
