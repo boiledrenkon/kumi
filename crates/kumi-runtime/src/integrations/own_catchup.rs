@@ -474,6 +474,8 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
+                    // (a `…Hash` leaf is the parameters' fingerprint, never one of them)
+                    .filter(|d| d.get("fingerprint") != Some(&Value::Bool(true)))
                     .filter_map(|d| Some((d.get("what")?.as_str()?.strip_prefix("parameters.")?.to_owned(), plain(&d["to"]))))
                     .collect();
                 if values.is_empty() {
@@ -769,6 +771,49 @@ mod tests {
         let lines: Vec<Vec<String>> = told.borrow().iter().map(|c| c.lines.clone()).collect();
         assert_eq!(lines, [vec![], vec!["Tempo 120 → 121 BPM".to_string()]]);
         assert!(remembered.since("A").is_some() && remembered.since("B").is_none());
+    }
+
+    /// What the host says of an FX whose parameters moved: the diff's details as watch_stop sends them, with the one
+    /// moved parameter it names (as its `name_moves` does) when `named`.
+    fn host_said(named: bool) -> Value {
+        use daw_mcp_server::semantic::{diff, Change, Detail, Snapshot};
+        let snapshot = |hash: &str, ratio: f64| {
+            Snapshot {
+            records: vec![
+                serde_json::from_value(json!({"k": "track", "id": "{B}", "n": "Bass", "o": 1})).unwrap(),
+                serde_json::from_value(json!({"k": "FX", "id": "{F}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"parameters": {"parametersHash": hash}}, "v": [0.5, ratio]})).unwrap(),
+            ],
+            ..Default::default()
+        }
+        };
+        let mut said = diff(&snapshot("77aa", 0.1), &snapshot("77ab", 0.4), true, &Default::default());
+        if named {
+            if let Change::Changed { details, .. } = &mut said.changes[0] {
+                details.push(Detail {
+                    facet: "parameters".into(),
+                    what: "parameters.Ratio".into(),
+                    from: json!(0.1),
+                    to: json!({"value": 0.4, "shows": "0.4"}),
+                    fingerprint: false,
+                });
+            }
+        }
+        json!({"changes": said.changes})
+    }
+
+    // Review K7: the parameters' fingerprint is never drafted as a parameter to set.
+    #[test]
+    fn a_tweaked_effects_fingerprint_is_never_drafted_as_one_of_its_parameters() {
+        let answer = host_said(true);
+        assert_eq!(answer["changes"][0]["details"][0]["what"], "parameters.parametersHash", "{answer}");
+        let drafted = draft(&answer, &WORDS).unwrap();
+        assert_eq!(
+            drafted["steps"],
+            json!([{"tool": "fx_params", "input": {"values": [{"param": "Ratio", "normalized": 0.4}], "ref": "$reacomp"}}])
+        );
+        // Its names not read (past what the host reads): nothing to set, and it's left out.
+        let answer = host_said(false);
+        assert!(draft(&answer, &WORDS).is_none(), "{answer}");
     }
 
     #[test]
