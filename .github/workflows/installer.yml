@@ -839,3 +839,30 @@ jobs:
           latest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -V | tail -n 1)"
           gh release edit "$latest" --repo "$GITHUB_REPOSITORY" --latest
           echo "The latest release is $latest."
+
+  nightly-failed:
+    # The nightly run is the only one before a tag that builds all six bundles with the release profile, REAPER's
+    # extension in each (the cross builds, lipo, strip and codesign). A break there stops the next release, Live's
+    # fixes too, so it opens an issue (or comments on the open one) to be seen the next morning.
+    name: The nightly build failed
+    needs: [plan, native]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="The nightly Installer build failed"
+          body="The nightly release-profile build of main failed: $RUN. Every release builds the same six bundles, with REAPER's extension in each, so a tag fails the same way until this is fixed."
+          open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
