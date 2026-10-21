@@ -14,6 +14,8 @@ pub mod own_listening;
 pub mod own_phrases;
 pub mod own_pictures;
 pub mod own_views;
+#[cfg(test)]
+mod pack_tests;
 pub mod reaper;
 pub mod reaper_changes;
 pub mod renoise;

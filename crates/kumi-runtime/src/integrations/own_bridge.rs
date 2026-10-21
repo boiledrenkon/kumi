@@ -868,11 +868,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     fn instructions(&self) -> String {
-        let place = self.daw.profile.words.place;
-        format!(
-            "{} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
-            self.daw.instructions, self.daw.changes.instructions
-        )
+        instructions_of(self.daw)
     }
 
     fn read_tool(&self) -> Rc<dyn KernelTool> {
@@ -1559,6 +1555,15 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
         }
     }
     shown
+}
+
+/// The instructions a DAW's turns carry: its own, its changes', and what catch-up's summary is.
+pub fn instructions_of(daw: &OwnDaw) -> String {
+    let place = daw.profile.words.place;
+    format!(
+        "{} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
+        daw.instructions, daw.changes.instructions
+    )
 }
 
 /// The setup as the model sees it: a render folder outside the project is named by its last folder, as the project's file is
