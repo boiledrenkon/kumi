@@ -182,13 +182,7 @@ end
 local function lines_print(phrase)
   local rows = read_lines(phrase)
   local text = json.encode(rows, { sort_keys = true }) or ""
-  local a, b = 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(text)
 end
 
 -- The phrase's mapping (its keys in keymap mode): its note range, or nil.

@@ -331,13 +331,7 @@ local function own_print(song, p, t)
   for k, automation in ipairs(pattern_track.automation) do
     for _, point in ipairs(automation.points) do parts[#parts + 1] = string.format("a%d:%.9g:%.9g:%.9g", k, point.time, point.value, point.scaling) end
   end
-  local text, a, b = table.concat(parts, "|"), 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(table.concat(parts, "|"))
 end
 
 local function alias_input(song, env, input)
