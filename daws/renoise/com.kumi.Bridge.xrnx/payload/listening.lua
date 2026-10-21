@@ -188,10 +188,32 @@ local function scan_pattern(song, p, tracks, into, over)
   return true
 end
 
--- Pattern p's cache entry while its lines haven't changed (`mark_of(p)`: the count of its changed lines, by the bridge's line
--- notifiers; nil when unknown, which reads again), whole or part read; nil when there's none.
-local function cached_changes(p, tracks, mark_of)
+-- Pattern p's mark for the cache: the count of its changed lines (`mark_of(p)`, by the bridge's line notifiers) and, for each
+-- track read that is an alias, the pattern it shows with that one's count: an edit in the source tells the source's notifiers
+-- only (measured). Nil when one is unknown.
+local function cache_mark(song, p, tracks, mark_of)
   local mark = mark_of and mark_of(p) or nil
+  if not mark then return nil end
+  local pattern, parts = song:pattern(p), nil
+  for t = 1, tracks do
+    if song:track(t).visible_effect_columns > 0 then
+      local pattern_track = pattern:track(t)
+      if pattern_track.is_alias then
+        local q = pattern_track.alias_pattern_index
+        local source = mark_of(q)
+        if not source then return nil end
+        parts = parts or { mark }
+        parts[#parts + 1] = t .. ":" .. q .. "=" .. source
+      end
+    end
+  end
+  return parts and table.concat(parts, "|") or mark
+end
+
+-- Pattern p's cache entry while its lines (and those its aliases show) haven't changed (nil when unknown, which reads again),
+-- whole or part read; nil when there's none.
+local function cached_changes(song, p, tracks, mark_of)
+  local mark = cache_mark(song, p, tracks, mark_of)
   local cached = S and S.zcache[p]
   if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached end
   return nil, mark
@@ -199,7 +221,7 @@ end
 
 -- A pattern's commands, from the cache, else read, going on from where a slice stopped. nil when `over()` stopped it part way.
 local function pattern_changes(song, p, tracks, mark_of, over)
-  local cached, mark = cached_changes(p, tracks, mark_of)
+  local cached, mark = cached_changes(song, p, tracks, mark_of)
   if cached and not cached.next_t then return cached.changes, cached.irregular end
   local reading = cached or { mark = mark, tracks = tracks, changes = {}, irregular = false }
   local done = scan_pattern(song, p, tracks, reading, over)
@@ -227,7 +249,7 @@ function M.warm(mark_of)
     local p = sequencer:pattern(s)
     if not seen[p] then
       seen[p] = true
-      local cached = cached_changes(p, tracks, mark_of)
+      local cached = cached_changes(song, p, tracks, mark_of)
       if not cached or cached.next_t then
         if pattern_changes(song, p, tracks, mark_of, over) == nil or over() then return end
       end
