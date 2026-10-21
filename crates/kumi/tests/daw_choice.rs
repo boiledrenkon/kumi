@@ -172,3 +172,36 @@ fn every_daw_is_asked_whether_it_runs_from_one_process_listing() {
     }
     assert_eq!(kumi::daw::process_listings() - before, 1, "one listing for every DAW");
 }
+
+/// With no bridge installed, a first run sets up the DAW on this computer: the only one here, else the one the producer
+/// chose before, else Live, else the first; setup asks among several none of which was chosen (review L2).
+#[test]
+fn without_a_bridge_the_daw_here_is_the_one_a_first_run_sets_up() {
+    use kumi_runtime::core::daw::DawId;
+    let home = tempfile::tempdir().unwrap();
+    let mut env = env();
+    env.insert("KUMI_HOME".into(), home.path().to_string_lossy().into_owned());
+    let not_running = |_: &dyn kumi::daw::DawProvider| false;
+    let first = |here: &[DawId], env: &Env| {
+        let here = here.to_vec();
+        kumi::daw::chosen_among(None, env, &not_running, &move |provider| here.contains(&provider.id())).0.id()
+    };
+    let asked = |here: &[DawId], env: &Env| {
+        let here = here.to_vec();
+        kumi::daw::to_ask(env, &move |provider| here.contains(&provider.id()))
+    };
+    assert_eq!(first(&[DawId::Reaper], &env), DawId::Reaper, "REAPER alone");
+    assert_eq!(first(&[DawId::Renoise], &env), DawId::Renoise, "Renoise alone");
+    assert_eq!(first(&[DawId::Ableton], &env), DawId::Ableton, "Live alone, as always");
+    assert_eq!(first(&[], &env), DawId::Ableton, "none: Live's words, as always");
+    assert!(asked(&[DawId::Reaper], &env).is_empty() && asked(&[], &env).is_empty(), "nothing to ask with one or none");
+    assert_eq!(first(&[DawId::Ableton, DawId::Reaper], &env), DawId::Ableton);
+    assert_eq!(asked(&[DawId::Ableton, DawId::Reaper], &env), [DawId::Ableton, DawId::Reaper]);
+    assert_eq!(first(&[DawId::Reaper, DawId::Renoise], &env), DawId::Reaper);
+    // Chosen once (setup remembers it): that one, and nothing asked again.
+    kumi::daw::remember_used(DawId::Renoise, &env);
+    assert_eq!(first(&[DawId::Ableton, DawId::Renoise], &env), DawId::Renoise);
+    assert!(asked(&[DawId::Ableton, DawId::Renoise], &env).is_empty());
+    // Asked for, it's that one whatever is here.
+    assert_eq!(kumi::daw::chosen_among(Some(DawId::Ableton), &env, &not_running, &|_| true).0.id(), DawId::Ableton);
+}

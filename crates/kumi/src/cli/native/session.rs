@@ -637,6 +637,18 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         let daw_after = daw_after.clone();
         Rc::new(move |daw| daw_after.set(Some(daw))) as Rc<dyn Fn(kumi_runtime::core::daw::DawId)>
     });
+    // A first run with several DAWs here and no bridge yet: setup asks which, remembers it, and opens Kumi again with it
+    // when it isn't this run's (review L2).
+    let ask_daw = if asked.is_none() && bridge_missing { crate::daw::to_ask(&io.env, &|other| other.here(&io.env)) } else { vec![] };
+    let pick_daw = (!ask_daw.is_empty()).then(|| {
+        let (daw_after, env, current) = (daw_after.clone(), io.env.clone(), provider.id());
+        Rc::new(move |daw| {
+            crate::daw::remember_used(daw, &env);
+            if daw != current {
+                daw_after.set(Some(daw));
+            }
+        }) as Rc<dyn Fn(kumi_runtime::core::daw::DawId)>
+    });
     let updates = update::UpdateControl {
         current: KUMI_VERSION.into(),
         check: {
@@ -709,6 +721,8 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         });
         options.updates = Some(updates);
         options.switch_daw = switch_daw;
+        options.ask_daw = ask_daw;
+        options.pick_daw = pick_daw;
         options.willington = provider.toggle(&io.env);
         options.slots = Some(slots_context);
         options.voice = Some(Rc::new(create_voice_control(VoiceControlOptions {

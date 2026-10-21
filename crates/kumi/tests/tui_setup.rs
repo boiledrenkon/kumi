@@ -943,3 +943,50 @@ case!(the_control_surface_step_says_where_settings_are_after_a_while, async {
     assert!(said(&h).contains("set a Control Surface to AbletonMcpBridge. Kumi notices by itself."));
     h.close().await;
 });
+
+case!(a_first_run_with_several_daws_here_asks_which_one_and_opens_again_with_it, async {
+    // Live and REAPER here, no bridge yet, none chosen before (review L2): setup asks before Live's step, and the DAW
+    // chosen is remembered and Kumi opens again with it; Live's step never starts.
+    use kumi_runtime::core::daw::DawId;
+    let live = FakeLive::new(false);
+    let picked: Rc<RefCell<Vec<DawId>>> = Rc::default();
+    let into = picked.clone();
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), move |o| {
+        o.ask_daw = vec![DawId::Ableton, DawId::Reaper];
+        o.pick_daw = Some(Rc::new(move |daw| into.borrow_mut().push(daw)));
+    });
+    h.start().await;
+    h.wait_for("Which DAW do you work in?").await;
+    h.has("› Live");
+    h.has("REAPER");
+    h.type_text("\x1b[B\r").await;
+    for _ in 0..200 {
+        if h.calls().contains(&"close".into()) {
+            break;
+        }
+        delay(10).await;
+    }
+    assert_eq!(*picked.borrow(), [DawId::Reaper]);
+    assert!(h.calls().contains(&"close".into()), "Kumi closes to open again with REAPER");
+    assert!(live.calls().is_empty(), "Live's step never started: {:?}", live.calls());
+    h.close().await;
+});
+
+case!(a_first_run_whose_daw_is_chosen_here_goes_on_with_its_setup, async {
+    // Live chosen among them: remembered, and Live's step goes on in this run.
+    use kumi_runtime::core::daw::DawId;
+    let live = FakeLive::new(false);
+    let picked: Rc<RefCell<Vec<DawId>>> = Rc::default();
+    let into = picked.clone();
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), move |o| {
+        o.ask_daw = vec![DawId::Ableton, DawId::Renoise];
+        o.pick_daw = Some(Rc::new(move |daw| into.borrow_mut().push(daw)));
+    });
+    h.start().await;
+    h.wait_for("Which DAW do you work in?").await;
+    h.type_text("\r").await;
+    h.wait_for("waiting for Live").await;
+    assert_eq!(*picked.borrow(), [DawId::Ableton]);
+    assert_eq!(live.calls(), ["open?", "install", "start", "connect"]);
+    h.close().await;
+});

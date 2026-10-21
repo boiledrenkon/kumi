@@ -62,6 +62,9 @@ impl DawProvider for Ableton {
         async move { live_app::open_live(&bridge_setup::default_run(), kumi_runtime::system::platform(), &env).await.is_some() }
             .boxed_local()
     }
+    fn here(&self, env: &Env) -> bool {
+        live_here() && live_app::installed(env, kumi_runtime::system::platform()) != crate::daw::provider::Installed::Missing
+    }
     fn running_now(&self) -> bool {
         crate::daw::processes().iter().any(|(_, name)| {
             let name = name.rsplit(['/', '\\']).next().unwrap_or(name);

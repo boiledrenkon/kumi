@@ -321,6 +321,14 @@ impl TuiApp {
         } else if !self.setup_sign_in().await {
             return self.end_setup(Some(Step::Sign), None).await;
         }
+        // Several DAWs here and none set up or chosen yet: the producer says which one Kumi works with.
+        if let Some(daw) = self.ask_daw().await {
+            if daw != crate::daw::current().id() {
+                // Chosen and remembered: Kumi opens again with it, and its own setup goes on there.
+                self.setup_show(|s| s.quit = Some((0, None)));
+                return self.end_setup(None, None).await;
+            }
+        }
         let live = self.0.options.connect_live.as_ref().map(|l| (l.live.clone(), l.why.clone()));
         if let Some((live, Some(why))) = live {
             let app = match self.setup_live(live.clone(), why).await {
@@ -344,6 +352,22 @@ impl TuiApp {
             }
         }
         self.end_setup(None, None).await;
+    }
+
+    /// "Which DAW do you work in?", among the DAWs here (`ask_daw`): the one chosen, given to `pick_daw`; None when
+    /// there's nothing to ask, or the producer put it off (this run's DAW goes on).
+    async fn ask_daw(&self) -> Option<kumi_runtime::core::daw::DawId> {
+        let (asked, pick) = (self.0.options.ask_daw.clone(), self.0.options.pick_daw.clone()?);
+        if asked.len() < 2 {
+            return None;
+        }
+        let app = |daw| crate::daw::provider(daw).map(|provider| provider.profile().words.app).unwrap_or_default();
+        let choices = asked.iter().map(|daw| choice(app(*daw), "", daw.as_str())).collect();
+        let said = vec!["Which DAW do you work in? Kumi sets itself up for it.".to_string()];
+        let picked = self.setup_choose("now", said, choices).await?;
+        let daw = kumi_runtime::core::daw::DawId::parse(&picked)?;
+        pick(daw);
+        Some(daw)
     }
 
     /// No model yet, but signed in somewhere: the provider's own first choice, as Kumi always chose.

@@ -36,7 +36,8 @@ pub fn provider(id: DawId) -> Option<&'static dyn DawProvider> {
 /// 1. the one asked for (with --daw or KUMI_DAW);
 /// 2. the only DAW whose bridge is installed (a producer who uses Live alone starts in Live, as always);
 /// 3. with several installed: the one running now, else the one used last, else Live, else the first;
-/// 4. with none installed, chatting without a DAW in Live's words.
+/// 4. with none installed, the DAW on this computer, for first-run setup to set up: the only one here, else the one
+///    the producer picked last, else Live, else the first (setup asks which, `to_ask`); with none here, Live's words.
 pub fn chosen(asked: Option<DawId>, env: &Env) -> (&'static dyn DawProvider, Option<String>) {
     chosen_with(asked, env, &|provider| provider.running_now())
 }
@@ -47,6 +48,35 @@ pub fn chosen_with(
     env: &Env,
     running: &dyn Fn(&dyn DawProvider) -> bool,
 ) -> (&'static dyn DawProvider, Option<String>) {
+    chosen_among(asked, env, running, &|provider| provider.here(env))
+}
+
+/// The DAWs on this computer whose bridge isn't installed yet, as `here` says.
+fn found_here(env: &Env, here: &dyn Fn(&dyn DawProvider) -> bool) -> Vec<&'static dyn DawProvider> {
+    if providers().into_iter().any(|provider| provider.bridge_config(env).is_some()) {
+        return vec![];
+    }
+    providers().into_iter().filter(|provider| here(*provider)).collect()
+}
+
+/// The DAWs a first run asks the producer to choose among ("Which DAW do you work in?"): with no bridge installed,
+/// several DAWs here, and none of them picked before.
+pub fn to_ask(env: &Env, here: &dyn Fn(&dyn DawProvider) -> bool) -> Vec<DawId> {
+    let found = found_here(env, here);
+    let picked = last_used(env);
+    if found.len() < 2 || found.iter().any(|provider| Some(provider.id()) == picked) {
+        return vec![];
+    }
+    found.into_iter().map(|provider| provider.id()).collect()
+}
+
+/// `chosen_with`, with whether each DAW is on this computer given too.
+pub fn chosen_among(
+    asked: Option<DawId>,
+    env: &Env,
+    running: &dyn Fn(&dyn DawProvider) -> bool,
+    here: &dyn Fn(&dyn DawProvider) -> bool,
+) -> (&'static dyn DawProvider, Option<String>) {
     if let Some(provider) = asked.and_then(provider) {
         return (provider, provider.bridge_config(env));
     }
@@ -54,7 +84,21 @@ pub fn chosen_with(
         providers().into_iter().filter_map(|provider| provider.bridge_config(env).map(|config| (provider, config))).collect();
     let pick = |provider: &'static dyn DawProvider, config: &str| (provider, Some(config.to_string()));
     match installed.as_slice() {
-        [] => (&ableton::provider::Ableton, None),
+        [] => {
+            let found = found_here(env, here);
+            let picked = last_used(env);
+            let first = match found.as_slice() {
+                [] => &ableton::provider::Ableton as &'static dyn DawProvider,
+                [one] => *one,
+                several => several
+                    .iter()
+                    .find(|provider| Some(provider.id()) == picked)
+                    .or_else(|| several.iter().find(|provider| provider.id() == DawId::Ableton))
+                    .copied()
+                    .unwrap_or(several[0]),
+            };
+            (first, None)
+        }
         [(provider, config)] => pick(*provider, config),
         several => {
             let running: Vec<&(&'static dyn DawProvider, String)> = several.iter().filter(|(provider, _)| running(*provider)).collect();
