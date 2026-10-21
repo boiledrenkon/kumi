@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use super::tests_items::{code, item, state, Lab, KICK};
+use super::tests_items::{code, item, state, Lab, KICK, SNARE};
 
 /// Kick with fixed lanes: two lanes, kick.wav on lane 0 and the second kick item moved under it on lane 1.
 fn lanes_lab() -> Lab {
@@ -51,6 +51,45 @@ fn fixed_lanes_go_on_and_their_undo_puts_the_track_back() {
     assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
     let again = lab.undo("track-lanes", &preview, &applied).unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
+#[test]
+fn undoing_lanes_off_leaves_the_track_once_the_producer_added_an_item_while_they_were_off_unless_told_to_discard() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
+    // With lanes off, the producer records a new take on Kick.
+    state(|s| {
+        let take = crate::reaper::fake::FakeTake::wave("{TAKE-NEW}", "new.wav");
+        s.tracks[1].items.push(crate::reaper::fake::FakeItem::new("{ITEM-NEW}", 8.0, 2.0, vec![take]));
+    });
+    let before = state(|s| s.tracks[1].clone());
+    let (code_, message) = lab.undo("track-lanes", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed", "{message}");
+    assert!(state(|s| s.tracks[1].clone()) == before, "nothing written");
+    // Told to undo anyway: lanes are back, Kumi's items on their lanes and the producer's item kept.
+    lab.undo_with("track-lanes", &preview, &applied, true).unwrap();
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 2.0);
+    assert_eq!(item("{ITEM-K2}").unwrap().1.lane, 1);
+    assert!(item("{ITEM-NEW}").is_some());
+}
+
+#[test]
+fn undoing_a_move_off_a_track_whose_lanes_went_off_since_leaves_the_item_where_kumi_put_it() {
+    let lab = lanes_lab();
+    // Kick's second item, on lane 2, moved to Snare.
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K2}", "toRef": SNARE}));
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 2);
+    // The producer turns Kick's fixed lanes off: lane 2 is no place to go back to.
+    state(|s| {
+        s.tracks[1].extra.insert("I_FREEMODE".into(), 0.0);
+    });
+    let (code_, message) = lab.undo("item-move", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed", "{message}");
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 2, "still on Snare: nothing written");
+    // Told to undo anyway, it goes back to its place on Kick.
+    lab.undo_with("item-move", &preview, &applied, true).unwrap();
+    assert_eq!(item("{ITEM-K2}").unwrap().0, 1);
 }
 
 #[test]

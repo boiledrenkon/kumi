@@ -442,7 +442,8 @@ fn put_place(ctx: &Ctx, guid: &str, place: &Value) -> Done<Item> {
             if !reaper.move_item_to_track(item, track) {
                 return Err(failed("REAPER wouldn't move the item to that track"));
             }
-            item = item_by_guid(ctx, guid).ok_or_else(|| failed("the item went while it was moved"))?;
+            item = item_by_guid(ctx, guid)
+                .ok_or_else(|| ("uncertain".to_string(), "the item went while it was moved: read the items".to_string()))?;
         }
     }
     reaper.set_item_value(item, "D_POSITION", number(place, "position"));
@@ -556,10 +557,37 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_place(&now, restore.applied) {
         return Err(changed(format!("{} has been moved in REAPER since Kumi moved it", label(ctx, found.item))));
     }
-    let item = put_place(ctx, &found.guid, restore.prior)?;
+    // The lane it goes back to, as the track it goes back to has lanes now: one whose fixed lanes went off or on since (or
+    // that has fewer) can't hold it as it was, which is the producer's change, found before anything is written. Told to
+    // undo anyway, it goes back to its place on that track, on its first lane if it has lanes.
+    let mut back = restore.prior.clone();
+    if let Some(track) = restore.prior["track"].as_str().and_then(|guid| track_by_guid(ctx, guid)) {
+        let lanes = lane_count(ctx.reaper, track);
+        let fits = match restore.prior["lane"].as_i64() {
+            Some(lane) => lanes.is_some_and(|count| lane < count),
+            None => lanes.is_none(),
+        };
+        if !fits {
+            if !restore.discard {
+                return Err(changed(format!(
+                    "{}'s lanes have been changed in REAPER since Kumi moved {} off it: it can't go back to its lane",
+                    quoted(&super::track_name(ctx.reaper, track)),
+                    label(ctx, found.item)
+                )));
+            }
+            back["lane"] = lanes.map(|_| 0).into();
+        }
+    }
+    let item = put_place(ctx, &found.guid, &back)?;
     let after = place_of(ctx.reaper, item);
-    if !same_place(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item back where it was"));
+    if !same_place(&after, &back) {
+        // Written, so never a plain failure: put where Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_place(ctx, &found.guid, &now).is_ok_and(|item| same_place(&place_of(ctx.reaper, item), &now));
+        return Err(if left {
+            failed("REAPER didn't put the item back where it was; it is where Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item back where it was, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored { restored: after, display: json!({"title": format!("{} moved back", label_opening(ctx, item))}), unwritten: false })
 }
