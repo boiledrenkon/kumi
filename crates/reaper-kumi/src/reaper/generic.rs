@@ -453,16 +453,14 @@ impl Reaper<'_> {
         Ok((result, call.outs()))
     }
 
-    /// Runs a ReaScript (Lua) once, now, on the main thread: the text is written to a file of its own, registered as an
+    /// Runs a ReaScript (Lua) once, now, on the main thread: the text is written to a new file of its own (an unguessable
+    /// name in the bridge's owner-only folder, made new, never through a file or link already there), registered as an
     /// action for as long as it runs (in memory only: REAPER's key map file isn't written), run, and taken away.
     pub fn run_script(&self, proj: Project, text: &str) -> Result<(), String> {
         let (Some(register), Some(run)) = (self.api.AddRemoveReaScript(), self.api.Main_OnCommandEx()) else {
             return Err("this REAPER can't run scripts".into());
         };
-        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("kumi-reaper-run-{}-{n}.lua", std::process::id()));
-        std::fs::write(&path, text).map_err(|e| format!("couldn't write the chunk to {}: {e}", path.display()))?;
+        let path = script_file(text)?;
         let file = CString::new(path.to_string_lossy().into_owned()).map_err(|_| "a temporary path with a NUL in it".to_string())?;
         let id = unsafe { register(true, 0, file.as_ptr(), false) };
         let result = if id <= 0 {
@@ -485,6 +483,57 @@ impl Reaper<'_> {
         }
         (!text.is_empty()).then_some(text)
     }
+}
+
+/// Where run-lua's scripts are written: the bridge's own folder in Kumi's (owner-only), set when the bridge starts serving.
+static SCRIPTS: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_scripts_dir(dir: Option<std::path::PathBuf>) {
+    *SCRIPTS.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// A new file holding `text`, owner-only, at a name no one can guess (another user can't make it first, or make Kumi write
+/// through a link at it): in the bridge's folder, or the user's temporary folder before one is set.
+fn script_file(text: &str) -> Result<std::path::PathBuf, String> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::io::Write;
+    let dir = SCRIPTS.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(std::env::temp_dir);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..8 {
+        // (a randomly keyed hash of the process, the run and the time: 64 bits no one outside the process can guess)
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write_u64(RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        let path = dir.join(format!("kumi-run-{:016x}.lua", hasher.finish()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(text.as_bytes()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("couldn't write the chunk to {}: {e}", path.display()));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("couldn't write the chunk to {}: {e}", path.display())),
+        }
+    }
+    Err(format!("couldn't make a new file for the chunk in {}", dir.display()))
 }
 
 /// An object the bridge holds, as the pointer a generic call passes.

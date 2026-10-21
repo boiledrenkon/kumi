@@ -530,6 +530,8 @@ pub struct State {
     pub calls: u64,
     /// ReaScripts registered as actions: (command id, file).
     pub scripts: Vec<(i32, String)>,
+    /// Every script file registered, with its permission bits (unix) as it was registered.
+    pub script_files: Vec<(String, u32)>,
     /// Called, with no borrow of the state held, with a registered script's text when it is run: a test's stand-in for
     /// REAPER's Lua (it does what the script would, and leaves its answer in the ext state).
     pub on_script: Option<fn(&str)>,
@@ -614,6 +616,7 @@ impl Default for State {
             project_ext: Default::default(),
             calls: 0,
             scripts: vec![],
+            script_files: vec![],
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
@@ -1058,6 +1061,14 @@ unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *co
         }
         if add {
             let id = 60_000 + s.scripts.len() as c_int + s.actions.len() as c_int;
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(&file).map_or(0, |m| m.permissions().mode() & 0o777)
+            };
+            #[cfg(not(unix))]
+            let mode = 0;
+            s.script_files.push((file.clone(), mode));
             s.scripts.push((id, file));
             id
         } else {

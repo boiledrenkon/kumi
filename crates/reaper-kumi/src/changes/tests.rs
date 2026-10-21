@@ -3364,6 +3364,37 @@ fn a_lua_chunk_runs_once_in_one_undo_point_and_only_reapers_undo_takes_it_back()
 }
 
 #[test]
+fn a_lua_chunks_script_is_a_new_owner_only_file_with_an_unguessable_name_in_the_bridges_folder() {
+    // The shared temporary folder and a counted name let another local user make the file first, or a link at it (review
+    // R12): the bridge's own folder, a random name, made new.
+    let lab = Lab::new();
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = dir.path().join("bridge").join("scripts");
+    crate::reaper::generic::set_scripts_dir(Some(scripts.clone()));
+    state(|s| s.on_script = Some(lua_ok));
+    lab.make("run-lua", json!({"code": "return 1"}), "Kumi: Ran Lua (kr001)");
+    lab.make("run-lua", json!({"code": "return 1"}), "Kumi: Ran Lua (kr002)");
+    crate::reaper::generic::set_scripts_dir(None);
+    let files = state(|s| s.script_files.clone());
+    assert_eq!(files.len(), 2);
+    for (path, mode) in &files {
+        assert!(std::path::Path::new(path).starts_with(&scripts), "{path}");
+        assert!(!std::path::Path::new(path).exists(), "taken away after the run: {path}");
+        #[cfg(unix)]
+        assert_eq!(*mode, 0o600, "{path}");
+        let _ = mode;
+    }
+    let name = |path: &str| std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+    assert_ne!(name(&files[0].0), name(&files[1].0));
+    assert!(!name(&files[0].0).contains(&std::process::id().to_string()), "not named by the process");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&scripts).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+}
+
+#[test]
 fn a_hundred_lua_chunks_leave_no_action_behind_and_never_write_reapers_key_map() {
     let lab = Lab::new();
     state(|s| s.on_script = Some(lua_ok));
