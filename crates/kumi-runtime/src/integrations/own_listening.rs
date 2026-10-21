@@ -859,6 +859,28 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Some(note)
     }
 
+    /// Kumi's play out loud stops if `signal` (a listening call's, the answer's) is cancelled before it ends: Esc stops
+    /// what Kumi plays as it stops the answer, whether the call is still at work or has answered.
+    pub(super) fn stop_play_on(self: &Rc<Self>, signal: &Signal) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let Some(until) = self.played.borrow().back().map(|(_, to)| *to).filter(|to| *to > now) else { return };
+        let (renderer, signal) = (Rc::downgrade(self), signal.clone());
+        tokio::task::spawn_local(async move {
+            tokio::select! {
+                biased;
+                _ = signal.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis((until - now) as u64)) => return,
+            }
+            // (the same play, still playing: a later one is its own call's)
+            let Some(renderer) = renderer.upgrade() else { return };
+            let playing =
+                renderer.played.borrow().back().is_some_and(|(_, to)| *to == until && until > chrono::Utc::now().timestamp_millis());
+            if playing {
+                let _ = renderer.link.call("audition_stop", json!({}), renderer.cleanup_signal()).await;
+            }
+        });
+    }
+
     /// Plays a render out loud where the producer listens (its part, at most `PLAYED_SECONDS`), without waiting: whether
     /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't. A track's
     /// render from before its fader (`track`, its ref) plays at its fader's level, as Kumi measured it, not louder.
@@ -2236,8 +2258,9 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     /// An audition (the audition tool's work), as the session's match run asks for it.
     pub async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
         let _held = self.hold(&signal).await?;
-        let auditioned = self.listening.audition(request, signal).await;
+        let auditioned = self.listening.audition(request, signal.clone()).await;
         self.renderer.put_tempo_back().await;
+        self.renderer.stop_play_on(&signal);
         auditioned
     }
 
@@ -2261,8 +2284,9 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     /// The listen tool's hearing of the project: what plays now (REAPER, while it plays), or a stretch rendered offline
     /// and played out loud after.
     pub async fn hear(&self, request: &HearRequest, original: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
-        let heard = self.hear_now(request, original).await;
+        let heard = self.hear_now(request, original.clone()).await;
         self.renderer.put_tempo_back().await;
+        self.renderer.stop_play_on(&original);
         heard
     }
 
@@ -2461,11 +2485,12 @@ impl<S: RefScheme + 'static> KernelTool for ListeningTool<S> {
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let _held = self.owner.hold(&signal).await?;
-        let result = match self.owner.listening.call(self.name, input, signal).await {
+        let result = match self.owner.listening.call(self.name, input, signal.clone()).await {
             Some(result) => result,
             None => Ok(ToolResult::error(format!("{} isn't a listening tool", self.name))),
         };
         self.owner.renderer.put_tempo_back().await;
+        self.owner.renderer.stop_play_on(&signal);
         result
     }
 }

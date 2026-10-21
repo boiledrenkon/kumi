@@ -250,6 +250,12 @@ impl SimListening {
         self.state.lock().unwrap().previews.clone()
     }
 
+    /// What Kumi plays out loud now (its preview's id), until it ends or is stopped.
+    pub fn playing(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.playing.clone().filter(|_| state.playing_until.is_some_and(|until| std::time::Instant::now() < until))
+    }
+
     /// What each render asked, in order.
     pub fn renders(&self) -> Vec<Value> {
         self.state.lock().unwrap().renders.clone()
