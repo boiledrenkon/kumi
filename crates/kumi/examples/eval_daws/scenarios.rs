@@ -357,9 +357,18 @@ for _, t in ipairs({kick, snare, bass}) do reaper.CreateNewMIDIItemInProj(t, 0, 
             read: "",
             teardown: None,
             generates: false,
-            names: &["Drum Bus", "send", "folder", "Drums"],
+            names: &["Drum Bus"],
+            // (PR #400 review D19, D23: two routes to the master are the producer's own; the expected answer names both and asks
+            // one question, nothing changed. One route removed also passes, with the kick's fader untouched and how to undo said.)
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
+                let paths = master_paths(after, "Kick");
+                let asked = paths == 2
+                    && seen.changes == 0
+                    && seen.said.contains("Drum Bus")
+                    && seen.said.contains("Drums")
+                    && seen.said.matches('?').count() == 1;
+                let fixed = paths == 1 && mentions(seen.said, &["undo"]);
                 let mut checks = vec![
                     Check::new(
                         "the kick reached the master twice before",
@@ -367,9 +376,9 @@ for _, t in ipairs({kick, snare, bass}) do reaper.CreateNewMIDIItemInProj(t, 0, 
                         format!("{} paths", master_paths(before, "Kick")),
                     ),
                     Check::new(
-                        "one route to the master is left",
-                        master_paths(after, "Kick") == 1,
-                        format!("{} paths", master_paths(after, "Kick")),
+                        "both routes named with one question, nothing changed; or one removed and how to undo said",
+                        asked || fixed,
+                        format!("{} paths, {} changes, {} questions", paths, seen.changes, seen.said.matches('?').count()),
                     ),
                 ];
                 for name in ["Snare", "Bass", "Drum Bus", "Drums"] {
@@ -379,7 +388,7 @@ for _, t in ipairs({kick, snare, bass}) do reaper.CreateNewMIDIItemInProj(t, 0, 
                 }
                 let kick = |state: &Value| track(state, "Kick").map(|t| t["volume"].clone());
                 checks.push(Check::new(
-                    "the kick's fader is left alone (the route is the cause)",
+                    "the kick's fader is left alone",
                     kick(before) == kick(after),
                     format!("{:?} → {:?}", kick(before), kick(after)),
                 ));

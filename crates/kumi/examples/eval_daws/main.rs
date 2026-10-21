@@ -7,11 +7,13 @@
 //! - the DAW's own words in what Kumi says and in HISTORY, never Live's;
 //! - nothing generated unasked (no notes added where the scenario asks for none).
 //!
-//! It uses your sign-in and model (Kumi's own folder) and Kumi's host in process on the lab's kumi-home. It changes the
-//! project or song it finds: run it only on the lab's scratch project or song, never a producer's.
+//! It uses your sign-in and model (Kumi's own folder) and Kumi's host in process on the lab's kumi-home. The fixtures
+//! rewrite the project or song they find, so it holds the lab's lock for the whole run (`<locks>/<daw>.lock`, made with
+//! mkdir; a wrapper that holds it names itself `holder <pid>` in its owner file) and refuses any project or song but the
+//! lab's scratch one: unsaved and untitled, or saved under the lab's folder (the kumi-home's parent).
 //!
-//! cargo run -p kumi --example eval_daws -- --daw reaper|renoise --kumi-home <lab kumi-home> [--only P30,R31]
-//!     [--out <results.md>]
+//! cargo run -p kumi --example eval_daws -- --daw reaper|renoise --kumi-home <lab kumi-home> --locks <dir>
+//!     [--only P30,R31] [--out <results.md>]
 //!
 //! EVAL_TRACE=1 prints each tool call and what it returned.
 use async_trait::async_trait;
@@ -259,6 +261,67 @@ impl Model {
 // ---------------------------------------------------------------------------------------------------------------------
 // One scenario
 
+/// The lab's mkdir lock for one DAW: taken for the run, or already held for it by the wrapper that started this process
+/// (its owner file names `holder <our parent's pid>`); refused, naming the owner, when anyone else holds it.
+struct LabLock {
+    dir: PathBuf,
+    ours: bool,
+}
+
+impl LabLock {
+    fn take(locks: &Path, daw: Daw) -> Result<LabLock, String> {
+        let dir = locks.join(format!("{}.lock", daw.name().to_lowercase()));
+        if std::fs::create_dir(&dir).is_ok() {
+            std::fs::write(dir.join("owner"), format!("eval_daws holder {}\n", std::process::id())).map_err(|e| e.to_string())?;
+            return Ok(LabLock { dir, ours: true });
+        }
+        let owner = std::fs::read_to_string(dir.join("owner")).unwrap_or_default();
+        let parent = parent_pid().map(|pid| pid.to_string());
+        if owner.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| w[0] == "holder" && Some(w[1].to_owned()) == parent) {
+            return Ok(LabLock { dir, ours: false });
+        }
+        Err(format!("the {} lab is locked ({}): {}", daw.name(), dir.display(), owner.trim()))
+    }
+}
+
+/// The pid of the process that started this one (a wrapper holding the lock), where the system says.
+#[cfg(unix)]
+fn parent_pid() -> Option<u32> {
+    Some(std::os::unix::process::parent_id())
+}
+#[cfg(not(unix))]
+fn parent_pid() -> Option<u32> {
+    None
+}
+
+impl Drop for LabLock {
+    fn drop(&mut self) {
+        if self.ours {
+            let _ = std::fs::remove_file(self.dir.join("owner"));
+            let _ = std::fs::remove_dir(&self.dir);
+        }
+    }
+}
+
+/// Whether the open project or song is the lab's scratch one: unsaved and untitled, or saved under the lab's folder (the
+/// kumi-home's parent); else why not, naming it.
+fn scratch(project: &Value, home: &Path) -> Result<(), String> {
+    let path = project["path"].as_str().unwrap_or_default();
+    let name = project["name"].as_str().unwrap_or_default();
+    let lab = home.parent().unwrap_or(home);
+    let lab = lab.canonicalize().unwrap_or_else(|_| lab.to_path_buf());
+    let under_lab = !path.is_empty() && Path::new(path).canonicalize().is_ok_and(|file| file.starts_with(&lab));
+    let untitled = path.is_empty() && (name.is_empty() || name.eq_ignore_ascii_case("untitled"));
+    if under_lab || untitled {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing: the open project isn't the lab's scratch one ({}), and the fixtures would rewrite it",
+            if path.is_empty() { name } else { path }
+        ))
+    }
+}
+
 /// Where a run's files go: the sounds the fixtures load, the songs they save, Kumi's tools (yt-dlp, whisper) and videos.
 struct Dirs {
     media: PathBuf,
@@ -283,6 +346,9 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Di
     if status.get("connected") != Some(&Value::Bool(true)) {
         return Err(RuntimeError::plain(format!("the lab DAW isn't connected: {status}")));
     }
+    // Only the lab's scratch project or song: the fixtures rewrite what's open.
+    let project = host_call(&host, "snapshot", json!({})).await.map_err(failure)?["project"].clone();
+    scratch(&project, home).map_err(failure)?;
     // (Renoise stops a callback at 800 ms; REAPER's chunks may take longer on a big template)
     let (prelude, state, timeout) = match scenario.daw {
         Daw::Reaper => (scenarios::REAPER_PRELUDE, scenarios::REAPER_STATE, 5_000),
@@ -485,13 +551,16 @@ fn report(outcome: &Outcome) -> String {
 async fn run() -> Result<i32, RuntimeError> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|k| argv.get(k + 1)).cloned();
-    let usage = "eval_daws --daw reaper|renoise --kumi-home <lab kumi-home> [--only P30,R31] [--out <results.md>]";
+    let usage = "eval_daws --daw reaper|renoise --kumi-home <lab kumi-home> --locks <dir> [--only P30,R31] [--out <results.md>]";
     let daw = match flag("--daw").as_deref() {
         Some("reaper") => Daw::Reaper,
         Some("renoise") => Daw::Renoise,
         _ => return Err(RuntimeError::plain(usage)),
     };
     let home = PathBuf::from(flag("--kumi-home").ok_or_else(|| RuntimeError::plain(usage))?);
+    // The lab's lock, for the whole run (released as `_lock` goes, before the process ends).
+    let locks = PathBuf::from(flag("--locks").ok_or_else(|| RuntimeError::plain(usage))?);
+    let _lock = LabLock::take(&locks, daw).map_err(RuntimeError::plain)?;
     let only: Vec<String> = flag("--only").map(|list| list.split(',').map(str::to_owned).collect()).unwrap_or_default();
     let env = process_env();
     let config = load_inference_config(&env)?;
