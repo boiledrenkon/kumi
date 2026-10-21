@@ -499,14 +499,22 @@ impl Library {
         }
         let (_, presets, sets) = self.counts.get();
         self.counts.set((reader.entries.len(), presets, sets));
-        let current: Vec<Source> = self.sources().await.into_iter().filter(|s| s.offered_in(daw)).collect();
-        let key = current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n");
+        let (current, hidden): (Vec<Source>, Vec<Source>) = self.sources().await.into_iter().partition(|s| s.offered_in(daw));
+        // Another DAW's library is never offered here, even where a folder offered here holds it (a Live Place around
+        // Renoise's User Library): what that library's own walk reads stays out of this index.
+        let hidden: Vec<Source> = hidden.into_iter().filter(Source::is_daw_library).collect();
+        let key = format!("{daw:?}\n{}", current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n"));
         let rebuild =
             self.held.borrow().as_ref().is_none_or(|held| {
                 held.key != key || (self.stale.get() && (self.progress.borrow().is_none() || now_ms() - held.at >= 3000))
             });
         if rebuild {
-            let entries = reader.entries.values().cloned().collect::<Vec<_>>();
+            let entries = reader
+                .entries
+                .values()
+                .filter(|entry| !hidden.iter().any(|library| daw_sources::owns(library, &entry.path)))
+                .cloned()
+                .collect::<Vec<_>>();
             drop(reader);
             let index = Rc::new(SoundIndex::build(entries, &current).await);
             *self.held.borrow_mut() = Some(HeldIndex { index, key, at: now_ms() });

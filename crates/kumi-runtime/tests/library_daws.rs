@@ -378,6 +378,58 @@ fn my_sets_is_offered_only_where_kumi_reads_the_daws_projects() {
     assert!(!offered(&DawProfile::RENOISE));
 }
 
+/// (#361 review K31) A DAW library inside a folder the producer named (or a Live Place): what the library's layout reads
+/// is its own source's and offered only in its DAW; the rest there is still the outer folder's, learned and offered
+/// everywhere, as before the library was a source of its own.
+#[tokio::test(flavor = "current_thread")]
+async fn a_daws_library_inside_a_producers_folder_leaves_its_other_sounds_to_that_folder() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = Home::new(true);
+            let user = home.home.path().join("Documents/Renoise/User Library");
+            put(&user.join("Kits/Kit Snare.wav"), wav(&[fixture::snare(0.2)], 44100));
+            put(&user.join("Samples/User Clap.wav"), wav(&[fixture::snare(0.1)], 44100));
+            put(&user.join("Loose Hat.wav"), wav(&[fixture::hat(0.1, 3)], 44100));
+            let documents = home.home.path().join("Documents").to_string_lossy().into_owned();
+            let mut plan = home.plan();
+            plan.sources = library_sources(&SourceOptions { folders: Some(vec![documents.clone()]), ..home.options() });
+            learn(LearnOptions::new(plan, Signal::new())).await.unwrap();
+            let logs = library_logs(home.dir.path().to_str().unwrap());
+            let learned: Vec<String> =
+                logs.sounds.load().await.into_keys().map(|p| Path::new(&p).file_stem().unwrap().to_string_lossy().into_owned()).collect();
+            for name in ["Kit Snare", "Loose Hat", "User Clap", "Renoise Kick"] {
+                assert_eq!(learned.iter().filter(|n| *n == name).count(), 1, "{name} learned once: {learned:?}");
+            }
+            let library = create_library(LibraryOptions {
+                dir: home.dir.path().to_string_lossy().into(),
+                folders: Some(vec![documents]),
+                sources: Some(home.options()),
+                fork: Some(false),
+                delay_ms: Some(3_600_000),
+                ..Default::default()
+            });
+            use kumi_runtime::core::daw::DawId::*;
+            let names = |index: &SoundIndex| {
+                let mut names: Vec<String> =
+                    index.entries.iter().map(|e| Path::new(&e.path).file_stem().unwrap().to_string_lossy().into_owned()).collect();
+                names.sort();
+                names
+            };
+            assert_eq!(
+                names(&library.sound_index_in(Some(Renoise)).await.unwrap()),
+                ["Kit Snare", "Loose Hat", "Renoise Kick", "User Clap"]
+            );
+            assert_eq!(names(&library.sound_index_in(Some(Reaper)).await.unwrap()), ["Kit Snare", "Loose Hat"]);
+            assert_eq!(
+                names(&library.sound_index_in(None).await.unwrap()),
+                ["Kit Snare", "Loose Hat"],
+                "Renoise's own samples aren't Live's"
+            );
+            library.close().await;
+        })
+        .await;
+}
+
 /// Every step find_presets names for loading a DAW's presets is one of that DAW's change steps.
 #[test]
 fn find_presets_names_only_steps_the_daw_has_and_lives_text_stays() {

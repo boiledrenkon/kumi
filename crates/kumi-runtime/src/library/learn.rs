@@ -538,8 +538,8 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
     let (mut walked_sounds, mut walked_presets, mut walked_sets) = (vec![], vec![], vec![]);
     let mut sources = plan.sources.clone();
     sources.sort_by_key(|s| order(s.kind));
-    // A DAW's library inside another folder is walked as its own source only.
-    let daw_libraries: HashSet<String> = sources.iter().filter(|s| s.is_daw_library()).map(|s| s.path.clone()).collect();
+    // A DAW's library inside another folder: what its layout reads is its own source's; the rest stays the outer folder's.
+    let daw_libraries: HashSet<String> = sources.iter().filter(|s| s.is_daw_library()).flat_map(daw_sources::owned_folders).collect();
     for source in &sources {
         progress.value.borrow_mut().at = Some(source.label.clone());
         progress.tell(false);
