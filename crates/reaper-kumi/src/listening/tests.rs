@@ -1024,6 +1024,9 @@ fn fx_rows_say_their_track_take_and_whether_they_are_plug_ins_from_outside_reape
         (&take["trackRef"], &take["takeRef"], &take["plugin"]),
         (&json!("r:track:{BBBB}"), &json!("r:take:{TAKE-K1}"), &json!(true))
     );
+    // An instrument says so (its type ends in "i"), so a gain Kumi adds goes after it; an effect says nothing.
+    assert_eq!(take["instrument"], json!(true), "{take}");
+    assert_eq!(pro_q.get("instrument"), None, "{pro_q}");
     // A page: REAPER's own ReaEQ (VST3 by Cockos) and a container are no plug-ins from outside.
     let page = rig.ask("read", json!({"kind": "fx", "parent": "r:track:{AAAA}"})).unwrap();
     assert!(daw_bridge::contract::misplaced_refs(&page).is_empty(), "{page}");

@@ -111,6 +111,9 @@ pub struct SimFx {
     pub params: Vec<(String, f64, ParamShows)>,
     /// An input FX (the master's: its monitoring FX), which no render holds.
     pub input: bool,
+    /// A plug-in from outside REAPER, as the extension's rows say (`plugin`), and whether it is an instrument (its type
+    /// ends in "i": "VSTi: …").
+    pub plugin: bool,
 }
 
 /// How an FX parameter of the sim's shows its normalized value.
@@ -186,7 +189,7 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         "ReaEQ" => "VST: ReaEQ (Cockos)",
         other => other,
     };
-    Some(SimFx { guid, name: name.into(), original: None, params, input: false })
+    Some(SimFx { guid, name: name.into(), original: None, params, input: false, plugin: false })
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -299,13 +302,20 @@ impl ReaperScript {
         let guid = format!("{{F{:04}}}", state.next_fx);
         let reference = state.tracks[track]["ref"].as_str().unwrap_or("").to_owned();
         let params = params.iter().map(|(n, v)| (n.to_string(), *v, ParamShows::Plain { min: 0., max: 1. })).collect();
-        state.fx.entry(reference).or_default().push(SimFx { guid: guid.clone(), name: name.into(), original: None, params, input: false });
+        state.fx.entry(reference).or_default().push(SimFx {
+            guid: guid.clone(),
+            name: name.into(),
+            original: None,
+            params,
+            input: false,
+            plugin: false,
+        });
         state.changed += 1;
         guid
     }
 
-    /// A plug-in the sim doesn't otherwise know (a limiter from outside REAPER) on a track's chain, by the track's ref: its
-    /// ref.
+    /// A plug-in the sim doesn't otherwise know (a limiter from outside REAPER, an instrument: "VSTi: …") on a track's chain,
+    /// by the track's ref: its ref.
     pub fn add_plugin_fx(&self, track: &str, name: &str) -> String {
         let mut state = self.state.lock().unwrap();
         state.next_fx += 1;
@@ -316,6 +326,7 @@ impl ReaperScript {
             original: None,
             params: vec![],
             input: false,
+            plugin: true,
         });
         state.changed += 1;
         format!("r:fx:{guid}")
@@ -1272,7 +1283,12 @@ impl ReaperScript {
 
     /// An FX row as the extension reads it.
     fn fx_row(fx: &SimFx, at: usize) -> Value {
-        let mut row = json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": false, "paramCount": fx.params.len()});
+        let mut row = json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": fx.plugin, "paramCount": fx.params.len()});
+        // (the extension says so from the FX's type, VSTi, VST3i, AUi, CLAPi, LV2i, DXi: its name starts with the type)
+        let own = fx.original.as_deref().unwrap_or(&fx.name);
+        if own.split_once(": ").is_some_and(|(kind, _)| kind.ends_with('i')) {
+            row["instrument"] = true.into();
+        }
         if fx.input {
             row["input"] = true.into();
         }

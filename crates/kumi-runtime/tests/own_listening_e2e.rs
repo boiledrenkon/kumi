@@ -1403,3 +1403,51 @@ async fn a_goal_never_searches_where_a_meta_device_aims() {
         })
         .await;
 }
+
+/// (#361 final review) An instrument track (only a VSTi): the gain FX a quieter round adds goes after the synth, where
+/// the track's sound is, so the turn is heard.
+#[tokio::test(flavor = "current_thread")]
+async fn a_gain_fx_rebalancing_adds_goes_after_an_instrument_last_on_the_track() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_plugin_fx("r:track:{T0002}", "VSTi: Serum (Xfer Records)");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let judge = tool(&observed, "judge");
+            let start = judge
+                .execute(
+                    object(json!({"goal": {"loudness": -6, "problems": false}, "track": "Track 2", "from_beat": 0, "beats": 8})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            script.listening().set_level("r:track:{T0002}", 0.4);
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            let tracks = context["tracks"].as_array().unwrap();
+            let synth = tracks.iter().find(|track| track["name"] == "Track 2").expect("Track 2")["ref"].as_str().unwrap().to_owned();
+            let change =
+                tool(&observed, "track_volume").execute(object(json!({"ref": synth, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!change.is_error, "{}", change.text);
+            let round = judge.execute(object(json!({"change": "Track 2 down 3 dB"})), Signal::new()).await.unwrap();
+            assert!(!round.is_error, "{}", round.text);
+            // (the simulator's track renders don't hear a gain FX on the track, so the round takes it back again: where it
+            // was added is what counts)
+            let added: Vec<Value> = script
+                .asked()
+                .into_iter()
+                .filter(|(method, params)| method == "change_apply" && params["kind"] == "fx-add")
+                .map(|(_, params)| params["input"].clone())
+                .collect();
+            assert_eq!(added.len(), 1, "{added:?} {}", round.text);
+            assert_eq!(added[0]["name"], "JS: Volume Adjustment");
+            assert!(added[0].get("index").is_none(), "appended after the synth, not put before it: {:?}", added[0]);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

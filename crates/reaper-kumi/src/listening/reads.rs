@@ -42,6 +42,10 @@ pub fn add_fx_place(reaper: &Reaper, fx: Fx, row: &mut Value) {
     let own = reaper.fx_config(fx, "fx_name").filter(|name| !name.is_empty());
     let made_by_cockos = own.clone().unwrap_or_else(|| reaper.fx_name(fx)).trim_end().ends_with("(Cockos)");
     row["plugin"] = (PLUGIN_TYPES.iter().any(|prefix| kind.starts_with(prefix)) && !made_by_cockos).into();
+    // An instrument (VSTi, VST3i, AUi, CLAPi, LV2i, DXi): a gain Kumi adds goes after it, where the track's sound is.
+    if kind.ends_with('I') {
+        row["instrument"] = true.into();
+    }
     let renamed = reaper.fx_config(fx, "renamed_name").is_some_and(|name| !name.is_empty());
     if let Some(own) = own.filter(|_| renamed) {
         row["originalName"] = rows::clip(&own).into();

@@ -251,6 +251,8 @@ pub(super) struct DeviceRow {
     pub own_name: String,
     pub on: bool,
     pub plugin: bool,
+    /// An instrument (REAPER's VSTi and the like): the track's sound starts there.
+    pub instrument: bool,
     pub index: u64,
     /// The track's own mixer (Renoise's first device: its fader and pan, not something on the track).
     pub mixer: bool,
@@ -722,6 +724,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                         let name = text(row, "name").unwrap_or_default();
                         self.table.plugin_prefixes.iter().any(|prefix| name.starts_with(prefix))
                     }),
+                    instrument: row.get("instrument") == Some(&Value::Bool(true)),
                     index: row.get("index").and_then(Value::as_u64).unwrap_or(at as u64),
                 })
             })
@@ -1530,13 +1533,17 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 let (add, name) = self.table.gain_device;
                 let mut input = json!({"ref": scope});
                 input[self.table.add_field] = add.into();
-                // Before the chain's last device that shapes the sound (a plug-in limiter Kumi doesn't know may hold the
-                // ceiling there): turned up after it, the level would go past it.
+                // Before the chain's last device that shapes the sound when it may hold the ceiling there (a limiter, or a
+                // plug-in effect Kumi doesn't know): turned up after it, the level would go past it. After anything else (an
+                // instrument the sound starts at, the DAW's own effects), so the turn is heard as it is.
                 let last = devices
                     .iter()
                     .rev()
                     .find(|device| !device.mixer && !self.table.analyzers.iter().any(|word| device.own_name.contains(word)));
-                if let Some(last) = last {
+                let ceiling = |device: &&DeviceRow| {
+                    !device.instrument && (device.plugin || self.table.limiters.iter().any(|(word, _, _)| device.own_name.contains(word)))
+                };
+                if let Some(last) = last.filter(ceiling) {
                     input["index"] = last.index.into();
                 }
                 self.change(self.table.add_tool, input, signal.clone()).await?;
