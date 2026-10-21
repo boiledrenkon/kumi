@@ -1264,7 +1264,7 @@ fn points_are_changed_deleted_and_cleared_from_a_range_and_each_undo_puts_the_la
     lab.undo("envelope-points-delete", &preview, &applied).unwrap();
     assert_eq!(kick_points(), before);
     let (preview, applied) = lab.make("envelope-range-clear", json!({"ref": KICK_VOLUME, "start": 0.5, "end": 2.5}));
-    assert_eq!(preview["display"]["title"], "Cleared “Kick”'s Volume envelope from 0.500 s to 2.500 s (2 points)");
+    assert_eq!(preview["display"]["title"], "Cleared “Kick”'s Volume envelope from bar 1 beat 2 to bar 2 beat 2 (2 points)");
     assert_eq!(kick_points().len(), 1);
     lab.undo("envelope-range-clear", &preview, &applied).unwrap();
     assert_eq!(kick_points(), before);
@@ -1320,6 +1320,9 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     let input = json!({"ref": KICK_VOLUME, "position": 0.5, "length": 1.0, "points": [{"position": 0.75, "value": -20}]});
     let (preview, applied) = lab.make("automation-item-add", input.clone());
     assert!(preview["display"]["note"].as_str().unwrap().contains("go into the new item"));
+    // In bars and beats, as items and markers are (review U16).
+    assert_eq!(preview["display"]["title"], "Added an automation item to “Kick”'s Volume envelope from bar 1 beat 2 to bar 1 beat 4");
+    assert_eq!(applied["display"]["title"], "Added an automation item to “Kick”'s Volume envelope from bar 1 beat 2 to bar 1 beat 4");
     let item = applied["created"]["ref"].as_str().unwrap().to_string();
     assert!(item.starts_with("r:aitem:{BBBB}:{ENV-K-VOL}:1:0.5"), "{item}");
     assert_eq!(kick_points().len(), 2, "the point at 1 s went into the item");
@@ -1345,7 +1348,7 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     assert_eq!(lab.read(json!({"kind": "point", "parent": copy}))["items"][0]["position"], 8.5);
     // Changed: loop off, baseline, moved; undo finds it at its new place and puts it back.
     let (p2, a2) = lab.make("automation-item-set", json!({"ref": copy, "loop": false, "baseline": 0.25, "position": 10}));
-    assert_eq!(p2["display"]["title"], "The automation item at 8 s on “Kick”'s Volume envelope: loop off, baseline 0.25, moved to 10 s");
+    assert_eq!(p2["display"]["title"], "The automation item at bar 5 on “Kick”'s Volume envelope: loop off, baseline 0.25, moved to bar 6");
     assert_eq!(a2["display"]["ref"], copy.replace(":8", ":10"));
     lab.undo("automation-item-set", &p2, &a2).unwrap();
     let it = state(|s| s.tracks[1].envelopes[0].items[1].clone());
