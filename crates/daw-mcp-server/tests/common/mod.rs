@@ -50,6 +50,12 @@ impl Session {
 
     /// Sends a message and returns the answer (Null for a notification). The transcript keeps both, with `bulk` set
     /// (long answers cut to their size) when the answer is too long to be worth keeping whole.
+    /// Sends a message without waiting for its answer.
+    #[allow(dead_code)]
+    pub async fn send(&mut self, message: Value) {
+        self.input.write_all(format!("{message}\n").as_bytes()).await.unwrap();
+    }
+
     pub async fn call(&mut self, message: Value) -> Value {
         self.call_as(message, false).await
     }

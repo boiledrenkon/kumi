@@ -289,6 +289,23 @@ async fn jobs_nobody_followed_are_asked_about_before_a_new_one_is_refused_and_a_
 }
 
 #[tokio::test]
+async fn at_the_end_of_input_a_running_render_is_stopped_without_waiting_for_requests_in_flight() {
+    let script = ReaperScript::new(3, 0);
+    script.listening().set_steps(1_000);
+    let mut lab = Lab::reaper(&script).await;
+    let render = json!({"sources": [{"id": "mix", "what": "master"}], "range": two_bars(), "epoch": "sim-1"});
+    let (job, _) = lab.tool("render", render).await;
+    // A request in flight that would wait 10 s for the render to end.
+    let wait = json!({"jsonrpc": "2.0", "id": 900, "method": "tools/call", "params": {"name": "listen_job", "arguments": {"jobId": job["jobId"], "waitMs": 10_000}}});
+    lab.session.send(wait).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let ended = std::time::Instant::now();
+    lab.session.finish().await;
+    assert!(ended.elapsed() < std::time::Duration::from_secs(5), "the host ended in {:?}", ended.elapsed());
+    assert_eq!(script.listening().restored(), 1, "the render was stopped and put back");
+}
+
+#[tokio::test]
 async fn an_items_audio_is_its_source_file_and_a_midi_item_says_it_has_none() {
     let script = ReaperScript::new(3, 0);
     script.listening().set_silent_ref("r:item:{I-T0002}");

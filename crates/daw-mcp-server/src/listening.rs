@@ -743,7 +743,10 @@ impl Host {
     /// The jobs still running when the host goes: the bridge stops them and puts back what they changed.
     pub(crate) async fn cancel_running_jobs(&self) {
         for id in self.jobs().running() {
-            let _ = self.call("listen_cancel", json!({"jobId": id}), &Pick::default(), STATUS_TIMEOUT).await;
+            let answer = self.call("listen_cancel", json!({"jobId": id}), &Pick::default(), STATUS_TIMEOUT).await;
+            if answer.is_ok_and(|answer| answer.get("state").and_then(Value::as_str).is_some_and(|state| TERMINAL.contains(&state))) {
+                self.jobs().ended(&id);
+            }
         }
     }
 }
