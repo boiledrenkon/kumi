@@ -12,7 +12,7 @@ use crate::{
         history::{cant_reach_to_undo, cant_take_back, Applied, ChangeHost, Entry, History, UndoResult},
         picture::ParameterRow,
         plan::{make_changes, stream_changes, ActionOutcome, ActionSummary, Batch, ChangeOutcome, PlanHost, StepKind},
-        refs::{Book, RefScheme},
+        refs::{Book, Moved, RefScheme, Shift},
     },
     integrations::shared::{
         changes::{new_record, ChangeSummary},
@@ -93,6 +93,16 @@ pub enum Picture {
 const CURVE_QUIET_MS: f64 = 300.;
 const CURVE_WAIT_MS: f64 = 3_000.;
 const CURVE_HOLD_MS: f64 = 120_000.;
+/// The most epoch moves of Kumi's own changes kept for a plug-in's curve to be carried through.
+const EPOCH_MOVES: usize = 64;
+
+/// (M6) An epoch move one of Kumi's own changes made: from the epoch its preview was read in to the one its apply
+/// left, and where it put the tracks when its answer says so exactly (None: it can't be told).
+struct EpochMove {
+    from: String,
+    to: String,
+    shift: Option<Shift>,
+}
 
 /// A change under way, counted while it lives.
 struct Changing<'a>(&'a Cell<u32>);
@@ -591,6 +601,8 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     me: std::rc::Weak<Self>,
     /// (M6) Changes under way now.
     changing: Cell<u32>,
+    /// (M6) The epoch moves Kumi's own changes made, oldest first, for a DAW that reads curves.
+    epoch_moves: RefCell<Vec<EpochMove>>,
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -608,6 +620,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             not_copied: Cell::new(None),
             me: me.clone(),
             changing: Cell::new(0),
+            epoch_moves: RefCell::default(),
         })
     }
 
@@ -757,7 +770,10 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// parameters (the host's `read` under the plug-in), each change's picture walked back from what was read (an
     /// equaliser's bands, a compressor's curve, before and after). Only for a DAW that reads curves (Logic's Channel EQ
     /// and Compressor), and a change that moved a parameter one of them has; a read another plug-in answers draws none.
-    fn curve_later(&self, id: &str, plugin: &str, values: Vec<PictureValue>) {
+    /// The plug-in's ref is the one its change was previewed with, read in `epoch`: when a later change moved the epoch
+    /// meanwhile (a plan's track added after it), the ref is carried to now through the moves Kumi's own changes made
+    /// ([`Self::carried`]), and when it can't be, the curve is skipped and each change keeps the values it moved.
+    fn curve_later(&self, id: &str, plugin: &str, epoch: Option<&str>, values: Vec<PictureValue>) {
         let Some(curves) = self.link().daw.curves else { return };
         if self.history.is_quiet() || !values.iter().any(|value| (curves.curve_parameter)(&value.name)) {
             return;
@@ -772,7 +788,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         if !first {
             return;
         }
-        let (plan, plugin) = (self.me.clone(), plugin.to_owned());
+        let (plan, plugin, epoch) = (self.me.clone(), plugin.to_owned(), epoch.map(str::to_owned));
         tokio::task::spawn_local(async move {
             // One task a plug-in: it reads again for changes that came while it read.
             loop {
@@ -796,8 +812,13 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                     run.reading = std::mem::take(&mut run.waiting);
                     run.reading.clone()
                 };
+                // Where the plug-in is now: past an epoch move Kumi can't follow, nothing is read and nothing drawn.
+                let Some(parent) = this.carried(&plugin, epoch.as_deref()) else {
+                    this.history.curve_runs.borrow_mut().remove(&plugin);
+                    return;
+                };
                 let read =
-                    this.link().call("read", json!({"kind": "param", "parent": plugin, "limit": 200}), abort::timeout(CALL_MS)).await;
+                    this.link().call("read", json!({"kind": "param", "parent": parent, "limit": 200}), abort::timeout(CALL_MS)).await;
                 let newer = {
                     let mut runs = this.history.curve_runs.borrow_mut();
                     let Some(run) = runs.get_mut(&plugin) else { return };
@@ -823,6 +844,74 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 }
             }
         });
+    }
+
+    /// (M6) A long ref read in `epoch` as it reads now: as it is while the DAW is still in that epoch, else carried
+    /// through each epoch move Kumi's own changes made since, by where each put the tracks (the refs' `moved`), and
+    /// written in the epoch of now (positional refs lead with their epoch). None when a move on the way isn't known
+    /// exactly (a Track Stack, a key command, a plug-in's strip replaced, the DAW moving on its own) or took the ref's
+    /// track away.
+    fn carried(&self, reference: &str, epoch: Option<&str>) -> Option<String> {
+        let now = self.link().epoch.borrow().clone();
+        let (Some(epoch), Some(now)) = (epoch, now) else { return Some(reference.to_owned()) };
+        if epoch == now {
+            return Some(reference.to_owned());
+        }
+        let book = self.link().book.borrow();
+        let moves = self.epoch_moves.borrow();
+        let (mut at, mut carried) = (epoch.to_owned(), reference.to_owned());
+        while at != now {
+            let step = moves.iter().rev().find(|step| step.from == at)?;
+            carried = match book.scheme.moved(step.shift.as_ref()?, &carried) {
+                Moved::Same => carried,
+                Moved::To(to) => to,
+                Moved::Gone => return None,
+            };
+            at.clone_from(&step.to);
+        }
+        let (_, rest) = carried.split_once(':')?;
+        Some(format!("{now}:{rest}"))
+    }
+
+    /// (M6) An epoch move a change made, kept for a plug-in's curve: where it put the tracks when its answer says so
+    /// exactly. A track it made (`created` a track, or the track a region came in on that it added), not a Track
+    /// Stack, which gathers tracks; a track it deleted (its target, `applied.deleted`); none moved by a region's or a
+    /// name's change; anything else can't be told.
+    fn note_epoch_move(&self, kind: &OwnKind, preview: &Value, applied: &Value) {
+        let (Some(from), Some(to)) = (preview.get("epoch").and_then(Value::as_str), applied.get("epoch").and_then(Value::as_str)) else {
+            return;
+        };
+        if from == to || self.link().daw.curves.is_none() {
+            return;
+        }
+        let shift = {
+            let book = self.link().book.borrow();
+            let place = |reference: Option<&Value>| -> Option<usize> {
+                let reference = reference?.as_str()?;
+                if book.scheme.kind_of(reference)? != "track" {
+                    return None;
+                }
+                reference.rsplit(['.', ':']).next()?.parse().ok()
+            };
+            let created = applied.get("created").filter(|created| created.is_object());
+            let made = created.and_then(|created| match created.get("trackAdded") {
+                Some(Value::Bool(true)) => Some(created.get("track")),
+                _ => (created.get("kind").and_then(Value::as_str) == Some("track")).then(|| created.get("ref")),
+            });
+            let gone = (applied.pointer("/applied/deleted") == Some(&Value::Bool(true))).then(|| place(preview.pointer("/target/ref")));
+            if let Some(made) = made {
+                let stack = created.is_some_and(|created| created.get("stack").is_some());
+                place(made).filter(|_| !stack).map(|at| Shift { tracks_made: vec![at], ..Shift::default() })
+            } else if let Some(Some(at)) = gone {
+                Some(Shift { tracks_gone: vec![at], ..Shift::default() })
+            } else {
+                matches!(kind.family, ChangeFamily::Clip | ChangeFamily::Rename).then(Shift::default)
+            }
+        };
+        let mut moves = self.epoch_moves.borrow_mut();
+        moves.push(EpochMove { from: from.to_owned(), to: to.to_owned(), shift });
+        let over = moves.len().saturating_sub(EPOCH_MOVES);
+        moves.drain(..over);
     }
 
     /// The input with this turn's short refs made long, or what to say of a short ref the turn doesn't know.
@@ -1018,6 +1107,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         };
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
+        self.note_epoch_move(kind, &preview, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
         // (r-tracks) Done, and nothing the DAW keeps changed (an action the DAW made no undo point of: a view, selection or
         // transport one): no row in HISTORY, and the host forgets it.
@@ -1056,7 +1146,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         let id = self.remember(kind, summary, &transaction, ChangeState::Applied, note.clone());
         // (M6) A plug-in's curve, once a read of its parameters says it's an equaliser or a compressor.
         if let Some(plugin) = preview.pointer("/target/ref").and_then(Value::as_str).filter(|_| !moved.is_empty()) {
-            self.curve_later(&id, plugin, moved);
+            self.curve_later(&id, plugin, preview.get("epoch").and_then(Value::as_str), moved);
         }
         // No copy kept first (the saved project was too big): said with what it deleted.
         let note = match (self.not_copied.take().filter(|_| kind.deletes), note) {
@@ -1807,6 +1897,54 @@ mod tests {
         );
         assert_eq!(RenoiseRefs.moved(&shift, "1:slot:2.4"), Moved::To("1:slot:3.4".into()));
         assert_eq!(RenoiseRefs.moved(&shift, "1:pattern:2"), Moved::Same);
+    }
+
+    #[test]
+    fn a_plug_ins_curve_is_carried_through_the_epoch_moves_kumis_own_changes_made_and_skipped_past_any_other() {
+        use super::super::logic::{LogicRefs, DAW};
+        let plan = engine::<LogicRefs>(&DAW, None);
+        let kind = |tool: &str| DAW.changes.kinds.iter().find(|kind| kind.tool == tool).unwrap();
+        let now = |epoch: &str| *plan.link().epoch.borrow_mut() = Some(epoch.into());
+        now("1");
+        assert_eq!(plan.carried("1:plugin:2.3", Some("1")).as_deref(), Some("1:plugin:2.3"), "still in its epoch");
+        // A track added below track 1 (epoch 1 to 2): Keys, and its Compressor, are on track 3.
+        let added = json!({"epoch": "2", "created": {"ref": "2:track:2", "kind": "track"}});
+        plan.note_epoch_move(kind("track_add"), &json!({"epoch": "1", "target": {"ref": null, "kind": "track"}}), &added);
+        now("2");
+        assert_eq!(plan.carried("1:plugin:2.3", Some("1")).as_deref(), Some("2:plugin:3.3"));
+        // A region split (2 to 3) moves no track; track 1 deleted (3 to 4) moves every track after it up one.
+        let split = (
+            json!({"epoch": "2", "target": {"ref": "2:region:1", "kind": "region"}}),
+            json!({"epoch": "3", "created": {"ref": "3:region:2", "kind": "region"}}),
+        );
+        plan.note_epoch_move(kind("region_split"), &split.0, &split.1);
+        let deleted =
+            (json!({"epoch": "3", "target": {"ref": "3:track:1", "kind": "track"}}), json!({"epoch": "4", "applied": {"deleted": true}}));
+        plan.note_epoch_move(kind("track_delete"), &deleted.0, &deleted.1);
+        now("4");
+        assert_eq!(plan.carried("1:plugin:2.3", Some("1")).as_deref(), Some("4:plugin:2.3"));
+        assert_eq!(plan.carried("3:plugin:1.1", Some("3")), None, "its track was deleted");
+        // A MIDI file imported onto a track it added (4 to 5) moves the tracks below it.
+        let import = json!({"epoch": "5", "created": {"ref": "5:region:2", "kind": "region", "track": "5:track:2", "trackAdded": true}});
+        plan.note_epoch_move(kind("midi_import"), &json!({"epoch": "4", "target": {"ref": "4:track:1", "kind": "track"}}), &import);
+        now("5");
+        assert_eq!(plan.carried("4:plugin:2.3", Some("4")).as_deref(), Some("5:plugin:3.3"));
+        // A Track Stack (5 to 6) gathers tracks: where they went can't be told, so nothing is carried past it.
+        let stack = json!({"epoch": "6", "created": {"ref": "6:track:1", "kind": "track", "stack": "folder"}});
+        plan.note_epoch_move(kind("track_stack"), &json!({"epoch": "5", "target": {"ref": null, "kind": "track"}}), &stack);
+        now("6");
+        assert_eq!(plan.carried("5:plugin:3.3", Some("5")), None);
+        // Nor past a move Kumi didn't make (the producer's own, 6 to 7), though the one before it was followed.
+        now("7");
+        assert_eq!(plan.carried("6:plugin:2.1", Some("6")), None);
+        // A plug-in's strip replaced by a patch (a device's change that moved the epoch) can't be followed either.
+        let patch = (
+            json!({"epoch": "7", "target": {"ref": "7:track:2", "kind": "track"}}),
+            json!({"epoch": "8", "applied": {"patch": "Bright Keys"}}),
+        );
+        plan.note_epoch_move(kind("patch_load"), &patch.0, &patch.1);
+        now("8");
+        assert_eq!(plan.carried("7:plugin:2.2", Some("7")), None);
     }
 
     /// A host that never answers in time.

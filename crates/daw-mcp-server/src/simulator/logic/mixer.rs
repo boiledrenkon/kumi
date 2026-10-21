@@ -1522,7 +1522,9 @@ impl State {
                 if epoch != RECORDED_EPOCH {
                     return None;
                 }
-                let reference = asked["ref"].as_str().unwrap_or_default();
+                // (the strip is found by the ref as it was sent, in the epoch of now: past the recorded one too)
+                let sent_ref = sent("ref");
+                let reference = sent_ref.as_str();
                 let missing = || Err(not_in_project(&sent("ref")));
                 match ref_kind.as_str() {
                     "plugin" => match self.under(Some(reference), "ref", "plugin", 1, false) {
@@ -1576,15 +1578,17 @@ impl State {
             }
             "read" if matches!(kind, Some("param" | "smart" | "automation")) => {
                 let kind = kind.unwrap_or_default();
-                let Some(parent) = asked.get("parent").and_then(Value::as_str) else {
+                if asked.get("parent").and_then(Value::as_str).is_none() {
                     let what = if kind == "param" { "plug-in" } else { "track" };
                     return Some(Err(bad(format!("{kind}: pass the parent {what}"))));
-                };
+                }
                 if recorded("parent").is_some_and(|(epoch, _, _)| epoch != RECORDED_EPOCH) {
                     return None;
                 }
+                // (the parent is found as it was sent, in the epoch of now: past the recorded one too)
+                let parent = sent("parent");
                 if kind == "param" {
-                    match self.plugin_for(Some(parent), "parent", false).and_then(|(owner, slot)| {
+                    match self.plugin_for(Some(&parent), "parent", false).and_then(|(owner, slot)| {
                         self.channel(owner).at_slot(slot).map(|_| (owner, slot)).ok_or_else(|| not_in_project(&sent("parent")))
                     }) {
                         Ok((owner, slot)) => {
@@ -1594,7 +1598,7 @@ impl State {
                         Err(fault) => Err(fault),
                     }
                 } else {
-                    match self.track_for(Some(parent), "parent", false) {
+                    match self.track_for(Some(&parent), "parent", false) {
                         Ok(track) if kind == "smart" => {
                             if self.tracks[track].smart.is_empty() {
                                 Err(failed("Logic Pro's Smart Controls pane shows no controls for this track"))

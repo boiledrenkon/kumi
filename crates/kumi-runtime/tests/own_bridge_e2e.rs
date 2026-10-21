@@ -2096,3 +2096,105 @@ async fn logics_channel_eq_and_compressor_changes_draw_their_curves_in_history()
         })
         .await;
 }
+
+/// (M6) A plug-in's curve when a later step of the same plan moved Logic's epoch: the Compressor's threshold changed,
+/// then a track added above its strip (Keys is track 3 in the new epoch). Its read goes to the plug-in's ref of now,
+/// carried through the add, and the curve draws. Past a Track Stack, which gathers tracks so where they went can't be
+/// told, the curve is skipped: nothing is read, and the change keeps the values it moved.
+#[tokio::test(flavor = "current_thread")]
+async fn a_curve_after_a_plan_moved_logics_epoch_is_read_where_the_plug_in_is_now_or_skipped() {
+    use kumi_runtime::core::contracts::ChangePicture;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let latest = |id: &str| told.borrow().iter().rev().find(|record| record.id == id).cloned().unwrap();
+            let param_reads = || -> Vec<Value> {
+                script
+                    .asked()
+                    .iter()
+                    .filter(|(method, params)| method == "read" && params["kind"] == "param")
+                    .map(|(_, params)| params["parent"].clone())
+                    .collect()
+            };
+            // The Compressor on Keys (and Vocal), as the model reads them now.
+            let compressor = |observed: &kumi_runtime::core::contracts::Observation| {
+                let context: Value = serde_json::from_str(&observed.context).unwrap();
+                let track = |name: &str| {
+                    context["tracks"].as_array().unwrap().iter().find(|track| track["name"] == name).unwrap()["ref"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                };
+                (track("Keys"), track("Vocal"))
+            };
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            let (keys, vocal) = compressor(&observed);
+            let read =
+                tool(&observed, "logic_read").execute(input(json!({"kind": "plugin", "parent": keys})), Signal::new()).await.unwrap();
+            let rows = serde_json::from_str::<Value>(&read.text).unwrap()["items"].clone();
+            let comp = rows.as_array().unwrap().iter().find(|row| row["name"] == "Compressor").unwrap()["ref"].as_str().unwrap().to_owned();
+
+            // The threshold, then a track added below Vocal: Logic's epoch moves and Keys becomes track 3.
+            let steps = json!({"steps": [
+                {"tool": "fx_param", "input": {"ref": comp, "param": "Threshold", "value": -30}},
+                {"tool": "track_add", "input": {"name": "Pad", "index": 1}},
+            ]});
+            let done = tool(&observed, "make_changes").execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let id = told.borrow().iter().find(|record| record.title.contains("Threshold")).unwrap().id.clone();
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if matches!(latest(&id).picture, Some(ChangePicture::Dynamics { .. })) {
+                    break;
+                }
+            }
+            let Some(ChangePicture::Dynamics { before, after, .. }) = latest(&id).picture else {
+                panic!("no curve: {:?}", latest(&id).picture)
+            };
+            assert_eq!((before.threshold_db, after.threshold_db), (-20.0, -30.0));
+            let asked = param_reads();
+            assert_eq!(asked, [json!("2:plugin:3.3")], "read where the Compressor is now, in the epoch the add left");
+            assert_eq!(script.track(3)["name"], "Keys");
+
+            // The threshold again, then Vocal put in a Track Stack: where its tracks went can't be told, so the curve's
+            // read isn't asked, and the change keeps its values.
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            let (keys, vocal_now) = compressor(&observed);
+            assert_ne!(vocal_now, vocal, "the epoch moved: the refs are new");
+            let read =
+                tool(&observed, "logic_read").execute(input(json!({"kind": "plugin", "parent": keys})), Signal::new()).await.unwrap();
+            let rows = serde_json::from_str::<Value>(&read.text).unwrap()["items"].clone();
+            let comp = rows.as_array().unwrap().iter().find(|row| row["name"] == "Compressor").unwrap()["ref"].as_str().unwrap().to_owned();
+            let steps = json!({"steps": [
+                {"tool": "fx_param", "input": {"ref": comp, "param": "Threshold", "value": -40}},
+                {"tool": "track_stack", "input": {"trackRefs": [vocal_now], "kind": "folder"}},
+            ]});
+            let done = tool(&observed, "make_changes").execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let id = told.borrow().iter().rev().find(|record| record.title.contains("Threshold")).unwrap().id.clone();
+            tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+            assert!(matches!(latest(&id).picture, Some(ChangePicture::Values { .. })), "{:?}", latest(&id).picture);
+            assert_eq!(param_reads(), asked, "no read past a move Kumi can't follow");
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
