@@ -472,6 +472,97 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn each_candidate_is_heard_over_its_own_part_in_an_audition_and_in_a_goal() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            // Two parts far apart: bar 17 on Track 2, bar 49 on Track 3 (two bars each).
+            let (a, _) = script.add_midi_item("r:track:{T0002}", "Verse", 64., 8., &eighths(0., 100, 100));
+            let (b, _) = script.add_midi_item("r:track:{T0003}", "Chorus", 192., 8., &eighths(0., 100, 100));
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let candidate = |track: &str, part: &str| AuditionCandidate {
+                track: track.into(),
+                clip: Some(part.into()),
+                label: Some(track.to_lowercase()),
+                mix: None,
+            };
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = |candidates: Vec<AuditionCandidate>| AuditionRequest {
+                candidates,
+                from_beat: None,
+                beats: None,
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let ranges =
+                |from: usize| -> Vec<Value> { script.listening().renders()[from..].iter().map(|render| render["range"].clone()).collect() };
+
+            // An audition: each candidate rendered over its own part, not over the first one's.
+            let before = script.listening().renders().len();
+            let heard = reaper.audition(&request(vec![candidate("Track 2", &a), candidate("Track 3", &b)]), Signal::new()).await.unwrap();
+            assert!(heard.is_ok(), "{heard:?}");
+            assert_eq!(ranges(before), [json!({"fromBeat": 64.0, "beats": 8.0}), json!({"fromBeat": 192.0, "beats": 8.0})]);
+            assert_eq!(script.listening().previews().len(), 1, "one candidate played out loud for the round");
+            // Parts of different lengths are refused in words, nothing rendered.
+            let (long, _) = script.add_midi_item("r:track:{T0002}", "Bridge", 256., 12., &eighths(0., 100, 100));
+            let before = script.listening().renders().len();
+            let refused =
+                reaper.audition(&request(vec![candidate("Track 2", &long), candidate("Track 3", &b)]), Signal::new()).await.unwrap();
+            let said = refused.map(|result| result.notes.join(" ")).unwrap_or_else(|why| why);
+            assert!(said.contains("different lengths (“track 2” 12 beats, “track 3” 8 beats): give beats"), "{said}");
+            assert_eq!(script.listening().renders().len(), before);
+            // A part longer than 32 beats is heard for its first 32.
+            let (longest, _) = script.add_midi_item("r:track:{T0003}", "Outro", 320., 40., &eighths(0., 100, 100));
+            let before = script.listening().renders().len();
+            let capped = reaper.audition(&request(vec![candidate("Track 3", &longest)]), Signal::new()).await.unwrap();
+            assert!(capped.is_ok(), "{capped:?}");
+            assert_eq!(ranges(before), [json!({"fromBeat": 320.0, "beats": 32.0})]);
+
+            // A goal from the same candidates: each slot's copy made and heard over its own part.
+            let made = |since: usize| -> Vec<Value> {
+                script.asked()[since..]
+                    .iter()
+                    .filter(|(method, params)| method == "scratch" && params["action"] == "make" && params["label"] == "Kumi: goal search")
+                    .map(|(_, params)| params["range"].clone())
+                    .collect()
+            };
+            let asked = script.asked().len();
+            let rig =
+                reaper.goal(&request(vec![candidate("Track 2", &a), candidate("Track 3", &b)]), Signal::new()).await.unwrap().unwrap();
+            assert_eq!(made(asked), [json!({"fromBeat": 64.0, "beats": 8.0}), json!({"fromBeat": 192.0, "beats": 8.0})]);
+            let slots = rig.slots();
+            let trials: Vec<GenerationTrial> = slots
+                .iter()
+                .map(|slot| GenerationTrial { slot: slot.name.clone(), knobs: vec![], values: vec![], fresh: Some(true) })
+                .collect();
+            let before = script.listening().renders().len();
+            rig.generation(&trials, Signal::new(), None).await.unwrap();
+            assert_eq!(ranges(before), [json!({"fromBeat": 64.0, "beats": 8.0}), json!({"fromBeat": 192.0, "beats": 8.0})]);
+            rig.close().await.unwrap();
+            // A goal heard again names each track's first part: where that track first plays.
+            let asked = script.asked().len();
+            let again = reaper
+                .goal(&request(vec![candidate("Track 2", "first"), candidate("Track 3", "first")]), Signal::new())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(made(asked), [json!({"fromBeat": 64.0, "beats": 8.0}), json!({"fromBeat": 192.0, "beats": 8.0})]);
+            again.close().await.unwrap();
+            assert_ours(&told.borrow());
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_renoise_goal_settles_its_winner_as_one_device_params_change_that_kumis_undo_takes_back() {
     tokio::task::LocalSet::new()
         .run_until(async {

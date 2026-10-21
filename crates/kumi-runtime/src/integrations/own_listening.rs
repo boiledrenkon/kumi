@@ -848,6 +848,18 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     /// Hears these candidates over `window` in one render: each by the name it goes by now, the mix by MIX_CANDIDATE.
     /// The first that isn't a scratch copy is played out loud after.
     async fn hear_candidates(&self, candidates: &[AuditionCandidate], window: Window, before_main: bool, signal: &Signal) -> Pass {
+        self.hear_candidates_aloud(candidates, window, before_main, true, signal).await
+    }
+
+    /// The same, the first source played out loud only when `aloud` (a round heard in several renders plays one).
+    async fn hear_candidates_aloud(
+        &self,
+        candidates: &[AuditionCandidate],
+        window: Window,
+        before_main: bool,
+        aloud: bool,
+        signal: &Signal,
+    ) -> Pass {
         let mut sources = vec![];
         // Each source's id, the name its file goes by, and whether it's the mix.
         let mut named: Vec<(String, String, bool)> = vec![];
@@ -890,7 +902,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let before_master = files.get("premix").map(|(render, _)| render.clone());
         let mut notes = notes;
         // What the producer hears: the first thing heard that isn't a copy only Kumi compares.
-        let first = named.iter().find(|(_, name, _)| !self.copies.borrow().contains_key(name));
+        let first = named.iter().filter(|_| aloud).find(|(_, name, _)| !self.copies.borrow().contains_key(name));
         let audible = match first.and_then(|(_, name, _)| captured.get(name)) {
             Some(render) => {
                 let (played, said) = self.play(render).await;
@@ -910,6 +922,76 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         };
         let sources = named.iter().map(|(_, name, mix)| (name.clone(), *mix)).collect();
         pass(Ok(Captured { files: captured, sources, before_master }), notes, tried, audible)
+    }
+
+    /// Each candidate's stretch: its own part's (an item, a pattern) from its start, else the first part's, else from_beat;
+    /// all one length (beats, else the parts', at most `MAX_PART_BEATS`). Parts of different lengths are refused in words.
+    pub(super) async fn part_windows(
+        &self,
+        candidates: &[AuditionCandidate],
+        from_beat: Option<f64>,
+        beats: Option<f64>,
+        signal: &Signal,
+    ) -> Result<Result<Vec<Window>, String>, RuntimeError> {
+        let given = Window { from: from_beat.unwrap_or(0.), beats: beats.unwrap_or(8.) };
+        let mut parts: Vec<Option<Window>> = vec![];
+        for candidate in candidates {
+            match self.part_of(candidate, from_beat, signal).await? {
+                Ok(part) => parts.push(part),
+                Err(why) => return Ok(Err(why)),
+            }
+        }
+        let lengths: Vec<f64> = parts.iter().flatten().map(|part| part.beats.min(MAX_PART_BEATS)).collect();
+        if beats.is_none() && lengths.iter().any(|length| (length - lengths[0]).abs() > 1e-6) {
+            let said: Vec<String> = candidates
+                .iter()
+                .zip(&parts)
+                .filter_map(|(candidate, part)| {
+                    let name = candidate.label.clone().unwrap_or_else(|| candidate.track.clone());
+                    part.map(|part| format!("“{name}” {} beats", kumi_common::js::number::to_string(part.beats.min(MAX_PART_BEATS))))
+                })
+                .collect();
+            return Ok(Err(format!(
+                "The candidates' parts are different lengths ({}): give beats, and Kumi hears each that long from its own start.",
+                said.join(", ")
+            )));
+        }
+        let length = beats.or(lengths.first().copied()).unwrap_or(given.beats);
+        let first = parts.iter().flatten().next().map(|part| part.from);
+        Ok(Ok(parts
+            .iter()
+            .map(|part| Window { from: part.map(|part| part.from).or(first).unwrap_or(given.from), beats: length })
+            .collect()))
+    }
+
+    /// Where a candidate's own part (an item, a pattern) plays: None when it names none or from_beat is given. "first" (a
+    /// goal heard again names its tracks' parts so) is where the track first plays.
+    pub(super) async fn part_of(
+        &self,
+        candidate: &AuditionCandidate,
+        from_beat: Option<f64>,
+        signal: &Signal,
+    ) -> Result<Result<Option<Window>, String>, RuntimeError> {
+        let Some(part) = candidate.clip.as_deref().filter(|part| !part.is_empty() && from_beat.is_none()) else {
+            return Ok(Ok(None));
+        };
+        if part != "first" {
+            return Ok(self.window_of(part, signal).await?.map(Some));
+        }
+        let track = match self.resolve(&candidate.track, signal).await? {
+            Ok((track, _)) => track,
+            Err(why) => return Ok(Err(why)),
+        };
+        let rows = match self.rows(json!({"kind": "spans", "limit": 200}), 8, signal).await? {
+            Ok(rows) => rows,
+            Err(why) => return Ok(Err(why)),
+        };
+        let span = rows
+            .iter()
+            .find(|row| text(row, "ref").is_some_and(|reference| self.same_place(&reference, &track)))
+            .and_then(|row| row.pointer("/spans/0").and_then(Value::as_array).cloned())
+            .and_then(|span| Some((span.first()?.as_f64()?, span.get(1)?.as_f64()?)));
+        Ok(Ok(span.filter(|(from, to)| to > from).map(|(from, to)| Window { from, beats: to - from })))
     }
 
     /// The window an item (REAPER) or a pattern (Renoise) plays over, from its row.
@@ -971,6 +1053,9 @@ pub(super) fn device_of_param(reference: &str) -> Option<String> {
     let (guid, _) = reference.strip_prefix("r:param:")?.rsplit_once(':')?;
     Some(format!("r:fx:{guid}"))
 }
+
+/// The longest part a candidate is heard over (as Live caps a clip), in beats.
+pub(super) const MAX_PART_BEATS: f64 = 32.;
 
 /// One knob's change: the device as it is now with the knob's number (a knob's own ref can be from before a search's copies
 /// moved Renoise's refs), or the knob's ref where it has no number.
@@ -1698,17 +1783,14 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         signal: Signal,
     ) -> AuditionPass {
         let failed = |error: RuntimeError, opened: bool| AuditionPass { rendered: Err(error), notes: vec![], opened };
-        // A candidate's own part (an item, a pattern) sets where it's heard; otherwise from_beat for beats.
-        let mut window = Window { from: from_beat.unwrap_or(0.), beats: beats.unwrap_or(8.) };
-        if from_beat.is_none() {
-            if let Some(part) = candidates.iter().find_map(|candidate| candidate.clip.clone()) {
-                match self.window_of(&part, &signal).await {
-                    Ok(Ok(found)) => window = Window { from: found.from, beats: beats.unwrap_or(found.beats) },
-                    Ok(Err(why)) => return failed(RuntimeError::Observation(why), false),
-                    Err(error) => return failed(error, false),
-                }
-            }
-        }
+        // Each candidate is heard over its own part (an item, a pattern), from its start for one length (beats, else the
+        // part's, at most MAX_PART_BEATS); a candidate without one over the first part's stretch, or from_beat for beats.
+        let windows = match self.part_windows(candidates, from_beat, beats, &signal).await {
+            Ok(Ok(windows)) => windows,
+            Ok(Err(why)) => return failed(RuntimeError::Observation(why), false),
+            Err(error) => return failed(error, false),
+        };
+        let window = windows[0];
         let first =
             candidates.first().map(|candidate| candidate.label.clone().unwrap_or_else(|| candidate.track.clone())).unwrap_or_default();
         self.tell_app(&format!(
@@ -1721,12 +1803,43 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 n => format!(" and {} more", n - 1),
             }
         ));
-        let heard = self.hear_candidates(candidates, window, false, &signal).await;
-        let mut notes = heard.notes;
-        let captured = match heard.rendered {
-            Ok(captured) => captured,
-            Err(error) => return AuditionPass { rendered: Err(error), notes, opened: true },
-        };
+        // One render for each stretch the candidates are heard over (most rounds: one), the first played out loud.
+        let mut froms: Vec<f64> = vec![];
+        for window in &windows {
+            if !froms.iter().any(|from| (from - window.from).abs() < 1e-9) {
+                froms.push(window.from);
+            }
+        }
+        let mut notes = vec![];
+        let mut audible = false;
+        let mut names: Vec<Option<String>> = vec![None; candidates.len()];
+        let mut files = IndexMap::new();
+        for (n, from) in froms.iter().enumerate() {
+            let at: Vec<usize> = (0..candidates.len()).filter(|i| (windows[*i].from - from).abs() < 1e-9).collect();
+            let group: Vec<AuditionCandidate> = at.iter().map(|i| candidates[*i].clone()).collect();
+            let heard = self.hear_candidates_aloud(&group, Window { from: *from, beats: window.beats }, false, n == 0, &signal).await;
+            notes.extend(heard.notes);
+            audible |= n == 0 && heard.audible;
+            let captured = match heard.rendered {
+                Ok(captured) => captured,
+                Err(error) => return AuditionPass { rendered: Err(error), notes, opened: true },
+            };
+            for (i, (name, _)) in at.iter().zip(captured.sources) {
+                // (the same track over two parts: the second goes by "name (2)")
+                let mut unique = name.clone();
+                let mut k = 2;
+                while files.contains_key(&unique) {
+                    unique = format!("{name} ({k})");
+                    k += 1;
+                }
+                if let Some(render) = captured.files.get(&name) {
+                    files.insert(unique.clone(), render.clone());
+                }
+                names[*i] = Some(unique);
+            }
+        }
+        let captured =
+            Captured { sources: names.into_iter().map(|name| (name.unwrap_or_default(), false)).collect(), files, before_master: None };
         let sources: Vec<AuditionSource> = candidates
             .iter()
             .enumerate()
@@ -1735,10 +1848,10 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 track: candidate.track.clone(),
                 name: name.clone(),
                 scene: None,
-                audible: at == 0 && heard.audible,
+                audible: at == 0 && audible,
             })
             .collect();
-        if heard.audible && candidates.len() > 1 {
+        if audible && candidates.len() > 1 {
             notes.push(format!("{} rendered the round offline; the producer hears the first candidate out loud now.", self.app()));
         }
         AuditionPass { rendered: Ok(AuditionRender { sources, files: captured.files, beats: window.beats }), notes, opened: true }
