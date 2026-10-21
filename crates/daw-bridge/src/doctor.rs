@@ -255,7 +255,22 @@ fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: 
 
     let pids = (inputs.running)(daw);
     let discovered = scan_discovery(&paths.discovery(), daw);
-    let alive: Vec<_> = discovered.iter().filter(|found| found.alive).filter_map(|found| found.discovery.as_ref().ok()).collect();
+    // A discovery file with no pid (Renoise on Windows writes none) is alive only while its port answers: one whose port
+    // nobody listens on is left from a run that ended (a crash, a folder the tool couldn't delete it from), so it goes, as
+    // the host sweeps it.
+    let alive: Vec<_> = discovered
+        .iter()
+        .filter(|found| found.alive)
+        .filter_map(|found| found.discovery.as_ref().ok().map(|discovery| (found, discovery)))
+        .filter(|(found, discovery)| {
+            let stale = discovery.pid == 0 && !listening(discovery.port, inputs.probe_timeout.min(Duration::from_millis(500)));
+            if stale {
+                let _ = std::fs::remove_file(&found.path);
+            }
+            !stale
+        })
+        .map(|(_, discovery)| discovery)
+        .collect();
     if pids.is_empty() && alive.is_empty() {
         checks.push(check("running", Level::Note, format!("{daw} isn't running")));
     } else if !pids.is_empty() {
@@ -422,6 +437,48 @@ mod tests {
         let missing = checks.iter().find(|check| check.id == "missing").expect("what this Renoise lacks");
         assert_eq!(missing.message, "Renoise 3.5.4 lacks what Kumi reads markers and regions with: update to Renoise 3.6 or newer");
         assert_eq!(receipt.version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn a_discovery_file_with_no_pid_whose_port_refuses_is_stale_and_goes() {
+        let root = tempfile::tempdir().unwrap();
+        let kumi = root.path().join("kumi");
+        let none = |_: &str| None;
+        let inputs = Inputs {
+            env: Env { os: Os::Mac, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) },
+            kumi_home: &kumi,
+            bundled: None,
+            running: &no_processes,
+            probe_timeout: Duration::from_secs(5),
+        };
+        // Renoise with Kumi's bridge set up.
+        std::fs::create_dir_all(root.path().join("home/Library/Preferences/Renoise/V3.5.4")).unwrap();
+        let target = install::renoise_target(&detect::detect_renoise(&inputs.env)).unwrap();
+        let source = root.path().join("src").join("com.kumi.Bridge.xrnx");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("main.lua"), "-- tool\n").unwrap();
+        Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
+        // A file with no pid (Renoise on Windows writes none) for a port nobody listens on: one just let go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let discovery = Discovery {
+            schema: DISCOVERY_SCHEMA.into(),
+            daw: "renoise".into(),
+            pid: 0,
+            host: "127.0.0.1".into(),
+            port,
+            protocol: PROTOCOL.into(),
+            version: "0.1.0".into(),
+            daw_version: "3.5.4".into(),
+            resource: root.path().join("home/Library/Preferences/Renoise/V3.5.4").to_string_lossy().into_owned(),
+            project: None,
+            started_ms: 1,
+        };
+        let dir = BridgePaths::new(&kumi, Daw::Renoise).discovery();
+        write_discovery(&dir, &discovery).unwrap();
+        let checks = doctor(Daw::Renoise, &inputs);
+        assert!(ids(&checks).contains(&("running", Level::Note)), "Renoise isn't running: {checks:?}");
+        assert!(!ids(&checks).contains(&("answering", Level::Fail)), "{checks:?}");
+        assert!(!dir.join(discovery.file_name()).exists(), "the stale file went");
     }
 
     #[test]
