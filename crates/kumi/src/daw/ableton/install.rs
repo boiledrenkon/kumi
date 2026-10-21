@@ -195,8 +195,12 @@ pub(crate) async fn remove_bridge(io: &InstalledIo, run: Run) -> Result<RemovedB
     }
     .into());
     let scripts = remote_scripts_dir(&io.env);
+    // An Ears device that won't come out is said with where it is, as the extension is: the bridge is out already.
     if basename(&scripts) == "Remote Scripts" {
-        remove(&join(&join(&dirname(&scripts), "Kumi"), &format!("{EARS_NAME}.amxd"))).map_err(error)?;
+        let ears = join(&join(&dirname(&scripts), "Kumi"), &format!("{EARS_NAME}.amxd"));
+        if let Err(why) = remove(&ears) {
+            say(format!("Kumi's Ears device couldn't be taken out of Live's User Library ({why}): delete {ears} by hand."));
+        }
     }
     Ok(RemovedBridge::Removed)
 }

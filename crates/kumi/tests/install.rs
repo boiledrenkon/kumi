@@ -449,6 +449,40 @@ async fn bridge_files_stay_while_live_uses_them() {
         }
     }
 }
+/// Live's bridge is out but Kumi's Ears device won't come out of the User Library: that's said with where the device
+/// is, and the rest goes on as for a bridge that's out (its files go too).
+#[tokio::test]
+#[cfg(unix)]
+async fn an_ears_device_that_wont_come_out_is_said_with_where_it_is() {
+    // SAFETY: geteuid has no preconditions. Root can delete from a read-only folder.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let env = with_bridge(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let library = dir.path().join("Kumi");
+    put(library.join("Kumi Ears.amxd"), "device");
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o555)).unwrap();
+    let (mut io, out) = io(&env);
+    io.confirm = Some(Rc::new(|_| async { true }.boxed_local()));
+    io.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+    io.run = Some(Rc::new(|_, _, _| async { Ran { code: 0, stdout: "".into(), stderr: "".into() } }.boxed_local()));
+    let code = uninstall_installed(io, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "Kumi's Ears device couldn't be taken out of Live's User Library (Permission denied (os error 13)): delete {} by hand.",
+            library.join("Kumi Ears.amxd").display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("couldn't take its bridge out") && said.contains("The bridge and Kumi's extension are out of Live."), "{said}");
+    assert!(!home.join("bridge").exists() && !home.join("app").exists(), "{said}");
+}
 #[tokio::test]
 #[cfg(not(windows))]
 async fn path_removal_honors_zdotdir_and_preserves_unrelated_lines() {
