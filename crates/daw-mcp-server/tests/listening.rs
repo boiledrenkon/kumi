@@ -161,9 +161,7 @@ async fn each_tool_checks_what_it_is_given_before_it_asks_the_bridge() {
         ),
         ("hear", json!({"seconds": 0.5})),
         ("hear", json!({"seconds": 61})),
-        ("listen_job", json!({"jobId": "j9nope"})),
         ("listen_job", json!({"jobId": "j1", "waitMs": 10_001})),
-        ("listen_cancel", json!({"jobId": "j9nope"})),
         ("audition", json!({"file": "relative.wav"})),
         ("audition", json!({"file": "/no/such/file.wav"})),
         ("audio_file", json!({})),
@@ -266,6 +264,28 @@ async fn a_tool_the_daws_list_doesnt_have_is_refused_before_its_bridge_is_asked(
         assert_eq!(answer["error"]["message"], format!("Unknown tool: {name}"), "{answer}");
     }
     assert!(script.asked().iter().all(|(method, _)| !matches!(method.as_str(), "audition_note" | "select" | "instrument_save")));
+}
+
+#[tokio::test]
+async fn jobs_nobody_followed_are_asked_about_before_a_new_one_is_refused_and_a_forgotten_one_says_so() {
+    let script = ReaperScript::new(3, 0);
+    let mut lab = Lab::reaper(&script).await;
+    let render = json!({"sources": [{"id": "mix", "what": "master"}], "range": two_bars(), "epoch": "sim-1"});
+    // As many renders as the host keeps, none followed to its end (a client that lost its connection, say).
+    for _ in 0..daw_mcp_server::listening::MAX_JOBS {
+        let (job, is_error) = lab.tool("render", render.clone()).await;
+        assert!(!is_error, "{job}");
+        script.listening().finish_jobs();
+    }
+    // The next one: the host learns from the bridge that they ended, so it starts.
+    let (job, is_error) = lab.tool("render", render).await;
+    assert!(!is_error, "{job}");
+    assert_eq!(lab.wait(&job).await["state"], "done");
+    // A job the host doesn't keep has its own code, not a malformed request's.
+    for tool in ["listen_job", "listen_cancel"] {
+        let (answer, is_error) = lab.tool(tool, json!({"jobId": "j999zzzz"})).await;
+        assert!(is_error && answer["code"] == "unknown-job", "{tool}: {answer}");
+    }
 }
 
 #[tokio::test]

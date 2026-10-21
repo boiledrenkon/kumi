@@ -249,6 +249,20 @@ impl SimListening {
         self.state.lock().unwrap().restored
     }
 
+    /// Every running job ends now, as a bridge's renders end whether or not anyone asks (their files written).
+    pub fn finish_jobs(&self) {
+        let mut state = self.state.lock().unwrap();
+        let mut ended = 0;
+        for job in state.jobs.values_mut().filter(|job| job.state == "running" && job.error.is_none()) {
+            for (n, (_, path, _, seconds, level, _)) in job.files.iter().enumerate() {
+                let _ = write_noise(path, *seconds, *level, n as u32 + 7);
+            }
+            job.state = "done";
+            ended += 1;
+        }
+        state.restored += ended;
+    }
+
     /// The scratch copies standing now, by set.
     pub fn scratch_copies(&self) -> usize {
         self.state.lock().unwrap().scratch.values().map(Vec::len).sum()

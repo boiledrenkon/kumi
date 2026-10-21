@@ -25,6 +25,9 @@ pub const MAX_SOURCES: usize = 18;
 /// The most jobs the host keeps, and how long a finished one stays once its end has been read.
 pub const MAX_JOBS: usize = 32;
 const FORGET_AFTER: Duration = Duration::from_secs(60);
+/// A job nobody has asked about for this long is asked about at the next start: its end is learnt, so it neither counts
+/// toward `MAX_JOBS` nor keeps its files from pruning once it's over.
+const ASK_AFTER: Duration = Duration::from_secs(60);
 /// The listening folder loses files older than this, then the oldest while it holds more than `MAX_FOLDER_BYTES`.
 const PRUNE_AGE: Duration = Duration::from_secs(2 * 3600);
 pub const MAX_FOLDER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -46,6 +49,8 @@ struct Job {
     ended: bool,
     /// When `listen_job` first answered its end: it's forgotten `FORGET_AFTER` later.
     read_end_at: Option<Instant>,
+    /// When its state was last learnt (its start, or an answer about it).
+    asked_at: Instant,
 }
 
 #[derive(Default)]
@@ -108,7 +113,7 @@ impl Jobs {
             let id = inner.order.remove(at);
             inner.jobs.remove(&id);
         }
-        inner.jobs.insert(id.to_string(), Job { kind, files, ended: false, read_end_at: None });
+        inner.jobs.insert(id.to_string(), Job { kind, files, ended: false, read_end_at: None, asked_at: Instant::now() });
         inner.order.push(id.to_string());
         Ok(())
     }
@@ -123,6 +128,24 @@ impl Jobs {
             job.ended = true;
             job.read_end_at.get_or_insert_with(Instant::now);
         }
+    }
+
+    /// Its state was just learnt (still running).
+    fn asked(&self, id: &str) {
+        if let Some(job) = self.inner.lock().expect("jobs lock").jobs.get_mut(id) {
+            job.asked_at = Instant::now();
+        }
+    }
+
+    /// The jobs that haven't ended and nobody has asked about for `ASK_AFTER` (all of them when `all`), oldest first.
+    fn unasked(&self, all: bool) -> Vec<String> {
+        let inner = self.inner.lock().expect("jobs lock");
+        inner
+            .order
+            .iter()
+            .filter(|id| inner.jobs.get(*id).is_some_and(|job| !job.ended && (all || job.asked_at.elapsed() >= ASK_AFTER)))
+            .cloned()
+            .collect()
     }
 
     /// The jobs that haven't ended, oldest first.
@@ -214,6 +237,14 @@ pub fn prune(folder: &Path, keep: &[PathBuf], age: Duration, most: u64) -> usize
 
 fn bad(why: impl Into<String>) -> (Value, bool) {
     (json!({"error": why.into(), "code": "bad-params"}), true)
+}
+
+/// A job id the host doesn't keep (never started here, or ended and forgotten): its own code, not a malformed request.
+fn unknown_job(id: &str) -> (Value, bool) {
+    (
+        json!({"error": format!("{id} isn't a job this host keeps (it never started here, or it ended a while ago)"), "code": "unknown-job"}),
+        true,
+    )
 }
 
 fn number(arguments: &Value, name: &str) -> Result<Option<f64>, String> {
@@ -412,8 +443,25 @@ impl Host {
         self.start_job("capture_start", "capture", params, &pick).await
     }
 
+    /// Asks the bridge where the jobs nobody followed stand (every one that hasn't ended when `all`): those it says ended,
+    /// or no longer has, are ended here too.
+    async fn learn_ends(&self, pick: &Pick, all: bool) {
+        for id in self.jobs().unasked(all) {
+            match self.call("listen_status", json!({"jobId": id}), pick, STATUS_TIMEOUT).await {
+                Ok(answer) if answer.get("state").and_then(Value::as_str).is_some_and(|state| TERMINAL.contains(&state)) => {
+                    self.jobs().ended(&id)
+                }
+                Ok(_) => self.jobs().asked(&id),
+                Err(crate::host::CallError::Bridge { code, .. }) if code == daw_bridge::wire::code::BAD_PARAMS => self.jobs().ended(&id),
+                Err(_) => {}
+            }
+        }
+    }
+
     /// Starts a job on the bridge under an id of the host's, with the free room it may fill, and keeps it.
     async fn start_job(&self, method: &str, kind: &'static str, mut params: Map<String, Value>, pick: &Pick) -> (Value, bool) {
+        // (jobs nobody followed to their end: their ends are learnt before they count against this one or its room)
+        self.learn_ends(pick, self.jobs().running().len() >= MAX_JOBS).await;
         let id = self.jobs().id('j');
         params.insert("jobId".into(), id.clone().into());
         if let Some(free) = self.tidy_folder().await {
@@ -450,7 +498,7 @@ impl Host {
                 None => return bad(format!("waitMs: a whole number from 0 to {MAX_WAIT_MS}")),
             },
         };
-        let Some(job) = self.jobs().get(&id) else { return bad(format!("{id} isn't a job this host started (or it ended a while ago)")) };
+        let Some(job) = self.jobs().get(&id) else { return unknown_job(&id) };
         let began = Instant::now();
         loop {
             let answer = match self.call("listen_status", json!({"jobId": id}), &pick, STATUS_TIMEOUT).await {
@@ -473,6 +521,8 @@ impl Host {
             let ended = answer.get("state").and_then(Value::as_str).is_some_and(|state| TERMINAL.contains(&state));
             if ended {
                 self.jobs().ended(&id);
+            } else {
+                self.jobs().asked(&id);
             }
             if ended || began.elapsed() >= Duration::from_millis(wait) {
                 return (answer, false);
@@ -492,7 +542,7 @@ impl Host {
             Err(why) => return bad(why),
         };
         if self.jobs().get(&id).is_none() {
-            return bad(format!("{id} isn't a job this host started (or it ended a while ago)"));
+            return unknown_job(&id);
         }
         match self.listening_call("listen_cancel", json!({"jobId": id}), &pick, STATUS_TIMEOUT).await {
             Ok(mut answer) => {
