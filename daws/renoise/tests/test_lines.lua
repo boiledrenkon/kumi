@@ -234,3 +234,63 @@ test("lines: a transposition or humanize applied after the producer changed a no
   eq(K.steps(), 0)
   H.no_dialogs()
 end)
+
+-- #361 final review: Renoise renumbers the song's notes as instruments are made, deleted or moved, but not the cells Kumi's
+-- record keeps, so Kumi's undo writes and compares them with their instruments where those are now.
+test("lines: Kumi's undo of written, transposed or copied lines puts notes back playing their instruments where those are now", function()
+  local _, peer = K.setup(nil, { instruments = 2 })
+  mock.ops.set_note(1, 3, 1, 1, { note = 48, instrument = 1 }) -- (Bass plays the second instrument: Renoise's 01)
+  mock.ops.set_note(1, 3, 3, 1, { note = 52, instrument = 1 })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local E = K.place(peer)
+  -- notes-write: an OFF over the producer's C-4, then an instrument made before the one it plays
+  local written = K.change(peer, "notes-write", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), lines = {
+    { line = 0, notes = { { col = 1, note = "OFF" } } },
+  } })
+  mock.ops.insert_instrument_at(1, { name = "Piano" })
+  H.tick(2)
+  eq(column(1, 3, 3, 1).instrument_string, "02", "Renoise renumbered the song's notes")
+  local undone = K.restore(peer, written)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(column(1, 3, 1, 1).note_string, "C-4")
+  eq(column(1, 3, 1, 1).instrument_string, "02", "the same instrument, now 02")
+  -- notes-transpose: Kumi's own notes are renumbered too, and still read as Kumi's
+  E = K.place(peer)
+  local moved = K.change(peer, "notes-transpose", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), semitones = 2 })
+  mock.ops.insert_instrument_at(1, { name = "Organ" })
+  H.tick(2)
+  local back = K.restore(peer, moved)
+  ok(back.result, T.load_payload_module("json").encode(back.error or {}))
+  eq(notes(1, 3, 1, 4), "1=C-4 3=E-4")
+  eq(column(1, 3, 1, 1).instrument_string, "03")
+  -- lines-copy: the kept destination cells too
+  E = K.place(peer)
+  mock.ops.set_note(1, 3, 9, 1, { note = 55, instrument = 3 })
+  H.tick(2)
+  local copied = K.change(peer, "lines-copy", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), first = 0, last = 3, line = 8 })
+  mock.song:swap_instruments_at(1, 4)
+  H.tick(2)
+  local uncopied = K.restore(peer, copied)
+  ok(uncopied.result, T.load_payload_module("json").encode(uncopied.error or {}))
+  eq(column(1, 3, 9, 1).note_string, "G-4")
+  eq(column(1, 3, 9, 1).instrument_string, "00", "the instrument it played, swapped to the front since")
+  H.no_dialogs()
+end)
+
+test("lines: Kumi's undo refuses to put notes back when the instrument they played was deleted, and writes nothing", function()
+  local _, peer = K.setup(nil, { instruments = 2 })
+  mock.ops.set_note(1, 3, 1, 1, { note = 48, instrument = 1 })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local E = K.place(peer)
+  local written = K.change(peer, "notes-write", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), lines = {
+    { line = 0, notes = { { col = 1, note = "OFF" } } },
+  } })
+  mock.song:delete_instrument_at(2)
+  H.tick(2)
+  local before = K.steps()
+  local message = K.failure(K.restore(peer, written), "changed")
+  ok(message:find("was deleted", 1, true), message)
+  eq(column(1, 3, 1, 1).note_string, "OFF", "nothing written")
+  eq(K.steps(), before)
+  H.no_dialogs()
+end)

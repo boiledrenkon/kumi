@@ -6,6 +6,7 @@ local import = ...
 local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
+local material_ = import("changes_material")
 
 local bad, fail, the_song = base.bad, base.fail, base.the_song
 local q = base.q
@@ -186,6 +187,48 @@ local function fingerprint(cells)
     end
   end
   return string.format("%08x%08x", a, b)
+end
+
+-- The instruments note cells play (two hex digits; ".." is none), kept to find each again at Kumi's undo: Renoise renumbers
+-- the song's notes as instruments are made, deleted or moved, but not the cells a record keeps.
+local function instruments_of(song, env, ...)
+  local values = {}
+  for _, cells in ipairs({ ... }) do
+    for _, cell in ipairs(cells) do
+      local v = cell.kind == "note" and tonumber(cell.instrument, 16)
+      if v and v < 255 then values[v] = true end
+    end
+  end
+  return material_.keep_instruments(song, env, values)
+end
+
+-- The kept instruments where they are now (a table from then to now), or a refusal: one that can't be followed, or one that
+-- is gone (Kumi won't put notes back playing another).
+local function instruments_back(song, env, kept, label)
+  local map, why = material_.instruments_now(song, env, kept)
+  if map then return map end
+  if why == "unknown" then
+    fail("stale", "the instruments changed in a way Kumi couldn't follow since its step, so it can't tell which instruments the notes in " .. label .. " play: nothing was put back")
+  end
+  fail("changed", string.format("the instrument %s that notes in %s play was deleted in Renoise since: Kumi won't put them back playing another", q(why), label))
+end
+
+-- The cells as they read with their instruments where those are now.
+local function remap(cells, map)
+  if not next(map) then return cells end
+  local out = {}
+  for i, cell in ipairs(cells) do
+    local v = cell.kind == "note" and tonumber(cell.instrument, 16)
+    if v and map[v] and map[v] ~= v then
+      local moved = {}
+      for k, x in pairs(cell) do moved[k] = x end
+      moved.instrument = string.format("%02X", map[v])
+      out[i] = moved
+    else
+      out[i] = cell
+    end
+  end
+  return out
 end
 
 local function cell_order(a, b)
@@ -656,6 +699,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb, planner)
       cells = result, columns = columns,
       -- (what the undo needs to know whether the pattern changed since: its count of changed lines from here, and its length)
       touch = env.pattern_touch_mark and env.pattern_touch_mark(plan.p) or nil, lines = plan.pattern.number_of_lines,
+      instruments = instruments_of(song, env, plan.prior, result),
     },
     display = { title = display.title, before = display.before, after = counts_of(result), note = display.note },
     undo = { desc = desc, entry = true },
@@ -665,10 +709,11 @@ end
 
 -- Restore
 
--- (`changed` is the env's pattern_touched_since for this pattern)
-local function restore_plan(pattern_track, restore, lines, changed)
+-- (`changed` is the env's pattern_touched_since for this pattern; `map` the kept instruments' numbers now, from instruments_back)
+local function restore_plan(pattern_track, restore, lines, changed, map)
   local prior, applied = restore.prior and restore.prior.cells, restore.applied and restore.applied.cells
   if type(prior) ~= "table" or type(applied) ~= "table" or #prior ~= #applied then bad("prior and applied: the cells the change wrote") end
+  prior, applied = remap(prior, map or {}), remap(applied, map or {})
   local kept = restore.applied
   if #applied > 0 then
     if type(kept.lines) == "number" and kept.lines ~= lines then
@@ -732,8 +777,9 @@ local function restore_of(spec_kind, noun)
       if not env.pattern_touched_since then return false end
       return env.pattern_touched_since(p, mark)
     end
-    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, changed)
     local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
+    local map = instruments_back(song, env, restore.applied and restore.applied.instruments, label)
+    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, changed, map)
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]
     if #todo == 0 then
@@ -1209,6 +1255,7 @@ local function block_apply(song, env, input, fence, desc)
     source = {
       cells = from_result, touch = env.pattern_touch_mark and env.pattern_touch_mark(block.p) or nil, lines = block.pattern.number_of_lines,
     },
+    instruments = instruments_of(song, env, to_prior, to_result, from_prior, from_result),
   }
   return {
     applied = applied, display = { title = display.title, before = display.before, after = counts_of(to_result), note = display.note },
@@ -1239,13 +1286,14 @@ local function block_restore(song, env, restore, desc)
     if not env.pattern_touched_since then return false end
     return env.pattern_touched_since(p_, mark)
   end
-  local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, function(mark) return changed(p, mark) end)
+  local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
+  local map = instruments_back(song, env, applied.instruments, label)
+  local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, function(mark) return changed(p, mark) end, map)
   local source_todo = {}
   if source_pattern_track then
     source_todo = restore_plan(source_pattern_track, { prior = prior.source, applied = applied.source }, source_pattern.number_of_lines,
-      function(mark) return changed(sp, mark) end)
+      function(mark) return changed(sp, mark) end, map)
   end
-  local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
   local spec = base.KINDS["lines-copy"]
   if #todo == 0 and #source_todo == 0 then
     lower_columns(song, index, track, prior.columns, applied.columns)
