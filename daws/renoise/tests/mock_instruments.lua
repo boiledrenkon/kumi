@@ -1576,8 +1576,8 @@ end
 function M.write_file(path, value)
   local f = io.open(path, "wb")
   if not f then return false end
-  -- (an instrument file is a zip: it starts as one)
-  f:write((value.kind == "instrument" and "PK\3\4" or "") .. "MOCKRENOISE " .. serialize(value))
+  -- (an instrument file is a zip: it starts as one, and its central directory at its end names Instrument.xml)
+  f:write((value.kind == "instrument" and "PK\3\4" or "") .. "MOCKRENOISE " .. serialize(value) .. (value.kind == "instrument" and "\n--PK\1\2 Instrument.xml" or ""))
   f:close()
   M.files_written = (M.files_written or 0) + 1
   return true
@@ -1588,6 +1588,7 @@ function M.read_file(path)
   if not f then return nil end
   local text = f:read("*a")
   f:close()
+  text = text:gsub("\n%-%-PK\1\2 Instrument%.xml$", "")
   local body = text:match("^MOCKRENOISE (.*)$") or text:match("^PK\3\4MOCKRENOISE (.*)$")
   if not body then return nil, text end
   local chunk = loadstring("return " .. body)
