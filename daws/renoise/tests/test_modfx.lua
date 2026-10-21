@@ -355,3 +355,33 @@ test("modfx: Kumi's undo of a chain device's move refuses it moved again in Reno
   ok(restore(peer, "chaindevice-move", moved, nil, { discard = true }).result)
   eq(chain.devices[2].path, "Audio/Effects/Native/EQ 5")
 end)
+
+test("modfx: an LFO's waveform, a Fader's scaling and a Velocity Tracking's mode are set, and come back with a deleted device or set (#361 N14)", function()
+  local env, peer, epoch = setup_modfx()
+  local set = instrument(1).sets[1]
+  ok(change(peer, "moddevice-add", { ref = modset_ref(epoch, 1, 1), path = "LFO", target = "pitch" }))
+  ok(change(peer, "moddevice-add", { ref = modset_ref(place(peer), 1, 1), path = "Fader", target = "volume" }))
+  ok(change(peer, "moddevice-add", { ref = modset_ref(place(peer), 1, 1), path = "Velocity Tracking", target = "volume" }))
+  local lfo, fader, velocity = #set.devices - 2, #set.devices - 1, #set.devices
+  local setting = change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, lfo), waveform = "random" })
+  eq(set.devices[lfo].mode, 4)
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, fader), scaling = "exp fast" }))
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, velocity), mode = "scale" }))
+  eq(set.devices[fader].scaling, 5)
+  eq(set.devices[velocity].mode, 2)
+  ok(restore(peer, "moddevice-set", setting).result)
+  eq(set.devices[lfo].mode, 1, "Kumi's undo puts the sine back")
+  ok(change(peer, "moddevice-set", { ref = moddevice_ref(place(peer), 1, 1, lfo), waveform = "pulse" }))
+  failure(call(peer, "change_preview", { kind = "moddevice-set", input = { ref = moddevice_ref(place(peer), 1, 1, fader), waveform = "saw" }, epoch = place(peer) }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "moddevice-set", input = { ref = moddevice_ref(place(peer), 1, 1, lfo), mode = "clamp" }, epoch = place(peer) }), "bad-params")
+  -- deleted alone, then with its set: each comes back as it was
+  local deleted = change(peer, "moddevice-delete", { ref = moddevice_ref(place(peer), 1, 1, lfo) })
+  ok(restore(peer, "moddevice-delete", deleted).result)
+  eq(set.devices[lfo].mode, 3, "the pulse wave is back")
+  local whole = change(peer, "modset-delete", { ref = modset_ref(place(peer), 1, 1) })
+  ok(restore(peer, "modset-delete", whole).result)
+  set = instrument(1).sets[1]
+  eq(set.devices[lfo].mode, 3)
+  eq(set.devices[fader].scaling, 5)
+  eq(set.devices[velocity].mode, 2)
+end)

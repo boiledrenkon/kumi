@@ -62,7 +62,10 @@ end
 
 -- Modulation devices: their state, as a delete keeps it and a restore writes it.
 
-local POINT_FIELDS = { "length", "play_mode", "loop_mode", "loop_start", "loop_end", "sustain_enabled", "sustain_position", "fade_amount", "play_step" }
+-- (and the plain fields of a type that aren't parameters: an LFO's waveform and a Velocity Tracking's mode (`mode`), a
+-- Fader's `scaling`; each read where the device has it)
+local POINT_FIELDS = { "length", "play_mode", "loop_mode", "loop_start", "loop_end", "sustain_enabled", "sustain_position", "fade_amount", "play_step",
+  "mode", "scaling" }
 
 local function points_of(device)
   local ok, points = pcall(function() return device.points end)
@@ -599,6 +602,21 @@ base.register({
 
 local PLAY_MODES = named({ points = 1, lines = 2, curves = 3 })
 local ENV_LOOPS = named({ off = 1, forward = 2, reverse = 3, pingpong = 4 })
+local LFO_WAVES = named({ sine = 1, saw = 2, pulse = 3, random = 4 })
+local VELOCITY_MODES = named({ clamp = 1, scale = 2 })
+local FADER_SCALINGS = named({ ["log fast"] = 1, ["log slow"] = 2, linear = 3, ["exp slow"] = 4, ["exp fast"] = 5 })
+
+-- A field only one type of device has, by its names (`map`) both ways.
+local function typed_field(kind, field, map, says, text)
+  return {
+    get = function(d)
+      local ok, value = pcall(function() return d[field] end)
+      return ok and map.get(value) or nil
+    end,
+    set = function(d, v) d[field] = map.parse(v) end, field = field,
+    check = function(v, d) return M.moddevice_type(d.name) == kind and map.parse(v) ~= nil end, says = says, text = text,
+  }
+end
 
 local function has_field(device, field) return pcall(function() return device[field] end) end
 
@@ -636,6 +654,9 @@ local MODDEVICE_FIELDS = {
   sustainPosition = device_field("sustain_position", whole(1, 6144), "sustainPosition is a point of the envelope", function(v) return "sustain at " .. v end),
   fade = device_field("fade_amount", whole(0, 4095), "fade is from 0 to 4095 (a volume Envelope)", function(v) return "fade " .. v end),
   playStep = device_field("play_step", whole(-1, 16), "playStep is from -1 (random) to 16 (Stepper)", function(v) return v == -1 and "random steps" or ("step " .. v) end),
+  waveform = typed_field("LFO", "mode", LFO_WAVES, "waveform is sine, saw, pulse or random (LFO)", function(v) return v .. " wave" end),
+  mode = typed_field("Velocity Tracking", "mode", VELOCITY_MODES, "mode is clamp or scale (Velocity Tracking)", function(v) return v .. " mode" end),
+  scaling = typed_field("Fader", "scaling", FADER_SCALINGS, "scaling is log fast, log slow, linear, exp slow or exp fast (Fader)", function(v) return v .. " scaling" end),
   points = {
     get = function(d) return points_of(d) end, set = function(d, v) d.points = v end, field = "points",
     check = function(v, d)
@@ -652,7 +673,7 @@ local MODDEVICE_FIELDS = {
     text = function(v) return #v .. " points" end,
   },
 }
-local MODDEVICE_ORDER = { "name", "active", "operator", "bipolar", "tempoSynced", "length", "playMode", "loopMode", "loopStart", "loopEnd", "sustain", "sustainPosition", "fade", "playStep", "points" }
+local MODDEVICE_ORDER = { "name", "active", "operator", "bipolar", "tempoSynced", "waveform", "mode", "scaling", "length", "playMode", "loopMode", "loopStart", "loopEnd", "sustain", "sustainPosition", "fade", "playStep", "points" }
 
 local moddevice_set = instruments_.settings_kind({
   kind = "moddevice-set", of = "moddevice", noun = "settings", undoable = true, order = MODDEVICE_ORDER, fields = MODDEVICE_FIELDS,

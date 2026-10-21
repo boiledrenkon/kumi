@@ -921,6 +921,20 @@ local function modulation_device_object(set, k)
       fields.play_step_observable = obs(data, "play_step")
     end
   end
+  -- (the plain fields of a type that aren't parameters: 3.5's API types)
+  local TYPED = {
+    ["Modulation/LFO"] = { "renoise.SampleLfoModulationDevice", "mode", 1, 4 },
+    ["Modulation/Velocity Tracking"] = { "renoise.SampleVelocityTrackingModulationDevice", "mode", 1, 2 },
+    ["Modulation/Fader"] = { "renoise.SampleFaderModulationDevice", "scaling", 3, 5 },
+  }
+  local typed = TYPED[data.path]
+  if typed then
+    class = typed[1]
+    local typed_getters, typed_setters, typed_fields = fields_of(data, { [typed[2]] = { typed[3], range(1, typed[4], true) } })
+    for key, fn in pairs(typed_getters) do getters[key] = fn end
+    for key, fn in pairs(typed_setters) do setters[key] = fn end
+    for key, value in pairs(typed_fields) do fields[key] = value end
+  end
   return object(class, fields, getters, setters)
 end
 
