@@ -23,9 +23,11 @@ pub trait Handles {
     fn name(&self, base: &str, pointer: *mut c_void) -> Value;
 }
 
-/// A buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`), and the least a buffer
-/// REAPER isn't told the size of ever has (its `…NeedBig` and `…Need64` texts).
+/// A sized buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`).
 const BUFFER: usize = 64 * 1024;
+/// The most a buffer holds, and what one REAPER isn't told the size of (its `…NeedBig` and `…Need64` texts) always holds:
+/// REAPER writes the whole text whatever the buffer is (lab 7.82: more than 96 KiB of a track's 200 KB P_EXT), and the
+/// memory is only taken as far as it writes.
 const MOST_BUFFER: usize = 64 * 1024 * 1024;
 /// The most of a buffer's contents an answer carries, as text (past it, `<name>_cut`): the host's frame holds 256 KiB
 /// (lab: a take's 144 KB of MIDI, as hex, was refused whole).
@@ -126,18 +128,13 @@ impl<'h> Call<'h> {
 
     /// A buffer REAPER writes into (and reads first, for an input): its pointer and size. When REAPER is told the size
     /// (`sized`, the size passed after it), `<name>_sz` may make it smaller or bigger; when it isn't (`…NeedBig`,
-    /// `…Need64`), REAPER writes what it has whatever the caller says, so the buffer is never smaller than 64 KiB.
+    /// `…Need64`), REAPER writes the whole text whatever the caller says, so the buffer is the biggest there is.
     pub fn buf(&mut self, k: Option<usize>, name: &str, sized: bool) -> Result<(*mut c_char, c_int), String> {
         let asked = match &self.args {
             Value::Object(map) => map.get(&format!("{name}_sz")).and_then(Value::as_u64).map(|n| n as usize),
             _ => None,
         };
-        let size = match asked {
-            Some(n) if sized => n,
-            Some(n) => n.max(BUFFER),
-            None => BUFFER,
-        }
-        .clamp(2, MOST_BUFFER);
+        let size = if sized { asked.unwrap_or(BUFFER) } else { MOST_BUFFER }.clamp(2, MOST_BUFFER);
         let mut buf = vec![0u8; size].into_boxed_slice();
         match self.arg(k, name) {
             Some(Value::String(s)) => {

@@ -3747,10 +3747,10 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
 }
 
 #[test]
-fn a_buffer_reaper_isnt_told_the_size_of_is_never_smaller_than_64_kib_whatever_the_caller_asks() {
+fn a_buffer_reaper_isnt_told_the_size_of_holds_the_whole_text_whatever_the_caller_asks() {
     // `stringNeedBig` (the GetSet…Info_String family) and `strNeed64` (mkvolstr): REAPER writes the whole value, told no
-    // size, and the buffer was made as small as the caller's `<name>_sz` asked. The fake writes a track's whole P_EXT
-    // value, as REAPER does.
+    // size, and the buffer was made as small as the caller's `<name>_sz` asked, or 64 KiB. The fake writes a track's whole
+    // P_EXT value, as REAPER does.
     let lab = Lab::new();
     let value = "x".repeat(50_000);
     state(|s| {
@@ -3760,11 +3760,37 @@ fn a_buffer_reaper_isnt_told_the_size_of_is_never_smaller_than_64_kib_whatever_t
     let args = json!({"tr": KICK, "parmname": "P_EXT:big", "setNewValue": false, "stringNeedBig_sz": 16});
     let read = lab.call("read", json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": args})).unwrap();
     assert_eq!(read["result"], true);
-    assert_eq!(read["out"]["stringNeedBig"].as_str().map(str::len), Some(value.len()), "the whole value, in a 64 KiB buffer");
+    assert_eq!(read["out"]["stringNeedBig"].as_str().map(str::len), Some(value.len()), "the whole value");
     assert_eq!(read["out"].get("stringNeedBig_cut"), None);
+    // REAPER writes a text longer than 64 KiB whole as well (lab 7.82: a track's 200 KB P_EXT): it fits, and the answer
+    // carries the first 96 KiB of it.
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:huge".into()), "y".repeat(200_000));
+    });
+    let args = json!({"tr": KICK, "parmname": "P_EXT:huge", "setNewValue": false});
+    let huge = lab.call("read", json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": args})).unwrap();
+    assert_eq!((huge["out"]["stringNeedBig"].as_str().map(str::len), &huge["out"]["stringNeedBig_cut"]), (Some(96 << 10), &json!(true)));
     // A buffer REAPER is told the size of still takes the caller's size.
     let short = lab.call("read", json!({"kind": "call", "fn": "GetTrackName", "args": {"track": KICK, "bufOut_sz": 3}})).unwrap();
     assert_eq!((&short["out"]["bufOut"], &short["out"]["bufOut_cut"]), (&json!("Ki"), &json!(true)));
+}
+
+#[test]
+fn the_bridges_own_reads_of_a_text_reaper_isnt_told_the_size_of_take_it_whole() {
+    // The bridge read names, P_EXT values, razor edits and the like into 4 KiB; REAPER writes the whole text (lab 7.82), so
+    // a longer one ran past it.
+    let _lab = Lab::new();
+    let value = "z".repeat(300_000);
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:long".into()), value.clone());
+    });
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let track = reaper.track_at(reaper.current_project().unwrap().ptr, 1).unwrap();
+    assert_eq!(reaper.track_string(track, "P_EXT:long").map(|text| text.len()), Some(value.len()));
+    assert_eq!(reaper.track_string(track, "P_NAME").as_deref(), Some("Kick"), "and a short one after it");
 }
 
 #[test]

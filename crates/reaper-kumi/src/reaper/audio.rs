@@ -2,7 +2,7 @@
 //! out loud, audio accessors and the hardware hook. Main thread only, as the rest of `Reaper`; the hook's own callback
 //! runs on the audio thread and touches nothing here (see `listening::capture`).
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_int, c_void, CString};
 
 use super::{Fx, FxOwner, Project, Reaper, Take, Track};
 use crate::api::{self, AudioAccessor, PCM_source};
@@ -18,10 +18,6 @@ const LAB_DUMMY_ENV: &str = "KUMI_REAPER_LAB_DUMMY";
 pub fn lab_dummy() -> bool {
     std::env::var(LAB_DUMMY_ENV).is_ok_and(|v| v == "1")
 }
-
-/// What `GetSetProjectInfo_String` reads a render setting into: its buffer has no size, `RENDER_TARGETS` lists a file per
-/// stem, and a producer's settings are put back exactly (the reads' `project_text` holds 4 KB).
-const PROJECT_TEXT: usize = 1 << 20;
 
 /// A media source REAPER made or handed out (a take's, or one made from a file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,17 +63,12 @@ impl Reaper<'_> {
         }
     }
 
-    /// A render setting's text (`RENDER_FILE`, `RENDER_TARGETS`…) whole, up to 1 MB; None when REAPER refuses the key.
+    /// A render setting's text (`RENDER_FILE`, `RENDER_TARGETS`, a file per stem) whole, so a producer's settings are put
+    /// back exactly; None when REAPER refuses the key.
     pub fn project_text_long(&self, proj: Project, key: &str) -> Option<String> {
         let f = self.api.GetSetProjectInfo_String()?;
         let key = cstring(key);
-        let mut buf = vec![0u8; PROJECT_TEXT];
-        if !unsafe { f(proj.0, key.as_ptr(), buf.as_mut_ptr().cast::<c_char>(), false) } {
-            return None;
-        }
-        buf[PROJECT_TEXT - 1] = 0;
-        let len = buf.iter().position(|&b| b == 0).unwrap_or(PROJECT_TEXT - 1);
-        Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+        super::objects::big_string(|buf| unsafe { f(proj.0, key.as_ptr(), buf, false) })
     }
 
     /// The address of a project's own config variable (`projrenderlimit`, the render speed) and its size in bytes.
