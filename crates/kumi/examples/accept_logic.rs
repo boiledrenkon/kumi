@@ -1263,20 +1263,24 @@ impl Accept {
         let tracks = context["tracks"].as_array().cloned().unwrap_or_default();
         let heard = self.changes.borrow().len();
 
-        // The new reads: the first track's Smart Controls and automation.
-        if let Some(first) = tracks.first().and_then(|track| track["ref"].as_str()) {
-            for kind in ["smart", "automation"] {
-                let t0 = perf_now();
-                let result =
-                    read.execute(json!({"kind": kind, "parent": first}).as_object().cloned().unwrap_or_default(), signal()).await?;
-                let page: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
-                let what = if result.is_error {
-                    format!("read {kind}: {}", short(&result.text, 200))
-                } else {
-                    format!("read {kind} of track 1: {} rows", page["total"])
-                };
-                self.say(!result.is_error, Some(perf_now() - t0), &what);
-            }
+        // The new reads: a software instrument track's Smart Controls (an audio track with nothing on its strip has
+        // none) and the first track's automation.
+        let instrument = tracks.iter().position(|track| track["kind"] == "instrument");
+        let reads = [("smart", instrument), ("automation", (!tracks.is_empty()).then_some(0))];
+        for (kind, at) in reads {
+            let Some((place, parent)) = at.and_then(|at| tracks[at]["ref"].as_str().map(|parent| (at + 1, parent.to_owned()))) else {
+                self.say(false, None, &format!("read {kind}: no track to read it of"));
+                continue;
+            };
+            let t0 = perf_now();
+            let result = read.execute(json!({"kind": kind, "parent": parent}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let page: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
+            let what = if result.is_error {
+                format!("read {kind}: {}", short(&result.text, 200))
+            } else {
+                format!("read {kind} of track {place}: {} rows", page["total"])
+            };
+            self.say(!result.is_error, Some(perf_now() - t0), &what);
         }
 
         // A Gain at the end of the Stereo Out, its gain set to -3 dB through the Controls View and read back as a
