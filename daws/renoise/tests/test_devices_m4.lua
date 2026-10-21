@@ -660,6 +660,18 @@ test("devices m4: a meta device is aimed at a device's parameter by refs, and Ku
   ok(again.result and again.result.undo.entry == false, "back already: " .. json.encode(again))
 end)
 
+test("devices m4: a meta device aimed at a track but no device yet gets that track back from Kumi's undo (#361 N-N7)", function()
+  local _, peer = meta_song()
+  local l = device_data(1, 2)
+  l.params[1].value = 2 -- the producer's half-made aim: Pad (track 3), no device yet
+  local epoch = place(peer)
+  local record = change(peer, "meta-destination", { ref = epoch .. ":device:1.2", targetRef = epoch .. ":device:2.2", param = "Gain" })
+  eq(values(1, 2, 1, 3), "1/1/1")
+  local back = restore(peer, "meta-destination", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 3), "2/-1/-1", "Pad again, no device: as the producer left it")
+end)
+
 test("devices m4: a meta device aimed elsewhere before is aimed back there, followed; gone or changed since, refused", function()
   local _, peer = meta_song()
   -- Before Kumi: the LFO drives Pad's EQ (device 3) Gain 2.
