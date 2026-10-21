@@ -181,7 +181,20 @@ struct Work {
     item_print: Print,
     item_records: Vec<Value>,
     items_done: bool,
+    /// The FX still to read, the next last (an FX, then its container's children), once begun; their records so far; and
+    /// what of the track is automated, which they read by.
+    fx_left: Option<Vec<FxPlace>>,
+    fx_records: Vec<Value>,
+    automated: Option<Automated>,
     records: Option<Vec<Value>>,
+}
+
+/// An FX to read: where it sits in its chain, the GUID of what holds it (its track, or its container) and how deep.
+struct FxPlace {
+    fx: Fx,
+    position: usize,
+    parent: String,
+    depth: usize,
 }
 
 impl Work {
@@ -200,6 +213,9 @@ impl Work {
             item_print: Print::new(),
             item_records: vec![],
             items_done: !content,
+            fx_left: None,
+            fx_records: vec![],
+            automated: None,
             records: None,
         }
     }
@@ -542,14 +558,39 @@ impl Reads {
             }
         }
         work.items_done = true;
-        work.records = Some(self.track_records(reaper, proj, track, position, work));
+        // The FX, one at a time, a page's share of time at a time (one plug-in's 512 parameters, a chain of containers):
+        // the track's own record and its FX's then follow.
+        let automated = work.automated.get_or_insert_with(|| automated(reaper, track));
+        let left = work.fx_left.get_or_insert_with(|| {
+            let owner = FxOwner::Track(track);
+            let chain = (0..reaper.fx_count(owner))
+                .map(|index| Fx { owner, index })
+                .chain((0..reaper.input_fx_count(track)).map(|index| Fx { owner, index: INPUT_FX | index }));
+            let mut left: Vec<FxPlace> =
+                chain.enumerate().map(|(position, fx)| FxPlace { fx, position, parent: guid.clone(), depth: 0 }).collect();
+            left.reverse();
+            left
+        });
+        while let Some(place) = left.pop() {
+            let fx_guid = self.fx_record(reaper, proj, &place, automated, &mut work.budget, &mut work.fx_records);
+            if place.depth < 8 && reaper.fx_config(place.fx, "container_count").is_some() {
+                let children = reaper.fx_children(place.fx).into_iter().enumerate();
+                let children: Vec<FxPlace> =
+                    children.map(|(position, fx)| FxPlace { fx, position, parent: fx_guid.clone(), depth: place.depth + 1 }).collect();
+                left.extend(children.into_iter().rev());
+            }
+            if clock.spend() && !left.is_empty() {
+                return false;
+            }
+        }
+        work.records = Some(self.track_records(reaper, track, position, work));
         true
     }
 
-    /// A track's records once its points and items are read: its own, then its FX (containers' children after them),
+    /// A track's records once its points, items and FX are read: its own, then its FX (containers' children after them),
     /// then its items.
-    fn track_records(&self, reaper: &Reaper, proj: Project, track: Track, position: usize, work: &mut Work) -> Vec<Value> {
-        let Work { budget, points, points_read, item_print, item_records, .. } = work;
+    fn track_records(&self, reaper: &Reaper, track: Track, position: usize, work: &mut Work) -> Vec<Value> {
+        let Work { budget, points, points_read, item_print, item_records, fx_records, automated, .. } = work;
         let master = position == 0;
         let guid = if master { "master".to_string() } else { reaper.track_guid(track) };
         let own_name = reaper.track_string(track, "P_NAME").unwrap_or_default();
@@ -562,7 +603,7 @@ impl Reads {
         } else {
             own_name.clone()
         };
-        let automated = automated(reaper, track);
+        let automated = automated.get_or_insert_with(|| self::automated(reaper, track));
         let value = |parm: &str| reaper.track_value(track, parm);
         let fader = |on: bool, value: Value| if on { Value::Null } else { value };
         // Sends and hardware outputs: where each goes and how.
@@ -580,11 +621,7 @@ impl Reads {
         }
         let envelope_count = reaper.track_envelope_count(track);
         let item_count = reaper.track_item_count(track).max(0);
-        let owner = FxOwner::Track(track);
-        let chain: Vec<Fx> = (0..reaper.fx_count(owner))
-            .map(|index| Fx { owner, index })
-            .chain((0..reaper.input_fx_count(track)).map(|index| Fx { owner, index: INPUT_FX | index }))
-            .collect();
+        let chain_count = reaper.fx_count(FxOwner::Track(track)).max(0) + reaper.input_fx_count(track).max(0);
         let mut track_record = json!({
             "k": "track",
             "id": guid,
@@ -602,7 +639,7 @@ impl Reads {
                 "color": reaper.track_color(track).and_then(|c| reaper.color_hex(c)).unwrap_or_default(),
                 "input": {"arm": value("I_RECARM") != 0.0, "monitor": value("I_RECMON") as i64, "recInput": value("I_RECINPUT") as i64},
                 "sends": {"count": send_count, "sendsHash": sends.hex()},
-                "FX": {"count": chain.len()},
+                "FX": {"count": chain_count},
                 "items": {"count": item_count, "itemsHash": if budget.content { json!(item_print.hex()) } else { Value::Null }},
                 "automation": {"count": envelope_count, "pointsHash": if *points_read { json!(points.hex()) } else { Value::Null }},
             },
@@ -616,27 +653,23 @@ impl Reads {
             track_record["dn"] = true.into();
         }
         let mut records = vec![track_record];
-        for (position, fx) in chain.iter().enumerate() {
-            self.fx_records(reaper, proj, *fx, position, &guid, &automated, budget, &mut records, 0);
-        }
+        records.append(fx_records);
         records.append(item_records);
         records
     }
 
-    /// An FX's record, then its children's when it's a container.
-    #[allow(clippy::too_many_arguments)]
-    fn fx_records(
+    /// An FX's record (its container's children come after it, read one by one): its GUID.
+    fn fx_record(
         &self,
         reaper: &Reaper,
         proj: Project,
-        fx: Fx,
-        position: usize,
-        parent: &str,
+        place: &FxPlace,
         automated: &Automated,
         budget: &mut Budget,
         records: &mut Vec<Value>,
-        depth: usize,
-    ) {
+    ) -> String {
+        let FxPlace { fx, position, parent, .. } = place;
+        let fx = *fx;
         let fx_guid = reaper.fx_guid(fx);
         let renamed = reaper.fx_config(fx, "renamed_name").unwrap_or_default();
         let plugin = reaper.fx_name(fx);
@@ -694,11 +727,7 @@ impl Reads {
         }
         self.registry.borrow_mut().note_fx(proj, &fx_guid, fx);
         records.push(record);
-        if depth < 8 && reaper.fx_config(fx, "container_count").is_some() {
-            for (position, child) in reaper.fx_children(fx).into_iter().enumerate() {
-                self.fx_records(reaper, proj, child, position, &fx_guid, automated, budget, records, depth + 1);
-            }
-        }
+        fx_guid
     }
 }
 
@@ -982,6 +1011,41 @@ mod tests {
         assert_eq!(records, whole_records);
         assert!(pages >= 3600 / 100, "{pages} pages");
         assert!(most < once / 4, "the most REAPER calls on one page, {most}, against {once} for the whole track");
+    }
+
+    // A track's FX were read in one go, every parameter of every plug-in and container child: a page held REAPER's main
+    // thread far past its share.
+    #[test]
+    fn a_tracks_fx_are_read_a_share_at_a_time_too() {
+        use crate::reaper::fake::{FakeFx, FakeParam};
+        fake::lab_project();
+        fake::with(|s| {
+            let params: Vec<FakeParam> = (0..300).map(|p| FakeParam::new(&format!("P{p}"), 0.5, "50")).collect();
+            let fx = |n: usize| FakeFx { params: params.clone(), ..FakeFx::new(&format!("{{FX-BIG{n:02}}}"), "VST: Big (Kumi)") };
+            let drums = &mut s.tracks[0];
+            drums.fx = (0..30).map(fx).collect();
+            drums.fx.push(FakeFx::container("{FX-BOX}", (30..40).map(fx).collect()));
+        });
+        let reads = Reads::default();
+        let calls = || fake::with(|s| s.calls);
+        let before = calls();
+        let (_, whole_records) = whole(&reads, false, true);
+        let once = calls() - before;
+        // A page's share of the main thread (here 2 points, items or FX) holds inside the FX, a container's children too.
+        TEST_READS.with(|reads| reads.set(Some(2)));
+        let mut answer = page(&reads, json!({})).unwrap();
+        let (mut pages, mut most, mut records) = (1, 0, answer["records"].as_array().unwrap().clone());
+        while let Some(cursor) = answer["nextCursor"].as_str().map(str::to_owned) {
+            let before = calls();
+            answer = page(&reads, json!({"cursor": cursor})).unwrap();
+            most = most.max(calls() - before);
+            records.extend(answer["records"].as_array().unwrap().clone());
+            pages += 1;
+        }
+        TEST_READS.with(|reads| reads.set(None));
+        assert_eq!(records, whole_records, "the same records, in the same order");
+        assert!(pages >= 41 / 2, "{pages} pages");
+        assert!(most < once / 4, "the most REAPER calls on one page, {most}, against {once} for the whole project");
     }
 
     #[test]
