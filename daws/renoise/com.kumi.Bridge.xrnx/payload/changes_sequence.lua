@@ -647,7 +647,16 @@ local function make_variation(song, plan, name)
   for t = 1, rows.track_count(song) do
     local from = source:track(t)
     if t == plan.t then
-      new:track(t):copy_from(from)
+      -- (copied from the lines an alias shows, never from the alias: a copy of an alias plays the same lines, and a write to it
+      -- would land in the pattern it shows; M7 lab, 3.5.4)
+      local real = from.alias_pattern_index > 0 and song:pattern(from.alias_pattern_index):track(t) or from
+      local varied = new:track(t)
+      varied:copy_from(real)
+      if varied.alias_pattern_index > 0 then
+        varied.alias_pattern_index = 0
+        varied:copy_from(real)
+      end
+      if varied.alias_pattern_index > 0 then error("Renoise kept the varied track an alias", 0) end
     else
       local alias = from.alias_pattern_index
       pcall(function() new:track(t).alias_pattern_index = alias > 0 and alias or plan.p end)

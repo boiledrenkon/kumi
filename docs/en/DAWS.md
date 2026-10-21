@@ -237,11 +237,13 @@ saves the song, instruments and device presets.
   new phrases for an instrument ("make me 9 phrases"). Kumi keeps the lines
   you name as what defines it, varies the rest (slices, rolls, reverses, ghost
   notes, accents, register), checks each take differs from the source and the
-  others yet stays the same idea, and renders pattern takes to hear them
-  first. Each take is a phrase, or a slot of its own in a "Variations of …"
+  others yet keeps the idea, the key and the grid, and renders the takes to
+  hear them first (never while Renoise plays). Each take is a phrase, or a slot of its own in a "Variations of …"
   section at the sequence's end that plays the rest of the pattern with it.
   Then "keep 1, 3 and 5; change the rest" changes only those, each in its own
   direction, and the rest go in one step; a take you edited is left alone.
+  Kept takes are renamed "V3 · … · kept", and Kumi remembers the takes after a
+  restart.
 - **Phrases:** written in Renoise's notation, or as phrase scripts rendered to
   lines; a pattern's lines become a phrase you play from any key (`variations`
   extract), and a faster copy is switched to with `0Zxx`, since a phrase's LPB

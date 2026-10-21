@@ -921,13 +921,21 @@ function M.make_song(options)
         end)
         return M.api.automation_object(made)
       end,
-      -- (M4 n-song) a copy of another pattern's track (through its alias), its automation too; no alias after. (M5) Another
-      -- track's automation lands on the parameter at the same device and place of this one (measured: a scratch copy's
-      -- automation lands on its own devices), and the pattern's line notifiers hear the copy.
+      -- (M4 n-song) a copy of another pattern's track, its automation too; this track's own alias goes. (M5) Another track's
+      -- automation lands on the parameter at the same device and place of this one (measured: a scratch copy's automation lands
+      -- on its own devices), and the pattern's line notifiers hear the copy. (M7, measured in 3.5.4) A copy of an alias is an
+      -- alias of the same pattern, with no lines of its own: a write to it lands in the pattern it shows.
       copy_from = function(_, other)
         local source = M.impl(other).__ptrack
         local from_t = source.t
-        if source.alias > 0 then source = d.patterns[source.alias].tracks[source.t] or { alias = 0, lines = {} } end
+        if source.alias > 0 then
+          local old = { alias = data.alias, lines = data.lines, automation = data.automation }
+          data.alias, data.lines, data.automation = source.alias, {}, {}
+          M.fire(data.alias_observable)
+          M.record(function() data.alias, data.lines, data.automation = old.alias, old.lines, old.automation end,
+            function() data.alias, data.lines, data.automation = source.alias, {}, {} end)
+          return
+        end
         local old = { alias = data.alias, lines = data.lines, automation = data.automation }
         local function copy(value)
           if type(value) ~= "table" then return value end
