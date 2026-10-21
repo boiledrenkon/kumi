@@ -496,6 +496,56 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
         .await;
 }
 
+/// Review K30: a project saved as a copy in another folder carries its original's id (REAPER's travels with the file),
+/// but while the original is still there the copy is a project of its own, by core's rules: its own place, the same
+/// each time and after a restart, so it never carries on the original's conversation. A copy beside the original is a
+/// version of the same song, and a project moved (its original gone) stays the same one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_copy_saved_elsewhere_is_a_project_of_its_own_while_its_original_is_there() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = |at: &str| {
+                let path = dir.path().join(at);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, "<REAPER_PROJECT").unwrap();
+                path.to_string_lossy().into_owned()
+            };
+            let (original, elsewhere, beside) = (file("A/Song A.rpp"), file("B/Song B.rpp"), file("A/Song A v2.rpp"));
+            let home = dir.path().join(".kumi");
+            let place_of = |path: &String| {
+                let (path, home) = (path.clone(), home.clone());
+                async move {
+                    let mut snapshot = reaper_snapshot();
+                    snapshot["project"]["path"] = json!(path);
+                    let host = Rc::new(Host {
+                        answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                        asked: RefCell::default(),
+                    });
+                    let mut options = options(host, Rc::default());
+                    options.kumi_home = home;
+                    let reaper = create_reaper_integration(options);
+                    reaper.start(Signal::new()).await.unwrap();
+                    let seen = reaper.observe(Signal::new(), None).await.unwrap();
+                    reaper.close().await.unwrap();
+                    seen.project.map(|project| project.id).unwrap()
+                }
+            };
+            let ours = format!("reaper-{PROJECT_ID}");
+            assert_eq!(place_of(&original).await, ours, "the original, first seen");
+            let copy = place_of(&elsewhere).await;
+            assert_ne!(copy, ours, "Save As in another folder, the original still there");
+            assert_eq!(place_of(&elsewhere).await, copy, "the same place each time, through a restart");
+            assert_eq!(place_of(&original).await, ours, "the original stays itself");
+            assert_eq!(place_of(&beside).await, ours, "a version beside it is the same song");
+            // The song's files deleted (the version, seen last, too): what's left of it is where it went.
+            std::fs::remove_file(&original).unwrap();
+            std::fs::remove_file(&beside).unwrap();
+            assert_eq!(place_of(&elsewhere).await, ours, "moved");
+        })
+        .await;
+}
+
 /// A look that can't read the song (Renoise behind a dialog, or quit) keeps the song's key and project, as Live's do:
 /// the conversation stays with it. A saved song's key is its id, so it holds through a restart of Renoise.
 #[tokio::test(flavor = "current_thread")]

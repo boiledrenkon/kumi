@@ -993,7 +993,11 @@ afresh.
   in the DAW's unsaved place until its first save; then they go on in the saved
   one's.
 - Kumi writes an id into a saved REAPER project (REAPER keeps it with your next
-  save), so a project saved under another name or moved carries on.
+  save), so a project moved, or saved under another name in the same folder,
+  carries on; a copy saved in another folder while the original is still there
+  starts afresh.
+- Another project's conversation: Kumi asks you to open that project yourself
+  (it can't open one there), and the conversation carries on once it's open.
 - Catch-up also tells what changed while REAPER or Renoise was closed or
   restarted, in the DAW's words: REAPER's tracks, FX, items, markers and
   regions, tempo and time signature; Renoise's tracks, devices, patterns,
