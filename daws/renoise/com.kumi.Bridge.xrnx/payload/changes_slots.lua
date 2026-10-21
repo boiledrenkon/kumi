@@ -9,6 +9,7 @@ local import = ...
 local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
+local sequence_ = import("changes_sequence")
 
 local bad, fail = base.bad, base.fail
 local q = base.q
@@ -99,8 +100,12 @@ local function insert_apply(song, env, input, fence, desc)
   if plan.pattern then sequencer:insert_sequence_at(plan.index, plan.pattern) else sequencer:insert_new_pattern_at(plan.index) end
   local pattern = sequencer.pattern_sequence[plan.index]
   return {
-    -- (a pattern is a number only within an epoch: the record keeps it as a ref, which a renumbered pool refuses)
-    applied = { index = plan.index, pattern = refs.make(env.epoch(), "pattern", pattern), slots = plan.slots + 1 },
+    -- (a pattern is a number only within an epoch: the record keeps it as a ref, which a renumbered pool refuses; a new one
+    -- is kept as it was made, so what the producer writes into it since stays theirs)
+    applied = {
+      index = plan.index, pattern = refs.make(env.epoch(), "pattern", pattern), slots = plan.slots + 1,
+      made = not plan.pattern and { print = sequence_.pattern_print(song, pattern) } or nil,
+    },
     created = { ref = refs.make(env.epoch(), "seq", plan.index), kind = "seq" }, target = seq_target(env, plan.index),
     display = {
       title = insert_title(song, plan), before = { slots = plan.slots }, after = { slots = plan.slots + 1, index = plan.index },
@@ -122,6 +127,11 @@ local function insert_restore(song, env, restore, desc)
     fail("changed", "the slot " .. s .. " holds another pattern now: it was changed in Renoise since Kumi made it")
   end
   if not restore.discard then
+    -- (a new pattern Kumi made with the slot: anything in it now is the producer's, lines or automation, its name, length or
+    -- colours; an empty one as made is nobody's, whatever Renoise's undo and redo did to it)
+    if type(applied.made) == "table" and (not song:pattern(made).is_empty or sequence_.pattern_print(song, made) ~= applied.made.print) then
+      fail("changed", string.format("the pattern %s that slot %d plays has something in it since Kumi made it: Kumi won't delete its slot", q(pattern_label(song, made)), s))
+    end
     if sequencer:sequence_is_start_of_section(s) then fail("changed", "slot " .. s .. " starts a section now: Kumi won't delete it") end
     for t = 1, rows.track_count(song) do
       if sequencer:track_sequence_slot_is_muted(t, s) then fail("changed", "tracks are muted in slot " .. s .. " now: Kumi won't delete it") end

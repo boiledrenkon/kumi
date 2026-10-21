@@ -2660,3 +2660,28 @@ test("changes: Kumi's undo of a track it made refuses once the producer automate
   eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1")
   H.no_dialogs()
 end)
+
+test("changes: Kumi's undo of a slot it made with a new pattern refuses once the producer wrote into that pattern, and discard removes it", function()
+  local env, peer = setup()
+  local function made()
+    local epoch, layout = place(peer)
+    local previewed = preview(peer, "slot-insert", { index = 2 })
+    local done = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw21)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    return { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created }, done
+  end
+  local record, done = made()
+  local p = mock.data.sequence[2]
+  mock.ops.set_note(p, 1, 1, 1, { note = 48, instrument = 0 }) -- the producer's line in the new pattern
+  H.tick(2)
+  failure(restore(peer, "slot-insert", record, "Kumi: undo (kw22)", done.result.epoch, done.result.layout), "changed")
+  eq(mock.data.sequence[2], p, "the slot that plays their pattern stays")
+  local forced = restore(peer, "slot-insert", record, "Kumi: undo (kw23)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(seq_text(), "1,2,1,3")
+  -- (one left empty goes as before)
+  record, done = made()
+  ok(restore(peer, "slot-insert", record, "Kumi: undo (kw24)", done.result.epoch, done.result.layout).result)
+  eq(seq_text(), "1,2,1,3")
+  H.no_dialogs()
+end)
