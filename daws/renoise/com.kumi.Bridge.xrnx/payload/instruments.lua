@@ -277,6 +277,24 @@ function M.instrument_work(instrument)
   return out
 end
 
+-- The copies kept to put back, oldest first: past MAX_KEPT_FILES files or MAX_KEPT_BYTES the oldest go (their undo then says
+-- the kept copy is gone), so a long session's deletes and replaces don't fill the disk before Renoise quits.
+M.MAX_KEPT_FILES, M.MAX_KEPT_BYTES = 256, 2 * 1024 * 1024 * 1024
+local kept_files = {}
+local function prune_kept()
+  local sizes, total = {}, 0
+  for k, path in ipairs(kept_files) do
+    local stat = io.exists(path) and io.stat(path) or nil
+    sizes[k] = stat and stat.size or 0
+    total = total + sizes[k]
+  end
+  while #kept_files > M.MAX_KEPT_FILES or (total > M.MAX_KEPT_BYTES and #kept_files > 1) do
+    local path = table.remove(kept_files, 1)
+    total = total - table.remove(sizes, 1)
+    if io.exists(path) then pcall(os.remove, path) end
+  end
+end
+
 -- Where Kumi keeps what it saves to put back (a deleted instrument's .xrni, a sample's audio): a folder of its own in Renoise's
 -- temporary folder, which Renoise empties as it quits (Kumi's undo can't outlive the song anyway). Renoise's own name when that
 -- folder can't be made.
@@ -288,6 +306,8 @@ function M.temp_file(extension)
   if not io.exists(own) then pcall(os.mkdir, own) end
   if not io.exists(own) then return name end
   if io.exists(name) then pcall(os.remove, name) end
+  kept_files[#kept_files + 1] = own .. sep .. file
+  prune_kept()
   return own .. sep .. file
 end
 

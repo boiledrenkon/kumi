@@ -498,6 +498,18 @@ test("instruments: a delete's look counts reads, not lines: dense patterns under
   eq(#done.result.material.notes, 1)
 end)
 
+test("instruments: the copies kept for undo are bounded: past the bound the oldest goes, and its undo says the copy is gone (#361 N-S19)", function()
+  local env, peer = patched("instruments.lua", "M%.MAX_KEPT_FILES, M%.MAX_KEPT_BYTES = 256", "M.MAX_KEPT_FILES, M.MAX_KEPT_BYTES = 1")
+  local first = change(peer, "instrument-delete", { ref = iref(place(peer), 3) })
+  ok(io.exists(first.material.file), "kept")
+  local second = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  ok(io.exists(second.material.file), "the newest is kept")
+  eq(io.exists(first.material.file), false, "the oldest went")
+  local undone = restore(peer, "instrument-delete", first)
+  failure(undone, "failed")
+  ok(undone.error.message:find("is gone", 1, true), undone.error.message)
+end)
+
 test("instruments: a big song is looked through in slices before the delete, which is one step; a pattern changed meanwhile is looked at again", function()
   local env, peer = setup({ patch = function(env_)
     local path = env_.bundle .. "payload/changes_instruments.lua"
