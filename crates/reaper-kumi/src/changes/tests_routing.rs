@@ -107,7 +107,24 @@ fn a_sends_midi_buses_and_faders_are_written_and_a_midi_only_send_takes_no_audio
     assert_eq!(lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "midi": {"fromBus": 200}})).unwrap_err().0, "bad-params");
 }
 
-// ----- hardware outputs -----
+#[test]
+fn a_change_of_one_end_of_a_send_is_checked_with_the_other_end_it_has() {
+    let lab = Lab::new();
+    // Drums has 4 channels, Reverb 2; the send takes 1/2 to 1/2.
+    state(|s| {
+        s.tracks[0].extra.insert("I_NCHAN".into(), 4.0);
+    });
+    // Four channels from Drums would reach channels 3/4 of Reverb, which it hasn't.
+    let (code, message) =
+        lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "srcChannels": {"offset": 1, "count": 4}})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("“Reverb” has 2 channels"), "{message}");
+    // A send of one channel, mono: its destination alone moved to channel 2 fits; as a stereo pair it wouldn't.
+    lab.make("send-channels", json!({"ref": DRUMS_TO_REVERB, "srcChannels": {"offset": 1, "count": 1}}), "Kumi: x (kc001)");
+    lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "dstChannels": {"offset": 2}})).unwrap();
+}
+
+// ----- hardware outputs -----// ----- hardware outputs -----
 
 fn kick_outputs() -> Vec<FakeSend> {
     state(|s| s.tracks[1].hw_outs.clone())

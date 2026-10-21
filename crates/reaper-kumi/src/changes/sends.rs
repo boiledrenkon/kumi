@@ -731,6 +731,15 @@ fn channels_text(state: &Value) -> String {
 
 /// Whether the tracks at both ends have the channels the wanted state uses: a send can't take from or give to channels a
 /// track doesn't have (REAPER keeps them, unheard).
+/// The fields asked for over the send's own: a change of one end is checked with the other end it has.
+fn over(now: &Value, wanted: &Value) -> Value {
+    let mut merged = now.clone();
+    for (key, value) in wanted.as_object().into_iter().flatten() {
+        merged[key] = value.clone();
+    }
+    merged
+}
+
 fn fits(reaper: &Reaper, from: Track, to: Track, wanted: &Value) -> Done<()> {
     let channels = |track: Track| reaper.track_value(track, "I_NCHAN").max(2.0) as i64;
     let src = wanted["srcChan"].as_i64();
@@ -764,7 +773,7 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let route = route_text(&found.from, &found.to);
     let mut display = json!({"title": (prop.title)(&route, &wanted), "before": now, "after": wanted});
@@ -784,7 +793,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
     }
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !(prop.same)(&now, &wanted) && !(prop.write)(ctx.reaper, found.track, found.index, &wanted) {
