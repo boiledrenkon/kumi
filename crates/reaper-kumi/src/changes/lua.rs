@@ -19,6 +19,8 @@ const TIMEOUT_MS: u64 = 2_000;
 const MOST_TIMEOUT_MS: u64 = 10_000;
 /// The most of a chunk's answer kept (its result and what it printed).
 const MOST_ANSWER: usize = 4 * 1024 * 1024;
+/// The most values of a chunk's result the wrapper writes (a result like `_G` is cut there, not encoded for minutes).
+const MOST_NODES: usize = 100_000;
 
 fn code_of(input: &Value) -> Done<&str> {
     input
@@ -64,6 +66,9 @@ pub fn wrapper(code: &str, token: &str, timeout_ms: u64, check: bool) -> String 
         r##"-- Kumi: a Lua chunk run once, then taken away.
 local TOKEN, LIMIT_MS, CHECK = "{token}", {timeout_ms}, {check}
 local code = {code}
+local sethook, getinfo = debug and debug.sethook, debug and debug.getinfo
+local STOP = "stopped after " .. LIMIT_MS .. " ms (the chunk's time limit)"
+local PAST = "(an answer past what Kumi keeps)"
 local function quote(s)
   return '"' .. s:gsub('[%c"\\]', function(c)
     if c == '"' then return '\\"' elseif c == '\\' then return '\\\\' elseif c == '\n' then return '\\n'
@@ -85,33 +90,63 @@ local function ref_of(v)
     end
   end)
   if ok and kind then return kind end
-  return tostring(v)
+  return "userdata"
 end
-local function json(v, depth)
-  depth = depth or 0
-  local t = type(v)
-  if v == nil then return "null"
-  elseif t == "boolean" then return tostring(v)
-  elseif t == "number" then
-    if v ~= v or v == math.huge or v == -math.huge then return "null" end
-    if v == math.floor(v) and math.abs(v) < 2^53 then return string.format("%d", v) end
-    return string.format("%.17g", v)
-  elseif t == "string" then return quote(v)
-  elseif t == "userdata" then return quote(ref_of(v))
-  elseif t == "table" then
-    if depth > 32 then return quote("(nested too deep)") end
-    local n, count = #v, 0
-    for _ in pairs(v) do count = count + 1 end
-    local out = {{}}
-    if count > 0 and count == n then
-      for i = 1, n do out[i] = json(v[i], depth + 1) end
-      return "[" .. table.concat(out, ",") .. "]"
-    end
-    if count == 0 then return "[]" end
-    for k, value in pairs(v) do out[#out + 1] = quote(tostring(k)) .. ":" .. json(value, depth + 1) end
-    return "{{" .. table.concat(out, ",") .. "}}"
+-- What the chunk answered, as JSON: tables read raw (no metamethod runs the chunk's code), each table written once (a
+-- table met again, or a cycle, is "(seen above)"), within a budget of values and bytes.
+local function encode(v)
+  local nodes, bytes, seen, out = 0, 0, {{}}, {{}}
+  local function put(text)
+    bytes = bytes + #text
+    if bytes > {most_bytes} then error(PAST, 0) end
+    out[#out + 1] = text
   end
-  return quote(tostring(v))
+  local function key(k)
+    if type(k) == "string" then return k elseif type(k) == "number" then return string.format("%.17g", k) end
+    return "(" .. type(k) .. ")"
+  end
+  local function walk(v, depth)
+    nodes = nodes + 1
+    if nodes > {most_nodes} then error(PAST, 0) end
+    local t = type(v)
+    if v == nil then put("null")
+    elseif t == "boolean" then put(v and "true" or "false")
+    elseif t == "number" then
+      if v ~= v or v == math.huge or v == -math.huge then put("null")
+      elseif v == math.floor(v) and math.abs(v) < 2^53 then put(string.format("%d", v))
+      else put(string.format("%.17g", v)) end
+    elseif t == "string" then put(quote(v))
+    elseif t == "userdata" then put(quote(ref_of(v)))
+    elseif t == "table" then
+      if seen[v] then put(quote("(seen above)")) return end
+      if depth > 32 then put(quote("(nested too deep)")) return end
+      seen[v] = true
+      local count, n = 0, 0
+      for _ in next, v do count = count + 1 end
+      while rawget(v, n + 1) ~= nil do n = n + 1 end
+      if count == 0 then put("[]")
+      elseif count == n then
+        put("[")
+        for i = 1, n do
+          if i > 1 then put(",") end
+          walk(rawget(v, i), depth + 1)
+        end
+        put("]")
+      else
+        put("{{")
+        local first = true
+        for k, value in next, v do
+          if not first then put(",") end
+          first = false
+          put(quote(key(k)) .. ":")
+          walk(value, depth + 1)
+        end
+        put("}}")
+      end
+    else put(quote(t)) end
+  end
+  walk(v, 0)
+  return table.concat(out)
 end
 local function where(message)
   message = tostring(message)
@@ -131,29 +166,67 @@ local function keep(...)
 end
 print = keep
 reaper.ShowConsoleMsg = function(text) printed[#printed + 1] = tostring(text) end
+-- A dialog would wait for someone while REAPER's main thread waits for the chunk (no hook runs inside it).
+for _, name in ipairs({{"MB", "ShowMessageBox", "GetUserInputs", "GetUserFileNameForRead", "ShowPopupMenu", "ShowActionList", "PromptForAction"}}) do
+  if reaper[name] then
+    reaper[name] = function() error("reaper." .. name .. " opens a dialog, which would hold REAPER until someone answers it: Kumi refuses it (print shows a result)", 2) end
+  end
+end
+-- The time limit: a hook checks the clock; past it, every line of the chunk's own raises, so a chunk that catches errors
+-- (a loop of pcall) stops too. Coroutines the chunk makes get the hook as well; the chunk can't take it off.
 local started = reaper.time_precise()
-if debug and debug.sethook then
-  debug.sethook(function()
-    if (reaper.time_precise() - started) * 1000 > LIMIT_MS then
-      debug.sethook()
-      error("stopped after " .. LIMIT_MS .. " ms (the chunk's time limit)", 0)
+local stopped = false
+local function hook()
+  if not stopped and (reaper.time_precise() - started) * 1000 <= LIMIT_MS then return end
+  if not stopped then
+    stopped = true
+    sethook(hook, "", 1)
+  end
+  local info = getinfo(2, "S")
+  if info and info.source == "=chunk" then error(STOP, 0) end
+end
+if sethook then
+  local create, resume = coroutine.create, coroutine.resume
+  coroutine.create = function(f)
+    local co = create(f)
+    sethook(co, hook, "", stopped and 1 or 1000)
+    return co
+  end
+  coroutine.wrap = function(f)
+    local co = coroutine.create(f)
+    local function pass(ok, ...)
+      if not ok then error((...), 0) end
+      return ...
     end
-  end, "", 10000)
+    return function(...) return pass(resume(co, ...)) end
+  end
+  debug.sethook = function() error("debug.sethook keeps Kumi's time limit while the chunk runs", 2) end
+  sethook(hook, "", 1000)
 end
 local results = {{ n = 0 }}
 local ok, failure = xpcall(function()
   local function pack(...) return {{ n = select("#", ...), ... }} end
   results = pack(chunk())
 end, function(e) return e end)
-if debug and debug.sethook then debug.sethook() end
+if sethook then sethook() end
+-- The answer, within its own second (and its budget of values and bytes).
+local encoded, result
+if sethook then
+  local until_ = reaper.time_precise() + 1
+  sethook(function() if reaper.time_precise() > until_ then error(PAST, 0) end end, "", 1000)
+end
+encoded, result = pcall(function()
+  if results.n == 1 then return encode(results[1]) elseif results.n > 1 then
+    local parts = {{}}
+    for i = 1, results.n do parts[i] = encode(results[i]) end
+    return "[" .. table.concat(parts, ",") .. "]"
+  end
+  return "null"
+end)
+if sethook then sethook() end
+if not encoded then result = quote(PAST) end
 local lines = {{}}
 for i, line in ipairs(printed) do lines[i] = quote(line) end
-local result = "null"
-if results.n == 1 then result = json(results[1]) elseif results.n > 1 then
-  local list = {{}}
-  for i = 1, results.n do list[i] = json(results[i]) end
-  result = "[" .. table.concat(list, ",") .. "]"
-end
 if ok then
   answer('{{"compiled":true,"ok":true,"result":' .. result .. ',"printed":[' .. table.concat(lines, ",") .. ']}}')
 else
@@ -162,6 +235,8 @@ end
 "##,
         code = long_string(code),
         section = SECTION,
+        most_bytes = MOST_ANSWER / 2,
+        most_nodes = MOST_NODES,
     )
 }
 

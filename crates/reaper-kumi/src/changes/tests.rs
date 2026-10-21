@@ -3435,10 +3435,22 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     let run = |code: &str, limit: u64, check: bool| -> Value {
         // (LuaJIT calls no hook inside code it compiled: REAPER's Lua compiles nothing, so neither does this)
         let stub = "if jit then jit.off() end\nreaper = { SetExtState = function(_, _, v) io.write(v) end, time_precise = os.clock, \
-                    ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end }\n";
+                    ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end, \
+                    MB = function() return 1 end }\n";
         let path = dir.path().join("w.lua");
         std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit, check))).unwrap();
-        let out = std::process::Command::new("luajit").arg(&path).output().unwrap();
+        // (a wrapper whose limit doesn't hold would run on: it's stopped after 20 s, and the test fails)
+        let mut child = std::process::Command::new("luajit").arg(&path).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let started = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed() > std::time::Duration::from_secs(20) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the wrapper ran past 20 s: {code}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let out = child.wait_with_output().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
     assert_eq!(run("return 1", 1000, true), json!({"compiled": true}));
@@ -3452,6 +3464,35 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert_eq!((&failed["ok"], &failed["error"]["line"], &failed["error"]["message"]), (&json!(false), &json!(2), &json!("boom")));
     let looped = run("while true do end", 50, false);
     assert!(looped["error"]["message"].as_str().unwrap().contains("stopped after 50 ms"), "{looped}");
+    // The time limit holds against a chunk that catches errors, a coroutine and an answer like `_G` or one of many shared
+    // tables (review R2: a pcall loop ran 3 s past a 50 ms limit, and `return _G` was still encoding after 10 s).
+    let timed = |code: &str| {
+        let started = std::time::Instant::now();
+        let ran = run(code, 50, false);
+        (ran, started.elapsed())
+    };
+    for code in [
+        "while true do pcall(function() for i = 1, 1e9 do end end) end",
+        "while true do pcall(error, 'x') end",
+        "coroutine.wrap(function() while true do end end)()",
+        "local co = coroutine.create(function() while true do end end)\ncoroutine.resume(co)\nwhile true do end",
+        "debug.sethook()\nwhile true do end",
+    ] {
+        let (ran, took) = timed(code);
+        assert!(
+            ran["error"]["message"].as_str().is_some_and(|m| m.contains("stopped after 50 ms") || m.contains("time limit")),
+            "{code}: {ran}"
+        );
+        assert!(took < std::time::Duration::from_secs(2), "{code} took {took:?}");
+    }
+    let (globals, took) = timed("return _G");
+    assert!(globals["ok"] == true && took < std::time::Duration::from_secs(3), "{took:?}");
+    let (shared, took) = timed("local t = {}\nfor i = 1, 60 do t = {a = t, b = t} end\nreturn t");
+    assert!(shared["ok"] == true && took < std::time::Duration::from_secs(2), "{took:?}");
+    assert!(shared["result"].to_string().contains("(seen above)"), "{shared}");
+    // A dialog would hold REAPER until someone answers it: refused.
+    let dialog = run("reaper.MB('done', 'Kumi', 0)", 1000, false);
+    assert!(dialog["error"]["message"].as_str().unwrap().contains("opens a dialog"), "{dialog}");
     // A chunk that closes the wrapper's own long bracket is still one string, and so is one that ends in `]` or `]=`.
     assert_eq!(run("return ']]'", 1000, false)["result"], "]]");
     assert_eq!(run("local t = {5}\nreturn t[1]", 1000, false)["result"], 5);
