@@ -517,6 +517,11 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
                     input.insert("ref".into(), format!("@{mark}").into());
                     draft.step(tool, input, None);
                 }
+                // (past the host's limit it names none of them, only how many moved: the effect is drafted as it comes)
+                if let Some(moved) = made.get("parametersMoved").and_then(Value::as_u64).filter(|moved| *moved > 0) {
+                    let plural = if moved == 1 { "" } else { "s" };
+                    draft.left_out.push(format!("{kind} “{name}”: {moved} parameter{plural} moved, not drafted"));
+                }
             }
             (effect, "changed") if effect == kinds.effect => {
                 let values: Vec<(String, Value)> = change
@@ -762,6 +767,11 @@ mod tests {
         assert_eq!(draft["params"][0], json!({"name": "track", "about": "the track to work on (it was “Lead Vox”)"}));
         assert_eq!(draft["params"][1], json!({"name": "reaeq", "about": "the FX to set (it was “ReaEQ” on “Drums”)"}));
         assert_eq!(draft["leftOut"], json!(["item “take 1” added"]));
+        // An added effect whose moved parameters the host didn't name (past its limit) is drafted as it comes, and said.
+        let mut many = answer.clone();
+        many["changes"][2]["madeOf"] = json!({"plugin": "VST: ReaComp (Cockos)", "parametersMoved": 14});
+        let drafted = super::draft(&many, &WORDS).unwrap();
+        assert_eq!(drafted["leftOut"], json!(["FX “My Comp”: 14 parameters moved, not drafted", "item “take 1” added"]));
         let reply = watched(&answer, &WORDS);
         assert_eq!(reply["watched"], "40 s");
         assert!(reply["changes"].as_array().unwrap().iter().any(|c| c["added"] == "FX" && c["on"] == "Lead Vox"), "{reply:?}");
