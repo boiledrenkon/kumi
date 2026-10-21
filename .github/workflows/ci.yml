@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.paths.outputs.code }}
+      rust: ${{ steps.paths.outputs.rust }}
+      reaper: ${{ steps.paths.outputs.reaper }}
+      renoise: ${{ steps.paths.outputs.renoise }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
@@ -43,11 +46,15 @@ jobs:
           esac
           # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
           if [[ -n "$base" ]]; then changed="$(git diff --name-only "$base...HEAD")"; fi
-          if [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$' <<<"$changed"; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Each world's jobs run for the changes they test (main runs every one): Rust's for all but the Renoise tool's
+          # Lua alone; REAPER's extension for its crate, the parts of daw-bridge it links, the lockfile and the release
+          # script's check; Renoise's tool for its folder. CI's own workflow runs them all.
+          code=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$' <<<"$changed" && echo true || echo false )
+          rust=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$|^daws/renoise/' <<<"$changed" && echo true || echo false )
+          ci='^\.github/workflows/ci\.yml$'
+          reaper=$( [[ -z "$base" ]] || grep -q -E "$ci|^crates/reaper-kumi/|^crates/daw-bridge/(Cargo\.toml|src/(lib|auth|contract|daw|files|frame|handshake|loopback|owner|paths|wire)\.rs)|^Cargo\.(toml|lock)$|^scripts/build-native-release\.py$" <<<"$changed" && echo true || echo false )
+          renoise=$( [[ -z "$base" ]] || grep -q -E "$ci|^daws/renoise/" <<<"$changed" && echo true || echo false )
+          { echo "code=$code"; echo "rust=$rust"; echo "reaper=$reaper"; echo "renoise=$renoise"; } | tee -a "$GITHUB_OUTPUT"
 
   rust-linux:
     # The tests that guard producers' Sets and Kumi's wire, the unit tests and Live's pins: the `ci` set in
@@ -55,7 +62,7 @@ jobs:
     # SDK interoperability and migration tests and the benchmarks are the Extended workflow's.
     name: Rust / Linux
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -85,7 +92,7 @@ jobs:
   rust-lint:
     name: Rust / Lint
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -111,7 +118,7 @@ jobs:
     # Windows console; Hands; paths, files and child processes; the store. Each platform's every test runs in Extended.
     name: Rust / ${{ matrix.label }}
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -212,7 +219,7 @@ jobs:
     # the Ubuntu the bundles build on, whose glibc is the one the extension may need.
     name: REAPER extension loads / ${{ matrix.os }}
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.reaper == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -264,7 +271,7 @@ jobs:
     # of github.com/renoise/definitions.
     name: Renoise tool
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.renoise == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -364,11 +371,12 @@ jobs:
           set -euo pipefail
           test "${{ needs.changes.result }}" = "success"
           test "${{ needs.scripts.result }}" = "success"
-          ok() { [[ "$1" == "success" || ( "$1" == "skipped" && "${{ needs.changes.outputs.code }}" == "false" ) ]]; }
-          ok "${{ needs.rust-linux.result }}"
-          ok "${{ needs.rust-lint.result }}"
-          ok "${{ needs.rust-platforms.result }}"
-          ok "${{ needs.remote-script.result }}"
-          ok "${{ needs.live-extension.result }}"
-          ok "${{ needs.reaper-extension.result }}"
-          ok "${{ needs.renoise-tool.result }}"
+          # A job passed, or was skipped because nothing it tests changed.
+          ok() { [[ "$1" == "success" || ( "$1" == "skipped" && "$2" == "false" ) ]]; }
+          ok "${{ needs.rust-linux.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.rust-lint.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.rust-platforms.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.remote-script.result }}" "${{ needs.changes.outputs.code }}"
+          ok "${{ needs.live-extension.result }}" "${{ needs.changes.outputs.code }}"
+          ok "${{ needs.reaper-extension.result }}" "${{ needs.changes.outputs.reaper }}"
+          ok "${{ needs.renoise-tool.result }}" "${{ needs.changes.outputs.renoise }}"

@@ -49,8 +49,9 @@ jobs:
           # Main, and pull requests that change installing, updating, releasing, Willington's files, the Mac helper the
           # bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings) and
           # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), how Kumi's extension
-          # goes into Live, or REAPER's and Renoise's bridges (the extension, the tool, Kumi's host for them and their
-          # shared lifecycle; their tests aside), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
+          # goes into Live, or how REAPER's and Renoise's bridges are built and go in (the extension's build, shim, SDK and
+          # entry point, the host's binary, the tool's manifest, entry and version, and the shared lifecycle, detection
+          # and files: a REAPER change kind or a host tool is CI's), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
           # silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install each,
           # update to it from the release before it and check the update from the JavaScript release (see below). A pull
           # request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a version
@@ -59,7 +60,7 @@ jobs:
           # merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/(reaper-kumi|daw-bridge|daw-mcp-server)/|daws/renoise/com\.kumi\.Bridge\.xrnx/)'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/reaper-kumi/(build\.rs|Cargo\.toml|shim/|sdk/|src/lib\.rs)|crates/daw-mcp-server/(Cargo\.toml|src/bin/)|crates/daw-bridge/(Cargo\.toml|src/(lifecycle|install|detect|files|owner|paths)\.rs)|daws/renoise/com\.kumi\.Bridge\.xrnx/(manifest\.xml|main\.lua|payload/version\.lua))'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
@@ -71,7 +72,8 @@ jobs:
             crates/ableton-mcp-server/src/lifecycle.rs crates/ableton-mcp-server/src/delivery_install.rs \
             crates/kumi/src/daw/own.rs crates/daw-bridge/src/lifecycle.rs crates/daw-bridge/src/install.rs crates/daw-bridge/src/detect.rs \
             crates/reaper-kumi/build.rs crates/reaper-kumi/src/lib.rs crates/daw-mcp-server/src/bin/daw-mcp-server.rs \
-            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua; do
+            crates/daw-bridge/src/files.rs crates/daw-bridge/src/owner.rs crates/daw-bridge/src/paths.rs crates/reaper-kumi/shim/csurf.cpp \
+            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua; do
             test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
