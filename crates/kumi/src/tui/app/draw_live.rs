@@ -232,7 +232,7 @@ impl TuiApp {
                 spans(screen, x, y + 1 + row as i32, line, None);
             }
         }
-        let bars = clip.length / 4.;
+        let bars = clip.length / clip.beats_per_bar.filter(|beats| *beats > 0.).unwrap_or(4.);
         let selected = clip.notes.iter().filter(|n| n.selected == Some(true)).count();
         let mut facts = vec![
             if bars.fract() == 0. {
@@ -340,8 +340,14 @@ impl TuiApp {
             line[at(locator.position)] = sp("┼", st::DIM);
         }
         line[at(strip.position)] = sp("┃", st::ACCENT);
+        // The time selection, as REAPER shades it.
+        if let Some([start, end]) = strip.time_selection {
+            for cell in &mut line[at(start)..=at(end)] {
+                *cell = sp(cell.text.clone(), Style { bg: st::SELECTED.bg, ..*cell.style });
+            }
+        }
         spans(screen, x, y + 1, &line, None);
-        let bar = |beats: f64| (beats / 4.).floor() + 1.;
+        let bar = |beats: f64| strip.bar_at(beats);
         let past = strip.locators.iter().filter(|l| l.position <= strip.position).max_by(|a, b| a.position.total_cmp(&b.position));
         let mut where_ = vec![format!("bar {}", number::to_string(bar(strip.position)))];
         if strip.playing {
@@ -353,6 +359,9 @@ impl TuiApp {
         let mut whole = vec![];
         if let Some(loop_) = strip.r#loop.as_ref().filter(|l| l.enabled) {
             whole.push(format!("loop {}–{}", number::to_string(bar(loop_.start)), number::to_string(bar(loop_.start + loop_.length))));
+        }
+        if let Some([start, end]) = strip.time_selection {
+            whole.push(format!("selection {}–{}", number::to_string(bar(start)), number::to_string(bar(end))));
         }
         whole.push(format!("{} bars", number::to_string(bar(strip.length) - 1.)));
         screen.put(x, y + 2, &truncate(&where_.join(" · "), width), &st::DIM);

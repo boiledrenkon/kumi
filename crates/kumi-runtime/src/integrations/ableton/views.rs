@@ -329,6 +329,8 @@ pub async fn arrangement_strip(host: &dyn ViewHost, signal: Signal) -> Result<Op
             lanes: None,
             track_count: None,
             lanes_from: None,
+            meter: vec![],
+            time_selection: None,
         }))
     }
     .await;

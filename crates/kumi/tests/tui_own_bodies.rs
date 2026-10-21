@@ -865,3 +865,34 @@ case!(renoises_pattern_refused_while_nothing_is_shown_is_read_again_on_the_timer
     h.has("E-2 02 .. .. ..");
     h.close().await;
 });
+// (review U4) REAPER's FOCUS counts bars as REAPER does, not in 4/4: by the meter the arrange body sends, and a take's
+// bars by its time signature; the time selection is said and shaded.
+case!(reapers_focus_counts_bars_in_the_projects_meter, async {
+    work_with(DawId::Reaper);
+    let c = Rc::new(Control::default());
+    *c.clip.borrow_mut() = Some(
+        serde_json::from_value(json!({"slotRef":"r:take:{T1}","name":"Waltz","length":12.0,"beatsPerBar":3.0,"notes":[
+            {"pitch":36,"start":0.0,"duration":1.0,"velocity":100}
+        ]}))
+        .unwrap(),
+    );
+    *c.arrangement.borrow_mut() = Some(
+        serde_json::from_value(json!({"length":31.0,"position":16.0,"playing":true,"locators":[],"beats_per_bar":3.0,
+            "loop":{"start":6.0,"length":6.0,"enabled":true},"time_selection":[24.0,27.5],
+            "meter":[{"position":0.0,"bar":1,"beat":0.0,"beats_per_bar":3.0},{"position":24.0,"bar":9,"beat":0.0,"beats_per_bar":3.5}],
+            "lanes":[{"name":"Bass","depth":0,"items":[]}]}))
+        .unwrap(),
+    );
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let track = json!({"name":"Bass","color":"#3c7cf5","kind":"midi"});
+    let midi = json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"note-editor","label":"MIDI editor"},"item":{"kind":"take","itemRef":"r:take:{T1}","name":"Waltz"}});
+    h.emit(json!({"type":"focus","focus":midi}));
+    shows(&h, "4 bars · 1 note").await;
+    let arrange = json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"}});
+    h.emit(json!({"type":"focus","focus":arrange}));
+    shows(&h, "bar 6 · playing").await;
+    h.has("loop 3–5 · selection 9–10 · 10 bars");
+    h.close().await;
+});

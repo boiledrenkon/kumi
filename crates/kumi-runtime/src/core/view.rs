@@ -431,6 +431,38 @@ pub struct ArrangementStrip {
     /// Where `lanes` start among every track (0 for the first), when they're a page of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes_from: Option<usize>,
+    /// How the DAW counts bars, where its meter can change (REAPER's time signature markers): bars are counted by these
+    /// marks, else by `beats_per_bar`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meter: Vec<MeterMark>,
+    /// The time selection's start and end (REAPER's), in beats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_selection: Option<[f64; 2]>,
+}
+
+/// A place the meter is known from: the bar it falls in (1 for the first, as the DAW counts), how far into that bar it
+/// is, and a bar's beats from there on. All in beats.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeterMark {
+    pub position: f64,
+    pub bar: f64,
+    #[serde(default)]
+    pub beat: f64,
+    pub beats_per_bar: f64,
+}
+
+impl ArrangementStrip {
+    /// The bar a place (in beats) falls in, from 1, as the DAW counts: by the meter mark before it, else a bar's beats
+    /// (four when not said).
+    pub fn bar_at(&self, beats: f64) -> f64 {
+        // (a hair's room: a bar line read back as 15.999999 beats is still bar 5)
+        const ROOM: f64 = 1e-6;
+        let mark = self.meter.iter().rev().find(|mark| mark.position <= beats + ROOM).or(self.meter.first());
+        match mark.filter(|mark| mark.beats_per_bar > 0.) {
+            Some(mark) => mark.bar + ((beats - mark.position + mark.beat) / mark.beats_per_bar + ROOM).floor(),
+            None => (beats / self.beats_per_bar.filter(|beats| *beats > 0.).unwrap_or(4.) + ROOM).floor() + 1.,
+        }
+    }
 }
 
 /// A track on the timeline with its items, in beats. Names are data.

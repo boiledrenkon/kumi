@@ -266,6 +266,17 @@ impl Reads {
             .map(|(_, m)| json!({"position": beats(m.time), "bpm": rows::seconds(m.bpm), "num": signature_part(m.num), "den": signature_part(m.denom), "linear": m.linear}))
             .collect();
         body["tempoMarkers"] = shown.into();
+        // How REAPER counts bars here: the bar the window opens in, then each time signature change in it (a bar's
+        // quarter notes from there on; `beat` is how far into its bar the mark is).
+        let mark = |time: f64, num: i32, denom: i32| {
+            let (measure, beat) = reaper.bar_and_beat_at(proj, time)?;
+            let per_bar = bar_beats(&crate::reaper::TimeSignature { num, denom, bpm: 0.0 });
+            (per_bar > 0.0)
+                .then(|| json!({"position": beats(time), "bar": measure + 1, "beat": rows::seconds(beat), "beatsPerBar": per_bar}))
+        };
+        let opening = reaper.time_signature_at(proj, from).and_then(|s| mark(from, s.num, s.denom));
+        let changes = tempo.iter().filter(|m| m.time > from && m.time <= to && m.num > 0).map(|m| mark(m.time, m.num, m.denom));
+        body["meter"] = opening.into_iter().chain(changes.take(WINDOW_TEMPO_MARKERS).flatten()).collect::<Vec<_>>().into();
     }
 
     // ----- a MIDI take as a piano roll -----
@@ -830,6 +841,15 @@ mod tests {
         assert_eq!(
             (&body["tempoMarkers"][1]["bpm"], &body["tempoMarkers"][1]["num"], &body["tempoMarkers"][1]["den"]),
             (&json!(100.0), &Value::Null, &Value::Null)
+        );
+        // How bars are counted (review U4): the bar the window opens in (two beats into bar 2), then the time signature
+        // change in it, as REAPER numbers its bar; not the tempo-only marker, nor the change past the window.
+        assert_eq!(
+            body["meter"],
+            json!([
+                {"position": 6.0, "bar": 2, "beat": 2.0, "beatsPerBar": 4.0},
+                {"position": 12.0, "bar": 4, "beat": 0.0, "beatsPerBar": 3.0}
+            ])
         );
     }
 

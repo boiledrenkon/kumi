@@ -219,6 +219,20 @@ pub fn timeline(body: &Value) -> TimelineStrip {
         lanes: Some(lanes),
         track_count: number(body, "trackCount").map(|n| n.max(0.) as usize),
         lanes_from: number(body, "from").map(|n| n.max(0.) as usize),
+        meter: list(body, "meter")
+            .filter_map(|mark| {
+                Some(MeterMark {
+                    position: number(mark, "position")?,
+                    bar: number(mark, "bar")?,
+                    beat: number(mark, "beat").unwrap_or(0.),
+                    beats_per_bar: number(mark, "beatsPerBar").filter(|beats| *beats > 0.)?,
+                })
+            })
+            .collect(),
+        time_selection: body.get("timeSelection").and_then(|span| {
+            let (start, end) = (number(span, "start")?, number(span, "end")?);
+            (end > start).then_some([start, end])
+        }),
     }
 }
 
@@ -550,6 +564,22 @@ mod tests {
         );
         assert_eq!(lanes[3].track_ref.as_deref(), Some("r:track:{B}"));
         assert_eq!((strip.lanes_from, strip.track_count), (Some(40), Some(200)));
+    }
+
+    #[test]
+    fn a_timeline_counts_bars_by_reapers_meter_and_keeps_the_time_selection() {
+        // (review U4) 3/4 from the start, 7/8 from quarter note 24 (bar 9): bars were counted in 4/4.
+        let body = json!({"length": 31.0, "beatsPerBar": 3.0, "tracks": [], "timeSelection": {"start": 6.0, "end": 12.0}, "meter": [
+            {"position": 0.0, "bar": 1, "beat": 0.0, "beatsPerBar": 3.0},
+            {"position": 24.0, "bar": 9, "beat": 0.0, "beatsPerBar": 3.5}
+        ]});
+        let strip = timeline(&body);
+        let bars: Vec<f64> = [0., 2.9, 3., 16., 23.999_999_9, 24., 27.5, 31.].into_iter().map(|beats| strip.bar_at(beats)).collect();
+        assert_eq!(bars, [1., 1., 2., 6., 9., 9., 10., 11.]);
+        assert_eq!(strip.time_selection, Some([6., 12.]));
+        // With no marks, a bar's beats count them; with neither, four.
+        let plain = timeline(&json!({"beatsPerBar": 3.0, "tracks": []}));
+        assert_eq!((plain.bar_at(16.), timeline(&json!({"tracks": []})).bar_at(16.)), (6., 5.));
     }
 
     #[test]
