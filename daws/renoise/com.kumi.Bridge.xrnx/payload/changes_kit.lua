@@ -289,41 +289,43 @@ end
 local function restore(song, env, restore, desc)
   local material, applied = restore.material, restore.applied or {}
   if type(material) ~= "table" or (type(material.made) ~= "table" and type(material.into) ~= "table") then bad("material: the instrument the kit is in") end
-  local n, why, list = places_.follow(env, material.made or material.into)
-  if not n then
-    if why == "gone" then fail("gone", string.format("the kit Kumi made (%s) isn't in the song any more", q(applied.name or "the instrument"))) end
-    places_.follow_failed(why, list or "instrument", applied.name)
+  local function find(live)
+    local n, why, list = places_.follow(env, material.made or material.into)
+    if not n then
+      if why == "gone" then fail("gone", string.format("the kit Kumi made (%s) isn't in the song any more", q(applied.name or "the instrument"))) end
+      places_.follow_failed(why, list or "instrument", applied.name)
+    end
+    return n[1], places_.instrument_label(n[1], live:instrument(n[1]))
   end
-  local i = n[1]
-  local instrument = song:instrument(i)
-  local label = places_.instrument_label(i, instrument)
-  if material.into and places_.is_empty(instrument) then
-    return { restored = { emptied = true }, display = { title = q(label) .. " is empty already" }, undo = { desc = desc, entry = false }, unwritten = true }
-  end
-  if not restore.discard then
-    if type(applied.print) == "table" and not base.same_table(kit_print(instrument), applied.print) then
+  local function locate(live)
+    local i, label = find(live)
+    local instrument = live:instrument(i)
+    if not restore.discard and type(applied.print) == "table" and not base.same_table(kit_print(instrument), applied.print) then
       fail("changed", string.format("%s changed in Renoise since Kumi made the kit (its samples, keyzones, mute groups, name or more)", q(label)))
     end
-    local notes = places_.notes_playing(song, i - 1, instruments_.SCAN_BUDGET)
-    if notes == nil then
-      fail("changed", string.format("Kumi can't tell whether notes play %s now (the song is too big to look through in one go), so it left it: delete it in Renoise, or undo with discard", q(label)))
-    end
-    if #notes > 0 then
-      fail("changed", string.format("%d %s in the song play %s since Kumi made it: Kumi left it (Renoise would clear them)", #notes, #notes == 1 and "note" or "notes", q(label)))
+    if material.made and #live.instruments == 1 then fail("changed", "it is the song's only instrument now: Renoise needs one") end
+    return i, label
+  end
+  if material.into then
+    local i, label = find(song)
+    if places_.is_empty(song:instrument(i)) then
+      return { restored = { emptied = true }, display = { title = q(label) .. " is empty already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
   end
-  if material.made and #song.instruments == 1 then fail("changed", "it is the song's only instrument now: Renoise needs one") end
-  song:describe_undo(desc)
-  if material.made then
-    song:delete_instrument_at(i)
+  return instruments_.remove_checked(song, env, restore, locate, function(live, i, label)
+    live:describe_undo(desc)
+    if material.made then
+      live:delete_instrument_at(i)
+      base.note_restored_at(env.journal, "instrument-kit", places_.journal_place("instrument", { i }))
+      return { restored = { deleted = true }, display = { title = string.format("Removed the kit %s (put back)", q(label)) }, undo = { desc = desc, entry = true } }
+    end
+    local instrument = live:instrument(i)
+    instrument:clear()
+    if type(material.name) == "string" and instrument.name ~= material.name then instrument.name = material.name end
     base.note_restored_at(env.journal, "instrument-kit", places_.journal_place("instrument", { i }))
-    return { restored = { deleted = true }, display = { title = string.format("Removed the kit %s (put back)", q(label)) }, undo = { desc = desc, entry = true } }
-  end
-  instrument:clear()
-  if type(material.name) == "string" and instrument.name ~= material.name then instrument.name = material.name end
-  base.note_restored_at(env.journal, "instrument-kit", places_.journal_place("instrument", n))
-  label = places_.instrument_label(i, instrument)
-  return { restored = { emptied = true }, display = { title = string.format("Emptied %s again (put back)", q(label)) }, undo = { desc = desc, entry = true } }
+    label = places_.instrument_label(i, instrument)
+    return { restored = { emptied = true }, display = { title = string.format("Emptied %s again (put back)", q(label)) }, undo = { desc = desc, entry = true } }
+  end)
 end
 
 base.register({

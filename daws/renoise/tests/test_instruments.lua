@@ -452,6 +452,29 @@ test("instruments: a delete whose notes are more than its undo can write back, o
   end
 end)
 
+test("instruments: in a big song Kumi's undo of an instrument it made looks for its notes in slices; notes refuse it, discard says it cleared them (#361 N10)", function()
+  local env, peer = patched("changes_instruments.lua", "M%.SCAN_BUDGET = 300000", "M.SCAN_BUDGET = 10")
+  local record = change(peer, "instrument-add", { index = 3, name = "Lead" })
+  note_at(1, 3) -- the producer plays it (its instrument value is 3: Renoise's 03)
+  note_at(5, 3)
+  local refused = restore(peer, "instrument-add", record)
+  failure(refused, "changed")
+  ok(refused.error.message:find("2 notes", 1, true), refused.error.message)
+  ok(not refused.error.message:find("discard", 1, true), "it doesn't point to discard: " .. refused.error.message)
+  eq(#mock.data.instruments, 4, "Lead stays")
+  local before = steps()
+  local forced = restore(peer, "instrument-add", record, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  ok((forced.result.display.note or ""):find("cleared the 2 notes", 1, true), "discard says what it cost: " .. tostring(forced.result.display.note))
+  eq(#mock.data.instruments, 3)
+  eq(steps(), before + 1, "one step")
+  -- nothing plays it: the sliced look ends in the undo
+  local plain = change(peer, "instrument-add", { name = "Empty" })
+  local undone = restore(peer, "instrument-add", plain)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#mock.data.instruments, 3)
+end)
+
 test("instruments: a big song is looked through in slices before the delete, which is one step; a pattern changed meanwhile is looked at again", function()
   local env, peer = setup({ patch = function(env_)
     local path = env_.bundle .. "payload/changes_instruments.lua"

@@ -325,22 +325,110 @@ local function instrument_devices(song)
 end
 M.instrument_devices = instrument_devices
 
--- Whether Kumi may take away an instrument it made (an add's, a load's, a duplicate's undo): nothing plays it, nothing is
--- aimed at it, and it is as Kumi made it. `discard` takes it whatever is in it, as a track's add does.
-local function check_removable(song, i, instrument, applied, discard, label)
-  local print = places_.instrument_print(instrument)
-  if not discard and type(applied) == "table" and type(applied.print) == "table" and not base.same_table(print, applied.print) then
-    fail("changed", string.format("%s changed in Renoise since Kumi made it (samples, phrases, a plug-in or its name)", q(label)))
-  end
-  if discard then return end
-  local notes = places_.notes_playing(song, i - 1, M.SCAN_BUDGET)
-  if notes == nil then
-    fail("changed", string.format("Kumi can't tell whether notes play %s now (the song is too big to look through in one go), so it left it: delete it in Renoise, or undo with discard", q(label)))
-  end
-  if #notes > 0 then
-    fail("changed", string.format("%d %s in the song play %s since Kumi made it: Kumi left it (Renoise would clear them)", #notes, #notes == 1 and "note" or "notes", q(label)))
+-- The notes playing instrument value `v` found by a look through the song: inline when it fits a callback, else in slices of a
+-- job (each pattern's count of changed lines is kept, so the writing step looks again at the patterns changed since).
+local function scan_cost(song)
+  local cost = 0
+  for p = 1, #song.patterns do cost = cost + song:pattern(p).number_of_lines end
+  return cost * rows.track_count(song)
+end
+
+local function notes_in_pattern(song, p, v, found)
+  local pattern = song:pattern(p)
+  for t = 1, rows.track_count(song) do
+    local pattern_track = pattern:track(t)
+    if not pattern_track.is_alias and not pattern_track.is_empty and song:track(t).max_note_columns > 0 then
+      for l = 1, pattern.number_of_lines do
+        local line = pattern_track:line(l)
+        if not line.is_empty then
+          for c = 1, 12 do
+            local column = line:note_column(c)
+            if column.instrument_value == v then
+              found[#found + 1] = {
+                p = p, t = t, line = l, col = c, note = column.note_value, volume = column.volume_value, panning = column.panning_value,
+                delay = column.delay_value, fxn = column.effect_number_value, fxa = column.effect_amount_value,
+              }
+            end
+          end
+        end
+      end
+    end
   end
 end
+M.notes_in_pattern = notes_in_pattern
+
+local function scan(job, env, v)
+  local song = rows.the_song()
+  local found, marks = {}, {}
+  for p = 1, #song.patterns do
+    if job then job.slice() end
+    local live = rows.the_song()
+    if p > #live.patterns then break end
+    marks[p] = env.pattern_touch_mark and env.pattern_touch_mark(p) or false
+    notes_in_pattern(live, p, v, found)
+  end
+  return found, marks
+end
+M.scan = scan
+
+-- The patterns changed since their look: looked at again (found is kept for the others).
+local function rescan_changed(env, v, found, marks)
+  local song = rows.the_song()
+  local again = {}
+  for p, mark in pairs(marks) do
+    local changed = true
+    if mark and env.pattern_touched_since then
+      local since = env.pattern_touched_since(p, mark)
+      changed = since ~= false
+    end
+    if changed then again[p] = true end
+  end
+  if not next(again) then return found end
+  local kept = {}
+  for _, note in ipairs(found) do
+    if not again[note.p] then kept[#kept + 1] = note end
+  end
+  for p in pairs(again) do
+    if p <= #song.patterns then notes_in_pattern(song, p, v, kept) end
+  end
+  return kept
+end
+
+-- Whether Kumi may take away an instrument it made (an add's, a load's, a duplicate's, a kit's undo): it is as Kumi made it
+-- (`check(song, i)`, which `discard` skips) and no note plays it. The notes are looked for first, in one callback for a small
+-- song and in slices of a job for a big one (nothing written meanwhile); then `locate(song)` finds it again (its place, or a
+-- refusal), and `write(song, i, label, notes)` takes it away (or empties it) in one callback. Under discard the notes that
+-- play it are counted and said.
+local function remove_checked(song, env, restore, locate, write)
+  local i = locate(song)
+  local function finish(live, notes)
+    local at, label = locate(live)
+    if #notes > 0 and not restore.discard then
+      fail("changed", string.format("%d %s in the song play %s since Kumi made it: Kumi left it (Renoise would clear them)", #notes, #notes == 1 and "note" or "notes", q(label)))
+    end
+    local done = write(live, at, label, notes)
+    if #notes > 0 then
+      local count = string.format("%d %s", #notes, #notes == 1 and "note" or "notes")
+      local said = done.restored.deleted and string.format("Renoise cleared the %s that played it.", count)
+        or string.format("The %s that played it play nothing now.", count)
+      done.display.note = done.display.note and (done.display.note .. " " .. said) or said
+    end
+    return done
+  end
+  if scan_cost(song) <= M.SCAN_BUDGET then return finish(song, (scan(nil, env, i - 1))) end
+  return {
+    kumi_job = function(job)
+      base.wait_while_busy(job, env)
+      local found, marks = scan(job, env, i - 1)
+      job.step(0)
+      base.wait_while_busy(job, env)
+      local live = rows.the_song()
+      if locate(live) ~= i then fail("changed", "the instruments moved while Kumi looked through the song for its notes: nothing was written; undo again") end
+      return finish(live, rescan_changed(env, i - 1, found, marks))
+    end,
+  }
+end
+M.remove_checked = remove_checked
 
 -- Where a new instrument goes: `index` by Renoise's number (from 0, as it shows instruments from 00), to its place from 1.
 local function index_input(input, count, what)
@@ -359,23 +447,30 @@ local function remove_made(song, env, restore, desc, kind, noun)
   local material = restore.material
   if type(material) ~= "table" or type(material.made) ~= "table" then bad("material: the instrument the change made") end
   local label = (restore.applied or {}).name or noun
-  local n, why = places_.follow(env, material.made)
-  if not n then
-    if why == "gone" then fail("gone", string.format("the instrument Kumi made (%s) isn't in the song any more", q(label))) end
-    places_.follow_failed(why, "instrument", label)
+  local function locate(live)
+    local at, why_now = places_.follow(env, material.made)
+    if not at then
+      if why_now == "gone" then fail("gone", string.format("the instrument Kumi made (%s) isn't in the song any more", q(label))) end
+      places_.follow_failed(why_now, "instrument", label)
+    end
+    local instrument = live:instrument(at[1])
+    local named = places_.instrument_label(at[1], instrument)
+    if #live.instruments == 1 then fail("changed", "it is the song's only instrument now: Renoise needs one") end
+    local applied = restore.applied
+    if not restore.discard and type(applied) == "table" and type(applied.print) == "table" and not base.same_table(places_.instrument_print(instrument), applied.print) then
+      fail("changed", string.format("%s changed in Renoise since Kumi made it (samples, phrases, a plug-in or its name)", q(named)))
+    end
+    return at[1], named
   end
-  local i = n[1]
-  local instrument = song:instrument(i)
-  label = places_.instrument_label(i, instrument)
-  if #song.instruments == 1 then fail("changed", "it is the song's only instrument now: Renoise needs one") end
-  check_removable(song, i, instrument, restore.applied, restore.discard, label)
-  song:describe_undo(desc)
-  song:delete_instrument_at(i)
-  base.note_restored_at(env.journal, kind, places_.journal_place("instrument", { i }))
-  return {
-    restored = { deleted = true }, display = { title = string.format("Removed instrument %s (put back)", q(label)) },
-    undo = { desc = desc, entry = true },
-  }
+  return remove_checked(song, env, restore, locate, function(live, i, named)
+    live:describe_undo(desc)
+    live:delete_instrument_at(i)
+    base.note_restored_at(env.journal, kind, places_.journal_place("instrument", { i }))
+    return {
+      restored = { deleted = true }, display = { title = string.format("Removed instrument %s (put back)", q(named)) },
+      undo = { desc = desc, entry = true },
+    }
+  end)
 end
 
 -- instrument-add {index?, name?}: an empty instrument.
@@ -463,75 +558,6 @@ local function delete_preview(song, env, input)
     display.note = string.format("It holds %.0f MB, more than Kumi can keep to put it back: the apply will refuse.", bytes / 1048576)
   end
   return { target = places_.target_of(env, "instrument", n), prior = { deleted = false }, fence = delete_fence(n[1], objects.instrument), display = display }
-end
-
--- The notes playing instrument value `v` found by a look through the song: inline when it fits a callback, else in slices of a
--- job (each pattern's count of changed lines is kept, so the writing step looks again at the patterns changed since).
-local function scan_cost(song)
-  local cost = 0
-  for p = 1, #song.patterns do cost = cost + song:pattern(p).number_of_lines end
-  return cost * rows.track_count(song)
-end
-
-local function notes_in_pattern(song, p, v, found)
-  local pattern = song:pattern(p)
-  for t = 1, rows.track_count(song) do
-    local pattern_track = pattern:track(t)
-    if not pattern_track.is_alias and not pattern_track.is_empty and song:track(t).max_note_columns > 0 then
-      for l = 1, pattern.number_of_lines do
-        local line = pattern_track:line(l)
-        if not line.is_empty then
-          for c = 1, 12 do
-            local column = line:note_column(c)
-            if column.instrument_value == v then
-              found[#found + 1] = {
-                p = p, t = t, line = l, col = c, note = column.note_value, volume = column.volume_value, panning = column.panning_value,
-                delay = column.delay_value, fxn = column.effect_number_value, fxa = column.effect_amount_value,
-              }
-            end
-          end
-        end
-      end
-    end
-  end
-end
-M.notes_in_pattern = notes_in_pattern
-
-local function scan(job, env, v)
-  local song = rows.the_song()
-  local found, marks = {}, {}
-  for p = 1, #song.patterns do
-    if job then job.slice() end
-    local live = rows.the_song()
-    if p > #live.patterns then break end
-    marks[p] = env.pattern_touch_mark and env.pattern_touch_mark(p) or false
-    notes_in_pattern(live, p, v, found)
-  end
-  return found, marks
-end
-M.scan = scan
-
--- The patterns changed since their look: looked at again (found is kept for the others).
-local function rescan_changed(env, v, found, marks)
-  local song = rows.the_song()
-  local again = {}
-  for p, mark in pairs(marks) do
-    local changed = true
-    if mark and env.pattern_touched_since then
-      local since = env.pattern_touched_since(p, mark)
-      changed = since ~= false
-    end
-    if changed then again[p] = true end
-  end
-  if not next(again) then return found end
-  local kept = {}
-  for _, note in ipairs(found) do
-    if not again[note.p] then kept[#kept + 1] = note end
-  end
-  for p in pairs(again) do
-    if p <= #song.patterns then notes_in_pattern(song, p, v, kept) end
-  end
-  return kept
 end
 
 local function delete_write(song, env, input, fence, desc, notes)
