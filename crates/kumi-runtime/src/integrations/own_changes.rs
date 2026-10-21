@@ -2083,6 +2083,8 @@ mod tests {
             for text in [set.plan_description, set.undo_description, set.instructions] {
                 assert!(!live.is_match(text), "{app}: {text}");
             }
+            // Every state a row of kumiChanges can be in (review K39).
+            assert!(set.instructions.contains("(applied, undone, kept, unsure, or expired: "), "{app}");
             // Every action's words and schema, and every kind's schema text, too.
             for action in set.actions {
                 assert!(!live.is_match(action.description) && !live.is_match(action.schema), "{app} {}", action.tool);
