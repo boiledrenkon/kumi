@@ -2520,9 +2520,62 @@ unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const
         if let Some(height) = height.filter(|height| *height != 0.0) {
             slot.extra.insert("I_HEIGHTOVERRIDE".into(), height);
         }
+        // Each plug-in's state is what its block in the text says (the number in the chunk names the rest).
+        for (fx, values) in slot.fx.iter_mut().zip(plugin_params(&chunk)) {
+            if let Some(values) = values {
+                for (param, value) in fx.params.iter_mut().zip(values) {
+                    param.value = value;
+                }
+            }
+        }
         s.undo_dirty = true;
         true
     })
+}
+
+/// The parameter values in each top-level entry of a track chunk's main FX chain, in order (`PARAM v name` lines inside
+/// a plug-in's block, as the fake writes them); None for an entry that isn't a plug-in block of that kind.
+pub(super) fn plugin_params(chunk: &str) -> Vec<Option<Vec<f64>>> {
+    let mut entries: Vec<Option<Vec<f64>>> = Vec::new();
+    let mut blocks: Vec<String> = Vec::new();
+    for line in chunk.lines().map(str::trim) {
+        let in_chain = blocks.len() == 2 && blocks[1] == "<FXCHAIN";
+        if in_chain && line.starts_with("BYPASS ") {
+            entries.push(None);
+        }
+        if line.starts_with('<') {
+            let word = line.split_whitespace().next().unwrap_or("<").to_string();
+            if in_chain && word == "<VST" {
+                if let Some(entry) = entries.last_mut() {
+                    *entry = Some(vec![]);
+                }
+            }
+            blocks.push(word);
+            continue;
+        }
+        if line == ">" {
+            blocks.pop();
+            continue;
+        }
+        if blocks.len() == 3 && blocks[1] == "<FXCHAIN" && blocks[2] == "<VST" {
+            if let (Some(Some(values)), Some(rest)) = (entries.last_mut(), line.strip_prefix("PARAM ")) {
+                values.push(rest.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0));
+            }
+        }
+    }
+    entries
+}
+
+/// A track as its chunk's number names it: its plug-ins' parameter values left to the text, as REAPER keeps a plug-in's
+/// state in its block.
+pub(super) fn chunk_key(track: &FakeTrack) -> FakeTrack {
+    let mut key = track.clone();
+    for fx in key.fx.iter_mut().filter(|fx| fx.children.is_none()) {
+        for param in fx.params.iter_mut() {
+            param.value = 0.0;
+        }
+    }
+    key
 }
 
 unsafe extern "C" fn create_track_send(track: *mut MediaTrack, dest: *mut MediaTrack) -> c_int {

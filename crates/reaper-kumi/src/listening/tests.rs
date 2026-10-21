@@ -1657,6 +1657,31 @@ fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_faded_muted_or_put_a_ta
 }
 
 #[test]
+fn kumis_undo_of_a_kept_copy_takes_it_away_after_the_project_played_its_automation() {
+    let rig = Rig::new();
+    let kick = copyable();
+    let made = make(&rig, "sp", &kick, 1);
+    let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
+    // The copy's ReaEQ gain is automated: an envelope on it.
+    fake::with(|s| {
+        let guid = s.tracks[4].fx[0].guid.clone();
+        s.tracks[4].envelopes.push(fake::FakeEnvelope::for_param("Gain / ReaEQ", &guid, 0, 2));
+    });
+    let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
+    let applied = change(
+        &rig,
+        "change_apply",
+        json!({"kind": "scratch-keep", "input": keep_input(&copy), "fence": preview["fence"], "desc": "Kumi: Kept (k11)"}),
+    )
+    .unwrap();
+    // The project plays: the envelope moves the gain, and with it the plug-in's saved state.
+    fake::with(|s| s.tracks[4].fx[0].params[0].value = 0.9);
+    let restore = json!({"kind": "scratch-keep", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo Kept (k12)"});
+    change(&rig, "change_restore", restore).unwrap();
+    assert_eq!(fake::with(|s| s.tracks.len()), 4, "taken away");
+}
+
+#[test]
 fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_turned_a_knob_on_it() {
     let rig = Rig::new();
     let kick = copyable();
