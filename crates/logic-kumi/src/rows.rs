@@ -345,6 +345,34 @@ impl Note {
     }
 }
 
+/// An automation event from the Track Automation Event List: a "Fader" row, its position, the parameter's number
+/// (Num) and name (Logic writes it in the Length/Info cell: "Volume", "Balance"), and its value (Val, 0 to 127).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationEvent {
+    pub position: Position,
+    pub number: u32,
+    pub parameter: String,
+    pub value: u32,
+}
+
+impl AutomationEvent {
+    pub fn of(row: &Node, columns: &[(String, usize)], strings: &Strings) -> Option<AutomationEvent> {
+        let status = cell(row, columns, "Status").and_then(|c| c.children.first()).map(|c| c.desc.clone()).unwrap_or_default();
+        if !strings.is(&status, "Fader") {
+            return None;
+        }
+        let position = cell(row, columns, "Position").and_then(|c| c.children.first()).and_then(position_of)?;
+        let number = cell(row, columns, "Num").and_then(cell_control).and_then(Node::number)? as u32;
+        let value_cell = cell(row, columns, "Val").and_then(cell_control)?;
+        let value = first_number(&value_cell.value_desc).or_else(|| value_cell.number())? as u32;
+        let parameter = cell(row, columns, "Length").map(|c| {
+            let inner = c.children.first();
+            inner.map(|n| if n.desc.is_empty() { n.value_text() } else { n.desc.clone() }).unwrap_or_default()
+        });
+        Some(AutomationEvent { position, number, parameter: clip(parameter.unwrap_or_default().trim()), value })
+    }
+}
+
 /// A marker from the Marker List: its position, name, length and text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Marker {
@@ -447,12 +475,14 @@ impl StripState {
         for insert in parts.inserts.iter().rev().filter(|slot| paths::occupied(slot)) {
             inserts.push((clip(&insert.desc), bypassed(insert, strings), "effect"));
         }
+        let knobs = send_knobs(strip, &parts.sends, strings);
         let sends = parts
             .sends
             .iter()
+            .zip(knobs)
             .rev()
-            .filter(|send| paths::occupied(send) || !(strings.is(&send.desc, "send button") || send.desc.is_empty()))
-            .map(|send| (clip(&send.desc), send_level(send, strings)))
+            .filter(|(send, _)| paths::occupied(send) || !(strings.is(&send.desc, "send button") || send.desc.is_empty()))
+            .map(|(send, knob)| (clip(&send.desc), knob.and_then(|k| db_of(&k.value_desc)).or_else(|| db_of(&send.value_desc))))
             .collect();
         StripState {
             name: parts.name.map(Node::value_text).unwrap_or_else(|| strip.desc.clone()),
@@ -476,10 +506,32 @@ fn bypassed(slot: &Node, strings: &Strings) -> bool {
     slot.children.iter().any(|c| c.role == "AXCheckBox" && strings.is(&c.desc, "bypass") && c.is_on())
 }
 
-/// A send slot's level in dB: its knob's description, when the slot shows one.
-fn send_level(slot: &Node, strings: &Strings) -> Option<f64> {
-    let knob = slot.find(&|n| n.role == "AXSlider" && (strings.is(&n.desc, "send knob") || strings.is(&n.desc, "send level")));
-    knob.and_then(|k| db_of(&k.value_desc)).or_else(|| db_of(&slot.value_desc))
+/// The level knob of each send slot of a strip (`slots` as `Strip::of` lists them, bottom-up), `None` for an empty
+/// slot. Logic lists the knobs as the strip's own sliders after the send groups, in the groups' order: right after a
+/// lone send's group, after all of them when there are several (measured on Logic Pro 12.3.1); a knob inside a group
+/// is taken first. When the knobs and the sends don't come out even, no level is read rather than a wrong one.
+pub fn send_knobs<'a>(strip: &'a Node, slots: &[&'a Node], strings: &Strings) -> Vec<Option<&'a Node>> {
+    let is_knob = |n: &Node| n.role == "AXSlider" && (strings.is(&n.desc, "send knob") || strings.is(&n.desc, "send level"));
+    let loose: Vec<&Node> = strip.children.iter().filter(|c| is_knob(c)).collect();
+    let occupied = slots.iter().filter(|slot| paths::occupied(slot) && slot.find(&is_knob).is_none()).count();
+    let mut next = loose.iter();
+    slots
+        .iter()
+        .map(|slot| {
+            if !paths::occupied(slot) {
+                return None;
+            }
+            if let Some(inside) = slot.find(&is_knob) {
+                return Some(inside);
+            }
+            next.next().copied().filter(|_| loose.len() == occupied)
+        })
+        .collect()
+}
+
+/// A send knob's description as dB: Logic writes the number alone ("-6.0", "-∞").
+pub fn send_db(description: &str) -> Option<f64> {
+    db_of(description)
 }
 
 /// A track's row: the header's live state, the strip's kind and routing when known.
@@ -829,6 +881,31 @@ mod tests {
         assert_eq!(state.inputs, ["Input 1"]);
         assert_eq!(state.inserts, [("Channel EQ".to_string(), false, "effect")]);
         assert_eq!(state.sends, [("Bus 1".to_string(), Some(-6.0))]);
+        // As Logic Pro 12.3.1 lists a lone send: its knob right after its group, the level written alone; several
+        // sends' knobs come after all the groups, in their order.
+        let logic = node(json!({"role": "AXLayoutItem", "desc": "Vocal", "c": [
+            {"role": "AXTextField", "desc": "name", "value": "Vocal"},
+            {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal."},
+            {"role": "AXGroup", "desc": "Bus 2", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}, {"role": "AXButton", "desc": "list"}]},
+            {"role": "AXSlider", "desc": "send knob", "value": 1330339456, "valueDesc": "-2.2"},
+            {"role": "AXGroup", "desc": "Bus 1", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}, {"role": "AXButton", "desc": "list"}]},
+            {"role": "AXSlider", "desc": "send knob", "value": 0, "valueDesc": "-∞"},
+            {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."}
+        ]}));
+        let state = StripState::of(&logic, &Strings::english());
+        assert_eq!(state.sends, [("Bus 1".to_string(), Some(MIN_DB)), ("Bus 2".to_string(), Some(-2.2))]);
+        let several = node(json!({"role": "AXLayoutItem", "desc": "Vocal", "c": [
+            {"role": "AXTextField", "desc": "name", "value": "Vocal"},
+            {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal."},
+            {"role": "AXGroup", "desc": "Bus 3", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}, {"role": "AXButton", "desc": "list"}]},
+            {"role": "AXGroup", "desc": "Bus 2", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}, {"role": "AXButton", "desc": "list"}]},
+            {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal."},
+            {"role": "AXSlider", "desc": "send knob", "value": 0, "valueDesc": "-∞"},
+            {"role": "AXSlider", "desc": "send knob", "value": 178427952, "valueDesc": "-37.1"},
+            {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."}
+        ]}));
+        let state = StripState::of(&several, &Strings::english());
+        assert_eq!(state.sends, [("Bus 2".to_string(), Some(-37.1)), ("Bus 3".to_string(), Some(MIN_DB))]);
         let instrument = node(json!({"role": "AXLayoutItem", "c": [
             {"role": "AXTextField", "desc": "name", "value": "Keys"},
             {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."},

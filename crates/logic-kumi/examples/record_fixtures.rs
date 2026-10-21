@@ -10,7 +10,8 @@
 //! click on its header's name field through the helper; `--region <place>` selects a region (its place through the
 //! project) through its item; `--editors` opens the editors pane (the Piano Roll for a
 //! MIDI region) first, `--play` presses Play, `--dialog` brings the "Choose a Project" dialog up. The scene starts
-//! after that; `--restore` puts the panes, the transport and the dialog back after it.
+//! after that; `--restore` puts the panes, the transport and the dialog back after it. `--set m4b` asks the second
+//! slice's reads (`scenes::m4b_requests`: a plug-in's parameters, Smart Controls, automation) instead of the fixed set.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let (mut out, mut helper_path, mut select, mut region) = (None, None, None, None);
     let (mut editors, mut play, mut dialog, mut restore) = (false, false, false, false);
+    let mut set_m4b = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = Some(PathBuf::from(args.next().expect("--out <dir>"))),
@@ -40,6 +42,13 @@ fn main() {
             "--play" => play = true,
             "--dialog" => dialog = true,
             "--restore" => restore = true,
+            "--set" => {
+                set_m4b = match args.next().as_deref() {
+                    Some("m4b") => true,
+                    Some("m2") => false,
+                    _ => panic!("--set m2 (the fixed set) or m4b (the second slice's reads)"),
+                }
+            }
             other => panic!("unknown argument {other}; usage: record_fixtures --out <dir> [--helper <path>] [--select <track>] [--editors] [--play] [--dialog] [--restore]"),
         }
     }
@@ -119,7 +128,8 @@ fn main() {
     let bundle = app.path.clone().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/Applications/Logic Pro.app"));
     let strings = Strings::load(&bundle, &language);
 
-    let cases = scenes::run(helper.as_mut(), app.pid, strings, status, (id.as_deref(), path.as_deref(), &pname));
+    let requests = if set_m4b { scenes::m4b_requests() } else { scenes::fixed_requests() };
+    let cases = scenes::run_set(helper.as_mut(), app.pid, strings, status, (id.as_deref(), path.as_deref(), &pname), &requests);
     // The events that came meanwhile (none expected: the Mackie ports aren't opened here).
     while helper.event(Duration::from_millis(50)).is_some() {}
     helper.quit();

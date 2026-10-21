@@ -12,6 +12,7 @@ pub mod ax;
 pub mod bodies;
 pub mod bridge;
 pub mod changes;
+pub mod disk;
 pub mod fixtures;
 pub mod focus;
 pub mod helper;

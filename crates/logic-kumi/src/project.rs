@@ -184,6 +184,8 @@ pub struct Project {
     pub carries: Vec<Carry>,
     /// The strips as the Mixer last showed them, by the track's place (from 1), with when.
     strips: Option<(Instant, Vec<StripState>)>,
+    /// The Mixer's output strips (the Stereo Out first), read with the tracks' strips.
+    outputs: Vec<StripState>,
     /// The list editors' rows read last, by tab, with when.
     lists: HashMap<&'static str, (Instant, Vec<Value>)>,
     /// The notes read last, by region, with when.
@@ -211,6 +213,7 @@ impl Project {
             shape: None,
             carries: Vec::new(),
             strips: None,
+            outputs: Vec::new(),
             lists: HashMap::new(),
             notes: HashMap::new(),
             id: None,
@@ -446,6 +449,7 @@ impl Project {
             }
         }
         let all = self.read_mixer(ax)?;
+        self.outputs = all.iter().filter(|strip| strip.kind == "output").cloned().collect();
         // The Mixer lists the tracks' strips in the Tracks area's order, then what no track has (busses, outputs, the
         // master): the strips are matched to the headers by name, in order, so a renamed strip still finds its track.
         let mut strips = vec![];
@@ -728,6 +732,15 @@ impl Project {
             }
             for (slot, send) in strip.sends.iter().enumerate() {
                 sends.push(rows::send_row(&r("send", format!("{}.{}", i + 1, slot + 1)), &track_ref, slot + 1, send));
+            }
+        }
+        // The outputs' plug-ins (the Stereo Out's limiter or gain): under `<epoch>:output:<n>`, as `0.<n>.<slot>`.
+        if needs.strips {
+            for (i, strip) in self.outputs.iter().enumerate() {
+                let output_ref = r("output", (i + 1).to_string());
+                for (slot, insert) in strip.inserts.iter().enumerate() {
+                    plugins.push(rows::plugin_row(&r("plugin", format!("0.{}.{}", i + 1, slot + 1)), &output_ref, slot + 1, insert));
+                }
             }
         }
         let markers = if needs.markers {

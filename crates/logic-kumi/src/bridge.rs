@@ -23,7 +23,8 @@ use crate::ax::{Ax, AxError};
 use crate::changes::Changes;
 
 /// The methods that write to Logic: the focus is refreshed before their answer leaves.
-const WRITES: [&str; 6] = ["change_apply", "change_restore", "transport_stop", "transport_play", "cursor_set", "project_save"];
+const WRITES: [&str; 8] =
+    ["change_apply", "change_restore", "transport_stop", "transport_play", "cursor_set", "project_save", "bounce", "export_tracks"];
 use crate::focus::{self, Focus};
 use crate::helper::Helper;
 use crate::log;
@@ -146,7 +147,12 @@ struct Attached {
     /// When the bridge attached and when the first complete epoch (headers and regions read) came: the lab's number.
     attached_at: Instant,
     first_epoch_at: Option<Instant>,
+    /// When the selected track's strip was last read for the undo watch's strip probes.
+    strip_read_at: Option<Instant>,
 }
+
+/// How often the Inspector's strip is read for a strip probe (a plug-in or a send Kumi put on the selected track).
+const STRIP_EVERY: Duration = Duration::from_secs(1);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -270,6 +276,7 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 last_epoch: 1,
                 attached_at: Instant::now(),
                 first_epoch_at: None,
+                strip_read_at: None,
             })
         }
         Err(error) => {
@@ -349,6 +356,19 @@ impl Attached {
         self.refreshed_at = Some(Instant::now());
         let epoch = look.epoch;
         let (selection, transport) = (look.selection.to_json(epoch), look.transport.to_json());
+        // A strip probe watches the selected track: its strip read from the Inspector, at most once a second.
+        if let Some((place, _)) = &look.selection.track {
+            if self.changes.watch.strip_wanted(*place) && self.strip_read_at.is_none_or(|at| at.elapsed() >= STRIP_EVERY) {
+                self.strip_read_at = Some(Instant::now());
+                if let Ok(Some(strip)) = self.project.inspector_strip(&mut ax) {
+                    self.changes.watch.saw_strip(crate::changes::undo::Seen {
+                        place: *place,
+                        plugins: strip.inserts.iter().filter(|(_, _, kind)| *kind == "effect").map(|(name, _, _)| name.clone()).collect(),
+                        sends: strip.sends.iter().map(|(bus, _)| bus.clone()).collect(),
+                    });
+                }
+            }
+        }
         // The producer's own undo of Kumi's changes, named back: the probes against this look, the Edit menu's titles.
         {
             let hub = &self.hub;
@@ -403,7 +423,7 @@ impl Attached {
         if crate::serve::CHANGE_METHODS.contains(&method) {
             return crate::serve::answer_change(&mut self.project, &mut self.changes, helper, self.pid, method, params);
         }
-        crate::serve::answer(&mut self.project, helper, self.pid, method, params)
+        crate::serve::answer_keyed(&mut self.project, helper, self.pid, method, params, &self.changes.keys)
     }
 
     /// The Mackie Control: opened once Logic can be read, its bytes answered on every event.
