@@ -190,13 +190,16 @@ impl TuiApp {
     fn bottom_height(pane: i32) -> i32 {
         ((pane as f64 / 2.).floor() as i32).max(7).min((pane - 8).max(1))
     }
-    fn track_header(&self, screen: &mut Screen, x: i32, y: i32, width: i32) -> FocusTrack {
-        let track = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone()).unwrap();
+    /// The focused track's chip and name over a body; where the focus names no track (REAPER's routing window for a track
+    /// that isn't the selected one), the name the body gives, with a plain chip; none when neither says.
+    fn track_header(&self, screen: &mut Screen, x: i32, y: i32, width: i32, named: Option<&str>) -> Option<FocusTrack> {
+        let focused = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone());
+        let track = focused.or_else(|| named.map(|name| FocusTrack { name: name.to_owned(), color: None, kind: None }))?;
         let kind = track.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string());
         let mark = icon(track_kind(kind.as_deref()), self.0.icons, Some(chip_color(track.color.as_deref())));
         screen.put(x, y, &mark.text, &mark.style);
         screen.put(x + 3, y, &truncate(&track.name, (width - 3).max(1)), &st::TEXT);
-        track
+        Some(track)
     }
     fn draw_notes(&self, screen: &mut Screen, x: i32, y: i32, width: i32, clip: &NoteView) -> i32 {
         let track = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone()).unwrap();
@@ -272,7 +275,7 @@ impl TuiApp {
         row - y
     }
     fn draw_grid(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &LauncherStrip) -> i32 {
-        self.track_header(screen, x, y, width);
+        self.track_header(screen, x, y, width, None);
         for (index, slot) in strip.slots.iter().enumerate() {
             let row = y + 1 + index as i32;
             if slot.index == strip.scene {
@@ -314,7 +317,7 @@ impl TuiApp {
         1 + strip.slots.len() as i32
     }
     fn draw_timeline(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &TimelineStrip) -> i32 {
-        self.track_header(screen, x, y, width);
+        self.track_header(screen, x, y, width, None);
         let cells = width.max(8);
         let span = strip.locators.iter().map(|l| l.position + 4.).fold(strip.length.max(strip.position + 4.), f64::max);
         let at = |beats: f64| (beats / span * cells as f64).floor().clamp(0., (cells - 1) as f64) as usize;
@@ -661,7 +664,7 @@ impl TuiApp {
     }
     /// A track's sends and receives, with their levels and where they tap the track.
     fn draw_routing(&self, screen: &mut Screen, x: i32, y: i32, width: i32, routing: &RoutingView, most: i32) -> i32 {
-        self.track_header(screen, x, y, width);
+        self.track_header(screen, x, y, width, routing.name.as_deref());
         let rows = routing.routes.len().min((most.max(3) - 2 - routing.midi_out.is_some() as i32).max(1) as usize);
         for (row, route) in routing.routes.iter().take(rows).enumerate() {
             let arrow = match route.kind {
@@ -834,10 +837,10 @@ impl TuiApp {
         self.hit(at, y, 1, |app| app.unpin());
     }
     fn draw_tree(&self, screen: &mut Screen, x: i32, y: i32, width: i32, rows: &[TreeRow], most: i32) -> i32 {
-        let track = self.track_header(screen, x, y, width);
+        let track = self.track_header(screen, x, y, width, None);
         // A chain that isn't the track's own (REAPER's take FX) says whose it is beside the track.
         let owner = self.0.state.borrow().tree.as_ref().and_then(|tree| tree.owner.clone());
-        if let Some(owner) = owner {
+        if let (Some(owner), Some(track)) = (owner, track) {
             let at = x + 3 + text_width(&truncate(&track.name, (width - 3).max(1)));
             if at + 4 < x + width {
                 screen.put(at, y, &truncate(&format!(" · {owner}"), x + width - at), &st::DIM);

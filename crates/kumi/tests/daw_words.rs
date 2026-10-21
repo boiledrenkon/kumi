@@ -168,6 +168,7 @@ case!(a_reaper_session_never_speaks_lives_words, async {
             json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"routing","label":"Routing"}}),
             Some(FocusBody::Routing(RoutingView {
                 track_ref: "r:track:{B}".into(),
+                name: None,
                 routes: vec![],
                 parent_send: Some(true),
                 midi_out: Some("Launchpad · channel 2".into()),

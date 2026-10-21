@@ -585,6 +585,9 @@ pub struct Keyzone {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingView {
     pub track_ref: String,
+    /// The track's name, as the body says it: the routing window may be another track's than the selected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub routes: Vec<Route>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_send: Option<bool>,
