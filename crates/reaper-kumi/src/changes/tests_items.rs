@@ -632,6 +632,22 @@ fn a_deleted_items_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_
 }
 
 #[test]
+fn a_deleted_items_undo_isnt_refused_because_the_cursor_moved_across_a_tempo_marker() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tempo_markers = vec![
+            fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false },
+            fake::FakeTempo { time: 8.0, bpm: 90.0, num: 4, denom: 4, linear: false },
+        ]
+    });
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // The cursor goes past the second marker: REAPER's tempo (at the cursor) reads 90 now, the map is the same.
+    state(|s| s.bpm = 90.0);
+    lab.undo("item-delete", &preview, &applied).unwrap();
+    assert!(item("{ITEM-K1}").is_some());
+}
+
+#[test]
 fn undoing_item_props_puts_back_only_kumis_fields_and_leaves_a_lock_the_producer_set_since() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("item-props", json!({"ref": K1, "mute": true}));

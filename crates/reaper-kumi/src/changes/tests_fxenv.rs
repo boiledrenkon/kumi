@@ -733,6 +733,35 @@ fn deleting_an_fx_says_the_links_and_macros_that_follow_it_and_its_undo_makes_th
 }
 
 #[test]
+fn undoing_an_fx_delete_leaves_a_link_the_producer_set_elsewhere_since() {
+    let lab = chains_lab();
+    let _dir = resource();
+    // Kick: ReaComp, a ReaEQ whose first parameter follows the ReaComp's second, and a ReaVerb.
+    state(|s| {
+        let mut eq = plugin("{K-EQ}", "VST: ReaEQ (Cockos)");
+        for (key, value) in [("mod.active", "1"), ("plink.active", "1"), ("plink.effect", "0"), ("plink.param", "1")] {
+            eq.config.insert(format!("param.0.{key}"), value.into());
+        }
+        s.tracks[1].fx.push(eq);
+        s.tracks[1].fx.push(plugin("{K-VERB}", "VST: ReaVerb (Cockos)"));
+    });
+    let link =
+        |key: &str| state(|s| s.tracks[1].fx.iter().find(|f| f.guid == "{K-EQ}").unwrap().config.get(&format!("param.0.{key}")).cloned());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{K-MAIN}")}));
+    // The producer links that parameter to the ReaVerb instead (second in the chain now).
+    state(|s| {
+        let eq = s.tracks[1].fx.iter_mut().find(|f| f.guid == "{K-EQ}").unwrap();
+        eq.config.insert("param.0.plink.active".into(), "1".into());
+        eq.config.insert("param.0.plink.effect".into(), "1".into());
+        eq.config.insert("param.0.plink.param".into(), "3".into());
+    });
+    let undone = lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert!(undone["display"]["note"].as_str().unwrap().contains("set otherwise in REAPER since"), "{}", undone["display"]);
+    // Their link stays theirs: still the ReaVerb (third now that the ReaComp is back), its fourth parameter.
+    assert_eq!((link("plink.effect"), link("plink.param")), (Some("2".into()), Some("3".into())));
+}
+
+#[test]
 fn a_copied_containers_undo_leaves_it_once_the_producer_changed_an_fx_inside_it() {
     let lab = chains_lab();
     let _dir = resource();

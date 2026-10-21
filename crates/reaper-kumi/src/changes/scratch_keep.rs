@@ -1,11 +1,12 @@
 //! Keeping a scratch copy (M5 listening, `scratch-keep {ref: copy, name}`): a goal's best copy becomes a track of the
 //! producer's, named as Kumi says and sending to the master as a track does, and leaves the scratch copies (its mark is
 //! taken off, so no drop or sweep removes it). Undone by value: the track is deleted while it is as Kumi left it, all of
-//! it (its chunk's print: items, takes, fades, FX and take FX, envelopes, automation items, containers).
+//! it (its state's hash less the plug-ins' own data: items, takes, fades, take FX, envelopes, automation items; and its
+//! FX's parameters, those automation moves left to their points).
 
 use serde_json::{json, Value};
 
-use super::{chunks, Applied, Ctx, Done, Fault, Preview, Restore, Restored};
+use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
 use crate::listening::scratch::MARK;
 use crate::read::{bad, failed};
 use crate::reaper::{FxOwner, Reaper, Track};
@@ -69,10 +70,16 @@ fn content_hash(reaper: &Reaper, track: Track) -> String {
         }
     };
     let owner = FxOwner::Track(track);
-    for index in 0..reaper.fx_count(owner) {
-        let fx = crate::reaper::Fx { owner, index };
+    // (each container's FX after it, at any depth)
+    let mut all = Vec::new();
+    let mut stack: Vec<crate::reaper::Fx> = (0..reaper.fx_count(owner)).rev().map(|index| crate::reaper::Fx { owner, index }).collect();
+    while let Some(fx) = stack.pop() {
+        all.push(fx);
+        stack.extend(reaper.fx_children(fx).into_iter().rev());
+    }
+    for fx in all {
         for param in 0..reaper.fx_param_count(fx) {
-            if reaper.fx_param_envelope(track, index, param).is_some() {
+            if reaper.fx_param_envelope(track, fx.index, param).is_some() {
                 continue;
             }
             if let Some((value, _, _)) = reaper.fx_param_raw(fx, param) {
@@ -141,10 +148,12 @@ fn mark_of(reaper: &Reaper, track: Track) -> String {
     reaper.track_string(track, MARK).unwrap_or_default()
 }
 
-/// The print of the track's whole state (`chunks::print_of`: what only the screen or a selection changes left out), or
-/// None when REAPER won't give it.
+/// A hash of the track's whole state as the producer changes it (`templates::content_hash`: items, takes, fades, take
+/// FX, envelopes, automation items, routing, the FX chains' structure), less what only the screen or a selection changes
+/// and less the plug-ins' own data: an automated parameter moves that as the project plays, and the signature's
+/// parameter hash (which leaves those to their points) covers the rest. None when REAPER won't give it.
 fn print(reaper: &Reaper, track: Track) -> Option<String> {
-    reaper.track_chunk(track).map(|chunk| chunks::print_of(&chunk))
+    reaper.track_chunk(track).map(|chunk| super::templates::content_hash(&chunk))
 }
 
 /// What the preview fences and the apply checks again: the copy by its GUID, still a scratch copy, as it was.
@@ -213,11 +222,10 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     let name = reaper.track_name(track);
     let applied = restore.applied;
-    // All of the track (a copy kept before its print was, by its signature).
-    let same = match applied["print"].as_str() {
-        Some(kept) => print(reaper, track).as_deref() == Some(kept),
-        None => applied.get("signature") == Some(&signature(reaper, track)),
-    };
+    // All of the track: its state less the plug-ins' own data, and its FX's parameters by the signature (those automation
+    // moves as the project plays left to their points).
+    let same = applied.get("signature") == Some(&signature(reaper, track))
+        && applied["print"].as_str().is_none_or(|kept| print(reaper, track).as_deref() == Some(kept));
     let as_left = applied["name"].as_str() == Some(name.as_str()) && reaper.track_value(track, "B_MAINSEND") != 0.0 && same;
     if !as_left && !restore.discard {
         return Err(changed(format!("{} changed in REAPER since Kumi kept it", super::quoted(&name))));

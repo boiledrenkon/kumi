@@ -235,8 +235,8 @@ fn kumis_marker(ctx: &Ctx, restore: &Restore, time: f64) -> Done<(f64, Option<(i
         .any(|m| same_marker(&marker_state(Some(&m)), restore.applied));
     if elsewhere {
         return Err(changed(format!(
-            "the tempo marker Kumi set at {} isn't there any more: it was moved in REAPER since, so Kumi leaves the tempo map as \
-             it is, even with discard",
+            "the tempo marker Kumi set at {} isn't there any more (moved or deleted in REAPER since), and one like it is \
+             elsewhere: Kumi can't tell whether that one is it, so it leaves the tempo map as it is, even with discard",
             bar_text(ctx.reaper, ctx.proj, time)
         )));
     }
@@ -314,10 +314,12 @@ pub fn marker_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Appl
     if !ctx.reaper.delete_tempo_marker(ctx.proj, index) || ctx.reaper.tempo_marker_count(ctx.proj) >= count {
         return Err(failed("REAPER wouldn't delete the tempo marker"));
     }
+    // The tempo map as the delete left it: changed since, the marker made again at its old time would sit at another bar.
+    let tempo = super::marks::tempo_print(ctx.reaper, ctx.proj);
     Ok(Applied {
         applied: json!({"deleted": true}),
         created: None,
-        material: Some(json!({"time": marker.time, "state": now})),
+        material: Some(json!({"time": marker.time, "state": now, "tempo": tempo})),
         display: json!({"title": format!("Deleted tempo marker at {}", bar_text(ctx.reaper, ctx.proj, marker.time))}),
         ..Default::default()
     })
@@ -341,6 +343,7 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             )))
         };
     }
+    super::marks::tempo_unmoved(ctx, material, restore.discard, "the tempo marker")?;
     if !put_marker(ctx, -1, time, saved) {
         return Err(failed("REAPER wouldn't make the tempo marker again"));
     }

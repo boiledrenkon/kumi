@@ -1052,7 +1052,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
     }
     // Its volume, pan and mute envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
-    let drawn = active_envelopes(ctx.reaper, found.track, found.index);
+    let drawn = drawn_envelopes(ctx.reaper, found.track, found.index);
     if !restore.discard && drawn > 0 {
         return Err(changed(format!(
             "the send {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
@@ -1101,7 +1101,7 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, reference, true)?;
     let now = send_state(ctx.reaper, found.track, found.index);
     let mut display = json!({"title": format!("Removed send {}", route_text(&found.from, &found.to)), "before": now});
-    let envelopes = active_envelopes(ctx.reaper, found.track, found.index);
+    let envelopes = drawn_envelopes(ctx.reaper, found.track, found.index);
     if envelopes > 0 {
         display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
     }
@@ -1109,11 +1109,13 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     Ok(Preview { target: target(reference), prior: now, fence, display })
 }
 
-fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
+/// The send's volume, pan and mute envelopes that are on or hold points (one bypassed is still drawn): REAPER takes them
+/// with the send, and nothing brings them back.
+fn drawn_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
     ["<VOLENV", "<PANENV", "<MUTEENV"]
         .into_iter()
         .filter_map(|chunk| reaper.send_envelope(track, index, chunk))
-        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE") || reaper.envelope_point_count(*envelope) > 0)
         .count()
 }
 
@@ -1129,7 +1131,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         .send_peer(found.track, 0, found.index)
         .map(|t| reaper.track_guid(t))
         .ok_or_else(|| failed("that send has no receiving track"))?;
-    let lost = active_envelopes(reaper, found.track, found.index);
+    let lost = drawn_envelopes(reaper, found.track, found.index);
     let (stamp, together) = (stamp_of(reaper, found.track, found.index), pair_count(reaper, found.track, found.receiver));
     let before = pair_seen(reaper, found.track, found.receiver);
     if !reaper.remove_send(found.track, 0, found.index) {

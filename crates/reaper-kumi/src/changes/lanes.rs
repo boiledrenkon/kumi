@@ -396,7 +396,7 @@ fn name_wanted(input: &Value) -> Done<String> {
 }
 
 /// Every lane's name, top first: a lane is told by its place, which a lane added or taken away above it moves.
-fn lane_names(reaper: &Reaper, track: Track) -> Vec<String> {
+pub(super) fn lane_names(reaper: &Reaper, track: Track) -> Vec<String> {
     (0..lane_count(reaper, track).unwrap_or(0)).map(|lane| lane_name(reaper, track, lane)).collect()
 }
 
@@ -453,26 +453,20 @@ pub fn name_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let prior = restore.prior["name"].as_str().unwrap_or_default();
     let name = named(ctx, found.track);
     // The lanes by their names: a lane added or taken away above it (a comp lane on top) moves every lane down or up, and
-    // the lane at its number is another one (as are "back already" and a rename there). Kept since lanes were.
-    let names = json!(lane_names(ctx.reaper, found.track));
-    if let (Some(prior_names), Some(applied_names)) = (restore.prior.get("names"), restore.applied.get("names")) {
-        if names == *prior_names {
-            return Ok(Restored {
-                restored: restore.prior.clone(),
-                display: json!({"title": format!("{name}'s lane {} has its name back already", lane + 1)}),
-                unwritten: true,
-            });
-        }
-        let count = |names: &Value| names.as_array().map_or(0, Vec::len);
-        if count(&names) != count(applied_names) {
+    // the lane at its number is another one (as are "back already" and a rename there). It is still Kumi's while the lanes
+    // above it read as Kumi left them, or while there are as many lanes as then (others renamed); lanes below don't count
+    // (REAPER drops empty ones at the bottom). Kept since lanes were.
+    let names = lane_names(ctx.reaper, found.track);
+    if let Some(then) = restore.applied.get("names").and_then(Value::as_array) {
+        let then: Vec<&str> = then.iter().filter_map(Value::as_str).collect();
+        let at = lane as usize;
+        let above_same = names.len() > at && then.len() > at && names[..at].iter().zip(&then[..at]).all(|(a, b)| a == b);
+        if !(above_same || names.len() == then.len()) {
             return Err(changed(format!(
-                "{name}'s lanes have been added or taken away in REAPER since: lane {} isn't the lane Kumi named, so Kumi leaves \
-                 them, even with discard",
+                "{name}'s lanes have been added or taken away above lane {} in REAPER since: it isn't the lane Kumi named, so Kumi \
+                 leaves them, even with discard",
                 lane + 1
             )));
-        }
-        if !restore.discard && names != *applied_names {
-            return Err(changed(format!("{name}'s lanes have been renamed in REAPER since")));
         }
     }
     if now == prior {

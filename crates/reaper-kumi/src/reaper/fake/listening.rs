@@ -887,10 +887,11 @@ unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_c
             }
             items += ">\n";
         }
-        let n = match s.chunks.iter().position(|kept| *kept == t) {
+        let key = super::chunk_key(&t);
+        let n = match s.chunks.iter().position(|kept| *kept == key) {
             Some(n) => n,
             None => {
-                s.chunks.push(t.clone());
+                s.chunks.push(key);
                 s.chunks.len() - 1
             }
         };

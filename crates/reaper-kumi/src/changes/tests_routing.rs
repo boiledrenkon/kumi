@@ -381,7 +381,12 @@ fn kumis_undo_of_a_send_receive_or_output_it_added_leaves_it_once_the_producer_d
     ] {
         let (preview, made) = lab.make(kind, input, "Kumi: x (kv001)");
         let chunk = if kind == "hw-out-add" { "hw<VOLENV" } else { "<VOLENV" };
-        state(|s| s.tracks[1].envelopes.push(FakeEnvelope::for_send("Volume", 0, chunk, 4)));
+        // Drawn, then bypassed: off, but its points are still the producer's.
+        state(|s| {
+            let mut envelope = FakeEnvelope::for_send("Volume", 0, chunk, 4);
+            envelope.active = false;
+            s.tracks[1].envelopes.push(envelope);
+        });
         let (code, message) = lab.undo(kind, &preview, &made, "Kumi: undo (kv002)").unwrap_err();
         assert_eq!(code, "changed", "{kind}: {message}");
         assert!(message.contains("1 envelope(s)"), "{kind}: {message}");
