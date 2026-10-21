@@ -48,6 +48,9 @@ pub struct HistoryRow {
     /// Where the copy that was in the DAW's folder went, when it wasn't what Kumi placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept: Option<String>,
+    /// An old copy set aside in the DAW's folder that couldn't be removed yet: a DLL a running REAPER holds (Windows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,12 +436,12 @@ impl Lifecycle {
         }
     }
 
-    fn record(&self, mut receipt: Receipt, action: &str, kept: Option<PathBuf>) -> Result<Receipt, LifecycleError> {
+    fn record(&self, mut receipt: Receipt, action: &str, kept: Option<PathBuf>, left: Option<PathBuf>) -> Result<Receipt, LifecycleError> {
         receipt.updated_ms = now_ms();
-        let kept = kept.map(|path| path.to_string_lossy().into_owned());
+        let (kept, left) = (kept.map(|path| path.to_string_lossy().into_owned()), left.map(|path| path.to_string_lossy().into_owned()));
         receipt
             .history
-            .insert(0, HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms, kept });
+            .insert(0, HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms, kept, left });
         receipt.history.truncate(HISTORY);
         receipt.previous.truncate(KEPT_GENERATIONS);
         self.write_receipt(&receipt)?;
@@ -523,7 +526,7 @@ impl Lifecycle {
             updated_ms: 0,
             history: before.map(|before| before.history).unwrap_or_default(),
         };
-        self.record(receipt, action, kept)
+        self.record(receipt, action, kept, None)
     }
 
     /// Goes back to the generation installed before this one.
@@ -547,7 +550,7 @@ impl Lifecycle {
         receipt.generation = Some(earlier);
         receipt.sha256 = Some(sha);
         receipt.target = self.target.path().to_string_lossy().into_owned();
-        self.record(receipt, "rollback", kept)
+        self.record(receipt, "rollback", kept, None)
     }
 
     /// Removes the bridge from the DAW's folder: the file or folder Kumi placed (one changed since is moved into
@@ -560,7 +563,7 @@ impl Lifecycle {
             return Err(LifecycleError::State(format!("Kumi's {} bridge isn't installed", self.target.daw)));
         };
         let target = PathBuf::from(&receipt.target);
-        let mut kept = None;
+        let (mut kept, mut left) = (None, None);
         if std::fs::symlink_metadata(&target).is_ok() {
             // One changed since Kumi placed it is copied into Kumi's folder first (a copy works across disks).
             if tree_sha256(&target).ok() != receipt.sha256 {
@@ -569,7 +572,11 @@ impl Lifecycle {
             let token = &crate::auth::random_hex16()[..12];
             let aside = target.with_file_name(format!("{}.kumi-old-{token}", self.target.name));
             std::fs::rename(&target, &aside)?;
-            let _ = remove_tree(&aside);
+            // A DLL a running REAPER holds can't be removed (Windows): the receipt names it, as no later action of
+            // Kumi's will be there to clean it up.
+            if remove_tree(&aside).is_err() {
+                left = Some(aside);
+            }
         }
         let reference = PathBuf::from(&receipt.reference);
         if Reference::read(&reference).is_ok_and(|reference| reference.daw == self.target.daw.id()) {
@@ -583,7 +590,7 @@ impl Lifecycle {
         receipt.version = None;
         receipt.sha256 = None;
         receipt.previous.clear();
-        self.record(receipt, "uninstall", kept)
+        self.record(receipt, "uninstall", kept, left)
     }
 }
 

@@ -1155,7 +1155,9 @@ and what Kumi fetched (programs, models and watched videos, fetched again when
 needed), and says how much space that frees. It offers to take the bridge and
 the extension out of Live (only while Live is closed), Kumi's extension out of
 REAPER and its tool out of Renoise. Your conversations,
-notes, recipes, sign-ins, library and references stay unless you add `--all`.
+notes, recipes, sign-ins, library and references stay unless you add `--all`,
+and so does catch-up's state for REAPER and Renoise; copies of their bridges you
+had changed (in `~/.kumi/bridges/<daw>/changed`) always stay.
 `--dry-run` says what it would remove, and removes nothing.
 
 - It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a

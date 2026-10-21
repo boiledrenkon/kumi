@@ -80,7 +80,9 @@ producer's side.
   (changed since, or there before Kumi) is kept in `~/.kumi/bridges/<daw>/changed`
   before anything replaces or removes it. The Renoise tool's `preferences.xml`,
   which Renoise writes, stays with the tool, and `.DS_Store`, `Thumbs.db` and
-  `desktop.ini` never count as a change.
+  `desktop.ini` never count as a change. `kumi uninstall` leaves those copies
+  where they are, and catch-up's baselines (`snapshots`) unless `--all`; the rest
+  of `~/.kumi/bridges` goes.
 - **Rollback and removal:** `kumi update --rollback` takes each bridge to the
   copy the earlier Kumi carries (a Kumi that knows neither DAW leaves both where
   they are); `kumi uninstall` takes them out where the receipt says they went.

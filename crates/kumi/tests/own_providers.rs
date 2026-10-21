@@ -71,11 +71,19 @@ async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     let (provider, found) = chosen(None, &env);
     assert_eq!((provider.id(), found.as_deref()), (DawId::Renoise, Some(config.as_str())), "the only bridge installed is chosen");
 
+    // A file of the producer's in it: the tool comes out, and the copy is kept in Kumi's folder, said with where.
+    std::fs::write(tool.join("mine.lua"), "-- the producer's\n").unwrap();
+    let out = Rc::new(Out::default());
     let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
     let run: kumi::process::Run = Rc::new(|_, _, _| panic!("removing the tool runs no program"));
     assert_eq!(renoise.remove_bridge(&io, run).await.unwrap(), RemovedBridge::Removed);
     assert!(!tool.exists());
     assert!(!renoise.bridge_installed(&env));
+    let said = out.0.borrow().clone();
+    assert!(said.contains(&format!("Kumi's tool is out of Renoise ({}).", tool.display())), "{said}");
+    let kept = dir.path().join(".kumi").join("bridges").join("renoise").join("changed");
+    assert!(said.contains("had changed since Kumi put it there: it's kept in ") && said.contains(&kept.display().to_string()), "{said}");
+    assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

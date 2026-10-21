@@ -321,12 +321,16 @@ jobs:
           daws | tee forward.txt
           test "$(cut -d' ' -f1-4 forward.txt)" = "$(cut -d' ' -f1-4 daws.txt)"
           echo 1 > "$KUMI_HOME/settings-marker"
+          # A file of the producer's in Kumi's tool: uninstalling takes the tool out and keeps that copy for them.
+          echo '-- mine' > "$renoise/Scripts/Tools/com.kumi.Bridge.xrnx/mine.lua"
           kumi uninstall --yes
           # One test a line: bash -e doesn't stop at a failing one that isn't the last in an && list.
           test ! -e "$KUMI_HOME/app"
           test ! -e "$KUMI_HOME/node"
           test ! -e "$KUMI_HOME/bin"
-          test ! -e "$KUMI_HOME/bridges"
+          test ! -e "$KUMI_HOME/bridges/reaper"
+          test ! -e "$KUMI_HOME/bridges/renoise/generations"
+          test -n "$(ls "$KUMI_HOME/bridges/renoise/changed")"   # the producer's copy stays
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
           test "$(marked)" = 0
           python3 scripts/tests/daw_bridges.py removed "$KUMI_HOME" "$reaper" "$renoise"
@@ -549,13 +553,17 @@ jobs:
           $forward = Daws; Write-Host $forward
           if ((Fields $forward) -ne (Fields $daws)) { throw "the second rollback didn't put back the first copies: $forward" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
+          # A file of the producer's in Kumi's tool: uninstalling takes the tool out and keeps that copy for them.
+          Set-Content -Path (Join-Path $renoise 'Scripts\Tools\com.kumi.Bridge.xrnx\mine.lua') -Value '-- mine'
           & $kumi uninstall --yes
           # REAPER's and Renoise's bridges come out at once; Kumi's folders a few seconds later, from a cmd it leaves running.
           python scripts/tests/daw_bridges.py removed $env:KUMI_HOME $reaper $renoise
           if ($LASTEXITCODE -ne 0) { throw "REAPER's or Renoise's bridge stayed" }
+          $gones = 'app', 'node', 'bin', 'bridges\reaper', 'bridges\renoise\generations'
           $deadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $deadline -and @('app', 'node', 'bin', 'bridges' | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
-          foreach ($gone in 'app', 'node', 'bin', 'bridges') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          while ((Get-Date) -lt $deadline -and @($gones | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
+          foreach ($gone in $gones) { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          if (-not (Get-ChildItem (Join-Path $env:KUMI_HOME 'bridges\renoise\changed'))) { throw "the producer's copy of the tool wasn't kept" }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
 

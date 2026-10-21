@@ -545,10 +545,29 @@ impl DawProvider for Own {
             };
             // Where the receipt says it went: the DAW's folder may be gone (Renoise's preferences, a portable REAPER).
             let target = self.receipt_target(&receipt);
+            let path = target.path().display().to_string();
             match Lifecycle::new(&kumi_home(&io.env), target).uninstall(true) {
-                Ok(_) => Ok(RemovedBridge::Removed),
+                Ok(receipt) => {
+                    let row = receipt.history.first();
+                    let mut said = format!("{} is out of {} ({path}).\n", self.bridge, self.name());
+                    if let Some(kept) = row.and_then(|row| row.kept.as_ref()) {
+                        said.push_str(&format!(
+                            "The copy that was in {} had changed since Kumi put it there: it's kept in {kept}.\n",
+                            self.name()
+                        ));
+                    }
+                    if let Some(left) = row.and_then(|row| row.left.as_ref()) {
+                        said.push_str(&format!(
+                            "{} still holds an old copy, {left}: close {}, then delete it.\n",
+                            self.name(),
+                            self.name()
+                        ));
+                    }
+                    io.out.write(&said);
+                    Ok(RemovedBridge::Removed)
+                }
                 Err(why) => {
-                    io.out.write(&format!("{} stays in {}: {why}.\n", self.bridge, self.name()));
+                    io.out.write(&format!("{} couldn't be taken out of {} ({why}): delete {path} by hand.\n", self.bridge, self.name()));
                     Ok(RemovedBridge::Kept)
                 }
             }
