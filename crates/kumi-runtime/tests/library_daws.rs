@@ -286,7 +286,7 @@ async fn reaper_and_renoise_presets_are_learned_by_their_layout_and_offered_only
     assert_eq!(chain["kind"], "fx chain");
     assert_eq!(chain["device"], "ReaEQ (Cockos)");
     assert_eq!(chain["inside"], json!(["ReaEQ (Cockos)", "ReaComp (Cockos)", "JS: utility/volume"]));
-    assert!(chain["path"].as_str().unwrap().ends_with("FXChains/Vocals/Lead Vox.RfxChain"));
+    assert!(chain["path"].as_str().unwrap().replace('\\', "/").ends_with("FXChains/Vocals/Lead Vox.RfxChain"));
     let template = row(&reaper, "Drum Bus");
     assert_eq!((template["kind"].as_str(), template["about"].as_str()), (Some("track template"), Some("2 tracks: Kick, Snare Top")));
     assert_eq!(template["inside"], json!(["ReaGate (Cockos)"]));

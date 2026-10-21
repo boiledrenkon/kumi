@@ -398,7 +398,10 @@ impl Changes {
                 if name.is_empty() || relative.is_absolute() || relative.components().any(|c| !matches!(c, Component::Normal(_))) {
                     return Err(bad("name must be a template's name (folders inside TrackTemplates allowed, \"Drums/Kit\")"));
                 }
-                Path::new(&reaper.resource_path()).join("TrackTemplates").join(format!("{name}.RTrackTemplate"))
+                // (a folder at a time, so the path has the system's separators throughout)
+                Path::new(&reaper.resource_path())
+                    .join("TrackTemplates")
+                    .join(Path::new(&format!("{name}.RTrackTemplate")).components().collect::<PathBuf>())
             }
             (None, Some(path)) => {
                 let path = plain_path(path)?;

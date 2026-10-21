@@ -353,7 +353,7 @@ fn tracks_are_saved_as_a_template_never_over_a_file_unless_told_and_the_selectio
     let dir = templates();
     fake::select_tracks(&[3]);
     let saved = lab.call("track_template_save", json!({"trackRefs": [KICK, SNARE], "name": "Mine/Two"})).unwrap();
-    let file = dir.path().join("TrackTemplates/Mine/Two.RTrackTemplate");
+    let file = dir.path().join("TrackTemplates").join("Mine").join("Two.RTrackTemplate");
     assert_eq!(saved["saved"].as_str(), Some(file.to_string_lossy().as_ref()));
     assert_eq!(saved["tracks"], json!(["Kick", "Snare"]));
     let text = std::fs::read_to_string(&file).unwrap();

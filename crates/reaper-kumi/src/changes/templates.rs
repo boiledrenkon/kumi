@@ -33,7 +33,10 @@ fn template_path(ctx: &Ctx, input: &Value) -> Done<PathBuf> {
                     "name must be a template's name in REAPER's TrackTemplates folder (folders inside allowed, \"Drums/Kit\")",
                 ));
             }
-            Path::new(&ctx.reaper.resource_path()).join("TrackTemplates").join(format!("{name}.RTrackTemplate"))
+            // (a folder at a time, so the path has the system's separators throughout)
+            Path::new(&ctx.reaper.resource_path())
+                .join("TrackTemplates")
+                .join(Path::new(&format!("{name}.RTrackTemplate")).components().collect::<PathBuf>())
         }
         (None, Some(path)) => {
             let path = PathBuf::from(path);

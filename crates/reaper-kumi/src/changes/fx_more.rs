@@ -731,7 +731,7 @@ fn chain_file(ctx: &Ctx, input: &Value) -> Done<(String, String)> {
         if path.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
             return Err(bad("file: a name in REAPER's FXChains folder (sub-folders allowed, no ..), or an absolute path"));
         }
-        Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)
+        Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path.components().collect::<PathBuf>())
     };
     let full = with_chain_extension(full);
     let size = std::fs::metadata(&full)
@@ -984,7 +984,8 @@ fn save_path(ctx: &Ctx, params: &Value) -> Done<PathBuf> {
     if !path.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(bad("name: a name in REAPER's FXChains folder (sub-folders as \"Vocals/Lead\"; no .., no absolute path)"));
     }
-    Ok(with_chain_extension(Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)))
+    // (a folder at a time, so the path has the system's separators throughout: "Vocals\\Lead.RfxChain" on Windows)
+    Ok(with_chain_extension(Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path.components().collect::<PathBuf>())))
 }
 
 /// An FX's entry without its automation (its `PARMENV` blocks): a chain file is the FX, not the project's timeline.
