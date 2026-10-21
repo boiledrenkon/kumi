@@ -49,7 +49,10 @@ async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     let (dir, env) = renoise_home();
     let renoise: &dyn DawProvider = &own::RENOISE;
     assert!(!renoise.bridge_installed(&env));
-    assert_eq!(chosen(None, &env).0.id(), DawId::Ableton, "nothing installed: Live's words");
+    // Nothing installed: no bridge found, and a first run sets up the DAW here (Renoise, unless another is here too).
+    assert_eq!(chosen(None, &env).1, None, "nothing installed");
+    let renoise_alone = kumi::daw::chosen_among(None, &env, &|_| false, &|provider| provider.here(&env) && provider.id() == DawId::Renoise);
+    assert_eq!(renoise_alone.0.id(), DawId::Renoise, "Renoise here alone: its setup");
 
     // Asked first: with nobody to answer (no --yes, no terminal), nothing goes in Renoise's folder.
     let out = Rc::new(Out::default());

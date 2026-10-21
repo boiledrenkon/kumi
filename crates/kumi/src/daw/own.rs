@@ -353,11 +353,11 @@ impl DawProvider for Own {
     fn setup(
         &self,
         env: &Env,
-        _bridge: Rc<RefCell<Option<String>>>,
-        _given: bool,
-        _controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
+        bridge: Rc<RefCell<Option<String>>>,
+        given: bool,
+        controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
     ) -> Rc<dyn DawSetup> {
-        Rc::new(OwnSetup { own: self.id, env: env.clone() })
+        Rc::new(OwnSetup { own: self.id, env: env.clone(), bridge, given, controller })
     }
     fn doctor_checks<'a>(&'a self, io: &'a DoctorIo, _node: &'a Check) -> LocalBoxFuture<'a, Vec<Check>> {
         if !self.present(&io.env) {
@@ -644,6 +644,12 @@ fn own_of(id: DawId) -> &'static Own {
 struct OwnSetup {
     own: DawId,
     env: Env,
+    /// The session's bridge slot: once setup puts the bridge in, it names the bridge (its reference), so the session's
+    /// next look connects through it instead of chatting without the DAW.
+    bridge: Rc<RefCell<Option<String>>>,
+    /// A bridge configuration given on the command line stays.
+    given: bool,
+    controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
 }
 
 impl OwnSetup {
@@ -698,7 +704,24 @@ impl DawSetup for OwnSetup {
         };
         command.spawn().is_ok()
     }
-    async fn connect(&self) {}
+    /// The bridge is in and the DAW is opening: the session takes the bridge and reconnects (as Live's setup does); one
+    /// still starting is asked again shortly.
+    async fn connect(&self) {
+        if !self.given {
+            if let Some(found) = self.own().bridge_config(&self.env) {
+                *self.bridge.borrow_mut() = Some(found);
+            }
+        }
+        for _ in 0..40 {
+            let session = self.controller.borrow().as_ref().and_then(Weak::upgrade);
+            let Some(session) = session else { return };
+            if session.reconnect().await.is_ok() {
+                return;
+            }
+            drop(session);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
     async fn version(&self, _app: Option<String>) -> Option<String> {
         match self.own().daw {
             Daw::Reaper => detected(&self.env, detect::detect_reaper).into_iter().find_map(|install| install.version),
