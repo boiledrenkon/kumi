@@ -643,6 +643,11 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         let daw_after = daw_after.clone();
         Rc::new(move |daw| daw_after.set(Some(daw))) as Rc<dyn Fn(kumi_runtime::core::daw::DawId)>
     });
+    // What /daw offers: the DAWs on this computer (or with a bridge in), by this session's environment.
+    crate::daw::offer_here(io.daws_here.clone().unwrap_or_else(|| {
+        let env = io.env.clone();
+        Rc::new(move |id| crate::daw::provider(id).is_some_and(|other| other.here(&env) || other.bridge_installed(&env)))
+    }));
     // A first run with several DAWs here and no bridge yet: setup asks which, remembers it, and opens Kumi again with it
     // when it isn't this run's (review L2).
     let ask_daw = if asked.is_none() && bridge_missing { crate::daw::to_ask(&io.env, &|other| other.here(&io.env)) } else { vec![] };

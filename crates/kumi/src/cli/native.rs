@@ -36,11 +36,23 @@ pub struct CliIo {
     pub signals: bool,
     /// Opens Kumi again with these arguments, in place of starting the program (tests).
     pub reopen: Option<Rc<dyn Fn(Vec<String>) -> LocalBoxFuture<'static, i32>>>,
+    /// Which DAWs are on this computer, for /daw to offer (tests); else the DAWs' own detection says.
+    pub daws_here: Option<crate::daw::Here>,
     exit_after_reopen: Rc<Cell<bool>>,
 }
 impl CliIo {
     pub fn new(input: Rc<dyn TerminalInput>, out: Rc<dyn TtyOutput>, err: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { input, out, err, env, args: vec![], signals: false, reopen: None, exit_after_reopen: Rc::new(Cell::new(false)) }
+        Self {
+            input,
+            out,
+            err,
+            env,
+            args: vec![],
+            signals: false,
+            reopen: None,
+            daws_here: None,
+            exit_after_reopen: Rc::new(Cell::new(false)),
+        }
     }
     pub fn installed(&self) -> bool {
         self.env.get("KUMI_INSTALLED").is_some_and(|s| s == "1")

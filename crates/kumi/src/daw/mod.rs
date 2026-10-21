@@ -191,8 +191,26 @@ pub enum DawCommand {
 
 /// `/daw` with `typed` after it ("", "renoise", "live").
 pub fn daw_command(typed: &str) -> DawCommand {
-    let env = kumi_runtime::system::process_env();
-    daw_command_among(typed, &|provider| provider.here(&env) || provider.bridge_installed(&env))
+    match HERE.with(|here| here.borrow().clone()) {
+        Some(here) => daw_command_among(typed, &|provider| here(provider.id())),
+        None => {
+            let env = kumi_runtime::system::process_env();
+            daw_command_among(typed, &|provider| provider.here(&env) || provider.bridge_installed(&env))
+        }
+    }
+}
+
+/// Whether a DAW is on this computer.
+pub type Here = Rc<dyn Fn(DawId) -> bool>;
+
+thread_local! {
+    /// Which DAWs `/daw` offers this run, as the session says ([`offer_here`]).
+    static HERE: RefCell<Option<Here>> = const { RefCell::new(None) };
+}
+
+/// Which DAWs are on this computer for `/daw` to offer, this run: by the session's environment, or a test's answer.
+pub fn offer_here(here: Here) {
+    HERE.with(|offered| *offered.borrow_mut() = Some(here));
 }
 
 /// [`daw_command`], offering the other DAWs `here` says are on this computer (any can still be asked for by name).
