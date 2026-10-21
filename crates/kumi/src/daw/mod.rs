@@ -259,11 +259,14 @@ pub fn words() -> &'static kumi_runtime::core::daw::DawWords {
 }
 
 /// Whether the doctor speaks of `provider` on this computer: Live's checks always, unless the producer uses other DAWs
-/// alone (Live's bridge isn't in, and another DAW's is); another DAW's say nothing until its folders are there.
+/// alone (Live's bridge isn't in, and another DAW's is); another DAW's once its bridge is in, or when the doctor is about
+/// that DAW (`--daw renoise doctor`, or the DAW a first run would set up): a Live producer who only opened REAPER or
+/// Renoise once sees the doctor as before (review L7).
 pub fn in_use(provider: &dyn DawProvider, env: &Env) -> bool {
-    provider.id() != DawId::Ableton
-        || provider.bridge_installed(env)
-        || !providers().into_iter().any(|other| other.id() != DawId::Ableton && other.bridge_installed(env))
+    if provider.id() != DawId::Ableton {
+        return provider.bridge_installed(env) || current().id() == provider.id();
+    }
+    provider.bridge_installed(env) || !providers().into_iter().any(|other| other.id() != DawId::Ableton && other.bridge_installed(env))
 }
 
 /// The DAWs the producer works with here, by name, for the doctor's heading: those whose bridge is in (Live when none
