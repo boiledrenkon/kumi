@@ -34,8 +34,16 @@ for name in ([[mute_state solo_state selected_track_index selected_instrument_in
   selected_sample_index selected_phrase_index selected_track_device_index selected_note_column_index selected_effect_column_index
   follow_player edit_mode edit_step octave loop_pattern loop_block_enabled loop_range loop_sequence_range metronome_enabled
   metronome_precount_enabled metronome_precount_bars record_quantize_enabled record_quantize_lines wrapped_pattern_edit
-  single_track_edit_mode keyboard_velocity_enabled keyboard_velocity record_parameter_mode]]):gmatch("%S+") do UNKEPT_FIELDS[name] = true end
-local UNKEPT_METHODS = { start = true, stop = true, start_at = true, panic = true, show_status = true }
+  single_track_edit_mode keyboard_velocity_enabled keyboard_velocity record_parameter_mode playback_pos playback_pos_beats
+  edit_pos edit_pos_beats loop_block_range_coeff octave_enabled selection_in_pattern selection_in_phrase
+  selected_phrase_line_index selected_phrase_note_column_index selected_phrase_effect_column_index
+  selected_sample_device_chain_index selected_sample_device_index selected_sample_modulation_set_index]]):gmatch("%S+") do UNKEPT_FIELDS[name] = true end
+-- (mute and solo, notes played, playback and its schedule, the block loop and the selection: none is a step of Renoise's undo)
+local UNKEPT_METHODS = {}
+for name in ([[start stop start_at panic show_status mute unmute solo trigger_instrument_note_on trigger_instrument_note_off
+  trigger_sample_note_on trigger_sample_note_off trigger_pattern_line trigger_sequence add_scheduled_sequence
+  set_scheduled_sequence loop_block_move_forwards loop_block_move_backwards select_next_track
+  select_previous_track]]):gmatch("%S+") do UNKEPT_METHODS[name] = true end
 
 -- The code with its comments blanked and its strings emptied (so nothing in them reads as code).
 local function blanked(code)

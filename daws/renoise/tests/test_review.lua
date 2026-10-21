@@ -1995,6 +1995,32 @@ test("run-lua: a chunk that sets a parameter changed the song; one that only mut
   eq(read.result.undo.entry, false)
 end)
 
+test("run-lua: mute, unmute and solo calls, notes played and playback scheduled make no Renoise step (#361 N8, final review)", function()
+  local env, peer = setup(nil, { instruments = 1 })
+  local codes = {
+    "song:track(2):mute()", "song:track(2):unmute()", "song:track(1):solo()",
+    "song:trigger_instrument_note_on(1, 1, 48, 1)\nsong:trigger_instrument_note_off(1, 1, 48)",
+    "song.transport:trigger_sequence(1)", "song.transport:add_scheduled_sequence(2)\nsong.transport:set_scheduled_sequence(1)",
+  }
+  for k, code in ipairs(codes) do
+    local before = steps()
+    local done = run_lua(peer, code, string.format("Kumi: Ran Lua (kr%02d)", k))
+    ok(done.result, json.encode(done.error or {}))
+    eq(done.result.applied.failed, nil, code)
+    eq(done.result.applied.writes, "unkept", code)
+    eq(done.result.undo.entry, false, code .. ": Renoise makes no step of it")
+    if done.result.applied.changed then
+      ok(done.result.display.note:find("nothing Renoise's undo takes back", 1, true), done.result.display.note)
+    end
+    eq(steps(), before, code)
+  end
+  eq(mock.data.tracks[1].solo, true, "the solo was played")
+  -- (with a write Renoise's undo keeps, it is a step again)
+  local mixed = run_lua(peer, "song:track(2):mute()\nsong.transport.bpm = 99", "Kumi: Ran Lua (kr10)")
+  ok(mixed.result, json.encode(mixed.error or {}))
+  eq(mixed.result.undo.entry, true)
+end)
+
 test("places, names × a pattern or an instrument renamed is the same one: the lines go back into it, playing it", function()
   local env, peer = setup(nil, INSTRUMENTS)
   local previewed, done = bass_in_verse(peer, "kp80")

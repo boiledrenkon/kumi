@@ -667,6 +667,17 @@ function M.make_song(options)
         M.record(function() t.column_names[c] = old; M.fire(column_observable(t, "name", c)) end,
           function() t.column_names[c] = name ~= "" and name or nil; M.fire(column_observable(t, "name", c)) end)
       end,
+      -- (mute and solo are no undo steps: the mute uses the prefs' default mute state, Off here)
+      mute = function()
+        if t.kind == "master" then error("std::logic_error: 'can't mute the master track'", 2) end
+        t.mute_state = 2
+        M.fire(t.mute_state_observable)
+      end,
+      unmute = function()
+        t.mute_state = 1
+        M.fire(t.mute_state_observable)
+      end,
+      solo = function() M.solo_set(t, true) end,
       set_column_is_muted = function(_, c, muted)
         column_observable(t, "muted", c)
         t.muted_columns = t.muted_columns or {}
@@ -1421,6 +1432,16 @@ function M.make_song(options)
     transport_fields.playing, d.started_at = true, position
     M.fire(transport_fields.playing_observable)
   end
+  -- (playing from a slot and the slots scheduled after it: playback, no undo step)
+  transport_fields.trigger_sequence = function(_, slot)
+    transport_fields.playing, d.started_at = true, slot
+    M.fire(transport_fields.playing_observable)
+  end
+  transport_fields.add_scheduled_sequence = function(_, slot)
+    d.scheduled = d.scheduled or {}
+    d.scheduled[#d.scheduled + 1] = slot
+  end
+  transport_fields.set_scheduled_sequence = function(_, slot) d.scheduled = { slot } end
   local transport_setters = {}
   -- (the loop is not an undo step; Renoise applies it a moment after it is written: a read right after still shows the old one)
   transport_setters.loop_pattern = function(value)
