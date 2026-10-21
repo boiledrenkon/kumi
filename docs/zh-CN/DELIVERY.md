@@ -4,6 +4,8 @@
 
 桥接由两部分组成：由 Live 加载的 `AbletonMcpBridge` Remote Script，以及由 Kumi（或其他 MCP 客户端）启动的本地 MCP 服务器。两者都在同一个包 `@ableton-mcp/mcp-server` 中，并由同一个工具安装：桥接的生命周期 CLI `ableton-mcp-server lifecycle`。它在做任何修改之前先制定计划，把安装的内容记录在回执中，并且能够精确地修复、回滚和移除这些内容。使用 Kumi 时，`kumi bridge` 会替你运行它。
 
+Kumi 为 Logic Pro 提供的桥接是另一个程序，Kumi 把它安装在自己的文件夹中，而不是装进 Logic Pro：见 [Logic Pro 桥接](#logic-pro-桥接)。
+
 ## 使用 Kumi 安装
 
 运行 `kumi`：它会把桥接装入 Live，也可以替你重启 Live。手动操作时，退出 Live，然后运行 `kumi bridge`。它会：
@@ -26,6 +28,22 @@
 | Kumi 的 Live 扩展 | Live 的 Extensions 文件夹中的 `kumi.kumi` |
 
 `KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 覆盖这两个 Live 文件夹，`KUMI_HOME` 改变 `~/.kumi` 的位置，`KUMI_BRIDGE_WAIT_SECONDS` 设置等待 Live 的时长（`0` 表示不等待）。Kumi 通过 `bridge-reference.json` 找到已安装的桥接，该文件由生命周期写在 Remote Script 旁边。
+
+## Logic Pro 桥接
+
+Logic Pro 不从外部加载任何东西，所以它的桥接不放进 Logic Pro。它是 Kumi 的一个程序 `logic-kumi`，带有它的辅助功能辅助程序 `kumi-logic-hands-<hash>`（一个通用、临时签名的 Swift 程序）。会话开始时，由 Kumi 为 Logic Pro 提供的主机 `daw-mcp-server --daw logic` 在 Logic Pro 旁边启动它，而这个主机由 Kumi 从它自己的二进制文件旁边启动。只有搭载 Apple 芯片的 Mac 上的 Kumi 带有它，放在 `kumi` 旁边的 `daws/logic/logic-kumi/` 中：桥接、辅助程序和一个 `version` 文件。
+
+`kumi --daw logic bridge`（或设置中的 **Connect to Logic Pro**）通过 Kumi 自己的各个桥接共用的生命周期（daw-bridge 的生命周期）把那个文件夹复制到 Kumi 自己的文件夹中：它检查文件夹的哈希，记录回执，保留较早的版本以便回滚，并拒绝其中的链接。Logic Pro 可以保持打开：Logic Pro 的任何东西都不会改变，而且桥接只在 Kumi 运行时才运行。
+
+| 内容 | 位置 |
+| --- | --- |
+| 桥接、它的辅助程序和 `version` | `~/.kumi/bridges/logic/bridge/logic-kumi/`，连同 `bridge-reference.json` |
+| 它的密钥、发现文件和日志 | `~/.kumi/bridges/logic/` 中的 `bridge.secret`、`discovery/` 和 `logs/` |
+| 回执、锁、进行中修改的操作日志，以及为回滚保留的版本 | `~/.kumi/bridges/logic/` 中的 `install-receipt.json`、`lifecycle.lock`、`lifecycle-journal.json` 和 `generations/` |
+
+桥接在 127.0.0.1 上监听 9790 到 9799 中第一个空闲的端口，并在它的发现文件中写明是哪一个；Kumi 的主机和桥接在传递任何其他内容之前，先证明双方都知道它的密钥。新的 Kumi 带有更新的桥接时，`kumi update` 会把桥接更新到最新，`kumi update --rollback` 会恢复之前那个 Kumi 的桥接，`kumi uninstall` 会把它移除，这些都不需要等待 Logic Pro。`kumi --daw logic doctor` 会检查它。在 Intel Mac、Linux 或 Windows 上，Kumi 不带 Logic Pro 桥接，`kumi --daw logic bridge` 什么都不安装，并说明 Logic Pro 只在搭载 Apple 芯片的 Mac 上受支持。
+
+`KUMI_LOGIC_BRIDGE_SOURCE` 指定一个按发布版本的方式布置桥接的文件夹，改为从那里安装桥接。在 Mac 上，源码副本的构建会把它自己的桥接暂存到 `target/logic-bridge/logic-kumi/` 中（`cargo build -p logic-kumi`；辅助程序还不存在时，由 `scripts/build-logic-hands.py` 构建），然后安装那一份。
 
 ## 独立桥接
 

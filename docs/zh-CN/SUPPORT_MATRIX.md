@@ -2,13 +2,13 @@
 
 [English](../en/SUPPORT_MATRIX.md) · 简体中文 · [日本語](../ja/SUPPORT_MATRIX.md)
 
-Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，以及在哪里测试过什么。每一项“已测试”背后的证据列在[实现状态](IMPLEMENTATION_STATUS.md)中。
+Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Live 和 Logic Pro，以及在哪里测试过什么。每一项“已测试”背后的证据列在[实现状态](IMPLEMENTATION_STATUS.md)中。
 
 ## Kumi
 
 | 系统 | 版本 | 处理器 | 状态 |
 | --- | --- | --- | --- |
-| macOS | 13（Ventura）或更高 | Apple 芯片、Intel | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Apple 芯片上配合 Live 测试 |
+| macOS | 13（Ventura）或更高 | Apple 芯片、Intel；Logic Pro：仅限 Apple 芯片 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Apple 芯片上配合 Live 测试；Logic Pro 已在 Apple 芯片上测试 |
 | Windows | 10 或 11 | x64、ARM64 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Windows 10 上配合 Live 测试；见 [Windows](#windows) |
 | Linux | glibc 2.35 或更高（Ubuntu 22.04、Debian 12 或更新；不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版 |
 
@@ -29,6 +29,16 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。Willington（从带有它的文件的版本起在 Kumi 的桥接中，在此之前可以自己安装；在 `/willington` 开启之前一直关闭）有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5（机架链区域仅限 b5）以及 Windows x64 上 Live 12.4.15b5 的绑定；见 [Willington](WILLINGTON_INTEGRATION.md)。
 
 原生编辑（分组、编曲自动化、场景/全局 Follow Actions、逐音符 MPE）要求安装已验证的 `WillingtonEditing`、通过与实际库匹配的自测，并明确启用。仅支持 Live 12.4.15b5 macOS ARM64，不支持 b4、Intel macOS 或 Windows。参见[自测流程](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。
+
+## Logic Pro
+
+| Logic Pro | 状态 |
+| --- | --- |
+| 12，在搭载 Apple 芯片的 Mac 上 | 通过 Kumi 的 Logic Pro 桥接支持（[连接 Logic Pro](KUMI_GUIDE.md#连接-logic-pro)）：App Store 的 Logic Pro（`com.apple.logic10`）和 Creator Studio 的 Logic Pro（`com.apple.mobilelogic`）。已在 macOS 26.6.1 上用 App Store 的英文版 Logic Pro 12.3.1 测试。 |
+| 11 或更早 | 不支持；`kumi --daw logic doctor` 会说明这一点。 |
+| Intel Mac、Linux、Windows | 没有 Logic Pro 桥接。Logic Pro 12 只能在搭载 Apple 芯片的 Mac 上运行，所以只有搭载 Apple 芯片的 Mac 上的 Kumi 带有这个桥接；其他的 Kumi 会说“Logic Pro is supported on Apple Silicon Macs only”，并且什么都不安装。 |
+
+这个桥接是 Kumi 的一个程序，在 Logic Pro 旁边运行，位于 Kumi 自己的文件夹中：它通过 macOS 的辅助功能（对运行 Kumi 的应用授权一次即可）、Logic Pro 的快捷键命令和菜单，以及虚拟 MIDI 端口上的一个 Mackie Control 控制界面来读取和操作 Logic Pro，并通过 Core Audio 的进程音频分接（process tap）聆听 Logic Pro，这需要 macOS 14.2 或更高版本（以及在 macOS 要求时的 System Audio Recording 权限）。其他语言的 Logic Pro 未经测试：桥接按 Logic Pro 自己的译文读取它的标签，而这些译文只在德语上手动核对过。Kumi 在 Logic Pro 中覆盖了什么，见[能力矩阵](CAPABILITY_MATRIX.md#logic-pro)；在真实 Logic Pro 上的运行，见[实现状态](IMPLEMENTATION_STATUS.md#在哪里测试过什么)。
 
 ## Windows
 
@@ -60,4 +70,4 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 ## CI 覆盖的范围
 
-CI 在 GitHub 托管的 macOS、Ubuntu 和 Windows 运行器上运行 Rust 构建和测试、Remote Script 和 Live 扩展的测试、六个目标平台的发行包，以及安装和迁移测试。这些运行器都没有 Live。[测试](TESTING.md#ci)列出了每个作业。
+CI 在 GitHub 托管的 macOS、Ubuntu 和 Windows 运行器上运行 Rust 构建和测试、Remote Script 和 Live 扩展的测试、macOS 上 Logic Pro 桥接的测试（基于录下的场景和一个模拟的 Logic Pro）、六个目标平台的发行包，以及安装和迁移测试。这些运行器都没有 Live 或 Logic Pro。[测试](TESTING.md#ci)列出了每个作业。

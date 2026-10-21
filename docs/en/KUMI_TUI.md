@@ -88,6 +88,7 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi import <file>` | Keep a conversation saved with `kumi export --json`, to carry on with `kumi -r` |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
+| `kumi --daw logic [<command>]` | Work with Logic Pro instead of Live (`--daw ableton` is Live), for a session or a command: `kumi --daw logic bridge [--yes]` sets Kumi's Logic Pro bridge up in Kumi's own folder, with Logic Pro open or not, and `kumi --daw logic doctor` checks Logic Pro's side ([Connect to Logic Pro](KUMI_GUIDE.md#connect-to-logic-pro)) |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
 | `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH; `--browser` for the browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
@@ -117,6 +118,7 @@ message, not a command.
 | `/export [copy \| md \| html \| json]` | This conversation as a file: copy it as Markdown, or save Markdown, a web page or a file for Kumi (`kumi import`); alone, choose. Over 64 KB, the copy is saved as a file instead |
 | `/share` | Save this conversation as a web page that opens anywhere (the same page again while nothing changed), then open it, show it in Finder (Explorer) or copy its path, until Done; over SSH, it says where the page is |
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
+| `/daw [name]` | Which DAW Kumi works with; `/daw logic` or `/daw live` closes Kumi and opens it again with that one, without the conversation (each DAW's projects keep their own). Offered once you work with more than Live |
 | `/undo` | Undo Kumi's latest change |
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
 | `/refresh` | Read the Set again without asking the model |

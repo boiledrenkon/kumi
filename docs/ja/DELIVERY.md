@@ -4,6 +4,8 @@
 
 ブリッジは二つの部分からなります。Live が読み込む Remote Script `AbletonMcpBridge` と、Kumi（またはほかの MCP クライアント）が起動するローカルの MCP サーバーです。どちらも一つのパッケージ `@ableton-mcp/mcp-server` に入っていて、一つのツールでインストールします。それがブリッジのライフサイクル CLI、`ableton-mcp-server lifecycle` です。このツールは何かを変更する前に計画を立て、インストールしたものをレシートに記録し、まさにそれを修復、ロールバック、削除できます。Kumi を使う場合は、`kumi bridge` がこれを実行します。
 
+Kumi の Logic Pro 用ブリッジは別のプログラムで、Kumi はそれを Logic Pro の中ではなく Kumi 自身のフォルダーに用意します。[Logic Pro ブリッジ](#logic-pro-ブリッジ)を参照してください。
+
 ## Kumi で使う
 
 `kumi` を実行します。ブリッジを Live に入れ、Live の再起動も任せられます。手作業なら、Live を終了してから `kumi bridge` を実行します。このコマンドは次のことを行います：
@@ -26,6 +28,22 @@
 | Kumi の Live 拡張機能 | Live の Extensions フォルダー内の `kumi.kumi` |
 
 `KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は二つの Live のフォルダーを上書きし、`KUMI_HOME` は `~/.kumi` の場所を移し、`KUMI_BRIDGE_WAIT_SECONDS` は Live を待つ時間を設定します（`0` で待ちません）。Kumi は、ライフサイクルが Remote Script の隣に書き込む `bridge-reference.json` を通じて、インストールされたブリッジを見つけます。
+
+## Logic Pro ブリッジ
+
+Logic Pro は外部から何も読み込まないので、そのブリッジは Logic Pro の中には入りません。ブリッジは Kumi のプログラム `logic-kumi` で、アクセシビリティ用のヘルパー `kumi-logic-hands-<hash>`（ユニバーサルでアドホック署名の Swift プログラム）を伴います。Kumi が自身のバイナリの隣から起動する、Logic Pro 用の Kumi のホスト `daw-mcp-server --daw logic` が、セッションの始まりに Logic Pro の横でブリッジを起動します。ブリッジを収めているのは Apple シリコン搭載 Mac の Kumi だけで、`kumi` の隣の `daws/logic/logic-kumi/` に、ブリッジ、ヘルパー、`version` ファイルがあります。
+
+`kumi --daw logic bridge`（またはセットアップの **Connect to Logic Pro**）は、Kumi 独自のブリッジが共有するライフサイクル（daw-bridge のもの）を通じて、そのフォルダーを Kumi 自身のフォルダーにコピーします：フォルダーのハッシュを確認し、レシートを記録し、ロールバックのために以前のバージョンを残し、フォルダーの中のリンクを拒否します。Logic Pro は開いたままでかまいません：Logic Pro のものは何も変わらず、ブリッジは Kumi が動いている間だけ動きます。
+
+| 対象 | 場所 |
+| --- | --- |
+| ブリッジ、そのヘルパー、`version` | `~/.kumi/bridges/logic/bridge/logic-kumi/`（`bridge-reference.json` と一緒に） |
+| そのシークレット、ディスカバリーファイル、ログ | `~/.kumi/bridges/logic/` の中の `bridge.secret`、`discovery/`、`logs/` |
+| レシート、ロック、進行中の変更のジャーナル、ロールバックのために残したバージョン | `~/.kumi/bridges/logic/` の中の `install-receipt.json`、`lifecycle.lock`、`lifecycle-journal.json`、`generations/` |
+
+ブリッジは 127.0.0.1 の、9790〜9799 のうち最初に空いているポートで待ち受け、その場所をディスカバリーファイルで伝えます。Kumi のホストとブリッジは、ほかに何かが通る前に、そのシークレットを知っていることを証明し合います。`kumi update` は、新しい Kumi がより新しいブリッジを収めていればブリッジを最新にし、`kumi update --rollback` は前の Kumi のブリッジを戻し、`kumi uninstall` はブリッジを取り除きます。どれも Logic Pro を待ちません。`kumi --daw logic doctor` がブリッジを確認します。Intel Mac、Linux、Windows の Kumi は Logic Pro ブリッジを収めておらず、`kumi --daw logic bridge` は何も用意せず、Logic Pro は Apple シリコン搭載 Mac にしか対応していないと伝えます。
+
+`KUMI_LOGIC_BRIDGE_SOURCE` は、リリースと同じ配置でブリッジを収めたフォルダーを指定し、代わりにそこから用意させます。Mac 上のチェックアウトのビルドは、自分のブリッジ（`cargo build -p logic-kumi`。ヘルパーはまだなければ `scripts/build-logic-hands.py` がビルドします）を `target/logic-bridge/logic-kumi/` にまとめ、それを用意します。
 
 ## スタンドアロンのブリッジ
 

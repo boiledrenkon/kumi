@@ -2,13 +2,13 @@
 
 [English](../en/SUPPORT_MATRIX.md) · [简体中文](../zh-CN/SUPPORT_MATRIX.md) · 日本語
 
-Kumi とそのブリッジが動作する環境、対応する Live のバージョン、どこで何をテストしたかをまとめます。それぞれの「テスト済み」の根拠は[実装状況](IMPLEMENTATION_STATUS.md)に記載しています。
+Kumi と各ブリッジが動作する環境、対応する Live と Logic Pro のバージョン、どこで何をテストしたかをまとめます。それぞれの「テスト済み」の根拠は[実装状況](IMPLEMENTATION_STATUS.md)に記載しています。
 
 ## Kumi
 
 | システム | バージョン | プロセッサ | 状況 |
 | --- | --- | --- | --- |
-| macOS | 13（Ventura）以降 | Apple silicon、Intel | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Apple silicon 上の Live でテスト済み |
+| macOS | 13（Ventura）以降 | Apple silicon、Intel。Logic Pro：Apple silicon のみ | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Apple silicon 上の Live でテスト済み。Logic Pro は Apple silicon でテスト済み |
 | Windows | 10 または 11 | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Windows 10 上の Live でテスト済み。[Windows](#windows) を参照 |
 | Linux | glibc 2.35 以降（Ubuntu 22.04、Debian 12 以降。Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しません |
 
@@ -29,6 +29,16 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 エディション：ブリッジは接続先の Live が提供するものを検出するので、エディションにないデバイスやコンテンツ（Standard と Intro は少なめです）は推測で扱われず、使えないままになります。Max for Live デバイスを作るには Max for Live（Suite、またはアドオンを追加した Standard）が必要です。Willington（そのファイルを収めたリリースからは Kumi のブリッジに入っていて、それまでは自分でインストールします。`/willington` でオンにするまではオフ）には、macOS ARM64 の Live 12.4.15b4 と b5 用（ラックのチェーンのゾーンは b5 のみ）と、Windows x64 の Live 12.4.15b5 用のバインディングがあります。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
 
 ネイティブ編集（グループ、Arrangement オートメーション、シーン/全体の Follow Actions、ノートごとの MPE）には、インストール済みの検証済み `WillingtonEditing`、実際のライブラリに一致するセルフテストの合格、明示的な有効化が必要です。Live 12.4.15b5 macOS ARM64 のみで、b4、Intel macOS、Windows は対象外です。[セルフテスト手順](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。
+
+## Logic Pro
+
+| Logic Pro | 状況 |
+| --- | --- |
+| 12（Apple シリコン搭載 Mac） | Kumi の Logic Pro ブリッジを通じて対応（[Logic Pro につなぐ](KUMI_GUIDE.md#logic-pro-につなぐ)）：App Store の Logic Pro（`com.apple.logic10`）と Creator Studio のもの（`com.apple.mobilelogic`）。macOS 26.6.1 上の、App Store の英語版 Logic Pro 12.3.1 でテスト済み。 |
+| 11 以前 | 非対応。`kumi --daw logic doctor` がそう伝えます。 |
+| Intel Mac、Linux、Windows | Logic Pro ブリッジはありません。Logic Pro 12 は Apple シリコン搭載 Mac でしか動かないので、ブリッジを収めているのは Apple シリコン搭載 Mac の Kumi だけです。ほかの Kumi は「Logic Pro is supported on Apple Silicon Macs only」と伝え、何も用意しません。 |
+
+ブリッジは Logic Pro の横で動く Kumi のプログラムで、Kumi 自身のフォルダーにあります。macOS のアクセシビリティ（Kumi を動かしているアプリに一度だけ許可します）、Logic Pro のキーコマンドとメニュー、仮想 MIDI ポート上の Mackie Control サーフェスを通じて Logic Pro を読み、操作し、Core Audio のプロセスタップを通じて Logic Pro を聴きます。プロセスタップには macOS 14.2 以降が必要です（macOS が求める場合は System Audio Recording も）。ほかの言語の Logic Pro はテストしていません：ブリッジは Logic Pro のラベルを Logic Pro 自身の翻訳で読みますが、その翻訳を手で確かめたのはドイツ語だけです。そこで Kumi がカバーする範囲は[機能マトリクス](CAPABILITY_MATRIX.md#logic-pro)に、本物の Logic Pro での実行は[実装状況](IMPLEMENTATION_STATUS.md#どこで何をテストしたか)にあります。
 
 ## Windows
 
@@ -60,4 +70,4 @@ Windows でまだ確認できていないこと：
 
 ## CI がカバーする範囲
 
-CI は GitHub がホストする macOS、Ubuntu、Windows のランナー上で、Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、6 ターゲットのバンドル、インストールと移行のテストを実行します。どのランナーにも Live はありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。
+CI は GitHub がホストする macOS、Ubuntu、Windows のランナー上で、Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、macOS での Logic Pro ブリッジのテスト（記録したシーンと、シミュレートされた Logic Pro に対して）、6 ターゲットのバンドル、インストールと移行のテストを実行します。どのランナーにも Live も Logic Pro もありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。

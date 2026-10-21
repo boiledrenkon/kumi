@@ -36,6 +36,7 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 | `kumi import <ファイル>` | `kumi export --json` で保存した会話を取り込み、`kumi -r` で続けられるようにする |
 | `kumi --inference-only` | Live なしでチャットする |
 | `kumi --bridge-config <absolute path>` | 自分のブリッジ設定を使う |
+| `kumi --daw logic [<command>]` | Live の代わりに Logic Pro で作業する（`--daw ableton` は Live）。セッションにもコマンドにも付けられる：`kumi --daw logic bridge [--yes]` は Logic Pro が開いていてもいなくても Kumi の Logic Pro ブリッジを Kumi 自身のフォルダーに用意し、`kumi --daw logic doctor` は Logic Pro 側を確認する（[Logic Pro につなぐ](KUMI_GUIDE.md#logic-pro-につなぐ)） |
 | `kumi login` | サインイン：ChatGPT か API キーかを尋ねる |
 | `kumi login <provider>` | `openai-codex`（ChatGPT。ブラウザなしなら `--device`。SSH 経由ではこれが既定。ブラウザなら `--browser`）に、または API キーで `anthropic`、`openai`、`opencode`、`opencode-go` にサインインする |
 | `kumi logout <provider>` | そのプロバイダーへの Kumi のサインインを削除する |
@@ -63,6 +64,7 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 | `/export [copy \| md \| html \| json]` | この会話をファイルに：Markdown としてコピー、または Markdown、Web ページ、Kumi 用ファイル（`kumi import`）として保存。省くと選べます。64 KB を超えるとコピーの代わりにファイルに保存 |
 | `/share` | この会話をどこでも開ける Web ページとして保存し（何も変わっていなければ同じページ）、Done を選ぶまで、開く、Finder（エクスプローラー）で表示する、パスをコピーする。SSH 経由ではページの場所を伝えます |
 | `/reconnect` | 新しいブリッジで Live に接続し直す。会話はそのまま（それ以前の変更は Kumi の undo を失う） |
+| `/daw [name]` | Kumi がどの DAW で作業しているか。`/daw logic` か `/daw live` で Kumi を閉じ、その DAW で開き直す。会話は引き継がない（各 DAW のプロジェクトはそれぞれの会話を持つ）。Live 以外の DAW でも作業するようになると候補に出る |
 | `/undo` | Kumi の最新の変更を取り消す |
 | `/stop` | Live を止める：クリップ、トランスポート、録音。Kumi の答えも止める |
 | `/refresh` | モデルに尋ねずに Set を読み直す |

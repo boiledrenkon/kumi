@@ -3,7 +3,7 @@
 English · [简体中文](../zh-CN/TESTING.md) · [日本語](../ja/TESTING.md)
 
 How to run the tests of each part of the repository, what they need, and what
-CI runs. None of the ordinary tests need Live or a sign-in.
+CI runs. None of the ordinary tests need Live, Logic Pro or a sign-in.
 
 ## Quick start
 
@@ -27,6 +27,7 @@ What they need:
 | Node.js on PATH (CI uses 24) | Some Rust tests, the Live extension's tests and the migration tests |
 | Python 3.11 or later on PATH (`python3`, or `python.exe` on Windows) | The Remote Script tests, the release scripts' tests, and Rust tests that run Python |
 | A locally supplied Extensions SDK in `vendor/` | Building or type-checking the Live extension (its tests don't need it) |
+| macOS with Swift (Xcode's command line tools) | Building Logic Pro's helper with `scripts/build-logic-hands.py`, which the Logic bridge's tests use |
 
 On Windows, a few tests create symlinks, which needs Developer Mode or an
 administrator account. Without it, some of them skip and a few fail with
@@ -40,6 +41,7 @@ Run from the repository root.
 | --- | --- |
 | `sh scripts/test-isolated.sh` (Windows: `./scripts/test-isolated.ps1`) | `cargo test --workspace --locked` in a home of its own; arguments go to `cargo test` |
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | One test file of one crate |
+| `KUMI_PACKAGES="daw-bridge daw-mcp-server logic-kumi" sh scripts/test-isolated.sh` | Only those packages, every test of theirs: here the Logic Pro bridge's crates, as CI's `Logic bridge` job runs them on macOS after `python3 scripts/build-logic-hands.py` |
 | `cargo fmt --all --check` | Formatting, as CI checks it |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lints; advisory in CI for now |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | A `RefCell` borrow held across an await; fails the Lint CI job |
@@ -115,6 +117,7 @@ run them.
 | Command (from the root) | Needs | What it does |
 | --- | --- | --- |
 | `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Live with a disposable copy of a Set open; the bridge, built first with `cargo build --release -p ableton-mcp-server --bins` (for a debug run, the same without `--release`) | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
+| `cargo run --release -p kumi --example accept_logic -- [--files <folder>] [--report <file>] [--no-operator]` | Logic Pro 12 open on a project you can spare; Kumi's Logic Pro bridge set up (`kumi --daw logic bridge`; `--kumi-home <folder>` names a home of its own) with Accessibility allowed; Kumi's host, built first with `cargo build --release -p daw-mcp-server --bins` | The run each Logic Pro gate made, on the project Logic Pro has open: the status and discovery, FOCUS's speed, every read and body; a plan of changes, each undone through Kumi; a save as to a copy under `--files` (from then on the run works on the copy, so the project you opened stays as it was), key commands, regions, an import, the cycle and the Tempo List; a plug-in, a send, a patch (`--patch` names it) and a bounce; listening (a hear, a judged round, an audition, a render); the fixed phrases, the metronome, a sample into a Sampler track, the recent projects, middle C, the bulk read, `watch_me` and Channel EQ's and the Compressor's curves; and the project read as before at the end. Without `--files`, what writes a file is skipped. With you at Logic Pro, it also checks the selection followed, a dialog counted as busy, a project switched and a track moved, which `--no-operator` leaves out. `--report` writes its Markdown summary for `docs/evidence/`. No model. |
 | `cargo run --release -p kumi --example time_rebuild` | Live with a Set open; the bridge, built first as for `accept_live` | Times what a tutorial's rebuild costs in Live, without a model: a MIDI track with Drift and four effects in one plan, each device's parameters read, 30 of them set by name, and Kumi's looks at the Set, each with the bridge requests it took. It adds one track and deletes it at the end. |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | Your sign-in and model | How the model uses Kumi's tools, against a synthetic bridge with the real bridge's tool schemas, read from its native catalog. Never touches Live. Each case says its time, its tools' share of it, and how many model calls it took; `EVAL_EFFORT` sets the model's reasoning effort, and `EVAL_TRACE=1` prints each call. `EVAL_TUTORIAL=1` adds a real 16-minute tutorial from YouTube, which needs the network. `EVAL_MEASURE=1`, with no sign-in or model, prints what every request carries: the instructions and each tool's definition in bytes (`EVAL_MEASURE=tools` adds the definitions). |
 | `cargo run --release -p kumi --example eval_logic [-- <part of a case name>]` | Your sign-in and model | How the model knows Logic Pro and works in it, over the simulated Logic: Kumi's host in process, in front of the Scratch project the Logic bridge's tests recorded, with Logic's instruction pack, changes and listening. Never touches Logic Pro. Its 23 cases are knowledge probes of Logic's terms and ways (Apple's guide asked and cited where a question is about one of Logic's features), change requests over Scratch, the limits Kumi's bridge can't pass (refused saying why) and a listen; each case's check is code. `--list` prints each case and what its check looks for, and `--dry` runs every check on a canned answer per case, with no sign-in or model. `EVAL_EFFORT`, `EVAL_TRACE=1` (which also prints each answer whole) and `EVAL_TIMINGS` work as for `eval_changes`. |
@@ -147,16 +150,20 @@ eval prints.
 
 ## Docs
 
-After editing docs, run the packaging tests:
+After editing docs, run the packaging tests and the release script's tests:
 
 ```sh
 python3 -m unittest discover -s scripts/tests -p test_native_release.py
+python3 -m unittest discover -s scripts/tests -p test_release.py
 ```
 
-They check every link in the guides the bridge ships with: its README and the
-fourteen `docs/en` pages listed in `DOCUMENTS` in
-`scripts/build-native-release.py`. Nothing checks that the three languages
-agree; keep them in step by hand.
+The first check every link in the guides the bridge ships with: its README and
+the fourteen `docs/en` pages listed in `DOCUMENTS` in
+`scripts/build-native-release.py`. The second check that the lines a release
+edits are there once each: the READMEs' status lines, and the ships-with lines
+under "Bridge versions" (Logic Pro's in every language or in none, at its
+bridge's version). Nothing else checks that the three languages agree; keep
+them in step by hand.
 
 ## CI
 
@@ -169,11 +176,14 @@ These workflows run on every pull request, and the CI, Willington files and Inst
 | | `Rust / Lint` (Ubuntu) | `cargo fmt --check`, the examples' build and Clippy (advisory, except a `RefCell` borrow held across an await, which fails the job) |
 | | `Python Remote Script / ubuntu-24.04`, `macos-15`, `windows-2025` (Python 3.11) | The Remote Script's tests; compiles the package |
 | | `Live extension` (Ubuntu, Node 24) | The extension's tests, against its committed build |
+| | `REAPER extension loads / macos-15`, `ubuntu-22.04`, `windows-2025` | REAPER's extension built as it ships and stripped with the platform's strip, checked as a bundle may carry it, loaded by the system's loader with REAPER's entry point found, and REAPER's calls through its C++ shim reaching Rust |
+| | `Renoise tool` (Ubuntu) | The tool's Lua tests on a pinned LuaJIT, against a mock of Renoise's API, and lua-language-server's check against Renoise's own API definitions |
+| | `Logic bridge` (macOS 15) | Logic Pro's helper built by its script, then the tests of `daw-bridge`, `daw-mcp-server` and `logic-kumi` through the isolated runner: the bridge over scenes recorded from the real Logic Pro, the host over the simulated Logic Pro. No Logic Pro |
 | | `Release scripts` (Ubuntu) | The whitespace check of the change, then the packaging tests, the release script's tests and `scripts/check-installers.sh` (install.sh is POSIX sh; install.ps1 parses and is ASCII). Pushes to `main` also check `main`'s raw installers and the latest release's |
 | | `Required CI` | Passes only when all of the above passed |
 | **Extended** | `Extended / Linux (1/3)` to `(3/3)`, `Extended / macOS (1/2)`, `(2/2)`, `Extended / Windows (1/3)` to `(3/3)`, `Extended / documentation tests` | Every test (the `extended` set) with the official SDKs installed: what `ci` leaves out (the recorded-source oracles, the long listening, form and rendering simulations, video with ffmpeg, the benchmarks, the interoperability tests beside the official MCP and model SDKs, the migration from Kumi 1.7.5, the long sweeps of the timing building blocks) and each platform's every test; then the documentation tests. It runs each week, by hand, and on a pull request labelled `full-tests`, and blocks nothing |
 | **Willington files** | `Willington files` (Ubuntu) | Only the repository owner's pull requests, from a `willington/` branch in this repository, change `vendor/willington/`, and such a pull request changes nothing else. `main`'s copy of the check runs, reading the pull request's file list, never its code |
-| **Installer** | `Native bundle / <target>`, `Aggregate native and existing-installer releases`, then `Install / <system>` and `Existing installer transition / <system>`; `Installer edges / <system>` (three) needs no bundle | Each push to `main`, and a pull request that changes installing, builds a bundle for Linux and Windows on x64 and macOS on Apple silicon and, on each, installs, checks and uninstalls as below. Tags, a run by hand and a pull request labelled `full-tests` do all of it: build a native bundle for Intel and ARM on macOS, Linux and Windows (each Mac bundle with the helper Kumi uses Live's menus with, universal and ad hoc signed; the Intel one cross-built on Apple Silicon), then the compatibility release that existing installations update from, and serves them locally with the installers, as GitHub serves a release's files. On each system: installs with the one-liner from that copy, as producers do (Windows PowerShell 5.1 on Windows, with `KUMI_HOME` in a folder named in non-ASCII letters), checks the version, `doctor`, the bridge and its analysis worker, installs again as a repair, runs `kumi bridge --yes` into a scratch Remote Scripts folder, `kumi update`, `kumi update --rollback` and `kumi uninstall`. One install on each system (macOS arm64, Linux x64, Windows x64) then, in a home with spaces and non-ASCII letters, installs GitHub's latest release with this build's installer and then, with `KUMI_VERSION`, the release before this build; puts that release's bridge in; updates to this build and rolls back twice, checking the Kumi and the bridge each time; and uninstalls. The PATH line goes in zsh's `ZDOTDIR` on macOS and fish's `conf.d` on Linux, where that shell finds `kumi`, and the uninstall takes it out; Windows runs this in PowerShell 7: this build's install, the bridge, the rollbacks and the uninstall with `KUMI_HOME` in a folder named in non-ASCII letters, and the update from the release before in a home with spaces only (that release's own updater unpacks it). The transition jobs run the migration tests with Kumi 1.7.5 and the new bundles. The edges jobs run install.sh and install.ps1 against stand-in releases: a missing release, no answer, a sign-in page, a bad checksum, a Kumi that doesn't start, Ctrl-C. On a `v*` tag's push, once all these pass, `publish` attaches the bundle and the installers to the release, and publishes it when `scripts/release.py` wrote its notes. |
+| **Installer** | `Native bundle / <target>`, `Aggregate native and existing-installer releases`, then `Install / <system>` and `Existing installer transition / <system>`; `Installer edges / <system>` (three) needs no bundle | Each push to `main`, and a pull request that changes installing, builds a bundle for Linux and Windows on x64 and macOS on Apple silicon and, on each, installs, checks and uninstalls as below. Tags, a run by hand and a pull request labelled `full-tests` do all of it: build a native bundle for Intel and ARM on macOS, Linux and Windows (each Mac bundle with the helper Kumi uses Live's menus with, universal and ad hoc signed; the Intel one cross-built on Apple Silicon), then the compatibility release that existing installations update from, and serves them locally with the installers, as GitHub serves a release's files. The Apple Silicon Mac's bundle carries Logic Pro's bridge and its helper (built by `scripts/build-logic-hands.py`), each checked as Apple's own tools see them; no other bundle carries it. On each system: installs with the one-liner from that copy, as producers do (Windows PowerShell 5.1 on Windows, with `KUMI_HOME` in a folder named in non-ASCII letters), checks the version, `doctor`, the bridge and its analysis worker, installs again as a repair, runs `kumi bridge --yes` into a scratch Remote Scripts folder, puts REAPER's extension and Renoise's tool into scratch DAW folders and, on the Apple Silicon Mac, Logic Pro's bridge into Kumi's own folder (elsewhere, checks that `kumi --daw logic bridge` sets nothing up and says Logic Pro is supported on Apple Silicon Macs only), then runs `kumi update`, `kumi update --rollback` and `kumi uninstall`, checking each DAW's bridge at each step. One install on each system (macOS arm64, Linux x64, Windows x64) then, in a home with spaces and non-ASCII letters, installs GitHub's latest release with this build's installer and then, with `KUMI_VERSION`, the release before this build; puts that release's bridge in; updates to this build and rolls back twice, checking the Kumi and the bridge each time; and uninstalls. The PATH line goes in zsh's `ZDOTDIR` on macOS and fish's `conf.d` on Linux, where that shell finds `kumi`, and the uninstall takes it out; Windows runs this in PowerShell 7: this build's install, the bridge, the rollbacks and the uninstall with `KUMI_HOME` in a folder named in non-ASCII letters, and the update from the release before in a home with spaces only (that release's own updater unpacks it). The transition jobs run the migration tests with Kumi 1.7.5 and the new bundles. The edges jobs run install.sh and install.ps1 against stand-in releases: a missing release, no answer, a sign-in page, a bad checksum, a Kumi that doesn't start, Ctrl-C. On a `v*` tag's push, once all these pass, `publish` attaches the bundle and the installers to the release, and publishes it when `scripts/release.py` wrote its notes. |
 
 On a pull request, less runs:
 
@@ -182,9 +192,10 @@ On a pull request, less runs:
   `main`'s and saves none.
 - The Installer builds and installs on one machine of each system only for a
   change to installing, updating, releasing, Willington's files, the Mac helper,
-  the `tar` and PowerShell Kumi runs, how it downloads (its HTTP client and
-  network settings) and builds paths, how Kumi's extension goes into Live, or a
-  dependency; all six, the updates from GitHub's releases, the edges and the
+  Kumi's own DAW bridges (REAPER's, Renoise's and Logic Pro's, with their host
+  and shared lifecycle), the `tar` and PowerShell Kumi runs, how it downloads
+  (its HTTP client and network settings) and builds paths, how Kumi's extension
+  goes into Live, or a dependency; all six, the updates from GitHub's releases, the edges and the
   transition run with the `full-tests` label. A change to the bridge (the Remote
   Script, the protocol, the Live extension) or a version number builds, installs
   and checks Linux's; any other change builds Linux's bundle only.
@@ -209,9 +220,11 @@ the rules.
 Passing shows the code behaves as its tests say, the packages install and run
 on macOS, Linux and Windows, and the installer works on GitHub's runners. It
 doesn't show that the Remote Script loads in your Live, that Live's API has the
-shape the fakes have, how anything sounds, or that a terminal or screen reader
-works with Kumi. The opt-in checks above, and the records in
-[implementation status](IMPLEMENTATION_STATUS.md#evidence), cover real Live.
+shape the fakes have, that your Logic Pro shows what the recorded scenes show,
+how anything sounds, or that a terminal or screen reader works with Kumi. The
+opt-in checks above, and the records in
+[implementation status](IMPLEMENTATION_STATUS.md#evidence), cover real Live and
+the real Logic Pro.
 
 ## Writing tests
 

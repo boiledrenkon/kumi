@@ -36,6 +36,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `kumi import <文件>` | 导入用 `kumi export --json` 保存的对话，之后可用 `kumi -r` 继续 |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
+| `kumi --daw logic [<command>]` | 配合 Logic Pro 而不是 Live 工作（`--daw ableton` 即 Live），可用于一次会话或一条命令：`kumi --daw logic bridge [--yes]` 把 Kumi 的 Logic Pro 桥接安装到 Kumi 自己的文件夹中，Logic Pro 打开与否都可以；`kumi --daw logic doctor` 检查 Logic Pro 这一侧（[连接 Logic Pro](KUMI_GUIDE.md#连接-logic-pro)） |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
 | `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`，通过 SSH 时默认如此；要用浏览器则加 `--browser`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
 | `kumi logout <provider>` | 移除 Kumi 在该提供方的登录 |
@@ -63,6 +64,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/export [copy \| md \| html \| json]` | 将这段对话存为文件：复制为 Markdown，或保存为 Markdown、网页、供 Kumi 使用的文件（`kumi import`）；不加参数时可以选择。超过 64 KB 时改为保存文件 |
 | `/share` | 将这段对话保存为随处可打开的网页（没有变化时仍是同一个网页），然后打开它、在访达（资源管理器）中显示它，或复制它的路径，直到选择 Done；通过 SSH 连接时，会告诉你网页在哪里 |
 | `/reconnect` | 通过新的桥接重新连接 Live，保留对话（之前的修改将失去 Kumi 的撤销） |
+| `/daw [name]` | Kumi 配合哪个 DAW 工作；`/daw logic` 或 `/daw live` 会关闭 Kumi，再以那个 DAW 重新打开它，不带上这段对话（每个 DAW 的工程各自保留自己的对话）。你用到 Live 以外的 DAW 之后才会提供 |
 | `/undo` | 撤销 Kumi 最近一次修改 |
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
 | `/refresh` | 重新读取工程，不询问模型 |
