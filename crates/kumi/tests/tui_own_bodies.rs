@@ -723,3 +723,23 @@ case!(reapers_routing_window_for_another_track_draws_under_its_own_name, async {
     assert!(!has(&h.screen(), "Bass"), "not the selected track's name");
     h.close().await;
 });
+
+/// (review K10) REAPER's arrange comes back once its MIDI editor or an FX window loses the focus: the body follows the
+/// editor going away, as it follows one coming.
+#[test]
+fn reapers_arrange_comes_back_after_the_midi_editor_or_an_fx_window() {
+    use kumi::tui::app::{touched_next, Touched};
+    work_with(DawId::Reaper);
+    let focus = |view: &str| -> DawFocus {
+        (reaper::DAW.fill_focus)(&json!({"view": view, "selection": {"track": {"name": "Bass", "type": "midi"}, "trackRef": "r:track:{B}",
+            "takeRef": "r:take:{T}", "itemRef": "r:item:{I}", "fxRef": "r:fx:{F}", "fxName": "ReaEQ"}}))
+    };
+    let (arrange, midi, fx) = (focus("arrange"), focus("midi"), focus("fx"));
+    assert_eq!(touched_next(None, Some(&arrange), None), Some(Touched::Timeline));
+    let editing = touched_next(Some(&arrange), Some(&midi), Some(Touched::Timeline));
+    assert_eq!(touched_next(Some(&midi), Some(&arrange), editing), Some(Touched::Timeline), "MIDI editor → arrange");
+    let tree = touched_next(Some(&arrange), Some(&fx), Some(Touched::Timeline));
+    assert_eq!(tree, Some(Touched::Tree));
+    assert_eq!(touched_next(Some(&fx), Some(&arrange), tree), Some(Touched::Timeline), "FX window → arrange");
+    assert_eq!(touched_next(Some(&arrange), Some(&arrange), Some(Touched::Timeline)), Some(Touched::Timeline), "nothing moved");
+}
