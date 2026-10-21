@@ -978,7 +978,8 @@ local function chaindevice_add(song, env, input, fence, desc, preview_only)
   if not made or not device then fail("failed", "Renoise wouldn't make " .. path .. (made and "" or (": " .. tostring(device):gsub("^[^%s:]*%.lua:%d+: ", "")))) end
   local m = { n[1], n[2], index }
   return {
-    applied = { index = index, path = path, print = chaindevice_print(device) }, created = { ref = places_.ref_of(env, "chaindevice", m), kind = "chaindevice" },
+    applied = { index = index, path = path, print = chaindevice_print(device), content = material_.content_fence(device) },
+    created = { ref = places_.ref_of(env, "chaindevice", m), kind = "chaindevice" },
     material = { made = places_.place_of(env, "chaindevice", m) }, target = places_.target_of(env, "chaindevice", m),
     display = { title = title, before = { devices = count }, after = { devices = count + 1 } }, undo = { desc = desc, entry = true },
     prior = { devices = count }, place = places_.journal_place("chaindevice", m), shape = "made",
@@ -1001,6 +1002,11 @@ base.register({
     local label = places_.label_of("chaindevice", n, objects)
     if not restore.discard and not base.same_table(chaindevice_print(objects.chaindevice), (restore.applied or {}).print) then
       fail("changed", label .. " changed in Renoise since Kumi made it")
+    end
+    -- (a Doofer's devices inside, a plug-in's state: what its parameters don't show)
+    local content = (restore.applied or {}).content
+    if not restore.discard and content ~= nil and material_.content_fence(objects.chaindevice) ~= content then
+      fail("changed", label .. " changed in Renoise since Kumi made it (what's inside it, its text or its state)")
     end
     song:describe_undo(desc)
     objects.chain:delete_device_at(n[3])

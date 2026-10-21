@@ -26,16 +26,8 @@ M.MAX_PRESET_BYTES = base.MAX_MATERIAL_BYTES
 -- The most parameters of one device watched for the producer's undo of a preset change.
 M.MOST_WATCHED = 64
 
--- A text's print: two 32-bit sums of its bytes and its length. (Kumi's host computes the same: presets.rs `print_of`.)
-function M.print_of(text)
-  local a, b = 5381, 0
-  for i = 1, #text do
-    local c = text:byte(i)
-    a = (a * 33 + c) % 4294967296
-    b = (b * 65599 + c) % 4294967296
-  end
-  return string.format("%08x%08x:%d", a, b, #text)
-end
+-- A text's print (changes_material.lua; Kumi's host computes the same: presets.rs `print_of`).
+M.print_of = material_.print_of
 
 -- Preset data with what moves by itself left out: parameter values (automation, meta devices and macros move them all the
 -- time), plug-in state chunks (which follow the plug-in's parameters), and the inner devices' SelectedPresetIsModified and
@@ -49,14 +41,8 @@ function M.shape_of(xml)
   return M.print_of(shape)
 end
 
--- Preset data as it reads, values and all, with the inner devices' SelectedPresetIsModified and IsSelected left out (they move
--- by themselves, as for the shape): what the journal compares to tell Renoise's undo and redo of a Doofer's, a Splitter's or a
--- Notepad's contents.
-function M.content_of(xml)
-  local content = xml:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
-  content = content:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
-  return M.print_of(content)
-end
+-- Preset data as it reads, values and all, but what moves by itself (changes_material.lua).
+M.content_of = material_.content_of
 
 -- What preset data says it is: its slot's device type, its document version, and a plug-in's identifier.
 local function preset_kind(xml)
@@ -167,14 +153,8 @@ end
 
 local function identity(track, device) return base.track_id(track) .. "|" .. device.device_path end
 
--- A device whose settings hold more than its parameters: a Doofer's or a Splitter's devices inside, a Notepad's text, a
--- plug-in's state. Its whole content is fenced, not only its parameters.
-local DEEP = { ["Audio/Effects/Native/Doofer"] = true, ["Audio/Effects/Native/Splitter"] = true, ["Audio/Effects/Native/Notepad"] = true }
-local function content_fence(device)
-  local path = device.device_path
-  if DEEP[path] or not path:find("^Audio/Effects/Native/") then return M.content_of(device.active_preset_data) end
-  return nil
-end
+-- A Doofer's, a Splitter's, a Notepad's or a plug-in's whole content, beyond its parameters (changes_material.lua).
+local content_fence = material_.content_fence
 
 -- Where a record finds the device again, and what it was called then (for the words of a refusal).
 local function keep(env, t, d, track, device)

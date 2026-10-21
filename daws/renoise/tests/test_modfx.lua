@@ -432,3 +432,22 @@ test("modfx: a chain or chain device deleted with a meta device's aim comes back
   ok(again.result, json.encode(again.error or {}))
   ok((again.result.display.note or ""):find("aimed at nothing", 1, true), tostring(again.result.display.note))
 end)
+
+test("modfx: Kumi's undo of a plug-in it added to a sample FX chain refuses once the producer changed its state, and discard deletes it", function()
+  local env, peer, epoch = setup_modfx()
+  local PLUGIN = "Audio/Effects/AU/aufx:dely:appl"
+  mock.device_catalog[PLUGIN] = { { name = "Mix", value = 0.5, min = 0, max = 1 } }
+  local chain = instrument(1).chains[1]
+  local added = change(peer, "chaindevice-add", { ref = chain_ref(epoch, 1, 1), path = PLUGIN })
+  eq(chain.devices[3].path, PLUGIN)
+  -- (the producer sets the plug-in up in its own editor: its state, not its parameters, changes)
+  chain.devices[3].preset_data = "<PluginState>theirs</PluginState>"
+  local before = steps()
+  local refused = restore(peer, "chaindevice-add", added)
+  failure(refused, "changed")
+  ok(refused.error.message:find("its state", 1, true), refused.error.message)
+  eq(#chain.devices, 3, "what they set up stays")
+  eq(steps(), before)
+  ok(restore(peer, "chaindevice-add", added, nil, { discard = true }).result)
+  eq(#chain.devices, 2)
+end)
