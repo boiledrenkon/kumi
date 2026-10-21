@@ -1175,7 +1175,7 @@ fn a_tempo_marker_is_made_where_asked_with_its_time_signature_and_undo_takes_tha
     assert_eq!(preview["prior"], json!({"exists": false}));
     assert_eq!(preview["target"]["kind"], "tempo-marker");
     assert_eq!(tempo_markers(), [before[0], (16.0, 140.0, 3, 4, false)]);
-    assert_eq!(applied["applied"], json!({"exists": true, "bpm": 140.0, "num": 3, "den": 4, "linear": false}));
+    assert_eq!(applied["applied"], json!({"exists": true, "bpm": 140.0, "num": 3, "den": 4, "linear": false, "qn": 32.0}));
     // The producer changed it since: undo is refused, unless discarded.
     state(|s| s.tempo_markers[1].bpm = 150.0);
     let mut params = restore_params(&preview, &applied, "Kumi: undo (kund1)");
@@ -1186,6 +1186,33 @@ fn a_tempo_marker_is_made_where_asked_with_its_time_signature_and_undo_takes_tha
     lab.call("change_restore", params.clone()).unwrap();
     assert_eq!(tempo_markers(), before);
     // Undone already.
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(tempo_markers(), before);
+}
+
+#[test]
+fn a_tempo_marker_kumi_made_is_found_by_its_beat_after_a_tempo_change_and_left_once_the_producer_dragged_it() {
+    let lab = Lab::new();
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false }));
+    let before = tempo_markers();
+    let (preview, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32.0, "bpm": 140.0}), "Kumi: Tempo 140 BPM (ktm07)");
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund7)");
+    params["kind"] = "tempo-marker-set".into();
+    // The producer drags it from bar 9 to bar 11: nothing is where Kumi put it, and Kumi's marker is elsewhere.
+    state(|s| s.tempo_markers[1].time = 20.0);
+    for discard in [false, true] {
+        params["discard"] = discard.into();
+        let (code, message) = lab.call("change_restore", params.clone()).unwrap_err();
+        assert_eq!(code, "changed", "discard {discard}: {message}");
+        assert!(message.contains("moved"), "{message}");
+        assert_eq!(tempo_markers()[1].0, 20.0, "the producer's tempo map stays");
+    }
+    params["discard"] = false.into();
+    // In beats timebase, a slower tempo before it moves it in seconds: it is found at its beat, and taken away.
+    state(|s| {
+        s.bpm = 60.0;
+        s.tempo_markers[1].time = 32.0;
+    });
     lab.call("change_restore", params).unwrap();
     assert_eq!(tempo_markers(), before);
 }
