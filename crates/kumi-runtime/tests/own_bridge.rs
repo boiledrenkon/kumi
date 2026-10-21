@@ -889,3 +889,111 @@ async fn a_failed_call_keeps_kumis_host_and_only_its_going_away_starts_another()
         })
         .await;
 }
+
+/// A host whose events a test sends: Kumi's host passing on the bridge's.
+struct Eventful {
+    host: Rc<Host>,
+    listener: RefCell<Option<Rc<dyn Fn(JsonObject)>>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for Eventful {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        None
+    }
+    async fn list(&self, server: Option<&str>, signal: Signal) -> Result<ListToolsResult, RuntimeError> {
+        self.host.list(server, signal).await
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
+        self.host.call(name, args, signal).await
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        *self.listener.borrow_mut() = Some(listener);
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+// Review K3: a Renoise device pinned in FOCUS keeps naming it when a track is added above its track, and once Renoise
+// renumbers past what Kumi can follow, the pin is told by its name only.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = |layout: u64, names: &[&str]| {
+                let tracks: Vec<Value> =
+                    names.iter().enumerate().map(|(i, name)| json!({"ref": format!("1:track:{}", i + 1), "name": name})).collect();
+                json!({"epoch": "1", "layout": layout, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": tracks, "selection": {}})
+            };
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot(0, &["Kick", "Bass"]), false)]),
+                asked: RefCell::default(),
+            });
+            let eventful = Rc::new(Eventful { host: host.clone(), listener: RefCell::default() });
+            let connect: Connect = {
+                let eventful = eventful.clone();
+                Rc::new(move |_| {
+                    let eventful = eventful.clone();
+                    async move { Ok(eventful as Rc<dyn McpEndpoint>) }.boxed_local()
+                })
+            };
+            let renoise = create_renoise_integration(OwnOptions {
+                context: IntegrationContext::new(Rc::new(|_, _| {})),
+                kumi_home: std::env::temp_dir(),
+                connect: Some(connect),
+            });
+            renoise.start(Signal::new()).await.unwrap();
+            let pin = PinnedNode {
+                track_ref: "1:track:2".into(),
+                r#ref: "1:device:2.2".into(),
+                node: PinKind::Device,
+                name: "Compressor".into(),
+                trail: vec![],
+                siblings: vec![],
+                track: Some("Bass".into()),
+                live: None,
+                time: None,
+            };
+            let look = |pin: &PinnedNode| {
+                let hints = ObserveHints { pinned: Some(pin.clone()), continuing: None };
+                renoise.observe(Signal::new(), Some(hints))
+            };
+            let seen = look(&pin).await.unwrap();
+            let first: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert_eq!(first["trackRef"], "track:2", "{first}");
+            // A track added at the top: Bass is track 3 now, and its Compressor 3.2.
+            let send = eventful.listener.borrow().clone().expect("Kumi listens to the host's events");
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 1, "made": [1]}}).as_object().unwrap().clone());
+            host.answers.borrow_mut().push(("snapshot", snapshot(1, &["New", "Kick", "Bass"]), false));
+            let seen = look(&pin).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert_eq!(pinned, first, "the same names, which name Bass and its Compressor where they are now");
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": []}), false));
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the Compressor on Bass, now track 3");
+            // Shifts Kumi didn't hear of (a gap in the layouts): the names retire, and the pin is told by its name only.
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 4, "made": [1]}}).as_object().unwrap().clone());
+            host.answers.borrow_mut().push(("snapshot", snapshot(4, &["A", "B", "C", "New", "Kick", "Bass"]), false));
+            let seen = look(&pin).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert!(pinned["gone"].as_str().unwrap().starts_with("The producer pinned “Compressor” on “Bass” in FOCUS, and Renoise has renumbered"), "{pinned}");
+            assert!(pinned.get("ref").is_none());
+        })
+        .await;
+}
