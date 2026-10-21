@@ -87,6 +87,7 @@ pub enum Picture {
     Items,
     Settings,
     Chain,
+    Midi,
 }
 
 impl OwnKind {
@@ -142,6 +143,7 @@ impl OwnKind {
             Picture::Zone => super::own_pictures::zone(&answers),
             Picture::Items => super::own_pictures::items(&answers),
             Picture::Settings => super::own_pictures::settings(&answers),
+            Picture::Midi => super::own_pictures::midi(&answers),
             _ => None,
         };
         if self.picture == Picture::Chain {
@@ -1562,6 +1564,29 @@ mod tests {
             let ours: BTreeSet<&str> = set.kinds.iter().filter(|kind| kind.skipped_by_daw_undo).map(|kind| kind.kind).collect();
             let host: BTreeSet<&str> = daw_mcp_server::tools::kinds(daw).outside_undo.iter().copied().collect();
             assert_eq!(ours, host, "{app}");
+        }
+    }
+
+    /// (review U8) REAPER's note and MIDI event changes are drawn in NOW and HISTORY, from what their previews drew.
+    #[test]
+    fn reapers_midi_changes_have_a_picture() {
+        let note = |pitch: u32, start: f64| json!({"index": 0, "pitch": pitch, "start": start, "length": 1.0, "velocity": 100});
+        let event =
+            |start: f64, value: i64| json!({"index": 0, "type": "cc", "channel": 1, "controller": 1, "value": value, "start": start});
+        for (tool, before, after) in [
+            ("notes_add", vec![], vec![note(36, 0.)]),
+            ("notes_change", vec![note(36, 0.)], vec![note(38, 0.)]),
+            ("notes_delete", vec![note(36, 0.)], vec![]),
+            ("notes_quantize", vec![note(36, 0.1)], vec![note(36, 0.)]),
+            ("notes_humanize", vec![note(36, 0.)], vec![note(36, 0.02)]),
+            ("midi_events_add", vec![], vec![event(0., 64)]),
+            ("midi_events_change", vec![event(0., 64)], vec![event(0., 100)]),
+            ("midi_events_delete", vec![event(0., 64)], vec![]),
+        ] {
+            let kind = reaper_changes::CHANGES.kinds.iter().find(|kind| kind.tool == tool).unwrap();
+            let preview = json!({"display": {"title": "t", "count": 1, "before": before, "after": after}});
+            let summary = kind.summary("t", Some(&preview), Some(&json!({"applied": {}, "display": {"title": "t"}})));
+            assert!(summary.picture.is_some(), "{tool}");
         }
     }
 

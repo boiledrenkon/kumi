@@ -676,6 +676,15 @@ scene!(picture_items, DawId::Reaper, PICTURE_SHOTS, |h| {
     opened(&h, drawn("c1", "clip", "Moved “vox.wav” to bar 6", picture)).await;
 });
 
+// (review U8) REAPER's notes changed in a take: the notes touched, before and after.
+scene!(picture_notes, DawId::Reaper, PICTURE_SHOTS, |h| {
+    let note = |pitch: u32, start: f64, length: f64| json!({"pitch": pitch, "start": start, "length": length, "velocity": 100});
+    let preview = json!({"display": {"count": 3, "before": [note(36, 16.0, 1.0), note(36, 18.0, 0.5), note(43, 19.0, 0.5)],
+        "after": [note(36, 16.0, 1.0), note(38, 18.0, 0.5), note(43, 19.5, 0.5)]}});
+    let picture = own_pictures::midi(&answers(&preview, &json!({})));
+    opened(&h, drawn("c1", "clip", "Changed 3 notes in “Bass take”", picture)).await;
+});
+
 scene!(picture_settings, DawId::Renoise, PICTURE_SHOTS, |h| {
     let preview = json!({"display": {"before": {"volumeDb": -6.0, "transpose": 0, "loop": "off", "nna": "cut"}}});
     let applied = json!({"display": {"after": {"volumeDb": -3.0, "transpose": 12, "loop": "forward", "nna": "cut"}}});

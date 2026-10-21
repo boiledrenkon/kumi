@@ -3,7 +3,7 @@
 //! `display`), in the DAW's own words. A tracker's lines, an envelope's or automation's points, the parameters that
 //! moved, a route between tracks, a keyzone, items on the timeline, and the settings that moved.
 use crate::core::{
-    contracts::{ChangePicture, DevicePlacement, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone, RouteChange},
+    contracts::{ChangePicture, ClipNote, DevicePlacement, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone, RouteChange},
     daw::DawProfile,
 };
 use serde_json::{Map, Value};
@@ -339,6 +339,63 @@ pub fn items(answers: &Answers) -> Option<ChangePicture> {
     Some(ChangePicture::Items { before: before.iter().filter_map(item).collect(), after: after.iter().filter_map(item).collect(), values })
 }
 
+// ----- a take's MIDI -----
+
+/// The notes or MIDI events a change touched, before and after, as its preview drew them (`display.before` and `after`,
+/// in quarter notes from the item's start: REAPER's): notes as a clip's, from the bar the first of them is in, so notes
+/// deep in a take aren't squeezed to its end; events as a controller lane's points, when they're all of one lane.
+pub fn midi(answers: &Answers) -> Option<ChangePicture> {
+    let display = answers.preview.get("display").unwrap_or(&Value::Null);
+    let (before, after) = (list(display, "before"), list(display, "after"));
+    let rows = || before.iter().chain(after);
+    if rows().next().is_none() {
+        return None;
+    }
+    if rows().all(|row| row.get("pitch").is_some() && row.get("length").is_some()) {
+        let first = rows().filter_map(|row| number(row, "start")).fold(f64::INFINITY, f64::min);
+        let first = (first / 4.).floor() * 4.;
+        let notes = |rows: &[Value]| -> Vec<ClipNote> {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(ClipNote {
+                        pitch: number(row, "pitch")?,
+                        start: number(row, "start")? - first,
+                        duration: number(row, "length")?,
+                        velocity: number(row, "velocity").unwrap_or(100.),
+                    })
+                })
+                .collect()
+        };
+        let (before, after) = (notes(before), notes(after));
+        let end = before.iter().chain(&after).map(|note| note.start + note.duration).fold(0., f64::max);
+        // (the preview draws so many notes; the count says how many it touched)
+        let partial = number(display, "count").is_some_and(|count| count as usize > before.len().max(after.len()));
+        return Some(ChangePicture::Notes { length: (end / 4.).ceil().max(1.) * 4., before, after, partial });
+    }
+    // One controller lane: its name, and the span of its values as REAPER's MIDI editor draws it.
+    let lane = |row: &Value| (text(row, "type"), number(row, "controller"), number(row, "channel"));
+    let one = lane(rows().next()?);
+    if rows().any(|row| lane(row) != one) {
+        return None;
+    }
+    let (kind, controller, _) = one;
+    let (parameter, min, max) = match kind.as_deref()? {
+        "cc" => (format!("CC {}", controller? as i64), 0., 127.),
+        "pitchbend" => ("Pitch".into(), -8192., 8191.),
+        "pressure" => ("Channel pressure".into(), 0., 127.),
+        _ => return None,
+    };
+    let points =
+        |rows: &[Value]| -> Vec<[f64; 2]> { rows.iter().filter_map(|row| Some([number(row, "start")?, number(row, "value")?])).collect() };
+    let (mut before, mut after) = (points(before), points(after));
+    // (drawn from the first event of either side, as a lane deep in the take)
+    let first = before.iter().chain(&after).map(|point| point[0]).fold(f64::INFINITY, f64::min);
+    for point in before.iter_mut().chain(after.iter_mut()) {
+        point[0] -= first;
+    }
+    Some(ChangePicture::Automation { parameter, min, max, before, after })
+}
+
 // ----- a track's devices -----
 
 /// A track's devices after a chain was loaded onto it (Renoise's device-chain-load: `applied.devices`, by name), drawn as
@@ -612,5 +669,36 @@ mod tests {
             answers(json!({"prior": {"devices": 1}}), json!({"applied": {"count": 3, "devices": ["EQ 5", "Compressor", "Reverb"]}}));
         let placement = chain(&Answers { preview: &preview, applied: &applied }).unwrap();
         assert_eq!(placement.devices.as_deref(), Some(&["EQ 5".to_string(), "Compressor".into(), "Reverb".into()][..]));
+    }
+
+    #[test]
+    fn a_takes_notes_are_drawn_from_the_bar_the_first_is_in_and_a_lanes_events_as_points() {
+        let note = |pitch: f64, start: f64| json!({"pitch": pitch, "start": start, "length": 0.5, "velocity": 90});
+        // Notes deep in a take (bar 17): drawn from that bar; the preview drew 2 of the 5 it touched.
+        let preview =
+            json!({"display": {"count": 5, "before": [note(36., 65.), note(43., 66.)], "after": [note(38., 65.), note(43., 66.)]}});
+        let Some(ChangePicture::Notes { length, before, after, partial }) = midi(&Answers { preview: &preview, applied: &json!({}) })
+        else {
+            panic!("notes")
+        };
+        assert_eq!((length, before[0].start, after[0].pitch, after[1].start, partial), (4., 1., 38., 2., true));
+        // A pitch bend lane's events, centred on 0 as REAPER says them.
+        let bend = |start: f64, value: i64| json!({"type": "pitchbend", "channel": 1, "value": value, "start": start});
+        let preview = json!({"display": {"after": [bend(8., 0), bend(9., 4096), bend(10., -8192)]}});
+        let picture = midi(&Answers { preview: &preview, applied: &json!({}) });
+        assert_eq!(
+            picture,
+            Some(ChangePicture::Automation {
+                parameter: "Pitch".into(),
+                min: -8192.,
+                max: 8191.,
+                before: vec![],
+                after: vec![[0., 0.], [1., 4096.], [2., -8192.]]
+            })
+        );
+        // Events of two lanes: no one lane to draw.
+        let cc = json!({"type": "cc", "channel": 1, "controller": 1, "value": 3, "start": 0.0});
+        let preview = json!({"display": {"after": [cc, bend(1., 0)]}});
+        assert_eq!(midi(&Answers { preview: &preview, applied: &json!({}) }), None);
     }
 }
