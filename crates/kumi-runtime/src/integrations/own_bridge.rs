@@ -285,7 +285,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     };
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
-    let variations = super::renoise_variations::RenoiseVariations::new(changes.clone());
+    let variations = super::renoise_variations::RenoiseVariations::new(changes.clone(), listening.renderer.clone());
     let kumi_home = options.kumi_home.clone();
     Rc::new(OwnIntegration::<S> {
         daw,

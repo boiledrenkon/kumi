@@ -451,6 +451,16 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// Why nothing can be heard now, in words: the DAW isn't there, its bridge is older than listening, or it's the demo.
+    /// (M7) Kumi is listening to something else now (a judged run, a listen): another check waits its turn.
+    pub(super) fn listening_now(&self) -> bool {
+        self.flag.is_on()
+    }
+
+    /// (M7) Kumi listens now, until the answer is dropped.
+    pub(super) fn begin_listen(&self) -> crate::listening::renderer::ListenNow<'_> {
+        self.flag.begin()
+    }
+
     pub(super) fn why_not(&self) -> Option<String> {
         let app = self.app();
         if !self.link.connected.get() || self.link.endpoint.borrow().is_none() {

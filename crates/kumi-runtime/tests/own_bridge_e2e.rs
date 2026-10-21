@@ -1102,3 +1102,46 @@ async fn variations_of_a_chop_are_slots_of_their_own_and_an_edited_take_is_never
         })
         .await;
 }
+
+/// (M7) Each pattern take is rendered before it's shown: one that clips is drawn again and rewritten (a change of its own each
+/// time, at most twice), and its line says what was heard.
+#[tokio::test(flavor = "current_thread")]
+async fn a_take_that_clips_in_the_render_is_drawn_again_and_says_so() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            script.listening().set_folder(home.path());
+            script.set_lines(
+                2,
+                1,
+                json!([
+                    {"line": 0, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+                    {"line": 2, "notes": [{"col": 1, "note": "D-4", "instrument": "00", "volume": "30"}]},
+                    {"line": 4, "notes": [{"col": 1, "note": "E-4", "instrument": "00"}]},
+                    {"line": 6, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+                ]),
+            );
+            let variations = tool(&observed, "variations");
+            let source = json!({"patternRef": "pattern:2", "trackRef": "track:1", "first": 0, "last": 7});
+            // (a quiet render first: each take's line says how it sounded)
+            let read = tool(&observed, "renoise_read");
+            run_tool(&read, json!({"kind": "pattern"})).await;
+            let made = run_tool(&variations, json!({"action": "make", "source": source, "seed": 5, "takes": [{"direction": "rolls", "ops": [{"op": "retrig", "amount": 0.5}]}]})).await;
+            let line = made["takes"][0]["line"].as_str().unwrap();
+            assert!(line.contains(" · heard: peak −"), "{made}");
+            assert_eq!(told.borrow().len(), 1);
+            // (now the track clips: the take is drawn again twice, each a change, and said to clip still)
+            script.listening().set_level("1:track:1", 1.0);
+            let made = run_tool(&variations, json!({"action": "make", "source": source, "seed": 6, "takes": [{"direction": "rolls", "ops": [{"op": "retrig", "amount": 0.5}]}]})).await;
+            let line = made["takes"][0]["line"].as_str().unwrap();
+            assert!(line.contains("(drawn again after the render: it clips (peak −0.0 dBFS))"), "{made}");
+            assert!(line.ends_with(" · heard: it clips (peak −0.0 dBFS)"), "still clipping after two draws, it says so: {made}");
+            assert_eq!(told.borrow().len(), 4, "the take, and two rewrites: {made}");
+            let renders = script.listening().renders();
+            assert!(renders.len() >= 2 + 4, "the source once and each take each time: {renders:?}");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

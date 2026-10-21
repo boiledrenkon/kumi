@@ -6,12 +6,13 @@
 //! or a kept take, and leaves alone a take the producer edited since Kumi wrote it.
 use super::own_bridge::follow_epoch;
 use super::own_changes::OwnPlan;
+use super::own_listening::OwnRenderer;
 use super::renoise_lines::{note_value, Lines, Op};
 use crate::core::{
-    contracts::{JsonObject, KernelTool, Reach, ToolResult},
+    contracts::{JsonObject, KernelTool, Reach, Render, ToolResult},
     errors::RuntimeError,
     refs::RefScheme,
-    variations::{roll, Bounds, Material, Purpose, Take, TakeSet, TakeState, DIRECTIONS},
+    variations::{roll, seed_of, Bounds, Material, Purpose, Take, TakeSet, TakeState, DIRECTIONS},
 };
 use async_trait::async_trait;
 use kumi_common::abort::Signal;
@@ -62,6 +63,7 @@ const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required"
 "force":{"type":"boolean"},
 "novelty":{"type":"string","enum":["subtle","clear","bold"]},
 "seed":{"type":"integer","minimum":0},
+"listen":{"type":"boolean","description":"false skips rendering the pattern takes to hear them (on by default)"},
 "phrase":{"type":"object","additionalProperties":false,"properties":{"instrumentRef":{"type":"string","description":"The instrument a pattern's lines become phrases of (the one its notes play by default)"},"keyTracking":{"type":"string","enum":["none","transpose","offset"]},"baseNote":{"type":"integer","minimum":0,"maximum":119},"lines":{"type":"integer","minimum":1,"maximum":512},"lpb":{"type":"integer","minimum":1,"maximum":256},"name":{"type":"string","maxLength":64}}},
 "at":{"type":"object","additionalProperties":false,"properties":{"keys":{"type":"array","items":{"type":"integer","minimum":0,"maximum":119},"minItems":2,"maxItems":2},"program":{"type":"boolean"},"switchAt":{"type":"object","additionalProperties":false,"required":["patternRef","trackRef","line"],"properties":{"patternRef":{"type":"string"},"trackRef":{"type":"string"},"line":{"type":"integer","minimum":0},"col":{"type":"integer","minimum":1,"maximum":8}}},"over":{"type":"boolean"},"after":{"type":"boolean"},"index":{"type":"integer","minimum":1}}}
 }}"#;
@@ -161,12 +163,14 @@ struct Drawn {
 /// The variations of one Renoise song (the sets live as long as the integration).
 pub struct RenoiseVariations<S: RefScheme + 'static> {
     plan: Rc<OwnPlan<S>>,
+    /// Renders the pattern takes offline, to hear them before they're shown.
+    renderer: Rc<OwnRenderer<S>>,
     sets: RefCell<Vec<Set>>,
 }
 
 impl<S: RefScheme + 'static> RenoiseVariations<S> {
-    pub fn new(plan: Rc<OwnPlan<S>>) -> Rc<Self> {
-        Rc::new(RenoiseVariations { plan, sets: RefCell::default() })
+    pub fn new(plan: Rc<OwnPlan<S>>, renderer: Rc<OwnRenderer<S>>) -> Rc<Self> {
+        Rc::new(RenoiseVariations { plan, renderer, sets: RefCell::default() })
     }
 
     pub fn tool(self: &Rc<Self>) -> Rc<dyn KernelTool> {
@@ -451,7 +455,8 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         let seed = input.get("seed").and_then(Value::as_u64).unwrap_or_else(fresh_seed);
         let id = self.sets.borrow().iter().map(|set| set.id).max().unwrap_or(0) + 1;
         let mut set: Set = TakeSet::new(id, info, seed);
-        let mut answer_lines = Vec::new();
+        let mut refs = BTreeMap::new();
+        let mut written = BTreeMap::new();
         let mut skipped = Vec::new();
         for recipe in recipes {
             let number = set.next_number();
@@ -465,7 +470,8 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             match self.write_new(&set, &drawn, signal).await {
                 Ok((change, place, reference)) => {
                     let line = take_line(&drawn, &change);
-                    answer_lines.push(json!({"take": format!("V{number}"), "ref": self.short(&reference), "line": line}));
+                    refs.insert(number, self.short(&reference));
+                    written.insert(number, recipe.clone());
                     set.takes.push(Take {
                         number,
                         state: TakeState::Shown,
@@ -486,7 +492,17 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             }
         }
         let made = set.takes.len();
-        let reply = json!({"set": id, "source": set.source.label, "takes": answer_lines, "skipped": skipped});
+        let numbers: Vec<usize> = written.keys().copied().collect();
+        let heard = self.listen(&mut set, &numbers, &written, &bounds, input, signal).await;
+        let answer_lines: Vec<Value> = numbers
+            .iter()
+            .filter_map(|n| set.take(*n))
+            .map(|take| json!({"take": format!("V{}", take.number), "ref": refs[&take.number], "line": take.line}))
+            .collect();
+        let mut reply = json!({"set": id, "source": set.source.label, "takes": answer_lines, "skipped": skipped});
+        if !heard.is_empty() {
+            reply["heard"] = json!(heard);
+        }
         if made > 0 {
             let mut sets = self.sets.borrow_mut();
             sets.push(set);
@@ -652,6 +668,7 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         let track = self.source_track(&set.source, signal).await?;
         let mut lines_out = Vec::new();
         let mut skipped = Vec::new();
+        let mut rewritten = BTreeMap::new();
         for (number, recipe) in numbers.iter().copied().zip(recipes) {
             let take = set.take(number).expect("a picked take").clone();
             let found = self.locate(vec![json!(take_item(&set.source, &take.place))], None, signal).await?;
@@ -700,6 +717,7 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             };
             match written {
                 Ok((change, _)) => {
+                    rewritten.insert(number, recipe.clone());
                     let line = take_line(&drawn, &change);
                     lines_out.push(json!({"take": format!("V{number}"), "ref": self.short(&reference), "line": line}));
                     if let Some(take) = set.take_mut(number) {
@@ -718,7 +736,18 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
                 }
             }
         }
-        let reply = json!({"set": set.id, "changed": lines_out, "skipped": skipped, "takes": set.lines()});
+        let changed: Vec<usize> = rewritten.keys().copied().collect();
+        let heard = self.listen(&mut set, &changed, &rewritten, &bounds, input, signal).await;
+        for line in &mut lines_out {
+            let number: Option<usize> = line["take"].as_str().and_then(|take| take.trim_start_matches('V').parse().ok());
+            if let Some(take) = number.and_then(|n| set.take(n)) {
+                line["line"] = json!(take.line);
+            }
+        }
+        let mut reply = json!({"set": set.id, "changed": lines_out, "skipped": skipped, "takes": set.lines()});
+        if !heard.is_empty() {
+            reply["heard"] = json!(heard);
+        }
         self.put_back(set);
         Ok(reply)
     }
@@ -907,12 +936,254 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             "keyTracking": settings.get("keyTracking"), "baseNote": settings.get("baseNote")}))
     }
 
+    /// Renders each pattern take on the source's track, offline, with the source once: a take that is silent or clips is
+    /// drawn again and rewritten (one more change, up to twice; lines written by the model are only said), and each take's
+    /// line says how it sounded and how much of the source's rhythm it keeps (its family). Phrase takes are judged on their
+    /// lines: Renoise renders a phrase only from a pattern that plays it. Answers what to tell.
+    async fn listen(
+        &self,
+        set: &mut Set,
+        numbers: &[usize],
+        recipes: &BTreeMap<usize, Recipe>,
+        bounds: &Bounds,
+        input: &JsonObject,
+        signal: &Signal,
+    ) -> Vec<String> {
+        if numbers.is_empty() || input.get("listen") == Some(&Value::Bool(false)) {
+            return vec![];
+        }
+        let SourceKind::Range { pattern, track, layout, first, last } = set.source.kind.clone() else {
+            return vec!["Phrase takes are judged on their lines: Renoise renders a phrase only from a pattern that plays it.".into()];
+        };
+        if let Some(why) = self.renderer.why_not() {
+            return vec![format!("The takes weren't rendered: {why}")];
+        }
+        if self.renderer.listening_now() {
+            return vec!["The takes weren't rendered: Kumi is listening to something else just now.".into()];
+        }
+        let _listening = self.renderer.begin_listen();
+        let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb) as f64;
+        let (offset, beats) = (first as f64 / lpb, (last - first + 1) as f64 / lpb);
+        let mut notes = Vec::new();
+        let mut pending: Vec<usize> = numbers.to_vec();
+        let mut source_heard: Option<Heard> = None;
+        for round in 0..3u32 {
+            let places = match self.where_slots(set, &pattern, &track, layout, &pending, signal).await {
+                Ok(places) => places,
+                Err(why) => {
+                    notes.push(format!("The takes weren't rendered: {why}"));
+                    break;
+                }
+            };
+            if source_heard.is_none() {
+                match self.hear(places.source + offset, beats, &places.track, signal).await {
+                    Ok(heard) => source_heard = Some(heard),
+                    Err(why) => {
+                        notes.push(format!("The takes weren't rendered: {why}"));
+                        break;
+                    }
+                }
+            }
+            let mut again = Vec::new();
+            for number in pending.iter().copied() {
+                let Some(slot) = places.takes.get(&number).copied() else { continue };
+                let heard = match self.hear(slot + offset, beats, &places.track, signal).await {
+                    Ok(heard) => heard,
+                    Err(why) => {
+                        notes.push(format!("V{number} wasn't rendered: {why}"));
+                        continue;
+                    }
+                };
+                let family = source_heard.as_ref().map(|source| heard.family(source));
+                let fault = heard.fault();
+                let redraw = recipes.get(&number).filter(|recipe| !recipe.ops.is_empty() && round < 2);
+                match (fault, redraw) {
+                    (Some(fault), Some(recipe)) => {
+                        // (drawn again from another seed and rewritten: one more change of Kumi's)
+                        let mut salted = set.clone();
+                        salted.seed = seed_of(set.seed, number, 100 + round);
+                        let Some(before) = set.take(number).map(|take| take.material.clone()) else { continue };
+                        let redrawn = match self.draw(&salted, number, recipe, bounds) {
+                            Ok(redrawn) => redrawn,
+                            Err(why) => {
+                                notes.push(format!("V{number} {fault} in the render, and drawing it again failed: {why}"));
+                                continue;
+                            }
+                        };
+                        let rewrite = json!({"patternRef": places.refs[&number], "trackRef": places.track,
+                            "lines": redrawn.material.rewrite(&before, first)});
+                        match self.change("notes_write", rewrite, signal).await {
+                            Ok((change, _)) => {
+                                if let Some(take) = set.take_mut(number) {
+                                    take.line = format!("{} (drawn again after the render: it {fault})", take_line(&redrawn, &change));
+                                    take.digest = redrawn.material.digest();
+                                    take.material = redrawn.material;
+                                    take.change = Some(change);
+                                }
+                                again.push(number);
+                            }
+                            Err((why, _)) => notes.push(format!("V{number} {fault} in the render, and rewriting it failed: {why}")),
+                        }
+                    }
+                    (Some(fault), None) => {
+                        if let Some(take) = set.take_mut(number) {
+                            take.line = format!("{} · heard: it {fault}", take.line);
+                        }
+                    }
+                    (None, _) => {
+                        if let Some(take) = set.take_mut(number) {
+                            take.line = format!("{} · heard: {}", take.line, heard.words(family));
+                        }
+                    }
+                }
+            }
+            if again.is_empty() {
+                break;
+            }
+            pending = again;
+        }
+        if let Some(note) = self.renderer.put_tempo_back().await {
+            notes.push(note);
+        }
+        notes
+    }
+
+    /// One render of the track over `beats` from `from` (beats from the song's start), heard.
+    async fn hear(&self, from: f64, beats: f64, track: &str, signal: &Signal) -> Result<Heard, String> {
+        let sources = vec![json!({"id": "t", "what": "track", "ref": track, "stage": "pre-fader"})];
+        let window = crate::listening::renderer::Window { from, beats };
+        match self.renderer.render_sources(sources, window, signal).await {
+            Ok(Ok((files, _))) => match files.get("t") {
+                Some((render, _)) => heard_of(render, signal).await,
+                None => Err("the render made no file".to_string()),
+            },
+            Ok(Err(why)) => Err(why),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Where the source's lines and each take's lines start in the song (beats), and the refs to render and rewrite them by.
+    async fn where_slots(
+        &self,
+        set: &Set,
+        pattern: &Value,
+        track: &str,
+        layout: Option<u64>,
+        numbers: &[usize],
+        signal: &Signal,
+    ) -> Result<Slots, String> {
+        let mut items = vec![json!({"pattern": pattern}), json!({"track": track})];
+        for number in numbers {
+            items.push(json!({"pattern": set.take(*number).map(|take| take.place.clone()).unwrap_or(Value::Null)}));
+        }
+        let found = self.locate(items, layout, signal).await?;
+        let rows = self.rows(json!({"kind": "sequence", "limit": 200}), signal).await?;
+        let starts: BTreeMap<String, f64> =
+            rows.iter().filter_map(|row| Some((row.get("ref")?.as_str()?.to_string(), row.get("positionBeats")?.as_f64()?))).collect();
+        let start = |row: &Value| row.get("seqRef").and_then(Value::as_str).and_then(|reference| starts.get(reference)).copied();
+        let source = start(&found[0]).ok_or("no slot plays the source's pattern now")?;
+        let track = found[1].get("ref").and_then(Value::as_str).ok_or("the source's track isn't in the song any more")?.to_string();
+        let mut takes = BTreeMap::new();
+        let mut refs = BTreeMap::new();
+        for (number, row) in numbers.iter().zip(&found[2..]) {
+            if let (Some(at), Some(reference)) = (start(row), row.get("ref").and_then(Value::as_str)) {
+                takes.insert(*number, at);
+                refs.insert(*number, reference.to_string());
+            }
+        }
+        Ok(Slots { source, track, takes, refs })
+    }
+
     fn put_back(&self, set: Set) {
         let mut sets = self.sets.borrow_mut();
         if let Some(slot) = sets.iter_mut().find(|held| held.id == set.id) {
             *slot = set;
         }
     }
+}
+
+/// Where the lines a listen renders start (beats from the song's start), and the refs it renders and rewrites by.
+struct Slots {
+    source: f64,
+    track: String,
+    takes: BTreeMap<usize, f64>,
+    refs: BTreeMap<usize, String>,
+}
+
+/// What a take's render sounded like: its peak and level (dBFS) and where its hits start (s).
+#[derive(Debug, Clone, PartialEq)]
+struct Heard {
+    peak: f64,
+    level: f64,
+    onsets: Vec<f64>,
+}
+
+/// Quieter than this throughout is silent; a peak this close to full scale clips.
+const SILENT_DB: f64 = -60.;
+const CLIPS_DB: f64 = -0.1;
+/// Onsets this close (s) are the same hit.
+const SAME_HIT_S: f64 = 0.03;
+
+/// A level in dB as Kumi writes it: a true minus.
+fn db_text(db: f64) -> String {
+    format!("{db:.1}").replace('-', "−")
+}
+
+impl Heard {
+    fn of(samples: &[f32], rate: f64) -> Heard {
+        let db = |value: f64| 20. * value.max(1e-9).log10();
+        let peak = samples.iter().fold(0f32, |peak, sample| peak.max(sample.abs())) as f64;
+        let power = samples.iter().map(|sample| (*sample as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64;
+        Heard { peak: db(peak), level: db(power.sqrt()), onsets: crate::listening::notes::onsets(samples, rate) }
+    }
+
+    /// Why it can't be shown (silent, clips), or None.
+    fn fault(&self) -> Option<String> {
+        if self.level < SILENT_DB {
+            Some("is silent".into())
+        } else if self.peak >= CLIPS_DB {
+            Some(format!("clips (peak {} dBFS)", db_text(self.peak)))
+        } else {
+            None
+        }
+    }
+
+    /// How much of its rhythm it shares with the source's render, 0 to 1: hits within 30 ms of one of the source's.
+    fn family(&self, source: &Heard) -> f64 {
+        let most = self.onsets.len().max(source.onsets.len());
+        if most == 0 {
+            return 1.;
+        }
+        let shared = self.onsets.iter().filter(|at| source.onsets.iter().any(|other| (*at - other).abs() <= SAME_HIT_S)).count();
+        shared as f64 / most as f64
+    }
+
+    fn words(&self, family: Option<f64>) -> String {
+        let peak = format!("peak {} dBFS", db_text(self.peak));
+        match family {
+            Some(family) => format!("{peak}, {:.0}% of its hits where the source's are", family * 100.),
+            None => peak,
+        }
+    }
+}
+
+/// A render's part heard: mono, from where the part starts, as long as it lasts.
+async fn heard_of(render: &Render, signal: &Signal) -> Result<Heard, String> {
+    let mut source = crate::audio::decode::open_audio(&render.file, Some(signal.clone())).await.map_err(|error| error.0)?;
+    let rate = source.sample_rate;
+    source.seek(render.start * rate);
+    let most = render.seconds.map_or(60. * rate, |seconds| seconds * rate).min(120. * rate) as usize;
+    let mut samples: Vec<f32> = Vec::new();
+    while samples.len() < most {
+        let Ok(Some(block)) = source.read(65536.min(most - samples.len())).await else { break };
+        let right = block.get(1).unwrap_or(&block[0]);
+        samples.extend(block[0].iter().zip(right).map(|(left, right)| (left + right) / 2.));
+    }
+    let _ = source.close().await;
+    if samples.is_empty() {
+        return Err("the render was empty".into());
+    }
+    Ok(Heard::of(&samples, rate))
 }
 
 fn pick_set<'a>(sets: &'a [Set], input: &JsonObject) -> Result<&'a Set, String> {

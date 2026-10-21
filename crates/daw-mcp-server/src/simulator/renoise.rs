@@ -392,27 +392,47 @@ impl RenoiseScript {
         let set = |state: &mut State, rows: &Value| {
             state.lines.insert((pattern, track), rows.as_array().cloned().unwrap_or_default());
         };
-        // The lines after the write: each cell named written whole, or cleared.
+        // The lines after the write: a line named with clear emptied first, each cell named written whole, or cleared (note
+        // and effect columns).
         let after = || -> Result<Value, (String, String)> {
-            let mut rows: std::collections::BTreeMap<u64, Vec<Value>> = now
+            let list = |row: &Value, key: &str| row[key].as_array().cloned().unwrap_or_default();
+            let mut rows: std::collections::BTreeMap<u64, (Vec<Value>, Vec<Value>)> = now
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|row| Some((row["line"].as_u64()?, row["notes"].as_array().cloned().unwrap_or_default())))
+                .filter_map(|row| Some((row["line"].as_u64()?, (list(row, "notes"), list(row, "effects")))))
                 .collect();
             for entry in params["input"]["lines"].as_array().into_iter().flatten() {
                 let line = entry["line"].as_u64().ok_or(bad("line"))?;
-                let cells = rows.entry(line).or_default();
-                for cell in entry["notes"].as_array().into_iter().flatten() {
-                    let col = cell["col"].as_u64().ok_or(bad("col"))?;
-                    cells.retain(|held| held["col"].as_u64() != Some(col));
-                    if cell["clear"] != true {
-                        cells.push(cell.clone());
-                    }
+                if entry["clear"] == true {
+                    rows.remove(&line);
                 }
-                cells.sort_by_key(|cell| cell["col"].as_u64());
+                let (notes, effects) = rows.entry(line).or_default();
+                for (key, cells) in [("notes", notes), ("effects", effects)] {
+                    for cell in entry[key].as_array().into_iter().flatten() {
+                        let col = cell["col"].as_u64().ok_or(bad("col"))?;
+                        cells.retain(|held| held["col"].as_u64() != Some(col));
+                        if cell["clear"] != true {
+                            cells.push(cell.clone());
+                        }
+                    }
+                    cells.sort_by_key(|cell| cell["col"].as_u64());
+                }
             }
-            Ok(rows.into_iter().filter(|(_, cells)| !cells.is_empty()).map(|(line, cells)| json!({"line": line, "notes": cells})).collect())
+            Ok(rows
+                .into_iter()
+                .filter(|(_, (notes, effects))| !notes.is_empty() || !effects.is_empty())
+                .map(|(line, (notes, effects))| {
+                    let mut row = json!({"line": line});
+                    if !notes.is_empty() {
+                        row["notes"] = notes.into();
+                    }
+                    if !effects.is_empty() {
+                        row["effects"] = effects.into();
+                    }
+                    row
+                })
+                .collect())
         };
         match method {
             "change_preview" => {
@@ -917,6 +937,13 @@ impl RenoiseScript {
         if method == "read" && params["kind"] == "where" {
             let items = params["items"].as_array().cloned().unwrap_or_default();
             return Some(state.takes.locate(state.epoch, &items));
+        }
+        if method == "read" && params["kind"] == "sequence" && params.get("cursor").is_none() {
+            let case = state.cases.iter().find(|case| case.method == "read" && case.params == json!({"kind": "sequence"}));
+            let rows =
+                case.and_then(|case| case.response.as_ref().ok()).and_then(|page| page["items"].as_array().cloned()).unwrap_or_default();
+            let rows = rows.iter().map(|row| retag(row, VECTORS_EPOCH, state.epoch, None)).collect();
+            return Some(state.takes.sequence(state.epoch, rows));
         }
         if method == "read" && params["kind"] == "line" && params["parent"].as_str().is_some_and(|parent| parent.contains(":phrase:")) {
             let parent = params["parent"].as_str().unwrap_or_default();

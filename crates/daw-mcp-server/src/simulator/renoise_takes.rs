@@ -344,6 +344,19 @@ impl Takes {
         }
     }
 
+    /// The sequence's rows (`rows`: the vectors' four slots of 8 beats), with a slot after them for each made pattern a slot
+    /// plays.
+    pub fn sequence(&self, epoch: u32, mut rows: Vec<Value>) -> Answer {
+        let mut position = SLOTS as f64 * 8.;
+        for pattern in self.patterns.iter().filter(|pattern| pattern.slotted) {
+            let Some((p, Some(slot))) = self.pattern_index(pattern.id) else { continue };
+            rows.push(json!({"ref": format!("{epoch}:seq:{slot}"), "pattern": p - 1, "patternRef": format!("{epoch}:pattern:{p}"),
+                "positionBeats": position, "lengthBeats": 8, "mutedTracks": [], "section": null}));
+            position += 8.;
+        }
+        Ok(json!({"items": rows, "epoch": epoch.to_string(), "layout": 0}))
+    }
+
     /// The made phrases of an instrument: name and lines, in order.
     pub fn phrases(&self, instrument: u64) -> Vec<(String, Vec<Value>)> {
         self.phrases.get(&instrument).into_iter().flatten().map(|phrase| (phrase.name.clone(), phrase.rows.clone())).collect()
