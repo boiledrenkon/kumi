@@ -289,6 +289,16 @@ local function gone_is_changed(err)
 end
 M.gone_is_changed = gone_is_changed
 
+-- Writes `state` with the kind's own write; when Renoise refuses part of it (a field past what this device takes), what was
+-- there (`was`) is written back, so nothing half-done stays, and the change fails with Renoise's words.
+local function write_whole(spec, loc, state, was)
+  local ok, err = pcall(spec.write, loc.object, state)
+  if ok then return end
+  pcall(spec.write, loc.object, was)
+  local why = type(err) == "table" and err.message or tostring(err)
+  fail("failed", string.format("Renoise refused %s's %s as asked (%s): nothing was changed", loc.name, spec.noun, (tostring(why):gsub("^[^%s:]*%.lua:%d+: ", ""))))
+end
+
 function M.prop_apply(song, env, spec, input, fence, desc)
   local ok, loc = pcall(spec.locate, song, env, input)
   if not ok then gone_is_changed(loc) end
@@ -307,7 +317,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   end
   if spec.undoable then song:describe_undo(desc) end
   if spec.watch then spec.watch(env, loc) end
-  if not spec.same(now, wanted) then spec.write(loc.object, wanted) end
+  if not spec.same(now, wanted) then write_whole(spec, loc, wanted, now) end
   -- (a setting Renoise applies a moment later answers its old value when read at once: `eventual` trusts the write)
   local after = spec.eventual and wanted or spec.read(loc.object, wanted)
   if not spec.same(after, wanted) then
@@ -354,7 +364,7 @@ function M.prop_restore(song, env, spec, restore, desc)
     end
     if spec.undoable then song:describe_undo(desc) end
     if spec.watch then spec.watch(env, loc) end
-    spec.write(loc.object, prior)
+    write_whole(spec, loc, prior, now)
     local after = spec.eventual and prior or spec.read(loc.object, prior)
     if not spec.same(after, prior) then fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was") end
   end

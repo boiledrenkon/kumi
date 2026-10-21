@@ -385,3 +385,33 @@ test("modfx: an LFO's waveform, a Fader's scaling and a Velocity Tracking's mode
   eq(set.devices[fader].scaling, 5)
   eq(set.devices[velocity].mode, 2)
 end)
+
+test("modfx: a settings change Renoise refuses part way puts back what it wrote first and fails, naming Renoise's words (#361 N-S2)", function()
+  -- (Kumi's own check let through, so that Renoise's refusal is what stops it)
+  local env, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_modfx.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local loose, count = text:gsub("v <= %(stepper and 256 or 6144%)", "v <= 6144")
+    assert(count == 1)
+    f = assert(io.open(path, "wb"))
+    f:write(loose)
+    f:close()
+  end })
+  mock.fire(mock.tool.app_new_document_observable)
+  local epoch = modfx_song(peer)
+  mock.fire(mock.tool.app_new_document_observable)
+  epoch = place(peer)
+  ok(change(peer, "moddevice-add", { ref = modset_ref(epoch, 1, 1), path = "Stepper", target = "pitch" }))
+  local set = instrument(1).sets[1]
+  local stepper = #set.devices
+  local name = set.devices[stepper].display_name
+  local before = steps()
+  local input = { ref = moddevice_ref(place(peer), 1, 1, stepper), name = "Steps", length = 300 }
+  local previewed, e, layout = preview(peer, "moddevice-set", input)
+  local refused = apply(peer, "moddevice-set", input, "Kumi: set (km01)", previewed.fence, e, layout)
+  failure(refused, "failed", "Renoise refused")
+  eq(set.devices[stepper].display_name, name, "the name it took first is put back")
+  ok(steps() <= before + 1, "at most the one step Renoise made of it")
+end)

@@ -651,7 +651,10 @@ local MODDEVICE_FIELDS = {
   active = { get = function(d) return d.is_active end, set = function(d, v) d.is_active = v end, field = "is_active", check = is_boolean, says = "active is true or false", text = function(v) return v and "on" or "bypassed" end },
   name = { get = function(d) return d.display_name end, set = function(d, v) d.display_name = v end, field = "display_name",
     check = function(v) return type(v) == "string" and #v <= 64 and not v:find("[%c]") end, says = "name must be one line of text", text = function(v) return "named " .. q(v) end },
-  length = device_field("length", function(v) return type(v) == "number" and v == math.floor(v) and v >= 1 and v <= 6144 end, "length is the envelope's length in points (Envelope 6-6144, Stepper 1-256)", function(v) return "length " .. v end),
+  length = device_field("length", function(v, d)
+    local stepper = M.moddevice_type(d.name) == "Stepper"
+    return type(v) == "number" and v == math.floor(v) and v >= (stepper and 1 or 6) and v <= (stepper and 256 or 6144)
+  end, "length is the envelope's length in points (Envelope 6-6144, Stepper 1-256)", function(v) return "length " .. v end),
   playMode = { get = function(d) return PLAY_MODES.get(d.play_mode) end, set = function(d, v) d.play_mode = PLAY_MODES.parse(v) end, field = "play_mode",
     check = function(v, d) return has_field(d, "play_mode") and PLAY_MODES.parse(v) ~= nil end, says = "playMode is points, lines or curves (Envelope and Stepper)", text = function(v) return "plays " .. v end },
   loopMode = { get = function(d) return ENV_LOOPS.get(d.loop_mode) end, set = function(d, v) d.loop_mode = ENV_LOOPS.parse(v) end, field = "loop_mode",
