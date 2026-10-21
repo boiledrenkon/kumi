@@ -1023,6 +1023,8 @@ base.register({
     local objects = places_.resolve(song, "chaindevice", n)
     local label = places_.label_of("chaindevice", n, objects)
     if n[3] == prior.index then return { restored = { index = n[3] }, display = { title = label .. " is at its place already" }, undo = { desc = desc, entry = false }, unwritten = true } end
+    -- (moved again by the producer since: their order stays, unless discard)
+    if not restore.discard and n[3] ~= (restore.applied or {}).index then fail("changed", label .. " was moved in Renoise since Kumi moved it") end
     if prior.index > #objects.chain.devices or prior.index < 2 then fail("changed", "place " .. prior.index .. " isn't in the chain any more") end
     song:describe_undo(desc)
     swap_along(objects.chain, n[3], prior.index)

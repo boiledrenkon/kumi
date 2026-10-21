@@ -337,3 +337,21 @@ test("places, chain device × the producer's device made before it: Kumi's undo 
   mock.song:instrument(1):sample_device_chain(1):delete_device_at(3)
   failure(restore(peer, "chaindevice-bypass", record), "gone")
 end)
+
+test("modfx: Kumi's undo of a chain device's move refuses it moved again in Renoise since, unless discard (#361 N12)", function()
+  local env, peer, epoch = setup_modfx()
+  local chain = instrument(1).chains[1]
+  -- Mixer, EQ 5, Gainer, Delay.
+  ok(change(peer, "chaindevice-add", { ref = chain_ref(epoch, 1, 1), path = "Gainer" }))
+  ok(change(peer, "chaindevice-add", { ref = chain_ref(place(peer), 1, 1), path = "Delay" }))
+  local moved = change(peer, "chaindevice-move", { ref = chaindevice_ref(place(peer), 1, 1, 2), index = 4 })
+  eq(chain.devices[4].path, "Audio/Effects/Native/EQ 5")
+  -- The producer moves it to place 3.
+  mock.song:instrument(1):sample_device_chain(1):swap_devices_at(3, 4)
+  T.harness.tick(2)
+  eq(chain.devices[3].path, "Audio/Effects/Native/EQ 5")
+  failure(restore(peer, "chaindevice-move", moved), "changed", "moved in Renoise")
+  eq(chain.devices[3].path, "Audio/Effects/Native/EQ 5", "nothing moved")
+  ok(restore(peer, "chaindevice-move", moved, nil, { discard = true }).result)
+  eq(chain.devices[2].path, "Audio/Effects/Native/EQ 5")
+end)
