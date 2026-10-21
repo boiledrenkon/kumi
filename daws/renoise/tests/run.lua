@@ -94,7 +94,9 @@ for _, file in ipairs({ "test_json.lua", "test_sha256.lua", "test_wire.lua", "te
   -- M6 (m6-library)
   "test_kit.lua",
   -- M6 (m6-catchup)
-  "test_digest.lua" }) do
+  "test_digest.lua",
+  -- M7 (variations)
+  "test_variations.lua" }) do
   local chunk = loadfile(tests_dir .. file)
   if chunk then chunk(T) end
 end

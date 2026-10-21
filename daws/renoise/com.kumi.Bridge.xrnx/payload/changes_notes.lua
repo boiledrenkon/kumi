@@ -1249,6 +1249,9 @@ M.cells = {
   line_range = line_range, parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
   same_cell = same_cell, same_cells = same_cells, is_empty_cell = is_empty_cell, fingerprint = fingerprint, writes_of = writes_of,
   counts_of = counts_of, needs_of = needs_of, lines_in = lines_in,
+  -- M7 (variations): a pattern track's columns, for slot-variation (changes_sequence.lua)
+  read_columns = read_columns, raise_columns = raise_columns, set_columns = set_columns, hidden_use = hidden_use, lower_columns = lower_columns,
+  pattern_of = pattern_of,
 }
 
 return M
