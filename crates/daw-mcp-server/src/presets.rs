@@ -461,9 +461,23 @@ fn destination_prefixes(device: &Element) -> Vec<String> {
 /// The meta devices in a container's lane aim at devices of that lane by index: each index n becomes `follow(n)`, or
 /// none (-1, with its parameter) when None. Answers what was cleared: [{device, prefix, effect, parameter}].
 fn reaim(container: &mut Element, kind: &str, lane: usize, follow: &dyn Fn(usize) -> Option<usize>) -> Vec<Value> {
+    reaim_skipping(container, kind, lane, follow, None)
+}
+
+/// As `reaim`, the device at `skip` left as it is (one just put in, whose aims are in the lane's numbering with it).
+fn reaim_skipping(
+    container: &mut Element,
+    kind: &str,
+    lane: usize,
+    follow: &dyn Fn(usize) -> Option<usize>,
+    skip: Option<usize>,
+) -> Vec<Value> {
     let mut cleared = vec![];
     let Some(list) = container.child_mut(chain_name(kind, lane)).and_then(|chain| chain.child_mut("Devices")) else { return cleared };
     for (d, device) in list.elements_mut().enumerate() {
+        if skip == Some(d) {
+            continue;
+        }
         for prefix in destination_prefixes(device) {
             let effect_name = format!("{prefix}DestEffect");
             let parameter_name = format!("{prefix}DestParameter");
@@ -1018,8 +1032,9 @@ fn insert_at(slot_: &mut Element, locus: &Locus, element: Element) {
     let kind = type_of(container, locus.container.is_empty()).to_string();
     let place = locus.place;
     remap(container, &kind, locus.lane, &|n| Some(if n >= place { n + 1 } else { n }));
-    // (the device just put in is at `place`: shift the others, then put it back where it is)
-    reaim(container, &kind, locus.lane, &|n| Some(if n >= place { n + 1 } else { n }));
+    // (the others' aims make room; the device just put in aims as it did, in the lane's numbering with it: a deleted
+    // meta device put back by Kumi's undo, one added with its aim)
+    reaim_skipping(container, &kind, locus.lane, &|n| Some(if n >= place { n + 1 } else { n }), Some(place));
 }
 
 /// Takes the device at a place out: the mappings to it go, the meta devices aimed at it are cleared, the others follow.

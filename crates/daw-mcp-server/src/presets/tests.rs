@@ -522,3 +522,16 @@ fn a_device_moved_into_or_out_of_a_doofer_inside_moves_the_other_mappings_and_ai
     assert_eq!(value_of(list[3], "DestEffect"), Some(0.0));
     assert_eq!(first_mapping(list[1]).as_deref(), Some("0"), "the inner Gainer is place 1 again");
 }
+
+#[test]
+fn kumis_undo_of_a_deleted_meta_device_puts_it_back_aimed_where_it_was() {
+    // An LFO before the EQ and the Gainer, aimed at the Gainer (place 3, index 2).
+    let lfo = "        <LfoDevice type=\"LfoDevice\">\n          <DestEffect>\n            <Value>2</Value>\n          </DestEffect>\n          <DestParameter>\n            <Value>1</Value>\n          </DestParameter>\n        </LfoDevice>\n";
+    let start = DOOFER.find("<Devices>\n").unwrap() + "<Devices>\n".len();
+    let before = xml::parse(&format!("{}{lfo}{}", &DOOFER[..start], &DOOFER[start..])).unwrap().to_xml();
+    let deleted = ok("doofer-device-delete", json!({"at": [1]}), &before, "Doofer");
+    let back = written(undone("doofer-device-delete", &deleted, &deleted.document.to_xml(), "Doofer", false));
+    let document = xml::parse(&back).unwrap();
+    assert_eq!(value_of(devices_in(slot(&document).unwrap(), DOOFER_TYPE, 0)[0], "DestEffect"), Some(2.0), "still the Gainer");
+    assert_eq!(back, before);
+}
