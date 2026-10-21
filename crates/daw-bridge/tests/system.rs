@@ -153,3 +153,33 @@ fn a_dll_a_running_reaper_holds_is_set_aside_by_an_update_and_named_by_an_uninst
         std::fs::remove_file(&left).unwrap();
     }
 }
+
+/// Each owner-only permission set on Windows is a PowerShell run (seconds, with Defender): a folder an earlier action
+/// made and locked isn't locked again, so an update that finds the bridge in place runs none.
+#[cfg(windows)]
+#[test]
+fn an_up_to_date_update_on_windows_runs_no_powershell() {
+    use daw_bridge::owner::acl_runs_on_this_thread as runs;
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("bridges").join("reaper");
+    let before = runs();
+    daw_bridge::owner::create_owner_only_dir(&folder).unwrap();
+    assert_eq!(runs() - before, 1, "a folder it made is locked");
+    daw_bridge::owner::create_owner_only_dir(&folder).unwrap();
+    assert_eq!(runs() - before, 1, "made already: left as it is");
+    let plugins = root.path().join("REAPER").join("UserPlugins");
+    let target = Target {
+        daw: Daw::Reaper,
+        dir: plugins.clone(),
+        name: "reaper_kumi.dll".into(),
+        folder: false,
+        reference: plugins.join("kumi-bridge-reference.json"),
+    };
+    let source = root.path().join("reaper_kumi.dll");
+    std::fs::write(&source, b"extension").unwrap();
+    let life = Lifecycle::new(&root.path().join("kumi"), target);
+    life.install(&source, "0.1.0").unwrap();
+    let installed = runs();
+    life.install(&source, "0.1.0").unwrap();
+    assert_eq!(runs(), installed, "the bridge in place: nothing to lock");
+}
