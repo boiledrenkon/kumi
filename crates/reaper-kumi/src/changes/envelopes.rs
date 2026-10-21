@@ -1401,6 +1401,20 @@ pub fn item_add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let item = match find_item(ctx, &at, pool, position) {
         Ok(item) => item,
         Err(fault) if fault.0 == "failed" => {
+            // Not where Kumi put it. Gone only when no item of its pool is left beyond the ones that were there besides
+            // it: one more is Kumi's, moved, which can't be told from the others now (discard or not).
+            if let Some(then) = restore.applied["items"].as_array() {
+                let then = then.iter().filter(|item| item["pool"].as_i64() == Some(pool)).count();
+                let now = (0..ctx.reaper.ai_count(at.envelope))
+                    .filter(|i| ctx.reaper.ai_value(at.envelope, *i, "D_POOL_ID") as i64 == pool)
+                    .count();
+                if now >= then.max(1) {
+                    return Err(changed(format!(
+                        "the automation item Kumi added to {label} has been moved in REAPER since: Kumi leaves it, as it can't tell it \
+                         apart now"
+                    )));
+                }
+            }
             return Ok(Restored {
                 restored: json!({}),
                 display: json!({"title": format!("The automation item is gone from {label} already")}),

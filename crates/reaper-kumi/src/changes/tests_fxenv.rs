@@ -1371,6 +1371,21 @@ fn pan_mute_and_take_envelope_points_are_in_their_own_units_and_a_takes_times_co
 }
 
 #[test]
+fn an_added_automation_item_the_producer_moved_is_left_not_called_gone() {
+    let lab = envelope_lab();
+    let input = json!({"ref": KICK_VOLUME, "position": 4.0, "length": 1.0});
+    let (preview, applied) = lab.make("automation-item-add", input);
+    state(|s| s.tracks[1].envelopes[0].items[0].position = 6.0);
+    let (code, message) = lab.undo("automation-item-add", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert_eq!(state(|s| s.tracks[1].envelopes[0].items.len()), 1, "it stays");
+    // Taken off by the producer, it is gone already.
+    state(|s| s.tracks[1].envelopes[0].items.clear());
+    let gone = lab.undo("automation-item-add", &preview, &applied).unwrap();
+    assert!(gone["display"]["title"].as_str().unwrap().contains("gone"), "{gone}");
+}
+
+#[test]
 fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_deleted_and_each_undo_puts_it_back() {
     let lab = envelope_lab();
     let before = kick_points();
