@@ -751,6 +751,22 @@ test("devices m4: a Doofer is made of devices on a track in one step, and Kumi's
   eq(back.result.display.note, nil, "at their own places")
 end)
 
+test("devices m4: a made Doofer's undo refuses a knob turned inside it since, which taking it apart would lose; discard takes it apart (#361 N9)", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  local done = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" })
+  ok(done.result, json.encode(done.error or {}))
+  -- the producer turns a macro inside (a value: the shape holds)
+  device_data(2, 2).params[1].value = 80
+  local before = steps()
+  failure(restore(peer, "doofer-make", done.result), "changed", "settings inside")
+  eq(paths(2), "Doofer, *LFO", "left as it is")
+  eq(steps(), before)
+  local forced = restore(peer, "doofer-make", done.result, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(paths(2), "EQ 5, Gainer, *LFO")
+end)
+
 test("devices m4: a Doofer isn't made of a device with automation, or one something outside aims at; a meta device inside keeps its aim", function()
   local _, peer = make_song()
   local epoch = place(peer)

@@ -949,8 +949,9 @@ base.register({
     if type(input.name) == "string" and input.name ~= "" then container.display_name = input.name end
     local kept = keep(env, t, final, track, container)
     kept.devices, kept.mark = saved, env.device_mark and env.device_mark(t) or nil
+    local made_data = container.active_preset_data
     return {
-      applied = { shape = M.shape_of(container.active_preset_data), count = #saved }, material = kept,
+      applied = { shape = M.shape_of(made_data), content = M.content_of(made_data), count = #saved }, material = kept,
       created = { ref = refs.make(env.epoch(), "device", t, final), kind = "device" }, target = target_of(t, final),
       display = display_from(input.display, "Made a Doofer on " .. q(base.named(t, track))), undo = { desc = desc, entry = true },
       prior = { count = 0 }, place = { track = t, device = final }, shape = "made",
@@ -970,6 +971,10 @@ base.register({
     local label = label_of(t, track, container)
     if M.shape_of(container.active_preset_data) ~= applied.shape then
       fail("changed", string.format("the devices or macros inside %s changed in Renoise since Kumi made it, so it can't take it apart", q(label)))
+    end
+    -- (the devices go back as they were kept: a knob turned inside since, a macro or a plug-in's state, would be lost)
+    if not restore.discard and applied.content ~= nil and M.content_of(container.active_preset_data) ~= applied.content then
+      fail("changed", string.format("settings inside %s changed in Renoise since Kumi made it (a knob, a macro or a plug-in's state): taking it apart would put the old ones back, so Kumi left it", q(label)))
     end
     for k = 1, #container.parameters do
       if container:parameter(k).is_automated then fail("changed", string.format("%s's macros have automation since, which taking it apart would lose", q(label))) end
