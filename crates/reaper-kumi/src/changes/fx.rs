@@ -358,10 +358,12 @@ fn macros_of(ctx: &Ctx, at: &FxAt) -> Vec<i64> {
         .collect()
 }
 
-/// Makes again the links and macros that followed a deleted FX, now back at `at`: how many couldn't be (their FX gone).
-fn relink(ctx: &Ctx, at: &FxAt, material: &Value) -> usize {
+/// Makes again the links and macros that followed a deleted FX, now back at `at`: how many couldn't be (their FX gone),
+/// and how many were left as the producer has set them since (a link REAPER cleared reads effect −1 and off, 7.82 lab;
+/// one that reads otherwise is theirs now).
+fn relink(ctx: &Ctx, at: &FxAt, material: &Value) -> (usize, usize) {
     let reaper = ctx.reaper;
-    let mut lost = 0;
+    let (mut lost, mut theirs) = (0, 0);
     let place = fxchain::position_of(&fxchain::guids(reaper, at.holder), &at.guid);
     for link in material["links"].as_array().into_iter().flatten() {
         let other = link["fx"].as_str().and_then(|guid| fxchain::locate_guid(ctx, guid).ok()).filter(|other| other.holder == at.holder);
@@ -369,6 +371,12 @@ fn relink(ctx: &Ctx, at: &FxAt, material: &Value) -> usize {
             lost += 1;
             continue;
         };
+        let reads = |k: &str| reaper.fx_config(other.fx, &format!("param.{p}.{k}")).map(|v| v.trim().to_string());
+        let cleared = reads("plink.active").is_none_or(|v| v == "0") && reads("plink.effect").is_none_or(|v| v == "-1");
+        if !cleared {
+            theirs += 1;
+            continue;
+        }
         for (k, value) in link["keys"].as_object().into_iter().flatten() {
             let value = if k == "plink.effect" { place.to_string() } else { value.as_str().unwrap_or_default().to_string() };
             reaper.fx_set_config(other.fx, &format!("param.{p}.{k}"), &value);
@@ -381,7 +389,7 @@ fn relink(ctx: &Ctx, at: &FxAt, material: &Value) -> usize {
             reaper.fx_config(container, &format!("container_map.add.{place}.{param}"));
         }
     }
-    lost
+    (lost, theirs)
 }
 
 fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -512,7 +520,7 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let chain = fxchain::guids(ctx.reaper, holder);
     let place = back_place(&chain, material);
     let at = add_entry(ctx, holder, place, entry, guid)?;
-    let lost = relink(ctx, &at, material);
+    let (lost, theirs) = relink(ctx, &at, material);
     let mut display = json!({"title": format!("{} put back {}", super::quoted(&fx_label(ctx, at.fx)), place_phrase(ctx, holder))});
     let mut notes = Vec::new();
     if material["envelopes"].as_u64().unwrap_or(0) > 0 {
@@ -520,6 +528,9 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     if lost > 0 {
         notes.push(format!("{lost} parameter link(s) that followed it weren't made again: their FX are gone."));
+    }
+    if theirs > 0 {
+        notes.push(format!("{theirs} parameter link(s) that followed it were set otherwise in REAPER since: Kumi left them as they are."));
     }
     if !notes.is_empty() {
         display["note"] = notes.join(" ").into();
