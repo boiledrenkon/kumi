@@ -1186,6 +1186,7 @@ test("devices m4: a native device's settings are saved as a preset in the user l
     local saved = save(2, "Bright")
     ok(saved.result, json.encode(saved.error or {}))
     eq(saved.result.file, home .. "/Documents/Renoise/User Library/Effect Presets/EQ 5/Bright.xrdp")
+    ok(saved.result.note:find("Effect Presets/EQ 5", 1, true) and saved.result.note:find("preferences", 1, true), "where it went, said (#361 N-N8)")
     local f = assert(io.open(saved.result.file, "rb"))
     eq(f:read("*a"), mock.song:track(1):device(2).active_preset_data, "its preset data")
     f:close()

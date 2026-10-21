@@ -1172,7 +1172,9 @@ function M.save(params, env)
   for _, preset in ipairs(device.presets) do
     if preset == name then listed = true end
   end
-  return { epoch = env.epoch(), layout = env.layout(), file = file, listed = listed, label = label }
+  -- (where it went, said: Kumi takes the user library from where Renoise makes it, which its preferences can move)
+  local note = string.format("Saved in %s. Renoise lists it from its next start if that is the user library its preferences name.", dir)
+  return { epoch = env.epoch(), layout = env.layout(), file = file, listed = listed, label = label, note = note }
 end
 
 return M
