@@ -1357,3 +1357,43 @@ fn the_compressors_window_is_found_past_its_editors_controls_and_its_controls_vi
     };
     assert_eq!((presses("3.0.0"), presses("3.0.1"), presses("0")), (3, 3, 4), "Controls, Editor, close");
 }
+
+#[test]
+fn a_sample_loads_restore_reads_back_that_the_imports_region_went_too_and_says_which_undo_didnt_land() {
+    // The sample-load scene with the Tracks area read after both undos as the restore read it before them: the Sampler
+    // track's header is gone, but the audio region the import made still shows, so the restore answers `uncertain`
+    // and names the import's undo. (Replayed as recorded, the region is gone and the restore answers as Logic did.)
+    let mut scene = load("change-sample-load");
+    let pressed = |titles: Value| scene.calls.iter().position(|call| call.op == "menu" && call.params["titles"] == titles).unwrap();
+    let (conversion, import) =
+        (pressed(json!(["Edit", "Undo Convert Regions to New Sampler Track"])), pressed(json!(["Edit", "Undo Insert"])));
+    let regions = |call: &logic_kumi::fixtures::Call| call.op == "tree" && call.params["depth"] == 3 && call.params["children"] == 256;
+    let before = (0..conversion).rev().find(|at| regions(&scene.calls[*at])).unwrap();
+    let after = (import..scene.calls.len()).find(|at| scene.calls[*at].params == scene.calls[before].params).unwrap();
+    scene.calls[after].reply = scene.calls[before].reply.clone();
+    let replayed = replay_scene(&scene);
+    let restore = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(restore["error"]["code"], "uncertain", "{restore}");
+    assert_eq!(
+        restore["error"]["message"],
+        "Logic Pro took the Sampler track back, but its “Undo Insert” didn't land: the audio region of “kumi-tone” is still on “Vocal”"
+    );
+    // The headers read after both undos as before them: the conversion's undo is the step named.
+    let mut scene = load("change-sample-load");
+    let headers = |call: &logic_kumi::fixtures::Call| call.op == "tree" && call.params["depth"] == 2 && call.params["children"] == 256;
+    let before = (0..conversion).rev().find(|at| headers(&scene.calls[*at])).unwrap();
+    let later: Vec<usize> =
+        (import..scene.calls.len()).filter(|at| scene.calls[*at].params == scene.calls[before].params).take(2).collect();
+    for at in later {
+        scene.calls[at].reply = scene.calls[before].reply.clone();
+    }
+    let replayed = replay_scene(&scene);
+    let restore = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(
+        (restore["error"]["code"].as_str(), restore["error"]["message"].as_str()),
+        (
+            Some("uncertain"),
+            Some("Logic Pro's “Undo Convert Regions to New Sampler Track” was pressed, but the Sampler track is still there")
+        )
+    );
+}

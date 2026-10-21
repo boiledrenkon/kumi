@@ -568,7 +568,10 @@ titles.
   was. Logic **copies the file into the project's package at once**, saved or not (`Media/Audio Files/<file>` for the
   import, `Media/Samples/<instrument>/<file>` for the zone), and its undo leaves the copies: the kind was measured on a
   copy of Scratch, never on Scratch, whose package would keep them. A restore is Logic's own undo of the conversion
-  while it is on top, then of the import right under it ("Insert"), which takes the new track and the audio region away.
+  while it is on top, then of the import right under it ("Insert"), which takes the new track and the audio region away;
+  both are read back (the Sampler track's header gone, and the audio region the import made, by its track and bounds),
+  and a step that didn't land is `uncertain`, named ("its “Undo Insert” didn't land: the audio region of “kumi-tone” is
+  still on “Vocal”").
 - A **MIDI import makes a track**: File > Import > MIDI File… lands the file on a new track below
   the one named ("Studio Grand"), so `created.trackAdded` is `true` and the import's undo takes the
   track away with the region.

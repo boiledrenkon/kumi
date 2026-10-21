@@ -8,7 +8,8 @@
 //! took, and names the step "Convert Regions to New Sampler Track" (measured on Logic Pro 12.3.1). Read back from the
 //! new header and the new track's strip in the Inspector (Logic selects it): its name and its instrument slot's
 //! plug-in. A restore is Logic's own undo of both steps while they are on top: the conversion, then the import right
-//! under it.
+//! under it, read back from the headers (the Sampler track gone) and the regions (the audio region the import made
+//! gone too); a step that didn't land is `uncertain`, named.
 //!
 //! Logic copies the file into the project's package at once, saved or not: `Media/Audio Files` for the import and
 //! `Media/Samples/<instrument>` for the Sampler's zone; its undo takes the tracks and regions back and leaves those
@@ -24,8 +25,8 @@ use super::{
     Restore, Restored, Watch,
 };
 use crate::ax::{Node, Root};
-use crate::refs::{bad, failed};
-use crate::rows::Position;
+use crate::refs::{bad, failed, Ref};
+use crate::rows::{Position, Region};
 
 /// Logic's names for the two steps a load makes, the later first.
 const STEP: &str = "Convert Regions to New Sampler Track";
@@ -373,13 +374,16 @@ pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Rest
     let Some(found) = there else {
         return Ok(Restored::by_value(json!({"deleted": created["ref"]}), json!({"title": format!("{} is gone already", quoted(&name))})));
     };
+    let regions = nudge::read(ctx.project.read_regions(ctx.ax))?;
     if !restore.discard {
-        let regions = nudge::read(ctx.project.read_regions(ctx.ax))?;
         let held = regions.iter().filter(|(track, _)| *track == found.place).count();
         if held > 1 {
             return Err(changed(format!("the Sampler track Kumi made ({}) holds {held} regions now", quoted(&name))));
         }
     }
+    // The audio region the import made (muted by the conversion), to read back that the import's undo took it too.
+    let imported = imported_region(ctx, restore, &regions);
+    let epoch = ctx.project.epoch;
     let before = all.len();
     let mut pressed = vec![structure::undo_in_logic(ctx, watch, &restore.key, STEP, None)?];
     // The import right under the conversion: Kumi's too, since nothing came between them. Logic moves its Undo title
@@ -393,7 +397,8 @@ pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Rest
         (titles, verified) = watch.fresh_titles(ctx)?;
     }
     let mut note = "Put back with Logic Pro's own undo; the copies of the file stay in the project's folder.".to_string();
-    if verified && titles.undo_action(&ctx.project.strings).as_deref() == Some(IMPORT_STEP) {
+    let import_on_top = verified && titles.undo_action(&ctx.project.strings).as_deref() == Some(IMPORT_STEP);
+    if import_on_top {
         let mut menus = vec!["Edit".to_string()];
         menus.extend(ctx.project.strings.candidates("Edit"));
         if let Some(shown) = menus.iter().find_map(|menu| ctx.ax.menu(&[menu.as_str(), titles.undo.as_str()]).ok()) {
@@ -403,16 +408,69 @@ pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Rest
     } else {
         note = format!("{note} The audio region the sample came in on stays: Logic Pro's Edit menu says {:?}.", titles.undo);
     }
-    timeline::look(ctx).map_err(|(_, why)| super::uncertain(why))?;
+    let regions_after = look_regions(ctx).map_err(|(_, why)| super::uncertain(why))?;
     let after = nudge::wrote(tracks::headers(ctx))?;
     if after.len() >= before {
-        return Err(super::uncertain(format!("Logic Pro's {:?} was pressed, but the Sampler track is still there", pressed[0])));
+        return Err(super::uncertain(format!("Logic Pro's {} was pressed, but the Sampler track is still there", quoted(&pressed[0]))));
+    }
+    // The import's undo named on top: the audio region it made is gone too, or its step didn't land.
+    if let Some((track, start, end)) = imported.filter(|_| import_on_top) {
+        let track_now = ctx.project.carry_track(epoch, track).unwrap_or(track);
+        let at = |regions: &[(usize, Region)], track: usize| {
+            regions.iter().filter(|(t, region)| *t == track && !region.midi && region.start == start && region.end == end).count()
+        };
+        if at(&regions_after, track_now) >= at(&regions, track) {
+            let label = track_now
+                .checked_sub(1)
+                .and_then(|at| after.get(at))
+                .map(tracks::Found::label)
+                .unwrap_or_else(|| format!("track {track_now}"));
+            let file = stem(restore.applied["file"].as_str().unwrap_or_default());
+            return Err(super::uncertain(format!(
+                "Logic Pro took the Sampler track back, but its {} didn't land: the audio region of {} is still on {}",
+                quoted(&titles.undo),
+                quoted(&file),
+                quoted(&label)
+            )));
+        }
     }
     Ok(Restored {
         restored: json!({"deleted": created["ref"], "pressed": pressed}),
         display: json!({"title": format!("{} taken back", quoted(&name)), "note": note}),
         undone_in_logic: true,
     })
+}
+
+/// One focus refresh, as `timeline::look` makes it, with the regions it read.
+fn look_regions(ctx: &mut Ctx) -> Done<Vec<(usize, Region)>> {
+    nudge::read(tracks::ensure_layout(ctx))?;
+    let (_, _, regions) = nudge::read(ctx.project.look(ctx.ax, None))?;
+    Ok(regions)
+}
+
+/// The audio region a load's import made, as the regions read now show it: its track's place and its bounds. The
+/// apply's `created.source` carried to now; else the audio region on the load's audio track that starts where the
+/// Sampler's region does, named after the file.
+fn imported_region(ctx: &Ctx, restore: &Restore, regions: &[(usize, Region)]) -> Option<(usize, Position, Position)> {
+    let created = restore.created?;
+    let audio = |place: usize| regions.get(place.checked_sub(1)?).filter(|(_, region)| !region.midi);
+    let by_ref = created
+        .get("source")
+        .and_then(Value::as_str)
+        .and_then(Ref::parse)
+        .and_then(|source| ctx.project.carry_region(source.epoch, source.first()))
+        .and_then(audio);
+    let found = by_ref.or_else(|| {
+        let epoch = Ref::parse(created.get("ref")?.as_str()?)?.epoch;
+        let track = ctx.project.carry_track(epoch, restore.applied["sourceTrack"].as_u64()? as usize)?;
+        let start = restore.applied["startBeats"].as_f64()?;
+        let file = stem(restore.applied["file"].as_str()?);
+        let per_bar = ctx.project.transport.beats_per_bar();
+        regions.iter().find(|(at, region)| {
+            *at == track && !region.midi && (region.start.beats(per_bar) - start).abs() < 1e-6 && region.name.starts_with(&file)
+        })
+    })?;
+    Some((found.0, found.1.start, found.1.end))
 }
 
 #[cfg(test)]
