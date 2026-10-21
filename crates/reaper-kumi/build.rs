@@ -379,6 +379,9 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
         None => (false, base),
     };
     match (stars, constant, base) {
+        // (GetTrackInfo's `track`: a number REAPER reads as a MediaTrack* when it isn't a track's index, so any other
+        // number crashes it; GetTrack, GetTrackName and GetMediaTrackInfo_Value read the same by ref)
+        (0, _, "INT_PTR") => Err("a number REAPER also reads as a pointer (INT_PTR)".into()),
         (0, _, b) => match scalar_kind(b) {
             Some(kind) => Ok(match kind {
                 "int" => format!("c.int({}, {name:?}, {optional})? as _", at(k)),

@@ -3670,6 +3670,17 @@ fn a_buffer_reaper_isnt_told_the_size_of_is_never_smaller_than_64_kib_whatever_t
 }
 
 #[test]
+fn a_number_reaper_also_reads_as_a_pointer_cant_be_given_to_the_generic_call() {
+    // GetTrackInfo's `track` is a track's index or, past them, a MediaTrack* cast to a number: 123456789 crashes REAPER.
+    use crate::reaper::generic::{function, uncallable};
+    let index = function("GetTrackInfo").unwrap();
+    assert!(uncallable(index).is_some_and(|why| why.contains("pointer")), "{:?}", uncallable(index));
+    let lab = Lab::new();
+    let (_, message) = call_read(&lab, json!({"kind": "call", "fn": "GetTrackInfo", "args": [123_456_789]})).unwrap_err();
+    assert!(message.contains("pointer"), "{message}");
+}
+
+#[test]
 fn binary_data_with_its_size_and_arrays_reaper_fills_cant_be_passed_to_the_generic_call() {
     use crate::reaper::generic::{function, uncallable};
     for (name, why) in [
