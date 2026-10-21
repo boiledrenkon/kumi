@@ -326,3 +326,13 @@ test("patterns: an alias's record follows its patterns through a pattern made an
   eq(cells(3, 2, 1, 8), "3=E-4", "its own lines back, in the pattern where it is now")
   H.no_dialogs()
 end)
+
+test("patterns: a longer pattern says it shows kept lines only when there are some, reading the region once (#361 N-S20)", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local plain = K.preview(peer, "pattern-length", { ref = K.ref(E, "pattern", 1), lines = 64 })
+  eq(plain.display.note, nil, "nothing was kept past its end: nothing to say")
+  mock.ops.set_note(1, 2, 40, 1, { note = 48 }) -- a line past its end, kept hidden
+  local kept = K.preview(peer, "pattern-length", { ref = K.ref(K.place(peer), "pattern", 1), lines = 64 })
+  ok((kept.display.note or ""):find("hold what was kept", 1, true), tostring(kept.display.note))
+end)

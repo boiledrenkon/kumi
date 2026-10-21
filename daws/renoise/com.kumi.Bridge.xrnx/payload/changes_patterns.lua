@@ -134,12 +134,14 @@ base.register({
 -- automation points) are as the change left them: the producer's lines written into a pattern Kumi made longer would go out of
 -- sight.
 
--- The lines from `from` to `to` of every track of the pattern, and the automation points in them, as a short fingerprint.
+-- The lines from `from` to `to` of every track of the pattern, and the automation points in them, as a short fingerprint; "none"
+-- when they hold nothing. (An empty pattern track's lines aren't read: only its automation.)
 local function region_print(song, p, from, to)
   if from > to then return "none" end
   local pattern = song:pattern(p)
-  local a, b = 5381, 0
+  local a, b, any = 5381, 0, false
   local function add(text)
+    any = true
     for i = 1, #text do
       local byte = text:byte(i)
       a = (a * 33 + byte) % 4294967296
@@ -149,7 +151,7 @@ local function region_print(song, p, from, to)
   for t = 1, rows.track_count(song) do
     local pattern_track = pattern:track(t)
     if not pattern_track.is_alias then
-      for l = from, to do
+      for l = from, pattern_track.is_empty and from - 1 or to do
         local line = pattern_track:line(l)
         if not line.is_empty then
           add(t .. ":" .. l .. "=")
@@ -173,7 +175,7 @@ local function region_print(song, p, from, to)
       end
     end
   end
-  return string.format("%08x%08x", a, b)
+  return any and string.format("%08x%08x", a, b) or "none"
 end
 M.region_print = region_print
 
@@ -191,11 +193,12 @@ end
 local function length_title(label, lines) return string.format("%s %d lines", label, lines) end
 
 -- (the lines by Renoise's numbers, from 00)
-local function length_note(song, p, old, new)
+-- (`region`: the region's print, read once a callback)
+local function length_note(old, new, region)
   if new < old then
     return string.format("Lines %02d to %02d are kept, hidden: making it longer again shows them.", new, old - 1)
   end
-  if new > old and region_print(song, p, old + 1, new) ~= "none" then
+  if new > old and region ~= "none" then
     return string.format("Lines %02d to %02d hold what was kept there, hidden: it shows again.", old, new - 1)
   end
   return nil
@@ -209,12 +212,13 @@ end
 local function length_preview(song, env, input)
   local p, pattern, label = length_locate(song, env, input.ref)
   local old, new = pattern.number_of_lines, length_input(input)
-  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(song, p, old, new) }
-  if old == new then display.unchanged = true end
   local low, high = math.min(old, new), math.max(old, new)
+  local region = region_print(song, p, low + 1, high)
+  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(old, new, region) }
+  if old == new then display.unchanged = true end
   return {
     target = pattern_target(env, p), prior = { lines = old },
-    fence = { lines = old, region = region_print(song, p, low + 1, high), name = pattern.name },
+    fence = { lines = old, region = region, name = pattern.name },
     display = display,
   }
 end
@@ -224,10 +228,11 @@ local function length_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(p) end
   local old, new = pattern.number_of_lines, length_input(input)
   local low, high = math.min(old, new), math.max(old, new)
-  if old ~= fence.lines or pattern.name ~= fence.name or region_print(song, p, low + 1, high) ~= fence.region then
+  local region = region_print(song, p, low + 1, high)
+  if old ~= fence.lines or pattern.name ~= fence.name or region ~= fence.region then
     fail("changed", label .. " changed since the preview")
   end
-  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(song, p, old, new) }
+  local display = { title = length_title(label, new), before = { lines = old }, after = { lines = new }, note = length_note(old, new, region) }
   if old == new then
     display.unchanged = true
     return { applied = { lines = new }, display = display, undo = { desc = desc, entry = false }, prior = { lines = old } }
