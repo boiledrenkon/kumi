@@ -1632,7 +1632,8 @@ fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_faded_muted_or_put_a_ta
     .unwrap();
     let restore = json!({"kind": "scratch-keep", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo Kept (k10)"});
     // What the producer does to the kept track's items, none of it its FX, fader or envelopes.
-    let edits: [(&str, fn(&mut fake::FakeTrack)); 4] = [
+    type Edit = fn(&mut fake::FakeTrack);
+    let edits: [(&str, Edit); 4] = [
         ("a fade", |t| {
             t.items[0].extra.insert("D_FADEINLEN".into(), 0.25);
         }),
