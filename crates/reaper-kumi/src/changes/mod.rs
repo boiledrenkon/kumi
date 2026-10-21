@@ -136,6 +136,22 @@ impl Written for Restored {
     }
 }
 
+/// The undo block a change runs in, ended as it is dropped by a panic before its own end: as a write (flags -1), so
+/// REAPER's undo takes back whatever the change wrote before it stopped.
+struct OpenBlock<'c, 'a, 'r> {
+    ctx: &'c Ctx<'a, 'r>,
+    desc: &'c str,
+    armed: bool,
+}
+
+impl Drop for OpenBlock<'_, '_, '_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.ctx.reaper.undo_end(self.ctx.proj, self.desc, -1);
+        }
+    }
+}
+
 /// A kind of change.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -572,6 +588,8 @@ impl Changes {
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
+        // A panic inside (caught per request) would leave the block open, and every later edit of the producer's in it.
+        let mut open = OpenBlock { ctx, desc, armed: !in_plan };
         // (r-tracks) Where REAPER's history stood before an action: one that moved it itself (a script that undoes) is told.
         let history = (marks && !in_plan).then(|| (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
         ctx.unkept.set(false);
@@ -589,6 +607,7 @@ impl Changes {
         // Inside the block REAPER's history doesn't move, but for an undo or redo the action ran: then the watch isn't told
         // the history is Kumi's own, and its next look tells HISTORY what was taken back or made again.
         let moved = history.is_some_and(|before| before != (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
+        open.armed = false;
         ctx.reaper.undo_end(ctx.proj, desc, if wrote && !marks { -1 } else { 0 });
         if moved {
             if wrote {

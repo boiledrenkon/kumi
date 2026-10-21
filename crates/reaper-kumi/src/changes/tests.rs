@@ -872,6 +872,20 @@ fn a_plan_is_one_undo_block_and_its_changes_open_none_of_their_own() {
 }
 
 #[test]
+fn a_change_that_panics_inside_its_undo_block_leaves_no_block_open() {
+    // The extension catches a panic per request; a block left open would swallow every later edit (review R15).
+    let lab = Lab::new();
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let ctx = lab.changes.context(&reaper, &lab.reads, &json!({"epoch": lab.reads.epoch()})).unwrap();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = lab.changes.in_block::<super::Applied>(&ctx, "Kumi: boom (kpn01)", true, false, |_| panic!("a bug"));
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(state(|s| s.undo_depth), 0, "the block is ended");
+}
+
+#[test]
 fn a_step_in_a_plan_says_whether_the_plans_point_takes_it_back() {
     let lab = Lab::new();
     let step = lab.call("undo_step_begin", json!({"label": "Kumi: a plan (kcov1)"})).unwrap();
