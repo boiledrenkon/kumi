@@ -491,7 +491,15 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path) -> Result
     let started = Instant::now();
     let failure = |e: String| RuntimeError::plain(e);
     let host = Rc::new(InProcess { host: Arc::new(Host::new(scenario.daw, home)), id: Cell::new(0) });
-    let status = host_call(&host, "status", json!({})).await.map_err(failure)?;
+    // (a DAW just started takes a while to load its bridge)
+    let mut status = Value::Null;
+    for _ in 0..60 {
+        status = host_call(&host, "status", json!({})).await.map_err(failure)?;
+        if status.get("connected") == Some(&Value::Bool(true)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     if status.get("connected") != Some(&Value::Bool(true)) {
         return Err(RuntimeError::plain(format!("the lab DAW isn't connected: {status}")));
     }
