@@ -477,6 +477,43 @@ test("changes: a restore finds the track there already and says changed, unless 
   H.no_dialogs()
 end)
 
+test("changes: a numbered restore whose connection goes after its first step runs to its end, unheard (#361 N-S4)", function()
+  local env, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_base.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local lowered = text:gsub("M%.SLICE_WRITES = %d+", "M.SLICE_WRITES = 40")
+    f = assert(io.open(path, "wb"))
+    f:write(lowered)
+    f:close()
+  end })
+  for p = 1, 3 do
+    for k = 1, 10 do
+      local column = mock.song:pattern(p):track(2):line(k):note_column(1)
+      column.note_value, column.instrument_value, column.volume_value = 40 + k, 1, 64
+    end
+  end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch = place(peer)
+  local previewed, _, layout = preview(peer, "track-delete", { ref = track_ref(epoch, 2) })
+  local before = snapshot_of_track(2)
+  local done = apply(peer, "track-delete", { ref = track_ref(epoch, 2) }, "Kumi: d (ks41)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  H.send(peer, { type = "request", id = 9041, method = "change_restore", params = { kind = "track-delete", target = previewed.target,
+    prior = previewed.prior, applied = done.result.applied, material = done.result.material, desc = "Kumi: undo d (ks42)", epoch = epoch,
+    layout = done.result.layout } })
+  for _ = 1, 50 do
+    mock.advance(10)
+    if steps() >= 2 then break end
+  end
+  eq(steps(), 2, "its first step is in")
+  peer:close() -- Kumi quits (or its host restarts) between the steps
+  for _ = 1, 100 do mock.advance(10) end
+  eq(steps(), 4, "every step ran")
+  eq(snapshot_of_track(2), before, "the whole track is back, not half of it")
+end)
+
 test("changes: a restore too big for one callback is numbered steps, each its own, and ends with the whole track", function()
   local env, peer = setup({ patch = function(env)
     local path = env.bundle .. "payload/changes_base.lua"
