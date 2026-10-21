@@ -1,102 +1,83 @@
-//! Renoise's variations (M7): numbered takes V1…Vn of a pattern track's lines, of a phrase, or new phrases for an instrument.
-//! The model says what defines the source (its anchor lines) and gives each take's recipe (operators, or lines it writes
-//! itself); Kumi reads the source, draws each take from its seed and checks it against the source and the other takes
-//! (re-rolling one too close or too far), writes each as one change (a phrase, or a slot of its own in a "Variations of …"
-//! section), and answers a line per take. Keep, change and drop go by take number: a change or a drop never touches the source
-//! or a kept take, and leaves alone a take the producer edited since Kumi wrote it.
+//! Renoise's backend for the variations tool (M7): only Renoise's facts. Its material is a pattern track's lines or a phrase's
+//! (`renoise_lines`), its operators shuffle slices, roll, reverse and move ghosts, and its takes are phrases of an instrument or
+//! slots of their own in a "Variations of …" section (a copy of the source pattern whose other tracks are aliases of the source's).
+//! Takes are found by the places the tool's logs follow, else by the names Kumi gave them; the source pattern, track and
+//! instrument the same way. Pattern takes render on the source's track from their slots, phrase takes through players of their
+//! phrases (scratch tracks, gone after). Core's tool does the rest.
 use super::own_bridge::follow_epoch;
 use super::own_changes::OwnPlan;
 use super::own_listening::OwnRenderer;
-use super::renoise_lines::{note_value, Lines, Op};
+use super::renoise_lines::{note_text, note_value, Lines, Op};
 use crate::core::{
-    contracts::{JsonObject, KernelTool, Reach, Render, ToolResult},
-    errors::RuntimeError,
+    contracts::JsonObject,
     refs::RefScheme,
-    variations::{roll, seed_of, Bounds, Material, Purpose, Take, TakeSet, TakeState, Verdict, DIRECTIONS},
+    variations::{
+        backend::{Rendered, Source, VariationsBackend, Words},
+        heard::{heard_of, Heard},
+        tool::names,
+        Rng, TakeSet, TakeState,
+    },
 };
 use async_trait::async_trait;
 use kumi_common::abort::Signal;
-use kumi_common::js::json::stringify;
-use serde_json::{json, Value};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use serde_json::{json, Map, Value};
+use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc};
 
-/// The most takes one request makes or changes, and the sets Kumi keeps.
-const MOST_TAKES: usize = 16;
-const SETS_KEPT: usize = 8;
-/// How many draws a take gets before Kumi gives up on it.
-const TRIES: u32 = 8;
 /// Pages of lines read for a source (200 lines a page: a 512-line pattern is three).
 const LINE_PAGES: usize = 8;
-const NAME_MOST: usize = 64;
+/// An instrument holds 126 phrases (0Z01 to 0Z7E).
+const MOST_PHRASES: u64 = 126;
+/// The longest a phrase take plays in its render (beats).
+const PHRASE_BEATS_MOST: f64 = 32.;
 
-const DESCRIPTION: &str = concat!(
-    "Variations in Renoise: numbered takes V1, V2… of a source, each its own phrase or slot, never written over the source. ",
-    "make: source is a pattern track's lines (patternRef, or a slot for its pattern; trackRef; first and last, as Renoise numbers lines, from 00), ",
-    "a phrase (phraseRef), or an instrument (instrumentRef: new phrases from lines you write); anchors are lines every take keeps as they are ",
-    "(the kick and snare that make it the producer's). Each of takes is a recipe: ops (",
-    "shuffle, retrig, reverse, ghosts, thin, fill, accent, octave, transpose, swing, offsets, speed; amount 0 to 1), ",
-    "lines you write yourself (as notes_write takes them, numbered as the source's lines), and/or from: \"V2\" to start from another take; ",
-    "direction names it in a few words. count without takes picks distinct directions. ",
-    "place: patterns (each take a slot of its own in a \"Variations of …\" section at the sequence's end, its other tracks playing the source pattern's, ",
-    "so playing it plays the take in context; the default for a pattern's lines) or phrases (new phrases of the instrument; the default otherwise; ",
-    "phrase sets their keyTracking, baseNote (48 is C-4), lines and lpb). Kumi draws each take, checks it differs from the source and the other takes yet ",
-    "keeps the anchors and the idea (re-rolling up to 8 times; novelty subtle, clear or bold), writes each as one change, and answers a line per take. ",
-    "change: names (\"V6\", or \"rest\": every take not kept) and takes (a recipe each, in order; left out, Kumi picks distinct directions) rewrite only ",
-    "those takes, one change each: kept takes and the source are never touched (force: true only when the producer named a kept take), and a take the ",
-    "producer edited is left as it is. keep: names; at places one take: a phrase on keys [low, high], as the instrument's program, or switchAt ",
-    "{patternRef, trackRef, line, col}: a 0Zxx there plays it (how a pattern switches to a faster copy, since a phrase's LPB is fixed); a pattern take ",
-    "over the source's lines, after the source's slot, or at index. drop: names (\"rest\" by default) go in one change. extract: one phrase of a pattern ",
-    "track's lines (source), relative to a base note so key tracking plays it from any key (phrase.baseNote: the note that plays it as written, its ",
-    "first note by default; keyTracking none for a chop). list: the set's takes. Effect commands as Renoise writes them: 0Sxx sample offset, 0Rxy ",
-    "retrig, 0B00 reverse, 0Zxx phrase."
-);
+pub static WORDS: Words = Words {
+    app: "Renoise",
+    sources: "a pattern track's lines (patternRef, or a slot for its pattern and its matrix mutes; trackRef; first and last, as Renoise numbers lines, from 00), a phrase (phraseRef), or an instrument (instrumentRef: new phrases from lines you write)",
+    anchors: "the lines (as Renoise numbers them) every take keeps as they are: the kick and snare that make it the producer's",
+    ops: "shuffle, retrig, reverse, ghosts, thin, fill, accent, octave, transpose, swing, offsets, speed; amount 0 to 1",
+    lines: "lines you write, as notes_write takes them, numbered as the source's lines",
+    places: "patterns (each take a slot of its own in a \"Variations of …\" section at the sequence's end, its other tracks playing the source pattern's, so playing it plays the take in context: a play or render of the whole song plays them too, and drop removes the ones not kept; the default for a pattern's lines) or phrases (new phrases of the instrument; the default otherwise)",
+    place_names: &["patterns", "phrases"],
+    at: "a phrase on keys [low, high], as the instrument's program, or switchAt {patternRef, trackRef, line, col}: a 0Zxx there plays it (how a pattern switches to a faster copy, since a phrase's LPB is fixed); a pattern take over the source's lines, after the source's slot, or at index",
+    options: "a phrase take's instrumentRef (a pattern's lines become phrases of the instrument their notes play by default), keyTracking, baseNote (48 is C-4: the note that plays it as written), lines, lpb and name",
+    extract: Some("one phrase of a pattern track's lines (source), relative to a base note so key tracking plays it from any key (options.baseNote: its first note by default; keyTracking none for a chop)."),
+    idioms: "Renoise numbers lines from 00 as it shows them; effect commands as Renoise writes them: 0Sxx sample offset, 0Rxy retrig, 0B00 reverse, 0Zxx phrase.",
+    directions: &["denser", "sparser", "more reverses", "shifted accents", "faster rolls", "swapped slices", "moved ghosts", "an octave up"],
+    source_schema: r#"{"type":"object","additionalProperties":false,"properties":{"patternRef":{"type":"string","description":"The pattern, or a sequence slot for its pattern (its mutes go with the takes)"},"trackRef":{"type":"string"},"first":{"type":"integer","minimum":0},"last":{"type":"integer","minimum":0},"phraseRef":{"type":"string"},"instrumentRef":{"type":"string"}}}"#,
+    op_schema: r#"{"type":"object","additionalProperties":false,"required":["op"],"properties":{"op":{"type":"string","enum":["shuffle","retrig","reverse","ghosts","thin","fill","accent","octave","transpose","swing","offsets","speed"]},"amount":{"type":"number","minimum":0,"maximum":1},"bar":{"type":"boolean"},"faster":{"type":"boolean"},"up":{"type":"boolean"},"volume":{"type":"string"},"semitones":{"type":"integer"},"factor":{"type":"number"}}}"#,
+    options_schema: r#"{"type":"object","additionalProperties":false,"properties":{"instrumentRef":{"type":"string","description":"The instrument a pattern's lines become phrases of (the one its notes play by default)"},"keyTracking":{"type":"string","enum":["none","transpose","offset"]},"baseNote":{"type":"integer","minimum":0,"maximum":119},"lines":{"type":"integer","minimum":1,"maximum":512},"lpb":{"type":"integer","minimum":1,"maximum":256},"name":{"type":"string","maxLength":64}}}"#,
+    at_schema: r#"{"type":"object","additionalProperties":false,"properties":{"keys":{"type":"array","items":{"type":"integer","minimum":0,"maximum":119},"minItems":2,"maxItems":2},"program":{"type":"boolean"},"switchAt":{"type":"object","additionalProperties":false,"required":["patternRef","trackRef","line"],"properties":{"patternRef":{"type":"string"},"trackRef":{"type":"string"},"line":{"type":"integer","minimum":0},"col":{"type":"integer","minimum":1,"maximum":8}}},"over":{"type":"boolean"},"after":{"type":"boolean"},"index":{"type":"integer","minimum":1}}}"#,
+};
 
-const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["action"],"properties":{
-"action":{"type":"string","enum":["make","change","keep","drop","extract","list"]},
-"set":{"type":"integer","minimum":1,"description":"Which set of takes (the latest by default)"},
-"source":{"type":"object","additionalProperties":false,"properties":{"patternRef":{"type":"string","description":"The pattern, or a sequence slot for its pattern"},"trackRef":{"type":"string"},"first":{"type":"integer","minimum":0},"last":{"type":"integer","minimum":0},"phraseRef":{"type":"string"},"instrumentRef":{"type":"string"}}},
-"anchors":{"type":"array","maxItems":512,"items":{"type":"integer","minimum":0},"description":"Lines (as Renoise numbers them) every take keeps as they are"},
-"place":{"type":"string","enum":["patterns","phrases"]},
-"count":{"type":"integer","minimum":1,"maximum":16},
-"takes":{"type":"array","maxItems":16,"items":{"type":"object","additionalProperties":false,"properties":{"direction":{"type":"string","maxLength":80},"from":{"type":"string","description":"Another take to start from, such as V2"},"ops":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,"required":["op"],"properties":{"op":{"type":"string","enum":["shuffle","retrig","reverse","ghosts","thin","fill","accent","octave","transpose","swing","offsets","speed"]},"amount":{"type":"number","minimum":0,"maximum":1},"bar":{"type":"boolean"},"faster":{"type":"boolean"},"up":{"type":"boolean"},"volume":{"type":"string"},"semitones":{"type":"integer"},"factor":{"type":"number"}}}},"lines":{"type":"array","maxItems":512,"items":{"type":"object"},"description":"Lines you write, as notes_write takes them"}}}},
-"names":{"type":"array","maxItems":32,"items":{"type":"string"},"description":"Takes: V3, or rest"},
-"force":{"type":"boolean"},
-"novelty":{"type":"string","enum":["subtle","clear","bold"]},
-"seed":{"type":"integer","minimum":0},
-"listen":{"type":"boolean","description":"false skips rendering the pattern takes to hear them (on by default)"},
-"phrase":{"type":"object","additionalProperties":false,"properties":{"instrumentRef":{"type":"string","description":"The instrument a pattern's lines become phrases of (the one its notes play by default)"},"keyTracking":{"type":"string","enum":["none","transpose","offset"]},"baseNote":{"type":"integer","minimum":0,"maximum":119},"lines":{"type":"integer","minimum":1,"maximum":512},"lpb":{"type":"integer","minimum":1,"maximum":256},"name":{"type":"string","maxLength":64}}},
-"at":{"type":"object","additionalProperties":false,"properties":{"keys":{"type":"array","items":{"type":"integer","minimum":0,"maximum":119},"minItems":2,"maxItems":2},"program":{"type":"boolean"},"switchAt":{"type":"object","additionalProperties":false,"required":["patternRef","trackRef","line"],"properties":{"patternRef":{"type":"string"},"trackRef":{"type":"string"},"line":{"type":"integer","minimum":0},"col":{"type":"integer","minimum":1,"maximum":8}}},"over":{"type":"boolean"},"after":{"type":"boolean"},"index":{"type":"integer","minimum":1}}}
-}}"#;
-
-/// What a set varies, and where its takes go.
-#[derive(Debug, Clone)]
-pub struct SetInfo {
+/// Where a set's source is, and where its takes go.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenoiseData {
     kind: SourceKind,
-    /// "lines 00–0F of “Break” on “Drums”", for the answer.
-    label: String,
-    /// The pattern's or phrase's name, for the takes' names.
-    short: String,
-    /// What the source holds (in the takes' form: a pattern's lines bound for phrases lose their instrument column);
-    /// None for an instrument's new phrases.
-    material: Option<Lines>,
     placement: Placement,
+    /// The instrument a phrase set's takes are in, by name (found by it when its place is lost).
+    instrument_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum SourceKind {
-    /// A pattern track's lines first..=last: the pattern by its place in the pool, the track by its ref at `layout`.
+    /// A pattern track's lines first..=last: the pattern by its place in the pool, the track by its ref at `layout` (and its name),
+    /// the source slot when the model named one (its mutes go with each take).
     Range {
         pattern: Value,
         track: String,
+        track_name: String,
         layout: Option<u64>,
         first: u32,
         last: u32,
+        slot: Option<u64>,
     },
-    Phrase,
+    Phrase {
+        place: Value,
+    },
     Instrument,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Placement {
     /// New phrases of the instrument (its place), made with these settings.
     Phrases { instrument: Value, settings: JsonObject },
@@ -104,79 +85,18 @@ enum Placement {
     Patterns { section: String },
 }
 
-type Set = TakeSet<SetInfo, Value, Lines>;
+/// Renoise's sets (the backend's `Set`, whatever its refs).
+type RenoiseSet = TakeSet<Source<Lines, RenoiseData>, Value, Lines>;
 
-/// One take's recipe.
-#[derive(Debug, Clone, Default)]
-struct Recipe {
-    direction: String,
-    ops: Vec<Op>,
-    lines: Option<Vec<Value>>,
-    from: Option<usize>,
-    /// Kumi picked its direction (the model left it): one that can't pass gives way to another direction.
-    picked: bool,
-}
-
-impl Recipe {
-    fn parse(value: &Value) -> Result<Recipe, String> {
-        let ops =
-            value.get("ops").and_then(Value::as_array).map(|ops| ops.iter().map(Op::parse).collect::<Result<Vec<_>, _>>()).transpose()?;
-        let from = match value.get("from").and_then(Value::as_str) {
-            Some(name) => Some(
-                name.trim().trim_start_matches(['V', 'v']).parse::<usize>().map_err(|_| format!("from: {name} isn't a take such as V2"))?,
-            ),
-            None => None,
-        };
-        let lines = value.get("lines").and_then(Value::as_array).cloned();
-        let ops = ops.unwrap_or_default();
-        if ops.is_empty() && lines.is_none() && from.is_none() {
-            return Err("each take needs ops, lines or from".into());
-        }
-        let direction = value.get("direction").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        Ok(Recipe { direction, ops, lines, from, picked: false })
-    }
-
-    /// A recipe Kumi picks for a direction the model left to it.
-    fn of_direction(direction: &str) -> Recipe {
-        let op = |value: Value| Op::parse(&value).expect("a known operator");
-        let ops = match direction {
-            "denser" => vec![op(json!({"op": "fill", "amount": 0.3})), op(json!({"op": "retrig", "amount": 0.2}))],
-            "sparser" => vec![op(json!({"op": "thin", "amount": 0.35}))],
-            "more reverses" => vec![op(json!({"op": "reverse", "amount": 0.4}))],
-            "shifted accents" => vec![op(json!({"op": "accent", "amount": 0.6}))],
-            "faster rolls" => vec![op(json!({"op": "retrig", "amount": 0.4}))],
-            "swapped slices" => vec![op(json!({"op": "shuffle", "amount": 0.6}))],
-            "moved ghosts" => vec![op(json!({"op": "ghosts", "amount": 0.8})), op(json!({"op": "fill", "amount": 0.15}))],
-            _ => vec![op(json!({"op": "octave", "amount": 0.4, "up": true}))],
-        };
-        Recipe { direction: direction.into(), ops, lines: None, from: None, picked: true }
-    }
-}
-
-/// The takes a request writes, before they're written: their number, material, recipe's direction and what was done.
-struct Drawn {
-    number: usize,
-    material: Lines,
-    direction: String,
-    said: Vec<String>,
-    distance: Option<f64>,
-}
-
-/// The variations of one Renoise song (the sets live as long as the integration).
-pub struct RenoiseVariations<S: RefScheme + 'static> {
+/// Renoise's backend, through Kumi's change engine (its changes) and renderer (its renders).
+pub struct RenoiseBackend<S: RefScheme + 'static> {
     plan: Rc<OwnPlan<S>>,
-    /// Renders the pattern takes offline, to hear them before they're shown.
     renderer: Rc<OwnRenderer<S>>,
-    sets: RefCell<Vec<Set>>,
 }
 
-impl<S: RefScheme + 'static> RenoiseVariations<S> {
-    pub fn new(plan: Rc<OwnPlan<S>>, renderer: Rc<OwnRenderer<S>>) -> Rc<Self> {
-        Rc::new(RenoiseVariations { plan, renderer, sets: RefCell::default() })
-    }
-
-    pub fn tool(self: &Rc<Self>) -> Rc<dyn KernelTool> {
-        Rc::new(VariationsTool { owner: self.clone() })
+impl<S: RefScheme + 'static> RenoiseBackend<S> {
+    pub fn new(plan: Rc<OwnPlan<S>>, renderer: Rc<OwnRenderer<S>>) -> Self {
+        RenoiseBackend { plan, renderer }
     }
 
     // Reading
@@ -191,15 +111,13 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         Ok(long)
     }
 
-    fn short(&self, long: &str) -> String {
-        self.plan.link().book.borrow_mut().short_ref(long)
-    }
-
-    /// A read through the tool, from the book's epoch (and `layout`, when the refs in it are from then): its answer.
+    /// A read through the tool, from the book's epoch when it names refs (and `layout`, when they are from then): its answer.
     async fn read(&self, mut args: Value, layout: Option<u64>, signal: &Signal) -> Result<Value, String> {
         let link = self.plan.link();
         let input = args.as_object().cloned().unwrap_or_default();
-        self.plan.place_request(&mut args, &input);
+        if ["parent", "track", "items", "ref"].iter().any(|key| input.contains_key(*key)) {
+            self.plan.place_request(&mut args, &input);
+        }
         if let Some(layout) = layout {
             args["layout"] = layout.into();
         }
@@ -238,44 +156,179 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         Ok(answer.get("items").and_then(Value::as_array).cloned().unwrap_or_default())
     }
 
+    async fn song(&self, signal: &Signal) -> Option<Value> {
+        let song = self.read(json!({"kind": "song"}), None, signal).await.ok()?;
+        song.pointer("/items/0").cloned()
+    }
+
     async fn song_lpb(&self, signal: &Signal) -> u32 {
-        let song = self.read(json!({"kind": "song"}), None, signal).await.ok();
-        song.and_then(|song| song.pointer("/items/0/lpb").and_then(Value::as_u64)).unwrap_or(4) as u32
+        self.song(signal).await.and_then(|song| song.get("lpb").and_then(Value::as_u64)).unwrap_or(4) as u32
     }
 
-    /// A take's lines as they are now: its phrase's, or its pattern's on the source's track.
-    async fn take_lines(&self, info: &SetInfo, now: &Value, track: Option<&str>, signal: &Signal) -> Result<Lines, String> {
-        let reference = now.get("ref").and_then(Value::as_str).ok_or("the take wasn't found")?;
-        match (&info.kind, track) {
-            (SourceKind::Range { first, last, .. }, Some(track)) => {
-                let rows =
-                    self.rows(json!({"kind": "line", "parent": reference, "track": track, "hidden": true, "limit": 200}), signal).await?;
-                let lpb = info.material.as_ref().map_or(4, |material| material.lpb);
-                Ok(Lines::from_rows(&rows, *first, *last, lpb))
+    /// The ref of the instrument a phrase set's takes are in: by its place, else by its name.
+    async fn instrument_now(&self, set: &RenoiseSet, signal: &Signal) -> Result<String, String> {
+        let Placement::Phrases { instrument, .. } = &set.source.data.placement else {
+            return Err("this set's takes are no phrases".into());
+        };
+        let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await?;
+        if let Some(reference) = found.first().and_then(|row| row.get("ref")).and_then(Value::as_str) {
+            return Ok(reference.to_string());
+        }
+        let name = &set.source.data.instrument_name;
+        let rows = self.rows(json!({"kind": "instrument", "limit": 200}), signal).await?;
+        only_named(&rows, name).ok_or(format!("the instrument “{name}” isn't in the song where Kumi left it: read again"))
+    }
+
+    /// The source pattern's row now (a pattern-track set): by its place, else by its name when one pattern has it.
+    async fn pattern_now(&self, set: &RenoiseSet, signal: &Signal) -> Result<Value, String> {
+        let SourceKind::Range { pattern, .. } = &set.source.data.kind else { return Err("this set has no source pattern".into()) };
+        let found = self.locate(vec![json!({"pattern": pattern})], None, signal).await?;
+        if let Some(row) = found.into_iter().next().filter(|row| row.get("ref").is_some()) {
+            return Ok(row);
+        }
+        let rows = self.rows(json!({"kind": "pattern", "limit": 200}), signal).await?;
+        let reference = only_named(&rows, &set.source.short)
+            .ok_or(format!("the source pattern “{}” isn't in the song where Kumi left it: read again", set.source.short))?;
+        let again = self.locate(vec![json!({"pattern": reference})], None, signal).await?;
+        again.into_iter().next().filter(|row| row.get("ref").is_some()).ok_or("the source pattern isn't in the song any more".into())
+    }
+
+    /// The source track's ref now (a pattern-track set): carried from the layout it was read at, else by its name.
+    async fn track_now(&self, set: &RenoiseSet, signal: &Signal) -> Result<String, String> {
+        let SourceKind::Range { track, track_name, layout, .. } = &set.source.data.kind else {
+            return Err("this set has no source track".into());
+        };
+        if let Ok(found) = self.locate(vec![json!({"track": track})], *layout, signal).await {
+            if let Some(reference) = found.first().and_then(|row| row.get("ref")).and_then(Value::as_str) {
+                return Ok(reference.to_string());
             }
-            _ => {
-                let rows = self.rows(json!({"kind": "line", "parent": reference, "hidden": true, "limit": 200}), signal).await?;
-                let lines = now.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32;
-                let lpb = now.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32;
-                Ok(Lines::from_rows(&rows, 0, lines.max(1) - 1, lpb))
+        }
+        let rows = self.rows(json!({"kind": "track", "limit": 200}), signal).await?;
+        only_named(&rows, track_name).ok_or(format!("the source's track “{track_name}” isn't in the song where Kumi left it: read again"))
+    }
+
+    /// The refs of the instrument's phrases (or the song's patterns) by name, for takes found by their names.
+    async fn rows_by_name(&self, set: &RenoiseSet, signal: &Signal) -> Result<BTreeMap<String, String>, String> {
+        let rows = match &set.source.data.placement {
+            Placement::Phrases { .. } => {
+                let instrument = self.instrument_now(set, signal).await?;
+                self.rows(json!({"kind": "phrase", "parent": instrument, "limit": 200}), signal).await?
             }
+            Placement::Patterns { .. } => self.rows(json!({"kind": "pattern", "limit": 200}), signal).await?,
+        };
+        Ok(rows.iter().filter_map(|row| Some((row.get("name")?.as_str()?.to_string(), row.get("ref")?.as_str()?.to_string()))).collect())
+    }
+
+    /// Where the source's lines and each take's lines start in the song (beats), and the track to render them on.
+    async fn where_slots(
+        &self,
+        set: &mut RenoiseSet,
+        numbers: &[usize],
+        signal: &Signal,
+    ) -> Result<(f64, String, BTreeMap<usize, f64>), String> {
+        let source_row = self.pattern_now(set, signal).await?;
+        let track = self.track_now(set, signal).await?;
+        let found = self.find(set, numbers, signal).await?;
+        let rows = self.rows(json!({"kind": "sequence", "limit": 200}), signal).await?;
+        let starts: BTreeMap<String, f64> =
+            rows.iter().filter_map(|row| Some((row.get("ref")?.as_str()?.to_string(), row.get("positionBeats")?.as_f64()?))).collect();
+        let start = |row: &Value| row.get("seqRef").and_then(Value::as_str).and_then(|reference| starts.get(reference)).copied();
+        let source = start(&source_row).ok_or("no slot plays the source's pattern now")?;
+        let takes = numbers.iter().zip(&found).filter_map(|(number, row)| Some((*number, start(row)?))).collect();
+        Ok((source, track, takes))
+    }
+
+    /// One render of the track over `beats` from `from` (beats from the song's start), heard.
+    async fn hear(&self, from: f64, beats: f64, track: &str, signal: &Signal) -> Result<Heard, String> {
+        let sources = vec![json!({"id": "t", "what": "track", "ref": track, "stage": "pre-fader"})];
+        let window = crate::listening::renderer::Window { from, beats };
+        match self.renderer.render_sources(sources, window, signal).await {
+            Ok(Ok((files, _))) => match files.get("t") {
+                Some((render, _)) => heard_of(render, signal).await,
+                None => Err("the render made no file".to_string()),
+            },
+            Ok(Err(why)) => Err(why),
+            Err(error) => Err(error.to_string()),
         }
     }
 
-    /// The source's track now (a Range source): its ref, from the layout it was read at.
-    async fn source_track(&self, info: &SetInfo, signal: &Signal) -> Result<Option<String>, String> {
-        let SourceKind::Range { track, layout, .. } = &info.kind else { return Ok(None) };
-        let found = self.locate(vec![json!({"track": track})], *layout, signal).await?;
-        match found.first().and_then(|row| row.get("ref")).and_then(Value::as_str) {
-            Some(reference) => Ok(Some(reference.to_string())),
-            None => Err("the source's track isn't in the song any more".into()),
+    /// Phrase takes heard through players of their phrases: scratch tracks, one per phrase, made, rendered at once and dropped.
+    async fn hear_phrases(&self, set: &mut RenoiseSet, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String> {
+        let found = self.find(set, numbers, signal).await?;
+        let mut phrases: Vec<(Option<usize>, u64)> = Vec::new();
+        if let (true, SourceKind::Phrase { place }) = (with_source, &set.source.data.kind) {
+            let row = self.locate(vec![json!({"phrase": place})], None, signal).await?;
+            if let Some(index) = row.first().and_then(|row| row.get("index")).and_then(Value::as_u64) {
+                phrases.push((None, index));
+            }
         }
+        for (number, row) in numbers.iter().zip(&found) {
+            if let Some(index) = row.get("index").and_then(Value::as_u64) {
+                phrases.push((Some(*number), index));
+            }
+        }
+        if phrases.is_empty() {
+            return Err("the phrases weren't found".into());
+        }
+        let instrument = self.instrument_now(set, signal).await?;
+        let note = match &set.source.data.placement {
+            Placement::Phrases { settings, .. } => settings.get("baseNote").and_then(Value::as_u64).unwrap_or(48),
+            Placement::Patterns { .. } => 48,
+        };
+        let beats = numbers
+            .iter()
+            .filter_map(|n| set.take(*n))
+            .map(|take| take.material.length as f64 / take.material.lpb.max(1) as f64)
+            .fold(1., f64::max)
+            .min(PHRASE_BEATS_MOST);
+        let list: Vec<u64> = phrases.iter().map(|(_, index)| *index).collect();
+        let args = json!({"action": "make", "count": list.len(), "label": "variations", "range": {"fromBeat": 0, "beats": beats},
+            "phrases": {"instrument": instrument, "phrases": list, "note": note}});
+        let made = match self.renderer.ask("scratch", args, self.renderer.cleanup_signal()).await {
+            Ok(Ok(made)) => made,
+            Ok(Err(refused)) => return Err(refused.why),
+            Err(error) => return Err(error.to_string()),
+        };
+        let id = made.get("scratchId").and_then(Value::as_str).unwrap_or("").to_string();
+        let steps = made.pointer("/undo/steps").and_then(Value::as_u64).unwrap_or(0);
+        self.renderer.tell_scratch_steps(steps);
+        let sources: Vec<Value> = made
+            .get("copies")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(k, copy)| {
+                Some(json!({"id": format!("p{k}"), "what": "track", "ref": copy.get("ref")?.as_str()?, "stage": "pre-fader"}))
+            })
+            .collect();
+        let window = crate::listening::renderer::Window { from: 0., beats };
+        let rendered = self.renderer.render_sources(sources, window, signal).await;
+        self.renderer.drop_make(&id, steps).await;
+        let files = match rendered {
+            Ok(Ok((files, _))) => files,
+            Ok(Err(why)) => return Err(why),
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut heard = BTreeMap::new();
+        let mut source = None;
+        for (k, (number, _)) in phrases.iter().enumerate() {
+            let result = match files.get(&format!("p{k}")) {
+                Some((render, _)) => heard_of(render, signal).await,
+                None => Err("the render made no file".to_string()),
+            };
+            match number {
+                Some(number) => {
+                    heard.insert(*number, result);
+                }
+                None => source = result.ok(),
+            }
+        }
+        Ok((source, heard))
     }
 
-    // Changes
-
-    /// One change of Kumi's by its step's name: its change id and what the DAW answered, or why it wasn't made (and whether
-    /// the request must stop there).
+    /// One change of Kumi's by its step's name: its change id and what the DAW answered, or why it wasn't made (and whether the
+    /// request must stop there).
     async fn change(&self, tool: &str, input: Value, signal: &Signal) -> Result<(String, Value), (String, bool)> {
         *self.plan.last_applied.borrow_mut() = None;
         let outcome = self.plan.change_by(tool, input.as_object().cloned().unwrap_or_default(), signal.clone()).await;
@@ -288,146 +341,7 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         Ok((id, self.plan.last_applied.borrow_mut().take().unwrap_or(Value::Null)))
     }
 
-    // The tool
-
-    async fn run(&self, input: JsonObject, signal: Signal) -> Result<Value, String> {
-        let action = input.get("action").and_then(Value::as_str).unwrap_or("");
-        match action {
-            "make" => self.make(&input, &signal).await,
-            "change" => self.change_takes(&input, &signal).await,
-            "keep" => self.keep(&input, &signal).await,
-            "drop" => self.drop_takes(&input, &signal).await,
-            "extract" => self.extract(&input, &signal).await,
-            "list" => {
-                let sets = self.sets.borrow();
-                let set = pick_set(&sets, &input)?;
-                Ok(json!({"set": set.id, "source": set.source.label, "takes": set.lines()}))
-            }
-            _ => Err("action is make, change, keep, drop, extract or list".into()),
-        }
-    }
-
-    /// Reads the source a request names (and where its takes go): the set's info.
-    async fn source_of(&self, input: &JsonObject, signal: &Signal) -> Result<SetInfo, String> {
-        let source = input
-            .get("source")
-            .and_then(Value::as_object)
-            .ok_or("make needs a source: patternRef and trackRef (with first and last), phraseRef, or instrumentRef")?;
-        let text = |key: &str| source.get(key).and_then(Value::as_str);
-        let phrase = input.get("phrase").and_then(Value::as_object).cloned().unwrap_or_default();
-        let anchors: Vec<u32> =
-            input.get("anchors").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).map(|n| n as u32).collect();
-        let place = input.get("place").and_then(Value::as_str);
-        if let (Some(pattern), Some(track)) = (text("patternRef"), text("trackRef")) {
-            let (pattern, track) = (self.lengthen(pattern)?, self.lengthen(track)?);
-            let found = self.locate(vec![json!({"pattern": pattern}), json!({"track": track})], None, signal).await?;
-            let (pattern_row, track_row) = (&found[0], &found[1]);
-            let (Some(pattern_ref), Some(track_ref)) =
-                (pattern_row.get("ref").and_then(Value::as_str), track_row.get("ref").and_then(Value::as_str))
-            else {
-                return Err("that pattern or track isn't in the song any more: read again".into());
-            };
-            let length = pattern_row.get("lines").and_then(Value::as_u64).unwrap_or(64) as u32;
-            let first = source.get("first").and_then(Value::as_u64).unwrap_or(0) as u32;
-            let last = source.get("last").and_then(Value::as_u64).map_or(length - 1, |n| n as u32);
-            if first > last || last >= length {
-                return Err(format!("first and last are lines from 00 to {:02} of this pattern, first not after last", length - 1));
-            }
-            let lpb = self.song_lpb(signal).await;
-            let rows =
-                self.rows(json!({"kind": "line", "parent": pattern_ref, "track": track_ref, "hidden": true, "limit": 200}), signal).await?;
-            let mut material = Lines::from_rows(&rows, first, last, lpb);
-            material.anchors = anchors_in(&anchors, first, last)?;
-            let pattern_name =
-                named(pattern_row, &format!("Pattern {:02}", pattern_row.get("number").and_then(Value::as_u64).unwrap_or(0)));
-            let track_name = named(track_row, "the track");
-            let label = format!("lines {first:02}–{last:02} of “{pattern_name}” on “{track_name}”");
-            let kind = SourceKind::Range {
-                pattern: pattern_row.get("place").cloned().unwrap_or(Value::Null),
-                track: track_ref.to_string(),
-                layout: self.plan.link().layout.get(),
-                first,
-                last,
-            };
-            let placement = match place.unwrap_or("patterns") {
-                "patterns" => Placement::Patterns { section: format!("Variations of {pattern_name}") },
-                _ => {
-                    // (a pattern's lines become phrases of the instrument they play: its notes lose their instrument column)
-                    let instrument = match phrase.get("instrumentRef").and_then(Value::as_str) {
-                        Some(reference) => self.lengthen(reference)?,
-                        None => {
-                            let value =
-                                most_played(&material).ok_or("those lines play no instrument: name one with phrase.instrumentRef")?;
-                            let epoch = pattern_ref.split(':').next().unwrap_or("");
-                            format!("{epoch}:instrument:{}", value as u32 + 1)
-                        }
-                    };
-                    let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await?;
-                    let row = found.first().filter(|row| row.get("ref").is_some()).ok_or("that instrument isn't in the song any more")?;
-                    let index = row.get("index").and_then(Value::as_u64).unwrap_or(1) as u8 - 1;
-                    material = for_phrase(&material, index)?;
-                    let base = phrase.get("baseNote").cloned().or_else(|| first_note(&material).map(Value::from));
-                    let mut settings = phrase_settings(&phrase, material.length, lpb);
-                    settings.entry("keyTracking").or_insert_with(|| json!("transpose"));
-                    if let Some(base) = base {
-                        settings.entry("baseNote").or_insert(base);
-                    }
-                    Placement::Phrases { instrument: row.get("place").cloned().unwrap_or(Value::Null), settings }
-                }
-            };
-            return Ok(SetInfo { kind, label, short: pattern_name, material: Some(material), placement });
-        }
-        if place == Some("patterns") {
-            return Err("place patterns is for a pattern track's lines (patternRef and trackRef)".into());
-        }
-        if let Some(phrase_ref) = text("phraseRef") {
-            let long = self.lengthen(phrase_ref)?;
-            let instrument = instrument_of(&long).ok_or("phraseRef must be a phrase")?;
-            let found = self.locate(vec![json!({"phrase": long}), json!({"instrument": instrument})], None, signal).await?;
-            let (row, instrument_row) = (&found[0], &found[1]);
-            let reference = row.get("ref").and_then(Value::as_str).ok_or("that phrase isn't in the song any more: read again")?;
-            let lines = row.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32;
-            let lpb = row.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32;
-            let rows = self.rows(json!({"kind": "line", "parent": reference, "hidden": true, "limit": 200}), signal).await?;
-            let mut material = Lines::from_rows(&rows, 0, lines.max(1) - 1, lpb);
-            material.anchors = anchors_in(&anchors, 0, lines.max(1) - 1)?;
-            let settings = self.phrase_row_settings(&instrument, reference, &phrase, lines, lpb, signal).await;
-            let name = named(row, &format!("Phrase {:02}", row.get("index").and_then(Value::as_u64).unwrap_or(1)));
-            let label = format!("phrase “{name}” of “{}”", named(instrument_row, "the instrument"));
-            return Ok(SetInfo {
-                kind: SourceKind::Phrase,
-                label,
-                short: name,
-                material: Some(material),
-                placement: Placement::Phrases { instrument: instrument_row.get("place").cloned().unwrap_or(Value::Null), settings },
-            });
-        }
-        if let Some(instrument_ref) = text("instrumentRef") {
-            let long = self.lengthen(instrument_ref)?;
-            let found = self.locate(vec![json!({"instrument": long})], None, signal).await?;
-            let row =
-                found.first().filter(|row| row.get("ref").is_some()).ok_or("that instrument isn't in the song any more: read again")?;
-            let name = named(row, "the instrument");
-            let lpb = match phrase.get("lpb").and_then(Value::as_u64) {
-                Some(lpb) => lpb as u32,
-                None => self.song_lpb(signal).await,
-            };
-            let lines = phrase.get("lines").and_then(Value::as_u64).map(|n| n as u32).unwrap_or_else(|| written_length(input, 16));
-            return Ok(SetInfo {
-                kind: SourceKind::Instrument,
-                label: format!("new phrases of “{name}”"),
-                short: name,
-                material: None,
-                placement: Placement::Phrases {
-                    instrument: row.get("place").cloned().unwrap_or(Value::Null),
-                    settings: phrase_settings(&phrase, lines, lpb),
-                },
-            });
-        }
-        Err("source is patternRef and trackRef (with first and last), phraseRef, or instrumentRef".into())
-    }
-
-    /// A phrase source's own settings (key tracking, base note), for its takes; what `phrase` gives wins.
+    /// A phrase source's own settings (key tracking, base note), for its takes; what `options` gives wins.
     async fn phrase_row_settings(
         &self,
         instrument: &str,
@@ -449,210 +363,266 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         }
         settings
     }
+}
 
-    async fn make(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
-        let info = self.source_of(input, signal).await?;
-        let recipes = recipes_of(input, info.material.is_some())?;
-        let bounds = bounds_of(input);
-        let seed = input.get("seed").and_then(Value::as_u64).unwrap_or_else(fresh_seed);
-        let id = self.sets.borrow().iter().map(|set| set.id).max().unwrap_or(0) + 1;
-        let mut set: Set = TakeSet::new(id, info, seed);
-        let mut refs = BTreeMap::new();
-        let mut written = BTreeMap::new();
-        let mut skipped = Vec::new();
-        let mut used: Vec<String> = recipes.iter().map(|recipe| recipe.direction.clone()).collect();
-        for recipe in recipes {
-            let number = set.next_number();
-            let (drawn, recipe) = match self.draw_picking(&set, number, &recipe, &mut used, &bounds) {
-                Ok(drawn) => drawn,
-                Err(why) => {
-                    skipped.push(format!("V{number} ({}) wasn't made: {why}", direction_of(&recipe)));
-                    continue;
+#[async_trait(?Send)]
+impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
+    type Material = Lines;
+    type Data = RenoiseData;
+
+    fn words(&self) -> &'static Words {
+        &WORDS
+    }
+
+    async fn project_key(&self, signal: &Signal) -> Option<String> {
+        let song = self.song(signal).await?;
+        ["id", "identity"].iter().find_map(|key| song.get(*key).and_then(Value::as_str).filter(|text| !text.is_empty()).map(str::to_owned))
+    }
+
+    async fn source(&self, input: &JsonObject, signal: &Signal) -> Result<Source<Lines, RenoiseData>, String> {
+        let source = input
+            .get("source")
+            .and_then(Value::as_object)
+            .ok_or("make needs a source: patternRef and trackRef (with first and last), phraseRef, or instrumentRef")?;
+        let text = |key: &str| source.get(key).and_then(Value::as_str);
+        let options = input.get("options").and_then(Value::as_object).cloned().unwrap_or_default();
+        let anchors: Vec<u32> =
+            input.get("anchors").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).map(|n| n as u32).collect();
+        let place = input.get("place").and_then(Value::as_str);
+        if let (Some(pattern), Some(track)) = (text("patternRef"), text("trackRef")) {
+            let (pattern, track) = (self.lengthen(pattern)?, self.lengthen(track)?);
+            // (a slot named for the pattern is the source slot: its mutes go with each take)
+            let slot = (pattern.split(':').nth(1) == Some("seq"))
+                .then(|| pattern.rsplit(':').next().and_then(|n| n.parse::<u64>().ok()))
+                .flatten();
+            let found = self.locate(vec![json!({"pattern": pattern}), json!({"track": track})], None, signal).await?;
+            let (pattern_row, track_row) = (&found[0], &found[1]);
+            let (Some(pattern_ref), Some(track_ref)) =
+                (pattern_row.get("ref").and_then(Value::as_str), track_row.get("ref").and_then(Value::as_str))
+            else {
+                return Err("that pattern or track isn't in the song any more: read again".into());
+            };
+            let length = pattern_row.get("lines").and_then(Value::as_u64).unwrap_or(64) as u32;
+            let first = source.get("first").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let last = source.get("last").and_then(Value::as_u64).map_or(length - 1, |n| n as u32);
+            if first > last || last >= length {
+                return Err(format!("first and last are lines from 00 to {:02} of this pattern, first not after last", length - 1));
+            }
+            let lpb = self.song_lpb(signal).await;
+            let rows =
+                self.rows(json!({"kind": "line", "parent": pattern_ref, "track": track_ref, "hidden": true, "limit": 200}), signal).await?;
+            let mut material = Lines::from_rows(&rows, first, last, lpb);
+            material.anchors = anchors_in(&anchors, first, last)?;
+            let number = pattern_row.get("number").and_then(Value::as_u64).unwrap_or(0);
+            let pattern_name = named(pattern_row, &format!("Pattern {number:02}"));
+            let track_name = named(track_row, "the track");
+            let label = format!("lines {first:02}–{last:02} of “{pattern_name}” on “{track_name}”");
+            let key = format!("range:{number}:{}:{first}:{last}", track_row.get("index").and_then(Value::as_u64).unwrap_or(0));
+            let kind = SourceKind::Range {
+                pattern: pattern_row.get("place").cloned().unwrap_or(Value::Null),
+                track: track_ref.to_string(),
+                track_name: track_row.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                layout: self.plan.link().layout.get(),
+                first,
+                last,
+                slot,
+            };
+            let (placement, instrument_name) = match place.unwrap_or("patterns") {
+                "patterns" => (Placement::Patterns { section: format!("Variations of {pattern_name}") }, String::new()),
+                _ => {
+                    // (a pattern's lines become phrases of the instrument they play: its notes lose their instrument column)
+                    let instrument = match options.get("instrumentRef").and_then(Value::as_str) {
+                        Some(reference) => self.lengthen(reference)?,
+                        None => {
+                            let value =
+                                most_played(&material).ok_or("those lines play no instrument: name one with options.instrumentRef")?;
+                            let epoch = pattern_ref.split(':').next().unwrap_or("");
+                            format!("{epoch}:instrument:{}", value as u32 + 1)
+                        }
+                    };
+                    let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await?;
+                    let row = found.first().filter(|row| row.get("ref").is_some()).ok_or("that instrument isn't in the song any more")?;
+                    let index = row.get("index").and_then(Value::as_u64).unwrap_or(1) as u8 - 1;
+                    material = for_phrase(&material, index)?;
+                    let base = options.get("baseNote").cloned().or_else(|| first_note(&material).map(Value::from));
+                    let mut settings = phrase_settings(&options, material.length, lpb);
+                    settings.entry("keyTracking").or_insert_with(|| json!("transpose"));
+                    if let Some(base) = base {
+                        settings.entry("baseNote").or_insert(base);
+                    }
+                    (Placement::Phrases { instrument: row.get("place").cloned().unwrap_or(Value::Null), settings }, named(row, ""))
                 }
             };
-            match self.write_new(&set, &drawn, signal).await {
-                Ok((change, place, reference)) => {
-                    let line = take_line(&drawn, &change);
-                    refs.insert(number, self.short(&reference));
-                    written.insert(number, recipe.clone());
-                    set.takes.push(Take {
-                        number,
-                        state: TakeState::Shown,
-                        place,
-                        change: Some(change),
-                        direction: drawn.direction.clone(),
-                        digest: drawn.material.digest(),
-                        material: drawn.material,
-                        line,
-                    });
-                }
-                Err((why, stops)) => {
-                    skipped.push(format!("V{number} ({}) wasn't made: {why}", direction_of(&recipe)));
-                    if stops {
-                        break;
-                    }
-                }
-            }
+            let data = RenoiseData { kind, placement, instrument_name };
+            return Ok(Source { label, short: pattern_name, key, material: Some(material), data });
         }
-        let made = set.takes.len();
-        let numbers: Vec<usize> = written.keys().copied().collect();
-        let heard = self.listen(&mut set, &numbers, &written, &bounds, input, signal).await;
-        let answer_lines: Vec<Value> = numbers
-            .iter()
-            .filter_map(|n| set.take(*n))
-            .map(|take| json!({"take": format!("V{}", take.number), "ref": refs[&take.number], "line": take.line}))
-            .collect();
-        let mut reply = json!({"set": id, "source": set.source.label, "takes": answer_lines, "skipped": skipped});
-        if !heard.is_empty() {
-            reply["heard"] = json!(heard);
+        if place == Some("patterns") {
+            return Err("place patterns is for a pattern track's lines (patternRef and trackRef)".into());
         }
-        if made > 0 {
-            let mut sets = self.sets.borrow_mut();
-            sets.push(set);
-            let excess = sets.len().saturating_sub(SETS_KEPT);
-            sets.drain(..excess);
+        if let Some(phrase_ref) = text("phraseRef") {
+            let long = self.lengthen(phrase_ref)?;
+            let instrument = instrument_of(&long).ok_or("phraseRef must be a phrase")?;
+            let found = self.locate(vec![json!({"phrase": long}), json!({"instrument": instrument})], None, signal).await?;
+            let (row, instrument_row) = (&found[0], &found[1]);
+            let reference = row.get("ref").and_then(Value::as_str).ok_or("that phrase isn't in the song any more: read again")?;
+            let lines = row.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32;
+            let lpb = row.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32;
+            let rows = self.rows(json!({"kind": "line", "parent": reference, "hidden": true, "limit": 200}), signal).await?;
+            let mut material = Lines::from_rows(&rows, 0, lines.max(1) - 1, lpb);
+            material.anchors = anchors_in(&anchors, 0, lines.max(1) - 1)?;
+            let settings = self.phrase_row_settings(&instrument, reference, &options, lines, lpb, signal).await;
+            let name = named(row, &format!("Phrase {:02}", row.get("index").and_then(Value::as_u64).unwrap_or(1)));
+            let label = format!("phrase “{name}” of “{}”", named(instrument_row, "the instrument"));
+            let data = RenoiseData {
+                kind: SourceKind::Phrase { place: row.get("place").cloned().unwrap_or(Value::Null) },
+                placement: Placement::Phrases { instrument: instrument_row.get("place").cloned().unwrap_or(Value::Null), settings },
+                instrument_name: named(instrument_row, ""),
+            };
+            return Ok(Source {
+                label,
+                short: name,
+                key: format!("phrase:{}", reference.splitn(3, ':').nth(2).unwrap_or("")),
+                material: Some(material),
+                data,
+            });
         }
-        Ok(reply)
+        if let Some(instrument_ref) = text("instrumentRef") {
+            let long = self.lengthen(instrument_ref)?;
+            let found = self.locate(vec![json!({"instrument": long})], None, signal).await?;
+            let row =
+                found.first().filter(|row| row.get("ref").is_some()).ok_or("that instrument isn't in the song any more: read again")?;
+            let name = named(row, "the instrument");
+            let lpb = match options.get("lpb").and_then(Value::as_u64) {
+                Some(lpb) => lpb as u32,
+                None => self.song_lpb(signal).await,
+            };
+            let lines = options.get("lines").and_then(Value::as_u64).map(|n| n as u32).unwrap_or_else(|| written_length(input, 16));
+            let data = RenoiseData {
+                kind: SourceKind::Instrument,
+                placement: Placement::Phrases {
+                    instrument: row.get("place").cloned().unwrap_or(Value::Null),
+                    settings: phrase_settings(&options, lines, lpb),
+                },
+                instrument_name: named(row, ""),
+            };
+            let key = format!("instrument:{}", row.get("index").and_then(Value::as_u64).unwrap_or(0));
+            return Ok(Source { label: format!("new phrases of “{name}”"), short: name, key, material: None, data });
+        }
+        Err("source is patternRef and trackRef (with first and last), phraseRef, or instrumentRef".into())
     }
 
-    /// Draws take `number` by its recipe; one whose direction Kumi picked and that can't pass gives way to the next direction
-    /// no take of the request has (`used`). The take and the recipe that made it.
-    fn draw_picking(
-        &self,
-        set: &Set,
-        number: usize,
-        recipe: &Recipe,
-        used: &mut Vec<String>,
-        bounds: &Bounds,
-    ) -> Result<(Drawn, Recipe), String> {
-        let first = self.draw(set, number, recipe, bounds);
-        if first.is_ok() || !recipe.picked {
-            return first.map(|drawn| (drawn, recipe.clone()));
+    fn direction_ops(&self, direction: &str) -> Vec<Value> {
+        match direction {
+            "denser" => vec![json!({"op": "fill", "amount": 0.3}), json!({"op": "retrig", "amount": 0.2})],
+            "sparser" => vec![json!({"op": "thin", "amount": 0.35})],
+            "more reverses" => vec![json!({"op": "reverse", "amount": 0.4})],
+            "shifted accents" => vec![json!({"op": "accent", "amount": 0.6})],
+            "faster rolls" => vec![json!({"op": "retrig", "amount": 0.4})],
+            "swapped slices" => vec![json!({"op": "shuffle", "amount": 0.6})],
+            "moved ghosts" => vec![json!({"op": "ghosts", "amount": 0.8}), json!({"op": "fill", "amount": 0.15})],
+            _ => vec![json!({"op": "octave", "amount": 0.4, "up": true})],
         }
-        let mut last = first.map(|drawn| (drawn, recipe.clone()));
-        let free: Vec<&str> = DIRECTIONS.iter().copied().filter(|direction| !used.iter().any(|u| u == direction)).collect();
-        for direction in free {
-            used.push(direction.to_string());
-            let mut other = Recipe::of_direction(direction);
-            other.from = recipe.from;
-            last = self.draw(set, number, &other, bounds).map(|drawn| (drawn, other));
-            if last.is_ok() {
-                break;
-            }
-        }
-        last
     }
 
-    /// Draws take `number` by its recipe and checks it (re-rolling a drawn one): what it is and what was done.
-    /// (A changed take is checked against its old self too: a change must change it.)
-    fn draw(&self, set: &Set, number: usize, recipe: &Recipe, bounds: &Bounds) -> Result<Drawn, String> {
-        let source = set.source.material.as_ref();
-        let base: Lines = match recipe.from {
-            Some(from) => set
-                .take(from)
-                .filter(|take| take.state != TakeState::Dropped)
-                .map(|take| take.material.clone())
-                .ok_or(format!("from: there is no V{from} to start from"))?,
-            None => match source {
-                Some(source) => source.clone(),
-                None => empty_lines(set),
-            },
-        };
-        let others_owned: Vec<(usize, Lines)> =
-            set.living_except(&[]).into_iter().map(|take| (take.number, take.material.clone())).collect();
-        let others: Vec<(usize, &Lines)> = others_owned.iter().map(|(n, lines)| (*n, lines)).collect();
-        let offset = match &set.source.kind {
+    fn check_ops(&self, ops: &[Value]) -> Result<(), String> {
+        ops.iter().map(Op::parse).collect::<Result<Vec<_>, _>>().map(|_| ())
+    }
+
+    fn apply_ops(&self, ops: &[Value], factor: f64, take: &mut Lines, source: &Lines, rng: &mut Rng) -> Result<Vec<String>, String> {
+        let mut words = Vec::new();
+        for op in ops {
+            if let Some(done) = Op::parse(op)?.scaled(factor).apply(take, source, rng) {
+                words.push(done);
+            }
+        }
+        Ok(words)
+    }
+
+    fn written(&self, set: &RenoiseSet, lines: &[Value], base: &Lines) -> Result<Lines, String> {
+        let offset = match &set.source.data.kind {
             SourceKind::Range { first, .. } => *first,
             _ => 0,
         };
-        // (written lines are what they are: one try; operators draw again from another seed)
-        let tries = if recipe.ops.is_empty() { 1 } else { TRIES };
-        let said: RefCell<Vec<String>> = RefCell::default();
-        // (a try too close to the source or a take draws bolder next time, one too far milder)
-        let factor = std::cell::Cell::new(1.0f64);
-        let rolled = roll(set.seed, number, tries, source, &others, bounds, |seed, before| {
-            match before {
-                Some(Verdict::NearSource(_) | Verdict::NearTake(..)) => factor.set(factor.get() * 1.35),
-                Some(Verdict::FarFromSource(_)) => factor.set(factor.get() * 0.7),
-                _ => {}
-            }
-            let mut take = match &recipe.lines {
-                Some(lines) => {
-                    let mut written = Lines::from_cells(lines, offset, base.length, base.lpb)?;
-                    written.anchors = base.anchors.clone();
-                    written
-                }
-                None => base.clone(),
-            };
-            let mut rng = crate::core::variations::Rng::new(seed);
-            let mut words = Vec::new();
-            if recipe.lines.is_some() {
-                words.push("lines as written".to_string());
-            }
-            for op in &recipe.ops {
-                if let Some(done) = op.scaled(factor.get()).apply(&mut take, source.unwrap_or(&base), &mut rng) {
-                    words.push(done);
-                }
-            }
-            if let Some(source) = source {
-                if let Err(line) = source.anchors_kept_in(&take) {
-                    return Err(format!("line {:02} is an anchor: every take keeps it as it is", line + offset));
-                }
-            }
-            *said.borrow_mut() = words;
-            Ok(take)
-        });
-        let take = rolled.take.filter(|_| rolled.verdict.is_fine()).ok_or_else(|| {
-            let tried = if rolled.tries > 1 { format!(" (after {} tries)", rolled.tries) } else { String::new() };
-            format!("{}{tried}", rolled.verdict.words())
-        })?;
-        let distance = source.map(|source| take.distance(source));
-        let mut words = said.into_inner();
-        if rolled.tries > 1 {
-            words.push(format!("re-rolled {} times", rolled.tries - 1));
-        }
-        Ok(Drawn { number, material: take, direction: direction_of(recipe).to_string(), said: words, distance })
+        let mut written = Lines::from_cells(lines, offset, base.length, base.lpb)?;
+        written.anchors = base.anchors.clone();
+        Ok(written)
     }
 
-    /// Writes a new take: its change id, its place (to find it again) and its ref now.
-    async fn write_new(&self, set: &Set, drawn: &Drawn, signal: &Signal) -> Result<(String, Value, String), (String, bool)> {
-        let name = take_name(drawn.number, &set.source.short);
-        match (&set.source.placement, &set.source.kind) {
-            (Placement::Phrases { instrument, settings }, _) => {
-                let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await.map_err(|why| (why, true))?;
-                let reference = found
-                    .first()
-                    .and_then(|row| row.get("ref"))
-                    .and_then(Value::as_str)
-                    .ok_or(("the instrument isn't in the song any more".to_string(), true))?;
+    fn empty(&self, set: &RenoiseSet) -> Lines {
+        match &set.source.data.placement {
+            Placement::Phrases { settings, .. } => empty_lines(
+                settings.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32,
+                settings.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32,
+            ),
+            Placement::Patterns { .. } => empty_lines(16, 4),
+        }
+    }
+
+    fn anchors_kept(&self, source: &Lines, take: &Lines) -> Result<(), String> {
+        source
+            .anchors_kept_in(take)
+            .map_err(|line| format!("line {line:02} (from the source's first) is an anchor: every take keeps it as it is"))
+    }
+
+    fn judge(&self, source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
+        judge(source, take, ops)
+    }
+
+    fn digest(&self, material: &Lines) -> String {
+        material.digest()
+    }
+
+    async fn write_new(
+        &self,
+        set: &RenoiseSet,
+        number: usize,
+        material: &Lines,
+        signal: &Signal,
+    ) -> Result<(String, Value, String), (String, bool)> {
+        let name = names(number, &set.source.short)[0].clone();
+        match (&set.source.data.placement, &set.source.data.kind) {
+            (Placement::Phrases { settings, .. }, _) => {
+                // (an instrument holds 126 phrases: 0Z01 to 0Z7E)
+                let reference = self.instrument_now(set, signal).await.map_err(|why| (why, true))?;
+                let found = self.locate(vec![json!({"instrument": reference})], None, signal).await.map_err(|why| (why, true))?;
+                if found.first().and_then(|row| row.get("phrases")).and_then(Value::as_u64).is_some_and(|count| count >= MOST_PHRASES) {
+                    return Err((
+                        format!(
+                            "“{}” holds {MOST_PHRASES} phrases, the most Renoise takes (0Z01 to 0Z7E)",
+                            set.source.data.instrument_name
+                        ),
+                        true,
+                    ));
+                }
                 let mut input = settings.clone();
                 input.insert("ref".into(), json!(reference));
                 input.insert("name".into(), json!(name));
-                input.insert("lpb".into(), json!(drawn.material.lpb));
-                input.insert("lines".into(), json!(drawn.material.length));
-                input.insert("content".into(), Value::Array(drawn.material.cells(0)));
+                input.insert("lpb".into(), json!(material.lpb));
+                input.insert("lines".into(), json!(material.length));
+                input.insert("content".into(), Value::Array(material.cells(0)));
                 let (change, applied) = self.change("phrase_add", Value::Object(input), signal).await?;
                 let place = applied.pointer("/created/place").cloned().unwrap_or(Value::Null);
                 let made = applied.pointer("/created/ref").and_then(Value::as_str).unwrap_or("").to_string();
                 Ok((change, place, made))
             }
-            (Placement::Patterns { section }, SourceKind::Range { pattern, track, layout, first, last }) => {
-                // (the source pattern and track where they are now, and the slot of the take before this one: the takes stay together)
-                let mut items = vec![json!({"pattern": pattern}), json!({"track": track})];
-                let previous = set.takes.iter().rev().find(|take| take.state != TakeState::Dropped);
-                if let Some(previous) = previous {
-                    items.push(json!({"pattern": previous.place}));
-                }
-                let found = self.locate(items, *layout, signal).await.map_err(|why| (why, true))?;
-                let (Some(pattern_ref), Some(track_ref)) =
-                    (found[0].get("ref").and_then(Value::as_str), found[1].get("ref").and_then(Value::as_str))
-                else {
-                    return Err(("the source's pattern or track isn't in the song any more".into(), true));
-                };
-                let mut input = json!({"patternRef": pattern_ref, "trackRef": track_ref, "first": first, "last": last,
-                    "content": drawn.material.cells(*first), "name": name});
+            (Placement::Patterns { section }, SourceKind::Range { first, last, slot, .. }) => {
+                let source = self.pattern_now(set, signal).await.map_err(|why| (why, true))?;
+                let track = self.track_now(set, signal).await.map_err(|why| (why, true))?;
+                let pattern_ref = source.get("ref").and_then(Value::as_str).unwrap_or("").to_string();
+                // (the source slot named, while it still plays the pattern: its mutes go with the take)
+                let plays =
+                    |s: u64| source.get("slots").and_then(Value::as_array).is_some_and(|slots| slots.iter().any(|v| v.as_u64() == Some(s)));
+                let epoch = pattern_ref.split(':').next().unwrap_or("").to_string();
+                let named_slot = slot.filter(|s| plays(*s)).map(|s| format!("{epoch}:seq:{s}")).unwrap_or_else(|| pattern_ref.clone());
+                let mut input = json!({"patternRef": named_slot, "trackRef": track, "first": first, "last": last,
+                    "content": material.cells(*first), "name": name});
+                // (after the take before it: the takes stay together)
+                let previous: Vec<usize> =
+                    set.takes.iter().rev().filter(|take| take.state != TakeState::Dropped).map(|take| take.number).take(1).collect();
+                let mut found_set = set.clone();
+                let found = self.find(&mut found_set, &previous, signal).await.map_err(|why| (why, true))?;
                 match found
-                    .get(2)
+                    .first()
                     .and_then(|row| row.get("slots"))
                     .and_then(Value::as_array)
                     .and_then(|slots| slots.last())
@@ -670,177 +640,117 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         }
     }
 
-    async fn change_takes(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
-        let force = input.get("force") == Some(&Value::Bool(true));
-        let names = names_of(input, &[]);
-        if names.is_empty() {
-            return Err("change needs names: the takes to change (V6, or rest)".into());
+    /// By each take's place, else (a place from before Renoise started again, or the tool watched the song anew) by the name
+    /// Kumi gave it, which then gets a fresh place.
+    async fn find(&self, set: &mut RenoiseSet, numbers: &[usize], signal: &Signal) -> Result<Vec<Value>, String> {
+        if numbers.is_empty() {
+            return Ok(vec![]);
         }
-        let (numbers, mut set) = {
-            let sets = self.sets.borrow();
-            let set = pick_set(&sets, input)?;
-            (set.pick(&names, Purpose::Change, force)?, set.clone())
+        let item = |placement: &Placement, place: Value| match placement {
+            Placement::Phrases { .. } => json!({"phrase": place}),
+            Placement::Patterns { .. } => json!({"pattern": place}),
         };
-        let given: Vec<Recipe> =
-            input.get("takes").and_then(Value::as_array).into_iter().flatten().map(Recipe::parse).collect::<Result<_, _>>()?;
-        if given.len() > numbers.len() || numbers.len() > MOST_TAKES {
-            return Err(format!(
-                "change names {} takes and gives {} recipes: give one per take, or fewer and Kumi picks the rest",
-                numbers.len(),
-                given.len()
-            ));
+        let items: Vec<Value> = numbers
+            .iter()
+            .map(|n| item(&set.source.data.placement, set.take(*n).map(|take| take.place.clone()).unwrap_or(Value::Null)))
+            .collect();
+        let mut found = self.locate(items, None, signal).await?;
+        let lost = |row: &Value| row.get("ref").is_none() && row.get("gone") != Some(&Value::Bool(true));
+        if !found.iter().any(lost) {
+            return Ok(found);
         }
-        // (the directions the model left to Kumi: distinct from the ones it gave and from each other)
-        let mut used: Vec<String> = given.iter().map(|recipe| recipe.direction.clone()).collect();
-        let mut recipes = given;
-        while recipes.len() < numbers.len() {
-            let direction = DIRECTIONS.iter().find(|d| !used.iter().any(|u| u == *d)).copied().unwrap_or("swapped slices");
-            used.push(direction.into());
-            let mut recipe = Recipe::of_direction(direction);
-            if set.source.material.is_none() {
-                recipe.from = Some(numbers[recipes.len()]);
-            }
-            recipes.push(recipe);
-        }
-        let bounds = bounds_of(input);
-        let track = self.source_track(&set.source, signal).await?;
-        let mut lines_out = Vec::new();
-        let mut skipped = Vec::new();
-        let mut rewritten = BTreeMap::new();
-        for (number, recipe) in numbers.iter().copied().zip(recipes) {
-            let take = set.take(number).expect("a picked take").clone();
-            let found = self.locate(vec![json!(take_item(&set.source, &take.place))], None, signal).await?;
-            let now = found.into_iter().next().unwrap_or(Value::Null);
-            if now.get("ref").is_none() {
-                skipped.push(format!("V{number} isn't in the song any more"));
+        let by_name = self.rows_by_name(set, signal).await?;
+        for (k, number) in numbers.iter().enumerate() {
+            if !found.get(k).is_some_and(lost) {
                 continue;
             }
-            let current = self.take_lines(&set.source, &now, track.as_deref(), signal).await?;
-            if current.digest() != take.digest {
-                skipped.push(format!("V{number} was edited in Renoise since Kumi wrote it: left as it is"));
-                continue;
-            }
-            let mut recipe = recipe;
-            if recipe.from.is_none() && set.source.material.is_none() {
-                recipe.from = Some(number);
-            }
-            let (drawn, recipe) = match self.draw_picking(&set, number, &recipe, &mut used, &bounds) {
-                Ok(drawn) => drawn,
-                Err(why) => {
-                    skipped.push(format!("V{number} wasn't changed: {why}"));
-                    continue;
+            let Some(reference) = names(*number, &set.source.short).iter().find_map(|name| by_name.get(name)).cloned() else { continue };
+            let again = self.locate(vec![item(&set.source.data.placement, json!(reference))], None, signal).await?;
+            if let Some(row) = again.into_iter().next().filter(|row| row.get("ref").is_some()) {
+                if let Some(take) = set.take_mut(*number) {
+                    take.place = row.get("place").cloned().unwrap_or(Value::Null);
                 }
-            };
-            let reference = now.get("ref").and_then(Value::as_str).unwrap_or("").to_string();
-            let mut rows = drawn.material.clone();
-            rows.anchors = current.anchors.clone();
-            let written = match &set.source.kind {
-                SourceKind::Range { first, .. } => {
-                    let input = json!({"patternRef": reference, "trackRef": track.clone().unwrap_or_default(), "lines": drawn.material.rewrite(&current, *first)});
-                    self.change("notes_write", input, signal).await
-                }
-                _ => {
-                    let mut first = Ok((String::new(), Value::Null));
-                    if drawn.material.lpb != current.lpb {
-                        first = self.change("phrase_set", json!({"ref": reference, "lpb": drawn.material.lpb}), signal).await;
-                    }
-                    match first {
-                        Ok(_) => {
-                            self.change("phrase_write", json!({"ref": reference, "lines": drawn.material.rewrite(&current, 0)}), signal)
-                                .await
-                        }
-                        Err(why) => Err(why),
-                    }
-                }
-            };
-            match written {
-                Ok((change, _)) => {
-                    rewritten.insert(number, recipe.clone());
-                    let line = take_line(&drawn, &change);
-                    lines_out.push(json!({"take": format!("V{number}"), "ref": self.short(&reference), "line": line}));
-                    if let Some(take) = set.take_mut(number) {
-                        take.digest = drawn.material.digest();
-                        take.material = drawn.material;
-                        take.direction = drawn.direction;
-                        take.change = Some(change);
-                        take.line = line;
-                    }
-                }
-                Err((why, stops)) => {
-                    skipped.push(format!("V{number} wasn't changed: {why}"));
-                    if stops {
-                        break;
-                    }
-                }
+                found[k] = row;
             }
         }
-        let changed: Vec<usize> = rewritten.keys().copied().collect();
-        let heard = self.listen(&mut set, &changed, &rewritten, &bounds, input, signal).await;
-        for line in &mut lines_out {
-            let number: Option<usize> = line["take"].as_str().and_then(|take| take.trim_start_matches('V').parse().ok());
-            if let Some(take) = number.and_then(|n| set.take(n)) {
-                line["line"] = json!(take.line);
-            }
-        }
-        let mut reply = json!({"set": set.id, "changed": lines_out, "skipped": skipped, "takes": set.lines()});
-        if !heard.is_empty() {
-            reply["heard"] = json!(heard);
-        }
-        self.put_back(set);
-        Ok(reply)
+        Ok(found)
     }
 
-    async fn keep(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
-        let names = names_of(input, &[]);
-        if names.is_empty() {
-            return Err("keep needs names: the takes the producer keeps (V3)".into());
+    async fn current(&self, set: &RenoiseSet, row: &Value, signal: &Signal) -> Result<Lines, String> {
+        let reference = row.get("ref").and_then(Value::as_str).ok_or("the take wasn't found")?;
+        match &set.source.data.kind {
+            SourceKind::Range { first, last, .. } => {
+                let track = self.track_now(set, signal).await?;
+                let rows =
+                    self.rows(json!({"kind": "line", "parent": reference, "track": track, "hidden": true, "limit": 200}), signal).await?;
+                let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb);
+                Ok(Lines::from_rows(&rows, *first, *last, lpb))
+            }
+            _ => {
+                let rows = self.rows(json!({"kind": "line", "parent": reference, "hidden": true, "limit": 200}), signal).await?;
+                let lines = row.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32;
+                let lpb = row.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32;
+                Ok(Lines::from_rows(&rows, 0, lines.max(1) - 1, lpb))
+            }
         }
-        let (numbers, mut set) = {
-            let sets = self.sets.borrow();
-            let set = pick_set(&sets, input)?;
-            (set.pick(&names, Purpose::Keep, false)?, set.clone())
+    }
+
+    async fn rewrite(
+        &self,
+        set: &RenoiseSet,
+        row: &Value,
+        before: &Lines,
+        after: &Lines,
+        signal: &Signal,
+    ) -> Result<String, (String, bool)> {
+        let reference = row.get("ref").and_then(Value::as_str).unwrap_or("").to_string();
+        match &set.source.data.kind {
+            SourceKind::Range { first, .. } => {
+                let track = self.track_now(set, signal).await.map_err(|why| (why, true))?;
+                let input = json!({"patternRef": reference, "trackRef": track, "lines": after.rewrite(before, *first)});
+                self.change("notes_write", input, signal).await.map(|(change, _)| change)
+            }
+            _ => {
+                // (a phrase's LPB is its own setting: a speed change is a step before its lines)
+                if after.lpb != before.lpb {
+                    self.change("phrase_set", json!({"ref": reference, "lpb": after.lpb}), signal).await?;
+                }
+                self.change("phrase_write", json!({"ref": reference, "lines": after.rewrite(before, 0)}), signal)
+                    .await
+                    .map(|(change, _)| change)
+            }
+        }
+    }
+
+    async fn mark_kept(&self, set: &RenoiseSet, number: usize, row: &Value, signal: &Signal) -> Result<Option<String>, String> {
+        let [named_take, kept] = names(number, &set.source.short);
+        let current = row.get("name").and_then(Value::as_str).unwrap_or("");
+        if current != named_take {
+            return Ok(None);
+        }
+        let reference = row.get("ref").and_then(Value::as_str).unwrap_or("");
+        let (tool, input) = match set.source.data.placement {
+            Placement::Phrases { .. } => ("phrase_set", json!({"ref": reference, "name": kept})),
+            Placement::Patterns { .. } => ("pattern_name", json!({"ref": reference, "name": kept})),
         };
-        let mut placed = Value::Null;
-        if let Some(at) = input.get("at").and_then(Value::as_object) {
-            let [number] = numbers.as_slice() else { return Err("at places one take: keep the others without at".into()) };
-            placed = self.place_take(&set, *number, at, signal).await?;
-        }
-        for number in &numbers {
-            if let Some(take) = set.take_mut(*number) {
-                take.state = TakeState::Kept;
-            }
-        }
-        let rest: Vec<String> =
-            set.takes.iter().filter(|take| take.state == TakeState::Shown).map(|take| format!("V{}", take.number)).collect();
-        let reply = json!({"set": set.id, "kept": numbers.iter().map(|n| format!("V{n}")).collect::<Vec<_>>(), "placed": placed, "rest": rest, "takes": set.lines()});
-        self.put_back(set);
-        Ok(reply)
+        self.change(tool, input, signal).await.map(|(change, _)| Some(change)).map_err(|(why, _)| why)
     }
 
-    /// One change that puts a kept take where the producer says.
-    async fn place_take(&self, set: &Set, number: usize, at: &JsonObject, signal: &Signal) -> Result<Value, String> {
-        let take = set.take(number).expect("a picked take");
-        let found = self.locate(vec![take_item(&set.source, &take.place)], None, signal).await?;
-        let now = found.into_iter().next().unwrap_or(Value::Null);
-        let reference = now.get("ref").and_then(Value::as_str).ok_or(format!("V{number} isn't in the song any more"))?.to_string();
-        let (tool, input) = match &set.source.placement {
-            Placement::Phrases { instrument, .. } => {
+    async fn place(&self, set: &mut RenoiseSet, number: usize, row: &Value, at: &JsonObject, signal: &Signal) -> Result<Value, String> {
+        let reference = row.get("ref").and_then(Value::as_str).ok_or(format!("V{number} isn't in the song any more"))?.to_string();
+        let (tool, input) = match &set.source.data.placement {
+            Placement::Phrases { .. } => {
                 if let Some(keys) = at.get("keys") {
                     ("phrase_map", json!({"ref": reference, "noteRange": keys}))
                 } else if at.get("program") == Some(&Value::Bool(true)) {
-                    let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await?;
-                    let instrument = found
-                        .first()
-                        .and_then(|row| row.get("ref"))
-                        .and_then(Value::as_str)
-                        .ok_or("the instrument isn't in the song any more")?;
+                    let instrument = self.instrument_now(set, signal).await?;
                     ("phrase_playback", json!({"ref": instrument, "mode": "program", "programRef": reference}))
                 } else if let Some(switch) = at.get("switchAt").and_then(Value::as_object) {
                     let pattern = self.lengthen(switch.get("patternRef").and_then(Value::as_str).unwrap_or(""))?;
                     let track = self.lengthen(switch.get("trackRef").and_then(Value::as_str).unwrap_or(""))?;
                     let line = switch.get("line").and_then(Value::as_u64).unwrap_or(0);
                     let col = switch.get("col").and_then(Value::as_u64).unwrap_or(1);
-                    let index = now.get("index").and_then(Value::as_u64).unwrap_or(1);
+                    let index = row.get("index").and_then(Value::as_u64).unwrap_or(1);
                     (
                         "notes_write",
                         json!({"patternRef": pattern, "trackRef": track, "merge": true, "lines": [{"line": line, "effects": [{"col": col, "number": "0Z", "amount": index}]}]}),
@@ -850,22 +760,19 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
                 }
             }
             Placement::Patterns { .. } => {
-                let SourceKind::Range { pattern, track, layout, first, last } = &set.source.kind else {
+                let SourceKind::Range { first, last, .. } = &set.source.data.kind else {
                     return Err("a pattern take needs its source".into());
                 };
-                let found = self.locate(vec![json!({"pattern": pattern}), json!({"track": track})], *layout, signal).await?;
-                let (Some(source), Some(track)) =
-                    (found[0].get("ref").and_then(Value::as_str), found[1].get("ref").and_then(Value::as_str))
-                else {
-                    return Err("the source's pattern or track isn't in the song any more".into());
-                };
+                let source_row = self.pattern_now(set, signal).await?;
+                let track = self.track_now(set, signal).await?;
+                let source = source_row.get("ref").and_then(Value::as_str).unwrap_or("");
                 if at.get("over") == Some(&Value::Bool(true)) {
                     (
                         "lines_copy",
                         json!({"patternRef": reference, "trackRef": track, "first": first, "last": last, "toPatternRef": source, "toTrackRef": track, "line": first}),
                     )
                 } else if at.get("after") == Some(&Value::Bool(true)) {
-                    let slot = found[0]
+                    let slot = source_row
                         .get("slots")
                         .and_then(Value::as_array)
                         .and_then(|slots| slots.first())
@@ -883,63 +790,69 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         Ok(json!({"change": change, "title": applied.pointer("/display/title").cloned().unwrap_or(Value::Null)}))
     }
 
-    async fn drop_takes(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
-        let force = input.get("force") == Some(&Value::Bool(true));
-        let names = names_of(input, &["rest"]);
-        let (numbers, mut set) = {
-            let sets = self.sets.borrow();
-            let set = pick_set(&sets, input)?;
-            (set.pick(&names, Purpose::Drop, force)?, set.clone())
+    fn undroppable(&self, set: &RenoiseSet, _number: usize, row: &Value) -> Option<String> {
+        match set.source.data.placement {
+            Placement::Phrases { .. } => None,
+            Placement::Patterns { .. } => {
+                let slots = row.get("slots").and_then(Value::as_array).map_or(0, Vec::len);
+                (slots != 1).then(|| format!("plays in {slots} slots now"))
+            }
+        }
+    }
+
+    async fn drop(&self, set: &RenoiseSet, rows: &[(usize, Value)], signal: &Signal) -> Result<(String, Value), String> {
+        let (tool, field, key) = match set.source.data.placement {
+            Placement::Phrases { .. } => ("phrases_drop", "phraseRefs", "ref"),
+            Placement::Patterns { .. } => ("slots_drop", "slotRefs", "seqRef"),
         };
-        let track = self.source_track(&set.source, signal).await?;
-        let items: Vec<Value> = numbers.iter().map(|n| take_item(&set.source, &set.take(*n).expect("a picked take").place)).collect();
-        let found = self.locate(items, None, signal).await?;
-        let mut refs = Vec::new();
-        let mut dropping = Vec::new();
-        let mut skipped = Vec::new();
-        for (number, now) in numbers.iter().copied().zip(found) {
-            if now.get("ref").is_none() {
-                skipped.push(format!("V{number} isn't in the song any more"));
-                if let Some(take) = set.take_mut(number) {
-                    take.state = TakeState::Dropped;
-                }
-                continue;
-            }
-            let current = self.take_lines(&set.source, &now, track.as_deref(), signal).await?;
-            if current.digest() != set.take(number).expect("a picked take").digest {
-                skipped.push(format!("V{number} was edited in Renoise since Kumi wrote it: left as it is"));
-                continue;
-            }
-            match &set.source.placement {
-                Placement::Phrases { .. } => refs.push(now["ref"].clone()),
-                Placement::Patterns { .. } => {
-                    let slots = now.get("slots").and_then(Value::as_array).cloned().unwrap_or_default();
-                    if slots.len() != 1 {
-                        skipped.push(format!("V{number} plays in {} slots now: left as it is", slots.len()));
-                        continue;
+        let refs: Vec<Value> = rows.iter().map(|(_, row)| row.get(key).cloned().unwrap_or(Value::Null)).collect();
+        self.change(tool, json!({field: refs}), signal).await.map_err(|(why, _)| why)
+    }
+
+    fn cant_render(&self) -> Option<String> {
+        self.renderer.why_not()
+    }
+
+    async fn playing(&self, signal: &Signal) -> bool {
+        let focus = self.plan.link().call("focus", json!({}), signal.clone()).await.ok().and_then(Result::ok).unwrap_or(Value::Null);
+        focus.pointer("/transport/playing") == Some(&Value::Bool(true))
+    }
+
+    async fn render(&self, set: &mut RenoiseSet, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String> {
+        if self.renderer.listening_now() {
+            return Err("Kumi is listening to something else just now".into());
+        }
+        let _listening = self.renderer.begin_listen();
+        let rendered = match set.source.data.kind.clone() {
+            SourceKind::Range { first, last, .. } => {
+                let (source_at, track, takes) = self.where_slots(set, numbers, signal).await?;
+                let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb) as f64;
+                let (offset, beats) = (first as f64 / lpb, (last - first + 1) as f64 / lpb);
+                let source = if with_source { Some(self.hear(source_at + offset, beats, &track, signal).await?) } else { None };
+                let mut heard = BTreeMap::new();
+                for number in numbers {
+                    if let Some(at) = takes.get(number) {
+                        heard.insert(*number, self.hear(at + offset, beats, &track, signal).await);
                     }
-                    refs.push(now["seqRef"].clone());
                 }
+                Ok((source, heard))
             }
-            dropping.push(number);
-        }
-        let mut change = Value::Null;
-        if !refs.is_empty() {
-            let (tool, field) = match set.source.placement {
-                Placement::Phrases { .. } => ("phrases_drop", "phraseRefs"),
-                Placement::Patterns { .. } => ("slots_drop", "slotRefs"),
-            };
-            let (id, applied) = self.change(tool, json!({field: refs}), signal).await.map_err(|(why, _)| why)?;
-            for number in &dropping {
-                if let Some(take) = set.take_mut(*number) {
-                    take.state = TakeState::Dropped;
-                }
-            }
-            change = json!({"change": id, "title": applied.pointer("/display/title").cloned().unwrap_or(Value::Null), "note": applied.pointer("/display/note").cloned().unwrap_or(Value::Null)});
-        }
-        let reply = json!({"set": set.id, "dropped": dropping.iter().map(|n| format!("V{n}")).collect::<Vec<_>>(), "in": change, "skipped": skipped, "takes": set.lines()});
-        self.put_back(set);
-        Ok(reply)
+            _ => self.hear_phrases(set, numbers, with_source, signal).await,
+        };
+        // (the tempo a render played into the transport goes back, as after every listen)
+        self.renderer.put_tempo_back().await;
+        rendered
+    }
+
+    fn short(&self, long: &str) -> String {
+        self.plan.link().book.borrow_mut().short_ref(long)
+    }
+
+    fn end_note(&self, set: &RenoiseSet) -> Option<String> {
+        let Placement::Patterns { section } = &set.source.data.placement else { return None };
+        Some(format!(
+            "The pattern takes play at the song's end, in “{section}”: playing or rendering the whole song plays them too. Drop removes the ones not kept."
+        ))
     }
 
     async fn extract(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
@@ -949,24 +862,23 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
         }
         let mut asked = input.clone();
         asked.insert("place".into(), json!("phrases"));
-        let info = self.source_of(&asked, signal).await?;
-        let Placement::Phrases { instrument, settings } = &info.placement else { return Err("extract makes a phrase".into()) };
-        let material = info.material.clone().unwrap_or_else(|| empty_lines_of(1, 4));
-        if material.silent() {
+        let info = self.source(&asked, signal).await?;
+        let Placement::Phrases { settings, .. } = &info.data.placement else { return Err("extract makes a phrase".into()) };
+        let material = info.material.clone().unwrap_or_else(|| empty_lines(1, 4));
+        if crate::core::variations::Material::silent(&material) {
             return Err("those lines have no notes to make a phrase of".into());
         }
-        let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await?;
-        let reference =
-            found.first().and_then(|row| row.get("ref")).and_then(Value::as_str).ok_or("the instrument isn't in the song any more")?;
+        let set: RenoiseSet = TakeSet::new(0, info.clone(), 0);
+        let reference = self.instrument_now(&set, signal).await?;
         let mut phrase = settings.clone();
         phrase.insert("ref".into(), json!(reference));
         let name = input
-            .get("phrase")
-            .and_then(|phrase| phrase.get("name"))
+            .get("options")
+            .and_then(|options| options.get("name"))
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| info.short.clone());
-        phrase.insert("name".into(), json!(clip(&name, NAME_MOST)));
+        phrase.insert("name".into(), json!(name.chars().take(crate::core::variations::NAME_MOST).collect::<String>()));
         phrase.insert("content".into(), Value::Array(material.cells(0)));
         let (change, applied) = self.change("phrase_add", Value::Object(phrase), signal).await.map_err(|(why, _)| why)?;
         let made = applied.pointer("/created/ref").and_then(Value::as_str).map(|r| self.short(r));
@@ -974,313 +886,140 @@ impl<S: RefScheme + 'static> RenoiseVariations<S> {
             "keyTracking": settings.get("keyTracking"), "baseNote": settings.get("baseNote")}))
     }
 
-    /// Renders each pattern take on the source's track, offline, with the source once: a take that is silent or clips is
-    /// drawn again and rewritten (one more change, up to twice; lines written by the model are only said), and each take's
-    /// line says how it sounded and how much of the source's rhythm it keeps (its family). Phrase takes are judged on their
-    /// lines: Renoise renders a phrase only from a pattern that plays it. Answers what to tell.
-    async fn listen(
-        &self,
-        set: &mut Set,
-        numbers: &[usize],
-        recipes: &BTreeMap<usize, Recipe>,
-        bounds: &Bounds,
-        input: &JsonObject,
-        signal: &Signal,
-    ) -> Vec<String> {
-        if numbers.is_empty() || input.get("listen") == Some(&Value::Bool(false)) {
-            return vec![];
-        }
-        let SourceKind::Range { pattern, track, layout, first, last } = set.source.kind.clone() else {
-            return vec!["Phrase takes are judged on their lines: Renoise renders a phrase only from a pattern that plays it.".into()];
-        };
-        if let Some(why) = self.renderer.why_not() {
-            return vec![format!("The takes weren't rendered: {why}")];
-        }
-        if self.renderer.listening_now() {
-            return vec!["The takes weren't rendered: Kumi is listening to something else just now.".into()];
-        }
-        let _listening = self.renderer.begin_listen();
-        let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb) as f64;
-        let (offset, beats) = (first as f64 / lpb, (last - first + 1) as f64 / lpb);
-        let mut notes = Vec::new();
-        let mut pending: Vec<usize> = numbers.to_vec();
-        let mut source_heard: Option<Heard> = None;
-        for round in 0..3u32 {
-            let places = match self.where_slots(set, &pattern, &track, layout, &pending, signal).await {
-                Ok(places) => places,
-                Err(why) => {
-                    notes.push(format!("The takes weren't rendered: {why}"));
-                    break;
-                }
-            };
-            if source_heard.is_none() {
-                match self.hear(places.source + offset, beats, &places.track, signal).await {
-                    Ok(heard) => source_heard = Some(heard),
-                    Err(why) => {
-                        notes.push(format!("The takes weren't rendered: {why}"));
-                        break;
-                    }
-                }
-            }
-            let mut again = Vec::new();
-            for number in pending.iter().copied() {
-                let Some(slot) = places.takes.get(&number).copied() else { continue };
-                let heard = match self.hear(slot + offset, beats, &places.track, signal).await {
-                    Ok(heard) => heard,
-                    Err(why) => {
-                        notes.push(format!("V{number} wasn't rendered: {why}"));
-                        continue;
-                    }
-                };
-                let family = source_heard.as_ref().map(|source| heard.family(source));
-                let fault = heard.fault();
-                let redraw = recipes.get(&number).filter(|recipe| !recipe.ops.is_empty() && round < 2);
-                match (fault, redraw) {
-                    (Some(fault), Some(recipe)) => {
-                        // (drawn again from another seed and rewritten: one more change of Kumi's)
-                        let mut salted = set.clone();
-                        salted.seed = seed_of(set.seed, number, 100 + round);
-                        let Some(before) = set.take(number).map(|take| take.material.clone()) else { continue };
-                        let redrawn = match self.draw(&salted, number, recipe, bounds) {
-                            Ok(redrawn) => redrawn,
-                            Err(why) => {
-                                notes.push(format!("V{number} {fault} in the render, and drawing it again failed: {why}"));
-                                continue;
-                            }
-                        };
-                        let rewrite = json!({"patternRef": places.refs[&number], "trackRef": places.track,
-                            "lines": redrawn.material.rewrite(&before, first)});
-                        match self.change("notes_write", rewrite, signal).await {
-                            Ok((change, _)) => {
-                                if let Some(take) = set.take_mut(number) {
-                                    take.line = format!("{} (drawn again after the render: it {fault})", take_line(&redrawn, &change));
-                                    take.digest = redrawn.material.digest();
-                                    take.material = redrawn.material;
-                                    take.change = Some(change);
-                                }
-                                again.push(number);
-                            }
-                            Err((why, _)) => notes.push(format!("V{number} {fault} in the render, and rewriting it failed: {why}")),
-                        }
-                    }
-                    (Some(fault), None) => {
-                        if let Some(take) = set.take_mut(number) {
-                            take.line = format!("{} · heard: it {fault}", take.line);
-                        }
-                    }
-                    (None, _) => {
-                        if let Some(take) = set.take_mut(number) {
-                            take.line = format!("{} · heard: {}", take.line, heard.words(family));
-                        }
-                    }
-                }
-            }
-            if again.is_empty() {
-                break;
-            }
-            pending = again;
-        }
-        if let Some(note) = self.renderer.put_tempo_back().await {
-            notes.push(note);
-        }
-        notes
+    fn material_json(&self, material: &Lines) -> Value {
+        lines_json(material)
     }
 
-    /// One render of the track over `beats` from `from` (beats from the song's start), heard.
-    async fn hear(&self, from: f64, beats: f64, track: &str, signal: &Signal) -> Result<Heard, String> {
-        let sources = vec![json!({"id": "t", "what": "track", "ref": track, "stage": "pre-fader"})];
-        let window = crate::listening::renderer::Window { from, beats };
-        match self.renderer.render_sources(sources, window, signal).await {
-            Ok(Ok((files, _))) => match files.get("t") {
-                Some((render, _)) => heard_of(render, signal).await,
-                None => Err("the render made no file".to_string()),
-            },
-            Ok(Err(why)) => Err(why),
-            Err(error) => Err(error.to_string()),
-        }
+    fn material_of(&self, value: &Value) -> Option<Lines> {
+        lines_of(value)
     }
 
-    /// Where the source's lines and each take's lines start in the song (beats), and the refs to render and rewrite them by.
-    async fn where_slots(
-        &self,
-        set: &Set,
-        pattern: &Value,
-        track: &str,
-        layout: Option<u64>,
-        numbers: &[usize],
-        signal: &Signal,
-    ) -> Result<Slots, String> {
-        let mut items = vec![json!({"pattern": pattern}), json!({"track": track})];
-        for number in numbers {
-            items.push(json!({"pattern": set.take(*number).map(|take| take.place.clone()).unwrap_or(Value::Null)}));
-        }
-        let found = self.locate(items, layout, signal).await?;
-        let rows = self.rows(json!({"kind": "sequence", "limit": 200}), signal).await?;
-        let starts: BTreeMap<String, f64> =
-            rows.iter().filter_map(|row| Some((row.get("ref")?.as_str()?.to_string(), row.get("positionBeats")?.as_f64()?))).collect();
-        let start = |row: &Value| row.get("seqRef").and_then(Value::as_str).and_then(|reference| starts.get(reference)).copied();
-        let source = start(&found[0]).ok_or("no slot plays the source's pattern now")?;
-        let track = found[1].get("ref").and_then(Value::as_str).ok_or("the source's track isn't in the song any more")?.to_string();
-        let mut takes = BTreeMap::new();
-        let mut refs = BTreeMap::new();
-        for (number, row) in numbers.iter().zip(&found[2..]) {
-            if let (Some(at), Some(reference)) = (start(row), row.get("ref").and_then(Value::as_str)) {
-                takes.insert(*number, at);
-                refs.insert(*number, reference.to_string());
-            }
-        }
-        Ok(Slots { source, track, takes, refs })
+    fn data_json(&self, data: &RenoiseData) -> Value {
+        data_json(data)
     }
 
-    fn put_back(&self, set: Set) {
-        let mut sets = self.sets.borrow_mut();
-        if let Some(slot) = sets.iter_mut().find(|held| held.id == set.id) {
-            *slot = set;
-        }
+    fn data_of(&self, value: &Value) -> Option<RenoiseData> {
+        data_of(value)
     }
 }
 
-/// Where the lines a listen renders start (beats from the song's start), and the refs it renders and rewrites by.
-struct Slots {
-    source: f64,
-    track: String,
-    takes: BTreeMap<usize, f64>,
-    refs: BTreeMap<usize, String>,
+/// A set's facts as kept between runs, and read back.
+fn data_json(data: &RenoiseData) -> Value {
+    let kind = match &data.kind {
+        SourceKind::Range { pattern, track, track_name, layout, first, last, slot } => {
+            json!({"kind": "range", "pattern": pattern, "track": track, "trackName": track_name, "layout": layout, "first": first, "last": last, "slot": slot})
+        }
+        SourceKind::Phrase { place } => json!({"kind": "phrase", "place": place}),
+        SourceKind::Instrument => json!({"kind": "instrument"}),
+    };
+    let placement = match &data.placement {
+        Placement::Phrases { instrument, settings } => json!({"kind": "phrases", "instrument": instrument, "settings": settings}),
+        Placement::Patterns { section } => json!({"kind": "patterns", "section": section}),
+    };
+    json!({"source": kind, "placement": placement, "instrumentName": data.instrument_name})
 }
 
-/// What a take's render sounded like: its peak and level (dBFS) and where its hits start (s).
-#[derive(Debug, Clone, PartialEq)]
-struct Heard {
-    peak: f64,
-    level: f64,
-    onsets: Vec<f64>,
+fn data_of(value: &Value) -> Option<RenoiseData> {
+    let source = value.get("source")?;
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let kind = match source.get("kind")?.as_str()? {
+        "range" => SourceKind::Range {
+            pattern: source.get("pattern").cloned().unwrap_or(Value::Null),
+            track: text(source, "track"),
+            track_name: text(source, "trackName"),
+            layout: source.get("layout").and_then(Value::as_u64),
+            first: source.get("first")?.as_u64()? as u32,
+            last: source.get("last")?.as_u64()? as u32,
+            slot: source.get("slot").and_then(Value::as_u64),
+        },
+        "phrase" => SourceKind::Phrase { place: source.get("place").cloned().unwrap_or(Value::Null) },
+        _ => SourceKind::Instrument,
+    };
+    let placement = value.get("placement")?;
+    let placement = match placement.get("kind")?.as_str()? {
+        "phrases" => Placement::Phrases {
+            instrument: placement.get("instrument").cloned().unwrap_or(Value::Null),
+            settings: placement.get("settings").and_then(Value::as_object).cloned().unwrap_or_default(),
+        },
+        _ => Placement::Patterns { section: text(placement, "section") },
+    };
+    Some(RenoiseData { kind, placement, instrument_name: text(value, "instrumentName") })
 }
 
-/// Quieter than this throughout is silent; a peak this close to full scale clips.
-const SILENT_DB: f64 = -60.;
-const CLIPS_DB: f64 = -0.1;
-/// Onsets this close (s) are the same hit.
-const SAME_HIT_S: f64 = 0.03;
-
-/// A level in dB as Kumi writes it: a true minus.
-fn db_text(db: f64) -> String {
-    format!("{db:.1}").replace('-', "−")
-}
-
-impl Heard {
-    fn of(samples: &[f32], rate: f64) -> Heard {
-        let db = |value: f64| 20. * value.max(1e-9).log10();
-        let peak = samples.iter().fold(0f32, |peak, sample| peak.max(sample.abs())) as f64;
-        let power = samples.iter().map(|sample| (*sample as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64;
-        Heard { peak: db(peak), level: db(power.sqrt()), onsets: crate::listening::notes::onsets(samples, rate) }
+/// The one row named `name` (none when none or several are), its ref.
+fn only_named(rows: &[Value], name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
     }
+    let mut same = rows.iter().filter(|row| row.get("name").and_then(Value::as_str) == Some(name));
+    match (same.next(), same.next()) {
+        (Some(row), None) => row.get("ref").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    }
+}
 
-    /// Why it can't be shown (silent, clips), or None.
-    fn fault(&self) -> Option<String> {
-        if self.level < SILENT_DB {
-            Some("is silent".into())
-        } else if self.peak >= CLIPS_DB {
-            Some(format!("clips (peak {} dBFS)", db_text(self.peak)))
-        } else {
-            None
+fn lines_json(lines: &Lines) -> Value {
+    json!({"length": lines.length, "lpb": lines.lpb, "anchors": lines.anchors, "cells": lines.cells(0)})
+}
+
+fn lines_of(value: &Value) -> Option<Lines> {
+    let length = value.get("length")?.as_u64()? as u32;
+    let lpb = value.get("lpb")?.as_u64()? as u32;
+    let mut lines = Lines::from_rows(value.get("cells")?.as_array()?, 0, length.max(1) - 1, lpb);
+    lines.anchors =
+        value.get("anchors").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).map(|n| n as u32).collect();
+    Some(lines)
+}
+
+/// What a take breaks that the source keeps: notes outside the source's pitches (shifted by a transpose asked for; an octave
+/// keeps them), and delays past the source's latest one (or the swing asked for).
+fn judge(source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
+    let Some(source) = source else { return vec![] };
+    let mut issues = Vec::new();
+    let notes = |lines: &Lines| -> Vec<(u32, u8, u8)> {
+        lines
+            .rows
+            .iter()
+            .flat_map(|(number, line)| line.notes.iter().filter_map(move |note| Some((*number, note_value(&note.note)?, note.delay))))
+            .collect()
+    };
+    let shift: i32 = ops
+        .iter()
+        .filter(|op| op.get("op").and_then(Value::as_str) == Some("transpose"))
+        .filter_map(|op| op.get("semitones")?.as_i64())
+        .sum::<i64>() as i32;
+    let pitches: BTreeSet<i32> = notes(source).iter().map(|(_, value, _)| (*value as i32 + shift).rem_euclid(12)).collect();
+    if !pitches.is_empty() {
+        let mut outside: Vec<String> = notes(take)
+            .iter()
+            .filter(|(_, value, _)| !pitches.contains(&(*value as i32).rem_euclid(12)))
+            .map(|(number, value, _)| format!("{} on line {number:02}", note_text(*value)))
+            .collect();
+        outside.dedup();
+        if !outside.is_empty() {
+            issues.push(format!("notes outside the source's key: {}", outside.into_iter().take(4).collect::<Vec<_>>().join(", ")));
         }
     }
-
-    /// How much of its rhythm it shares with the source's render, 0 to 1: hits within 30 ms of one of the source's.
-    fn family(&self, source: &Heard) -> f64 {
-        let most = self.onsets.len().max(source.onsets.len());
-        if most == 0 {
-            return 1.;
-        }
-        let shared = self.onsets.iter().filter(|at| source.onsets.iter().any(|other| (*at - other).abs() <= SAME_HIT_S)).count();
-        shared as f64 / most as f64
+    let swing = ops
+        .iter()
+        .filter(|op| op.get("op").and_then(Value::as_str) == Some("swing"))
+        .map(|op| (op.get("amount").and_then(Value::as_f64).unwrap_or(0.35).clamp(0., 1.) * 96.).round() as u8)
+        .max()
+        .unwrap_or(0);
+    let allowed = notes(source).iter().map(|(_, _, delay)| *delay).max().unwrap_or(0).max(swing);
+    let late: Vec<String> = notes(take)
+        .iter()
+        .filter(|(_, _, delay)| *delay > allowed)
+        .map(|(number, _, delay)| format!("line {number:02} ({delay}/256)"))
+        .collect();
+    if !late.is_empty() {
+        issues.push(format!("off the grid past the source's feel: {}", late.into_iter().take(4).collect::<Vec<_>>().join(", ")));
     }
-
-    fn words(&self, family: Option<f64>) -> String {
-        let peak = format!("peak {} dBFS", db_text(self.peak));
-        match family {
-            Some(family) => format!("{peak}, {:.0}% of its hits where the source's are", family * 100.),
-            None => peak,
-        }
-    }
-}
-
-/// A render's part heard: mono, from where the part starts, as long as it lasts.
-async fn heard_of(render: &Render, signal: &Signal) -> Result<Heard, String> {
-    let mut source = crate::audio::decode::open_audio(&render.file, Some(signal.clone())).await.map_err(|error| error.0)?;
-    let rate = source.sample_rate;
-    source.seek(render.start * rate);
-    let most = render.seconds.map_or(60. * rate, |seconds| seconds * rate).min(120. * rate) as usize;
-    let mut samples: Vec<f32> = Vec::new();
-    while samples.len() < most {
-        let Ok(Some(block)) = source.read(65536.min(most - samples.len())).await else { break };
-        let right = block.get(1).unwrap_or(&block[0]);
-        samples.extend(block[0].iter().zip(right).map(|(left, right)| (left + right) / 2.));
-    }
-    let _ = source.close().await;
-    if samples.is_empty() {
-        return Err("the render was empty".into());
-    }
-    Ok(Heard::of(&samples, rate))
-}
-
-fn pick_set<'a>(sets: &'a [Set], input: &JsonObject) -> Result<&'a Set, String> {
-    match input.get("set").and_then(Value::as_u64) {
-        Some(id) => sets.iter().find(|set| set.id as u64 == id).ok_or(format!("there is no set {id} (make one first)")),
-        None => sets.last().ok_or("there are no takes yet: make some first".into()),
-    }
-}
-
-fn names_of(input: &JsonObject, default: &[&str]) -> Vec<String> {
-    let names: Vec<String> =
-        input.get("names").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-    if names.is_empty() {
-        default.iter().map(|name| name.to_string()).collect()
-    } else {
-        names
-    }
-}
-
-fn recipes_of(input: &JsonObject, has_source: bool) -> Result<Vec<Recipe>, String> {
-    let given: Vec<Recipe> =
-        input.get("takes").and_then(Value::as_array).into_iter().flatten().map(Recipe::parse).collect::<Result<_, _>>()?;
-    let count = input.get("count").and_then(Value::as_u64).map(|n| n as usize);
-    if given.is_empty() && !has_source {
-        return Err("new phrases for an instrument need takes with lines you write (later takes can start from: \"V1\")".into());
-    }
-    let wanted = count.unwrap_or(if given.is_empty() { 4 } else { given.len() });
-    if wanted > MOST_TAKES {
-        return Err(format!("at most {MOST_TAKES} takes at once"));
-    }
-    let mut recipes = given;
-    let used: Vec<String> = recipes.iter().map(|recipe| recipe.direction.clone()).collect();
-    let mut free = DIRECTIONS.iter().filter(|d| !used.iter().any(|u| u == *d));
-    while recipes.len() < wanted {
-        let direction = free.next().copied().unwrap_or("swapped slices");
-        let mut recipe = Recipe::of_direction(direction);
-        // (an instrument's new phrases have no source: the takes Kumi picks vary the first one written)
-        if !has_source {
-            recipe.from = Some(1);
-        }
-        recipes.push(recipe);
-    }
-    Ok(recipes)
-}
-
-fn bounds_of(input: &JsonObject) -> Bounds {
-    match input.get("novelty").and_then(Value::as_str) {
-        Some("subtle") => Bounds { min_source: 0.03, max_source: 0.6, min_others: 0.03 },
-        Some("bold") => Bounds { min_source: 0.2, max_source: 0.95, min_others: 0.1 },
-        _ => Bounds::default(),
-    }
-}
-
-fn fresh_seed() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_nanos() as u64).unwrap_or(1)
+    issues
 }
 
 /// The anchors given (as Renoise numbers lines) within first..=last, from 0 there.
-fn anchors_in(anchors: &[u32], first: u32, last: u32) -> Result<std::collections::BTreeSet<u32>, String> {
+fn anchors_in(anchors: &[u32], first: u32, last: u32) -> Result<BTreeSet<u32>, String> {
     anchors
         .iter()
         .map(|line| {
@@ -1314,7 +1053,9 @@ fn for_phrase(lines: &Lines, index: u8) -> Result<Lines, String> {
         for note in &mut line.notes {
             match note.instrument {
                 Some(instrument) if instrument != index => {
-                    return Err(format!("line {number:02} plays instrument {instrument:02X}, not {index:02X}: a phrase plays its own instrument (or name the instrument with phrase.instrumentRef)"))
+                    return Err(format!(
+                        "line {number:02} plays instrument {instrument:02X}, not {index:02X}: a phrase plays its own instrument (or name the instrument with options.instrumentRef)"
+                    ))
                 }
                 _ => note.instrument = None,
             }
@@ -1328,7 +1069,7 @@ fn first_note(lines: &Lines) -> Option<u8> {
 }
 
 fn phrase_settings(given: &JsonObject, lines: u32, lpb: u32) -> JsonObject {
-    let mut settings = JsonObject::new();
+    let mut settings = Map::new();
     settings.insert("lines".into(), json!(given.get("lines").and_then(Value::as_u64).unwrap_or(lines as u64)));
     settings.insert("lpb".into(), json!(given.get("lpb").and_then(Value::as_u64).unwrap_or(lpb as u64)));
     for key in ["keyTracking", "baseNote"] {
@@ -1356,26 +1097,8 @@ fn written_length(input: &JsonObject, least: u32) -> u32 {
     }
 }
 
-fn empty_lines(set: &Set) -> Lines {
-    match &set.source.placement {
-        Placement::Phrases { settings, .. } => empty_lines_of(
-            settings.get("lines").and_then(Value::as_u64).unwrap_or(16) as u32,
-            settings.get("lpb").and_then(Value::as_u64).unwrap_or(4) as u32,
-        ),
-        Placement::Patterns { .. } => empty_lines_of(16, 4),
-    }
-}
-
-fn empty_lines_of(length: u32, lpb: u32) -> Lines {
+fn empty_lines(length: u32, lpb: u32) -> Lines {
     Lines { length: length.max(1), lpb: lpb.max(1), rows: BTreeMap::new(), anchors: Default::default() }
-}
-
-/// What finds a take now: its phrase's place, or its pattern's.
-fn take_item(info: &SetInfo, place: &Value) -> Value {
-    match info.placement {
-        Placement::Phrases { .. } => json!({"phrase": place}),
-        Placement::Patterns { .. } => json!({"pattern": place}),
-    }
 }
 
 fn instrument_of(phrase: &str) -> Option<String> {
@@ -1384,62 +1107,8 @@ fn instrument_of(phrase: &str) -> Option<String> {
     (kind == "phrase").then(|| format!("{epoch}:instrument:{}", numbers.split('.').next().unwrap_or("1")))
 }
 
-fn direction_of(recipe: &Recipe) -> &str {
-    if recipe.direction.is_empty() {
-        "a variation"
-    } else {
-        &recipe.direction
-    }
-}
-
 fn named(row: &Value, otherwise: &str) -> String {
     row.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned).unwrap_or_else(|| otherwise.into())
-}
-
-fn clip(text: &str, most: usize) -> String {
-    text.chars().take(most).collect()
-}
-
-fn take_name(number: usize, source: &str) -> String {
-    clip(&format!("V{number} \u{b7} {source}"), NAME_MOST)
-}
-
-/// A take's line: "V4 (more reverses): reversed lines 06, 14 · 0.24 from the source (c12)".
-fn take_line(drawn: &Drawn, change: &str) -> String {
-    let what = if drawn.said.is_empty() { "as drawn".to_string() } else { drawn.said.join("; ") };
-    let distance = drawn.distance.map(|d| format!(" \u{b7} {d:.2} from the source")).unwrap_or_default();
-    let change = if change.is_empty() { String::new() } else { format!(" ({change})") };
-    format!("V{} ({}): {what}{distance}{change}", drawn.number, drawn.direction)
-}
-
-struct VariationsTool<S: RefScheme + 'static> {
-    owner: Rc<RenoiseVariations<S>>,
-}
-
-#[async_trait(?Send)]
-impl<S: RefScheme + 'static> KernelTool for VariationsTool<S> {
-    fn name(&self) -> &str {
-        "variations"
-    }
-
-    fn description(&self) -> &str {
-        DESCRIPTION
-    }
-
-    fn input_schema(&self) -> JsonObject {
-        serde_json::from_str(SCHEMA).expect("the variations schema is JSON")
-    }
-
-    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        Ok(match self.owner.run(input, signal).await {
-            Ok(answer) => ToolResult::text(stringify(&answer)),
-            Err(why) => ToolResult::error(why),
-        })
-    }
-
-    fn reach(&self) -> Reach {
-        Reach::DawWrite
-    }
 }
 
 #[cfg(test)]
@@ -1448,18 +1117,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_schema_is_json_and_every_operator_it_offers_is_one_kumi_has() {
-        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
-        let ops = schema.pointer("/properties/takes/items/properties/ops/items/properties/op/enum").unwrap().as_array().unwrap();
-        for op in ops {
-            let op = op.as_str().unwrap();
-            let value = if op == "transpose" { json!({"op": op, "semitones": 2}) } else { json!({"op": op}) };
-            assert!(Op::parse(&value).is_ok(), "{op}");
-            assert!(OPS.contains(op), "{op} is named in the operators' words");
+    fn the_schemas_are_json_and_every_operator_offered_is_one_renoise_has() {
+        for part in [WORDS.source_schema, WORDS.op_schema, WORDS.options_schema, WORDS.at_schema] {
+            serde_json::from_str::<Value>(part).unwrap();
         }
-        for direction in DIRECTIONS {
-            assert!(!Recipe::of_direction(direction).ops.is_empty(), "{direction}");
+        let op: Value = serde_json::from_str(WORDS.op_schema).unwrap();
+        for name in op.pointer("/properties/op/enum").unwrap().as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            let value = if name == "transpose" { json!({"op": name, "semitones": 2}) } else { json!({"op": name}) };
+            assert!(Op::parse(&value).is_ok(), "{name}");
+            assert!(OPS.contains(name), "{name} is named in the operators' words");
         }
+    }
+
+    /// (V9) The tool goes with every Renoise request: its words and schema stay small beside Renoise's other tools (~62 KB).
+    #[test]
+    fn the_tool_is_small_beside_renoises_other_tools() {
+        use crate::core::variations::tool::{description, schema};
+        let size = description(&WORDS).len() + kumi_common::js::json::stringify(&Value::Object(schema(&WORDS))).len();
+        assert!(size < 9_000, "the variations tool is {size} bytes");
+        assert!(description(&WORDS).contains("0Sxx sample offset"), "Renoise's idioms");
     }
 
     #[test]
@@ -1474,29 +1151,75 @@ mod tests {
         assert!(phrase.rows.values().all(|line| line.notes.iter().all(|note| note.instrument.is_none())));
         assert_eq!(first_note(&phrase), Some(48));
         assert!(for_phrase(&lines, 1).unwrap_err().contains("plays instrument 02"));
-    }
-
-    #[test]
-    fn takes_are_named_and_described_in_one_line() {
-        let drawn = Drawn {
-            number: 4,
-            material: empty_lines_of(16, 4),
-            direction: "more reverses".into(),
-            said: vec!["reversed lines 06, 14".into()],
-            distance: Some(0.24),
-        };
-        assert_eq!(take_line(&drawn, "c12"), "V4 (more reverses): reversed lines 06, 14 \u{b7} 0.24 from the source (c12)");
-        assert_eq!(take_name(3, "Amen chop"), "V3 \u{b7} Amen chop");
         assert_eq!(instrument_of("5:phrase:2.3").as_deref(), Some("5:instrument:2"));
-        assert_eq!(written_length(&json!({"takes": [{"lines": [{"line": 20}]}]}).as_object().unwrap().clone(), 16), 32);
+        assert_eq!(written_length(json!({"takes": [{"lines": [{"line": 20}]}]}).as_object().unwrap(), 16), 32);
     }
 
     #[test]
-    fn kumi_picks_distinct_directions_for_the_takes_it_is_left() {
-        let input = json!({"takes": [{"direction": "sparser", "ops": [{"op": "thin"}]}], "count": 4});
-        let recipes = recipes_of(input.as_object().unwrap(), true).unwrap();
-        let directions: Vec<&str> = recipes.iter().map(|recipe| recipe.direction.as_str()).collect();
-        assert_eq!(directions, ["sparser", "denser", "more reverses", "shifted accents"]);
-        assert!(recipes_of(json!({}).as_object().unwrap(), false).unwrap_err().contains("lines you write"));
+    fn a_take_keeps_the_sources_key_and_feel_unless_a_transpose_or_swing_was_asked() {
+        let source = Lines::from_rows(
+            &[
+                json!({"line": 0, "notes": [{"col": 1, "note": "C-4"}]}),
+                json!({"line": 4, "notes": [{"col": 1, "note": "E-4", "delay": "10"}]}),
+            ],
+            0,
+            15,
+            4,
+        );
+        let mut octave = source.clone();
+        octave.rows.get_mut(&0).unwrap().notes[0].note = "C-5".into();
+        assert!(judge(Some(&source), &octave, &[]).is_empty(), "an octave keeps the key");
+        let mut sharp = source.clone();
+        sharp.rows.get_mut(&4).unwrap().notes[0].note = "F#4".into();
+        let issues = judge(Some(&source), &sharp, &[]);
+        assert!(issues[0].contains("outside the source's key: F#4 on line 04"), "{issues:?}");
+        let mut up = source.clone();
+        up.rows.get_mut(&0).unwrap().notes[0].note = "D-4".into();
+        up.rows.get_mut(&4).unwrap().notes[0].note = "F#4".into();
+        assert!(
+            judge(Some(&source), &up, &[json!({"op": "transpose", "semitones": 2})]).is_empty(),
+            "a transpose moves the key on purpose"
+        );
+        let mut late = source.clone();
+        late.rows.get_mut(&0).unwrap().notes[0].delay = 0x60;
+        assert!(judge(Some(&source), &late, &[])[0].contains("off the grid"), "past the source's feel");
+        assert!(judge(Some(&source), &late, &[json!({"op": "swing", "amount": 1})]).is_empty(), "within the swing asked for");
+    }
+
+    #[test]
+    fn material_and_facts_come_back_as_they_were_kept() {
+        let mut lines = Lines::from_rows(
+            &[
+                json!({"line": 3, "notes": [{"col": 1, "note": "C-4", "volume": "20"}], "effects": [{"col": 1, "number": "0S", "amount": "40"}]}),
+            ],
+            0,
+            15,
+            4,
+        );
+        lines.anchors = [3].into_iter().collect();
+        assert_eq!(lines_of(&lines_json(&lines)), Some(lines.clone()));
+        let data = RenoiseData {
+            kind: SourceKind::Range {
+                pattern: json!({"n": 2, "mark": "p:4"}),
+                track: "1:track:3".into(),
+                track_name: "Drums".into(),
+                layout: Some(2),
+                first: 0,
+                last: 15,
+                slot: Some(4),
+            },
+            placement: Placement::Patterns { section: "Variations of B".into() },
+            instrument_name: String::new(),
+        };
+        assert_eq!(data_of(&data_json(&data)), Some(data));
+        let phrases = RenoiseData {
+            kind: SourceKind::Instrument,
+            placement: Placement::Phrases {
+                instrument: json!({"of": "instrument"}),
+                settings: json!({"lines": 16, "lpb": 4}).as_object().cloned().unwrap(),
+            },
+            instrument_name: "Synth".into(),
+        };
+        assert_eq!(data_of(&data_json(&phrases)), Some(phrases));
     }
 }

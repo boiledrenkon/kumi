@@ -159,8 +159,8 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     pins: Rc<RefCell<indexmap::IndexMap<(String, String), Option<Carried>>>>,
     /// Where each saved project was last seen, by the id its file carries.
     places: Places,
-    /// (M7) Renoise's variations: their takes, kept as long as the integration.
-    variations: Rc<super::renoise_variations::RenoiseVariations<S>>,
+    /// (M7) The variations tool, where the DAW's profile offers it (core's, with the DAW's backend).
+    variations: Option<Rc<dyn KernelTool>>,
 }
 
 /// How REAPER and Renoise tell templates and a song's own folder, for core's rules on copies: a project in REAPER's
@@ -285,7 +285,11 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     };
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
-    let variations = super::renoise_variations::RenoiseVariations::new(changes.clone(), listening.renderer.clone());
+    let variations: Option<Rc<dyn KernelTool>> = (daw.profile.caps.variations && daw.profile.id == Some(crate::core::daw::DawId::Renoise))
+        .then(|| {
+            let backend = super::renoise_variations::RenoiseBackend::new(changes.clone(), listening.renderer.clone());
+            crate::core::variations::tool::Variations::new(backend, options.kumi_home.clone()).tool()
+        });
     let kumi_home = options.kumi_home.clone();
     Rc::new(OwnIntegration::<S> {
         daw,
@@ -854,9 +858,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             on_watch: self.options.context.on_watch.clone(),
         }));
         tools.extend(self.listening.tools());
-        // M7: Renoise's variations loop.
-        if self.daw.profile.id == Some(crate::core::daw::DawId::Renoise) {
-            tools.push(self.variations.tool());
+        // M7: the variations loop, where the DAW offers it.
+        if let Some(variations) = &self.variations {
+            tools.push(variations.clone());
         }
         tools
     }

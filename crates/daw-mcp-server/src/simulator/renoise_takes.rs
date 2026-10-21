@@ -36,6 +36,8 @@ struct Pattern {
 #[derive(Default)]
 pub struct Takes {
     next: u64,
+    /// Places are of a generation: one from before `forget` (Renoise started again) is unknown, and found again by name.
+    generation: u64,
     phrases: BTreeMap<u64, Vec<Phrase>>,
     patterns: Vec<Pattern>,
     /// What each drop took (by its desc): the phrases with their places, or the patterns' ids.
@@ -57,7 +59,41 @@ fn numbers(text: Option<&str>, kind: &str) -> Option<Vec<u64>> {
 impl Takes {
     /// The kinds this answers.
     pub fn owns(kind: &str) -> bool {
-        matches!(kind, "phrase-add" | "phrase-write" | "phrase-set" | "slot-variation" | "slots-drop" | "phrases-drop")
+        matches!(kind, "phrase-add" | "phrase-write" | "phrase-set" | "slot-variation" | "slots-drop" | "phrases-drop" | "pattern-name")
+    }
+
+    /// Renoise started again: every place from before is unknown (what was made is still there, by its name).
+    pub fn forget(&mut self) {
+        self.generation += 1;
+    }
+
+    fn place(&self, id: u64) -> Value {
+        json!({"sim": id, "gen": self.generation})
+    }
+
+    /// A place of this generation's: its id; an older one is unknown.
+    fn known(&self, place: &Value) -> Option<u64> {
+        (place.get("gen").and_then(Value::as_u64) == Some(self.generation)).then(|| place.get("sim").and_then(Value::as_u64)).flatten()
+    }
+
+    /// The made phrases' rows of an instrument, after `before` (the vectors' rows), as a read of its phrases answers.
+    pub fn phrase_rows(&self, epoch: u32, instrument: u64, before: Vec<Value>) -> Answer {
+        let mut rows = before;
+        for (k, phrase) in self.phrases.get(&instrument).into_iter().flatten().enumerate() {
+            let p = phrases_before(instrument) + 1 + k as u64;
+            rows.push(json!({"ref": format!("{epoch}:phrase:{instrument}.{p}"), "index": p, "name": phrase.name, "lines": phrase.lines, "lpb": phrase.lpb}));
+        }
+        Ok(json!({"items": rows, "epoch": epoch.to_string(), "layout": 0}))
+    }
+
+    /// The made patterns' rows after `before` (the vectors' three), as a read of the patterns answers.
+    pub fn pattern_rows(&self, epoch: u32, before: Vec<Value>) -> Answer {
+        let mut rows = before;
+        for (k, pattern) in self.patterns.iter().enumerate() {
+            let p = PATTERNS + 1 + k as u64;
+            rows.push(json!({"ref": format!("{epoch}:pattern:{p}"), "number": p - 1, "name": pattern.name, "lines": 32, "aliases": {}}));
+        }
+        Ok(json!({"items": rows, "epoch": epoch.to_string(), "layout": 0}))
     }
 
     fn id(&mut self) -> u64 {
@@ -102,27 +138,33 @@ impl Takes {
                         [1u64, 2, 1, 3].get(s.saturating_sub(1) as usize).map(|p| (*p, None))
                     }
                     Value::String(text) => numbers(Some(text), "pattern").and_then(|n| n.first().copied()).map(|p| (p, None)),
-                    place => place.get("sim").and_then(Value::as_u64).map(|id| (0, Some(id))),
+                    place => match self.known(place) {
+                        Some(id) => Some((0, Some(id))),
+                        None => {
+                            out.push(json!({"unknown": true}));
+                            continue;
+                        }
+                    },
                 };
                 match found {
                     Some((p, None)) if (1..=PATTERNS).contains(&p) => {
                         let slots: Vec<u64> =
                             [1u64, 2, 1, 3].iter().enumerate().filter(|(_, v)| **v == p).map(|(s, _)| s as u64 + 1).collect();
                         json!({"ref": format!("{epoch}:pattern:{p}"), "number": p - 1, "name": "", "lines": 32, "slots": slots,
-                            "seqRef": format!("{epoch}:seq:{}", slots[0]), "place": {"sim": 0, "n": p}})
+                            "seqRef": format!("{epoch}:seq:{}", slots[0]), "place": {"sim": 0, "n": p, "gen": self.generation}})
                     }
                     Some((_, Some(0))) => {
                         let p = pattern.get("n").and_then(Value::as_u64).unwrap_or(1);
                         let slots: Vec<u64> =
                             [1u64, 2, 1, 3].iter().enumerate().filter(|(_, v)| **v == p).map(|(s, _)| s as u64 + 1).collect();
                         json!({"ref": format!("{epoch}:pattern:{p}"), "number": p - 1, "name": "", "lines": 32, "slots": slots,
-                            "seqRef": format!("{epoch}:seq:{}", slots[0]), "place": {"sim": 0, "n": p}})
+                            "seqRef": format!("{epoch}:seq:{}", slots[0]), "place": {"sim": 0, "n": p, "gen": self.generation}})
                     }
                     Some((_, Some(id))) => match self.pattern_index(id) {
                         Some((p, slot)) => {
                             let name = &self.patterns[(p - PATTERNS - 1) as usize].name;
                             let slots: Vec<u64> = slot.into_iter().collect();
-                            let mut row = json!({"ref": format!("{epoch}:pattern:{p}"), "number": p - 1, "name": name, "lines": 32, "slots": slots, "place": {"sim": id}});
+                            let mut row = json!({"ref": format!("{epoch}:pattern:{p}"), "number": p - 1, "name": name, "lines": 32, "slots": slots, "place": self.place(id)});
                             if let Some(slot) = slot {
                                 row["seqRef"] = format!("{epoch}:seq:{slot}").into();
                             }
@@ -135,12 +177,18 @@ impl Takes {
             } else if let Some(phrase) = item.get("phrase") {
                 let found = match phrase {
                     Value::String(text) => numbers(Some(text), "phrase").map(|n| (n[0], n[1])),
-                    place => place.get("sim").and_then(Value::as_u64).and_then(|id| self.phrase_index(id)),
+                    place => match self.known(place) {
+                        Some(id) => self.phrase_index(id),
+                        None => {
+                            out.push(json!({"unknown": true}));
+                            continue;
+                        }
+                    },
                 };
                 match found.and_then(|(i, p)| self.phrase_at(i, p).map(|phrase| (i, p, phrase))) {
                     Some((i, p, phrase)) => {
                         json!({"ref": format!("{epoch}:phrase:{i}.{p}"), "index": p, "name": phrase.name, "lines": phrase.lines,
-                        "lpb": phrase.lpb, "place": {"sim": phrase.id}})
+                        "lpb": phrase.lpb, "place": self.place(phrase.id)})
                     }
                     None => json!({"gone": true}),
                 }
@@ -151,7 +199,9 @@ impl Takes {
                 };
                 match i.filter(|i| (1..=2).contains(i)) {
                     Some(i) => {
-                        json!({"ref": format!("{epoch}:instrument:{i}"), "index": i, "name": if i == 1 { "Kit" } else { "Pad" }, "place": {"instrument": i}})
+                        let phrases = phrases_before(i) + self.phrases.get(&i).map_or(0, Vec::len) as u64;
+                        json!({"ref": format!("{epoch}:instrument:{i}"), "index": i, "name": if i == 1 { "Kit" } else { "Pad" }, "phrases": phrases,
+                            "place": {"instrument": i}})
                     }
                     None => json!({"gone": true}),
                 }
@@ -208,7 +258,7 @@ impl Takes {
                 let p = phrases_before(i) + list.len() as u64;
                 undo.push(desc.clone());
                 answer(
-                    json!({"applied": {"id": id}, "created": {"ref": format!("{epoch}:phrase:{i}.{p}"), "kind": "phrase", "place": {"sim": id}},
+                    json!({"applied": {"id": id}, "created": {"ref": format!("{epoch}:phrase:{i}.{p}"), "kind": "phrase", "place": self.place(id)},
                     "target": target, "display": {"title": format!("Added phrase “{}”", input["name"].as_str().unwrap_or(""))}, "undo": {"desc": desc, "entry": true}}),
                 )
             }
@@ -235,6 +285,9 @@ impl Takes {
                 let phrase = &mut self.phrases.get_mut(&i).expect("its instrument")[k];
                 if kind == "phrase-set" {
                     phrase.lpb = input["lpb"].as_u64().unwrap_or(phrase.lpb);
+                    if let Some(name) = input["name"].as_str() {
+                        phrase.name = name.into();
+                    }
                 } else {
                     phrase.rows = written(&phrase.rows, input["lines"].as_array().map(Vec::as_slice).unwrap_or(&[]));
                 }
@@ -255,6 +308,30 @@ impl Takes {
                 phrase.lpb = params["prior"]["lpb"].as_u64().unwrap_or(phrase.lpb);
                 undo.push(desc);
                 answer(json!({"restored": {"done": true}, "display": {"title": "Lines put back"}}))
+            }
+            // (a made pattern renamed: a kept take's mark)
+            ("pattern-name", "change_preview") => {
+                let p = numbers(input["ref"].as_str(), "pattern").and_then(|n| n.first().copied()).ok_or(bad("ref: a pattern"))?;
+                let k = p
+                    .checked_sub(PATTERNS + 1)
+                    .filter(|k| (*k as usize) < self.patterns.len())
+                    .ok_or(bad("the sim names only patterns its variations made"))? as usize;
+                let pattern = &self.patterns[k];
+                answer(json!({"target": {"ref": input["ref"], "kind": "pattern"}, "prior": {"name": pattern.name, "id": pattern.id},
+                    "fence": {"id": pattern.id}, "display": {"title": format!("Renamed pattern “{}”", pattern.name)}}))
+            }
+            ("pattern-name", "change_apply") => {
+                let id = params["fence"]["id"].as_u64().unwrap_or(0);
+                let pattern = self
+                    .patterns
+                    .iter_mut()
+                    .find(|pattern| pattern.id == id)
+                    .ok_or(("gone".to_string(), "that pattern isn't there".to_string()))?;
+                pattern.name = input["name"].as_str().unwrap_or("").into();
+                undo.push(desc.clone());
+                answer(
+                    json!({"applied": {"id": id}, "display": {"title": format!("Renamed pattern “{}”", pattern.name)}, "undo": {"desc": desc, "entry": true}}),
+                )
             }
             ("slot-variation", "change_preview") => {
                 numbers(input["pattern"].as_str(), "pattern").ok_or(bad("pattern: a pattern"))?;
@@ -281,7 +358,7 @@ impl Takes {
                 lines.insert((p, track), rows);
                 undo.push(desc.clone());
                 answer(json!({"applied": {"id": id}, "target": {"ref": input["track"], "kind": "track"},
-                    "created": {"ref": format!("{epoch}:seq:{}", slot.unwrap_or(0)), "kind": "seq", "pattern": format!("{epoch}:pattern:{p}"), "place": {"sim": id}},
+                    "created": {"ref": format!("{epoch}:seq:{}", slot.unwrap_or(0)), "kind": "seq", "pattern": format!("{epoch}:pattern:{p}"), "place": self.place(id)},
                     "display": {"title": format!("Added a variation “{}”", input["name"].as_str().unwrap_or(""))}, "undo": {"desc": desc, "entry": true}}))
             }
             ("slot-variation", _) => {

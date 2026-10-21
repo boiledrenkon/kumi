@@ -556,3 +556,33 @@ test("scratch-keep: the producer's undo in Renoise takes back the name only, and
   ok(told.descs[1]:find("Kumi: keep", 1, true))
   H.no_dialogs()
 end)
+
+-- M7 (variations): players of phrases, for Kumi to hear phrase takes
+
+test("scratch: players of phrases are empty tracks, each playing the instrument's note with a 0Zxx at the range's first line; drop takes them", function()
+  local env, peer = setup()
+  local ins = mock.song:instrument(1)
+  for k = 1, 3 do ins:insert_phrase_at(k).name = "V" .. k end
+  mock.data.undo.stack = {}
+  local epoch, layout = place(peer)
+  local made = result(call(peer, "scratch", { action = "make", scratchId = "s9p1a", count = 2, label = "variations", epoch = epoch, layout = layout,
+    range = { fromBeat = 4, beats = 4 }, phrases = { instrument = epoch .. ":instrument:1", phrases = { 3, 1 }, note = 50 } }), "make")
+  eq(#made.copies, 2)
+  eq(steps(), 1, "one Renoise undo step")
+  ok(newest():find("players of", 1, true), newest())
+  local t = 6
+  eq(track(t).name, "Kumi " .. DOT .. " try 9p1a 1")
+  eq(#track(t).devices, 1, "no device but the mixer")
+  eq(track(t).mute_state, OFF)
+  -- (beat 4 is slot 2's start, pattern 2 at LPB 4 with 16 lines: line 1)
+  local line = mock.song:pattern(2):track(t):line(1)
+  eq(line:note_column(1).note_value, 50)
+  eq(line:note_column(1).instrument_value, 0)
+  eq(line:effect_column(1).number_string .. line:effect_column(1).amount_string, "0Z03")
+  eq(mock.song:pattern(2):track(t + 1):line(1):effect_column(1).amount_string, "01")
+  ok(read_journal(env).entries[1].copies[2].name:find("try 9p1a 2", 1, true), "journaled, for a sweep to find")
+  result(call(peer, "scratch", { action = "drop", scratchId = "s9p1a" }), "drop")
+  eq(names(), "Kick,Hat,Bass,Pad,Bus,Master,Send 1")
+  failure(call(peer, "scratch", { action = "make", scratchId = "s9p1b", count = 1, label = "v", epoch = epoch, layout = layout,
+    range = { fromBeat = 2, beats = 4 }, phrases = { instrument = epoch .. ":instrument:1", phrases = { 1 } } }), "bad-params")
+end)

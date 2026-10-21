@@ -217,6 +217,50 @@ local function make_copy(song, source, at, name, patterns)
   return copy
 end
 
+-- M7 (variations): a player of one phrase instead of a copy: an empty track (no devices, OFF until Kumi solos it to render) whose
+-- line `spot.line` of pattern `spot.pattern` plays the instrument's note with a 0Zxx naming the phrase. Its lines go with it when
+-- the track goes.
+local function make_player(song, at, name, spot)
+  song:insert_track_at(at)
+  local track = song:track(at)
+  track.name = name
+  track.mute_state = renoise.Track.MUTE_STATE_OFF
+  if track.visible_effect_columns < 1 then track.visible_effect_columns = 1 end
+  local line = song:pattern(spot.pattern):track(at):line(spot.line)
+  local column = line:note_column(1)
+  column.note_value = spot.note
+  column.instrument_value = spot.instrument - 1
+  line:effect_column(1).number_string = "0Z"
+  line:effect_column(1).amount_value = spot.phrase
+  return track
+end
+
+-- Where players of phrases play: the instrument, its phrases (from 1) and the note, and the pattern and line the range starts at
+-- (a slot's first line). Refused unless the range starts where a slot does.
+local function players_of(song, env, players, range)
+  if type(players) ~= "table" or type(players.instrument) ~= "string" or type(players.phrases) ~= "table" or #players.phrases == 0 then
+    bad("phrases is {instrument, phrases, note?}: the instrument's ref and its phrases' numbers (from 1)")
+  end
+  local i = refs.expect(players.instrument, "instrument", 1, env.epoch())[1]
+  if i > #song.instruments then fail("gone", "that instrument isn't in the song any more") end
+  local instrument = song:instrument(i)
+  for _, ph in ipairs(players.phrases) do
+    if type(ph) ~= "number" or ph ~= math.floor(ph) or ph < 1 or ph > #instrument.phrases then
+      bad(string.format("phrases are numbers from 1 to %d (the instrument's phrases)", #instrument.phrases))
+    end
+  end
+  local note = players.note == nil and 48 or players.note
+  if type(note) ~= "number" or note ~= math.floor(note) or note < 0 or note > 119 then bad("note is from 0 to 119 (48 is C-4)") end
+  if not range then bad("a player of phrases needs range: where it plays") end
+  local timeline = listening.timeline(song, env.pattern_mark)
+  for _, slot in ipairs(timeline.slots) do
+    if math.abs(slot.beat - range.fromBeat) < 1e-6 then
+      return { instrument = i, list = players.phrases, note = note, pattern = slot.pattern, line = 1, name = instrument.name }
+    end
+  end
+  bad("range must start where a slot of the sequence starts")
+end
+
 -- What one copy costs, about, in ms (measured: 8 copies of 5 devices and 4 dense 64-line patterns took 200 ms; a track insert
 -- grows faster than the tracks, 11 ms at 90 and 385 ms at 566; a pattern's copy with its lines, about 4 ms a 64 lines).
 local function cost_of(song, source, patterns)
@@ -256,23 +300,29 @@ local function make(params, env)
   local song = base.context(params, env)
   local id = listening.need_id(params.scratchId, "scratchId", "s")
   if S.live[id] then bad("there is a scratch " .. id .. " already") end
-  if type(params.ref) ~= "string" then bad("ref must be a track ref") end
-  local source = refs.expect(params.ref, "track", 1, env.epoch())[1]
-  local track = base.track_at(song, source)
-  if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
-    bad("Kumi copies a sequencer track (not a group, the master or a send)")
+  local range = check_range(params.range)
+  -- (M7: players of phrases instead of copies of a track)
+  local players = params.phrases ~= nil and players_of(song, env, params.phrases, range) or nil
+  local source, track
+  if not players then
+    if type(params.ref) ~= "string" then bad("ref must be a track ref") end
+    source = refs.expect(params.ref, "track", 1, env.epoch())[1]
+    track = base.track_at(song, source)
+    if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
+      bad("Kumi copies a sequencer track (not a group, the master or a send)")
+    end
   end
   local count = params.count
   if type(count) ~= "number" or count ~= math.floor(count) or count < 1 or count > M.MAX_COPIES then
     bad("count is from 1 to " .. M.MAX_COPIES)
   end
+  if players and count ~= #players.list then bad("count is the number of phrases to play") end
   local label = params.label
   if type(label) ~= "string" or label == "" or #label > 320 or label:find("[%c]") then bad("label must be one line of text") end
-  local range = check_range(params.range)
-  local patterns = patterns_for(song, env, source, range)
+  local patterns = players and {} or patterns_for(song, env, source, range)
   local tag = tag_of(id)
-  local source_name = base.named(source, track)
-  local per_copy = cost_of(song, source, patterns)
+  local source_name = players and players.name or base.named(source, track)
+  local per_copy = players and (2 + 0.05 * rows.track_count(song) + 11 * (rows.track_count(song) / 90) ^ 2) or cost_of(song, source, patterns)
   if per_copy > M.MOST_COPY_MS then
     bad(string.format("one copy of %s would hold Renoise about %.1f s (its lines in %d patterns, in a song of %d tracks): give a range, a few bars of it",
       q(source_name), per_copy / 1000, #patterns, rows.track_count(song)))
@@ -287,30 +337,40 @@ local function make(params, env)
   for n, name in ipairs(names) do planned[n] = { name = name, index = song.sequencer_track_count + n } end
   local journal = read_journal(M.cfg())
   journal.entries[#journal.entries + 1] = {
-    scratchId = id, project = env.song_id(), label = label, source = { name = track.name, index = source }, copies = json.array(planned),
-    madeMs = env.unix_ms(),
+    scratchId = id, project = env.song_id(), label = label, source = { name = players and players.name or track.name, index = source or 0 },
+    copies = json.array(planned), madeMs = env.unix_ms(),
   }
   local written, why = write_journal(M.cfg(), journal)
   if not written then fail("failed", "Kumi couldn't note its scratch copies in its folder (" .. tostring(why) .. "), so it made none") end
   local session = { id = id, label = label, source = source, source_name = source_name, copies = {}, devices = {} }
-  for d = 1, #track.devices do session.devices[d] = track:device(d).device_path end
+  if track then
+    for d = 1, #track.devices do session.devices[d] = track:device(d).device_path end
+  end
   S.live[id] = session
-  local desc = string.format("Kumi: scratch copies of %s for %s (%s)", q(source_name), label, id)
+  local desc = players and string.format("Kumi: players of %s's phrases for %s (%s)", q(source_name), label, id)
+    or string.format("Kumi: scratch copies of %s for %s (%s)", q(source_name), label, id)
   local total = math.max(1, math.ceil(per_copy * count / M.STEP_MS))
-  local source_layout, source_id = env.layout(), base.track_id(track)
+  local source_layout, source_id = env.layout(), track and base.track_id(track) or nil
   -- Makes copies until the step's time is used (at least one; `budget` false: all of them); the source is found where the tracks
   -- made and deleted since moved it, and must still be the track it was.
   local function step(live, k, budget)
-    local from = env.shifted(source, source_layout)
-    if not from or from > rows.track_count(live) or base.track_id(live:track(from)) ~= source_id then
-      fail("changed", q(source_name) .. " isn't where it was any more: read again")
+    local from
+    if not players then
+      from = env.shifted(source, source_layout)
+      if not from or from > rows.track_count(live) or base.track_id(live:track(from)) ~= source_id then
+        fail("changed", q(source_name) .. " isn't where it was any more: read again")
+      end
     end
     live:describe_undo(total > 1 and string.format("%s (%d/%d)", desc, k, total) or desc)
     local started = env.now_ms()
     repeat
       local n = #session.copies + 1
       local at = live.sequencer_track_count + 1
-      make_copy(live, from, at, names[n], patterns)
+      if players then
+        make_player(live, at, names[n], { pattern = players.pattern, line = players.line, note = players.note, instrument = players.instrument, phrase = players.list[n] })
+      else
+        make_copy(live, from, at, names[n], patterns)
+      end
       session.copies[n] = { name = names[n], index = at, layout = env.layout() }
     until #session.copies >= count or (budget ~= false and env.now_ms() - started >= M.STEP_MS)
   end

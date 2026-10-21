@@ -570,9 +570,9 @@ end
 -- pattern at a new slot (the sequence's end by default) that plays `pattern` with one track's lines first..last replaced by
 -- `content` (cells as notes-write takes them). Its other tracks are aliases of `pattern`'s, so they follow the producer's edits
 -- there; the varied track is a copy of its own (an alias in the source is read through, never written through). The slot starts
--- a section named `section`, or joins the one before it, and mutes what the first slot playing `pattern` mutes. Told by the
--- whole sequence, as slot-clone is: Kumi's undo removes the slot and its pattern while both are as Kumi left them, and hides
--- again the track's columns it showed.
+-- a section named `section`, or joins the one before it, and mutes what the source slot mutes (the slot `pattern` names, or the
+-- first that plays it). Told by the whole sequence, as slot-clone is: Kumi's undo removes the slot and its pattern while both are
+-- as Kumi left them, and hides again the track's columns it showed.
 
 local cells = notes_.cells
 local MAX_NAME = 256
@@ -601,11 +601,17 @@ local function variation_plan(song, env, input)
     local value = input[field]
     if value ~= nil and (type(value) ~= "string" or #value > MAX_NAME or value:find("[%c]")) then bad(field .. " must be one line of text") end
   end
+  -- (the matrix mutes belong to a slot: the source slot's when a slot names the pattern, else the first slot that plays it)
   local mutes = {}
-  for slot, value in ipairs(song.sequencer.pattern_sequence) do
-    if value == p then
-      mutes = state_of(song, slot).mutes
-      break
+  local named = refs.parse(input.pattern)
+  if named and named.kind == "seq" then
+    mutes = state_of(song, named.n[1]).mutes
+  else
+    for slot, value in ipairs(song.sequencer.pattern_sequence) do
+      if value == p then
+        mutes = state_of(song, slot).mutes
+        break
+      end
     end
   end
   return { p = p, t = t, track = track, first = first, last = last, wants = wants, index = index, slots = n, mutes = mutes }

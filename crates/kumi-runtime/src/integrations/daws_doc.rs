@@ -17,6 +17,7 @@ const ROWS: &[(&str, &str)] = &[
     ("instant", "Instant phrases"),
     ("scripting", "Code run inside the DAW"),
     ("stop_transport", "Stop everything at once"),
+    ("variations", "Variations as numbered takes"),
     ("recording_state", "Knows whether the DAW is recording"),
     ("status_line", "A line in the DAW's status bar"),
     ("open_project", "Opens a saved project"),

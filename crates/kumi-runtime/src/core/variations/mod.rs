@@ -1,8 +1,33 @@
-//! Variations (M7): numbered takes V1…Vn of one source and the keep/change loop over them. A DAW's material (a tracker's
-//! lines, a timeline's items) measures how far apart two takes are; this keeps the bookkeeping (which takes exist, which
-//! are kept, which a request names) and the seeded draw that re-rolls a take too close to its source or to another take,
-//! or too far from its source to belong to it. Nothing here knows a DAW.
+//! Variations (M7): numbered takes V1…Vn of one source and the keep/change loop over them, built once for every DAW. Core owns
+//! the model's tool and its answers (`tool`), the take sets and where they're kept, the checks, and the seeded draw that re-rolls
+//! a take too close to its source or to another take, or too far from it to belong to it; how a render sounds (`heard`). A DAW
+//! plugs in a backend (`backend`) with only its own facts: what its material is and how far apart two are, its operators, and
+//! how it reads, writes, finds, renders and drops takes. Nothing here knows a DAW.
 use std::collections::BTreeSet;
+
+pub mod backend;
+pub mod heard;
+pub mod tool;
+
+/// The most a take's name may be (Renoise's phrase names hold 64 characters).
+pub const NAME_MOST: usize = 64;
+
+/// A take's name in the DAW: "V3 · <source>".
+pub fn take_name(number: usize, source: &str) -> String {
+    clip(&format!("V{number} \u{b7} {source}"), NAME_MOST)
+}
+
+/// A kept take's name: "V3 · <source> · kept", the source cut short so the mark always fits.
+pub fn kept_name(number: usize, source: &str) -> String {
+    let mark = " \u{b7} kept";
+    let head = format!("V{number} \u{b7} ");
+    let room = NAME_MOST.saturating_sub(head.chars().count() + mark.chars().count());
+    format!("{head}{}{mark}", clip(source, room))
+}
+
+fn clip(text: &str, most: usize) -> String {
+    text.chars().take(most).collect()
+}
 
 /// A small, fast generator whose sequence a seed fixes (SplitMix64): the same seed makes the same take.
 #[derive(Debug, Clone)]
@@ -230,16 +255,18 @@ pub struct TakeSet<S, P, M> {
     pub source: S,
     pub seed: u64,
     pub takes: Vec<Take<P, M>>,
+    /// Numbers up to this were given before (another set of the same source's takes): the next take is past it.
+    pub floor: usize,
 }
 
 impl<S, P, M> TakeSet<S, P, M> {
     pub fn new(id: usize, source: S, seed: u64) -> Self {
-        TakeSet { id, source, seed, takes: Vec::new() }
+        TakeSet { id, source, seed, takes: Vec::new(), floor: 0 }
     }
 
     /// The number the next take gets.
     pub fn next_number(&self) -> usize {
-        self.takes.iter().map(|take| take.number).max().unwrap_or(0) + 1
+        self.takes.iter().map(|take| take.number).max().unwrap_or(0).max(self.floor) + 1
     }
 
     pub fn take(&self, number: usize) -> Option<&Take<P, M>> {
@@ -310,11 +337,6 @@ impl<S, P, M> TakeSet<S, P, M> {
             .collect()
     }
 }
-
-/// Distinct directions for "change these in different ways" when the model names none: each take gets the next one no
-/// other take of the request has.
-pub const DIRECTIONS: [&str; 8] =
-    ["denser", "sparser", "more reverses", "shifted accents", "faster rolls", "swapped slices", "moved ghosts", "an octave up"];
 
 #[cfg(test)]
 mod tests {
@@ -422,7 +444,20 @@ mod tests {
         assert!(set.pick(&["V12".into()], Purpose::Keep, false).unwrap_err().contains("no V12"));
         assert_eq!(set.pick(&["all".into()], Purpose::Keep, false).unwrap().len(), 8);
         assert_eq!(set.next_number(), 10);
+        set.floor = 12;
+        assert_eq!(set.next_number(), 13, "numbers never come back");
         assert_eq!(set.living_except(&[4]).len(), 7);
         assert!(set.lines().contains(&"V3 (kept)".to_string()));
+    }
+
+    #[test]
+    fn takes_are_named_after_their_source_and_a_kept_mark_always_fits() {
+        assert_eq!(take_name(3, "Amen chop"), "V3 \u{b7} Amen chop");
+        assert_eq!(kept_name(3, "Amen chop"), "V3 \u{b7} Amen chop \u{b7} kept");
+        let long = "x".repeat(80);
+        assert_eq!(take_name(12, &long).chars().count(), NAME_MOST);
+        let kept = kept_name(12, &long);
+        assert_eq!(kept.chars().count(), NAME_MOST);
+        assert!(kept.ends_with(" \u{b7} kept"));
     }
 }

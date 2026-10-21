@@ -671,7 +671,30 @@ impl Host {
             match text(arguments, "action")? {
                 Some("make") => {
                     params.insert("action".into(), "make".into());
-                    params.insert("ref".into(), required(arguments, "ref")?.into());
+                    // (M7: players of an instrument's phrases, for Kumi to hear phrase takes, instead of copies of a track)
+                    match arguments.get("phrases").filter(|phrases| !phrases.is_null()) {
+                        Some(phrases) => {
+                            let instrument = phrases
+                                .get("instrument")
+                                .and_then(Value::as_str)
+                                .ok_or("phrases.instrument: the instrument's ref".to_string())?;
+                            let list: Vec<u64> =
+                                phrases.get("phrases").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).collect();
+                            if list.is_empty() || list.len() as u64 > MAX_COPIES {
+                                return Err(format!("phrases.phrases: 1 to {MAX_COPIES} phrase numbers"));
+                            }
+                            let mut players = Map::new();
+                            players.insert("instrument".into(), instrument.into());
+                            players.insert("phrases".into(), list.into());
+                            if let Some(note) = phrases.get("note").and_then(Value::as_u64) {
+                                players.insert("note".into(), note.into());
+                            }
+                            params.insert("phrases".into(), Value::Object(players));
+                        }
+                        None => {
+                            params.insert("ref".into(), required(arguments, "ref")?.into());
+                        }
+                    }
                     let count = arguments.get("count").and_then(Value::as_u64).filter(|n| (1..=MAX_COPIES).contains(n));
                     params.insert("count".into(), count.ok_or(format!("count: 1 to {MAX_COPIES}"))?.into());
                     let label = required(arguments, "label")?;

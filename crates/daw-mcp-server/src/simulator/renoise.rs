@@ -78,6 +78,8 @@ struct State {
     render_bpm: Option<f64>,
     /// (M7) What Kumi's variations made: phrases with their lines, slots of variation patterns.
     takes: Takes,
+    /// Renoise plays, as its focus says (a test sets it).
+    transport_playing: bool,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -221,6 +223,7 @@ impl RenoiseScript {
                 chains: Chains::default(),
                 render_bpm: None,
                 takes: Takes::default(),
+                transport_playing: false,
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -852,6 +855,16 @@ impl RenoiseScript {
         self.state.lock().unwrap().takes.phrases(instrument)
     }
 
+    /// (M7) Renoise started again: the places Kumi kept are unknown now (what the variations made is still there by name).
+    pub fn forget_places(&self) {
+        self.state.lock().unwrap().takes.forget();
+    }
+
+    /// (M7) Renoise plays (as its focus says) or not.
+    pub fn set_transport_playing(&self, playing: bool) {
+        self.state.lock().unwrap().transport_playing = playing;
+    }
+
     /// (M7) The variation patterns a slot plays: name and pattern number (from 1).
     pub fn variation_slots(&self) -> Vec<(String, u64)> {
         self.state.lock().unwrap().takes.slotted()
@@ -945,6 +958,28 @@ impl RenoiseScript {
             let rows = rows.iter().map(|row| retag(row, VECTORS_EPOCH, state.epoch, None)).collect();
             return Some(state.takes.sequence(state.epoch, rows));
         }
+        // (the phrases of an instrument and the patterns, with what the variations made after the vectors')
+        if method == "read"
+            && params.get("cursor").is_none()
+            && (params["kind"] == "pattern" || (params["kind"] == "phrase" && params["parent"].is_string()))
+        {
+            let parent = params["parent"].as_str().unwrap_or_default();
+            let instrument = parent.rsplit(':').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+            let asked = if params["kind"] == "pattern" {
+                json!({"kind": "pattern"})
+            } else {
+                json!({"kind": "phrase", "parent": format!("{VECTORS_EPOCH}:instrument:{instrument}")})
+            };
+            let case = state.cases.iter().find(|case| case.method == "read" && case.params == asked);
+            let rows =
+                case.and_then(|case| case.response.as_ref().ok()).and_then(|page| page["items"].as_array().cloned()).unwrap_or_default();
+            let rows = rows.iter().map(|row| retag(row, VECTORS_EPOCH, state.epoch, None)).collect();
+            return Some(if params["kind"] == "pattern" {
+                state.takes.pattern_rows(state.epoch, rows)
+            } else {
+                state.takes.phrase_rows(state.epoch, instrument, rows)
+            });
+        }
         if method == "read" && params["kind"] == "line" && params["parent"].as_str().is_some_and(|parent| parent.contains(":phrase:")) {
             let parent = params["parent"].as_str().unwrap_or_default();
             return Some(
@@ -1018,6 +1053,14 @@ impl RenoiseScript {
             }
         }
         let wanted = normal(&asked);
+        if method == "focus" && state.transport_playing {
+            if let Some(Ok(mut page)) =
+                state.cases.iter().find(|case| case.method == method && case.params == wanted).map(|case| case.response.clone())
+            {
+                page["transport"]["playing"] = true.into();
+                return Some(Ok(retag(&page, VECTORS_EPOCH, epoch, None)));
+            }
+        }
         if let Some(case) = state.cases.iter().find(|case| case.method == method && case.params == wanted) {
             let response = case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts));
             if method == "digest" {

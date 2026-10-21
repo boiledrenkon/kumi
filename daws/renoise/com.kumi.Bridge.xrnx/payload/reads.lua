@@ -290,7 +290,7 @@ function M.read(job, params, epoch)
           if of == "phrase" then
             row.name, row.lines, row.lpb = objects.phrase.name, objects.phrase.number_of_lines, objects.phrase.lpb
           else
-            row.name = objects.instrument.name
+            row.name, row.phrases = objects.instrument.name, #objects.instrument.phrases
           end
         else
           row = missing(n and "gone" or why)
