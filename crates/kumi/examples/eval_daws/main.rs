@@ -316,7 +316,12 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Di
         if let Some(teardown) = scenario.teardown {
             lua(&host, teardown, timeout).await.ok();
         }
-        let summary = format!("{} bytes of state: {}", stringify(&before).len(), head(&stringify(&before), 300));
+        let mut summary = format!("{} bytes of state: {}", stringify(&before).len(), head(&stringify(&before), 300));
+        // (with a `before`: what catch-up tells of the fixture, as the session's first look would)
+        if scenario.before.is_some() {
+            let told = host_call(&host, "catch_up", json!({})).await.unwrap_or_else(|why| json!({"refused": why}));
+            summary.push_str(&format!(" | catch-up: {}", head(&stringify(&told), 600)));
+        }
         return Ok(Outcome {
             id: scenario.id,
             checks: vec![Check::new("fixture built and read", true, summary)],

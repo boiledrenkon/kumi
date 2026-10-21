@@ -320,7 +320,8 @@ pub fn master_paths(state: &Value, name: &str) -> usize {
 }
 
 fn mentions(said: &str, words: &[&str]) -> bool {
-    let said = said.to_lowercase();
+    // (typographic apostrophes and dashes read as plain ones)
+    let said = said.to_lowercase().replace(['’', '‘'], "'").replace(['–', '—'], "-");
     words.iter().any(|word| said.contains(&word.to_lowercase()))
 }
 
@@ -960,13 +961,17 @@ end
                 let content = |state: &Value, s: usize| (state["slots"][s]["keys"].clone(), state["slots"][s]["drums"].clone());
                 let kept = (0..2).all(|s| content(before, s) == content(after, s));
                 let empties = list(&after["slots"]).iter().filter(|slot| slot["empty"] == true).count();
+                // (the proposal's item 4: Kumi says what's new and proposes the clean-up, or makes it; it never edits what came
+                // before)
+                let new =
+                    &["6 new", "six new", "six patterns", "6 patterns", "slots 3", "3-8", "patterns 2-7", "patterns 02", "to 8 slots"];
                 vec![
                     Check::new("the two patterns from before the jam are as they were", kept, ""),
-                    Check::new("the empty patterns are out of the sequence", empties == 0, format!("{empties} empty slots left")),
+                    Check::new("it says what was new (six patterns, slots 3 to 8)", mentions(seen.said, new), ""),
                     Check::new(
-                        "it says what was new",
-                        mentions(seen.said, &["6 new", "six new", "six patterns", "6 patterns", "slots 3", "3–8", "3-8"]),
-                        "",
+                        "it proposes or makes the clean-up (the empty patterns among it)",
+                        empties == 0 || mentions(seen.said, &["empty"]),
+                        format!("{empties} empty slots left"),
                     ),
                 ]
             },
