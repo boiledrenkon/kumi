@@ -1618,6 +1618,44 @@ fn kumis_undo_of_a_kept_copy_refuses_when_the_producer_changed_it_unless_told_to
 }
 
 #[test]
+fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_faded_muted_or_put_a_take_fx_on_its_items() {
+    let rig = Rig::new();
+    let kick = copyable();
+    let made = make(&rig, "sf", &kick, 1);
+    let copy = made["copies"][0]["ref"].as_str().unwrap().to_string();
+    let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&copy)})).unwrap();
+    let applied = change(
+        &rig,
+        "change_apply",
+        json!({"kind": "scratch-keep", "input": keep_input(&copy), "fence": preview["fence"], "desc": "Kumi: Kept (k9)"}),
+    )
+    .unwrap();
+    let restore = json!({"kind": "scratch-keep", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo Kept (k10)"});
+    // What the producer does to the kept track's items, none of it its FX, fader or envelopes.
+    let edits: [(&str, fn(&mut fake::FakeTrack)); 4] = [
+        ("a fade", |t| {
+            t.items[0].extra.insert("D_FADEINLEN".into(), 0.25);
+        }),
+        ("a take FX", |t| t.items[0].takes[0].fx.push(FakeFx::new("{FX-TAKE}", "VST: ReaEQ (Cockos)"))),
+        ("an item muted", |t| t.items[0].mute = true),
+        ("an item's volume", |t| {
+            t.items[0].extra.insert("D_VOL".into(), 0.5);
+        }),
+    ];
+    for (what, edit) in edits {
+        let was = fake::with(|s| s.tracks[4].clone());
+        fake::with(|s| edit(&mut s.tracks[4]));
+        let refused = change(&rig, "change_restore", restore.clone()).unwrap_err();
+        assert_eq!(refused.0, "changed", "{what}");
+        assert_eq!(fake::with(|s| s.tracks.len()), 5, "{what}: nothing was deleted");
+        fake::with(|s| s.tracks[4] = was);
+    }
+    // As Kumi left it, Kumi's undo takes it away.
+    change(&rig, "change_restore", restore).unwrap();
+    assert_eq!(fake::with(|s| s.tracks.len()), 4);
+}
+
+#[test]
 fn kumis_undo_of_a_kept_copy_leaves_it_once_the_producer_turned_a_knob_on_it() {
     let rig = Rig::new();
     let kick = copyable();
