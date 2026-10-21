@@ -248,7 +248,7 @@ async fn a_question_reads_the_best_matching_topics_once_and_answers_from_their_s
     assert!(!answer.is_error, "{}", answer.text);
     assert!(
         answer.text.starts_with(
-            "From Apple's Logic Pro User Guide, best first (cite the topic you answer from, as “Logic Pro User Guide, Quantize regions”):\n\nWork in the Tracks area › Quantize regions › Quantize selected regions · Arrange a project (https://guide.test/guide/logicpro/quantize-regions-lgcpd12112da/mac#lgcp1f1e9397)\n<<<guide\n- Choose a grid from the Quantize pop-up menu in the Region inspector.\nguide>>>\n\nWork in the Tracks area › Quantize regions · Arrange a project (https://guide.test/guide/logicpro/quantize-regions-lgcpd12112da/mac)\n<<<guide\nQuantizing moves the notes of a region to the nearest point of a grid.\n\nThe Quantize setting in the Region inspector applies to whole regions.\nguide>>>\n"
+            "From Apple's Logic Pro User Guide, best first. Cite only a topic given here, by its title exactly as given (“Logic Pro User Guide, Quantize regions”): nothing else is the guide's, not a section's heading, a chapter or a topic not given here.\n\nTopic “Quantize regions”: Work in the Tracks area › Quantize regions › Quantize selected regions · Arrange a project (https://guide.test/guide/logicpro/quantize-regions-lgcpd12112da/mac#lgcp1f1e9397)\n<<<guide\n- Choose a grid from the Quantize pop-up menu in the Region inspector.\nguide>>>\n\nTopic “Quantize regions”: Work in the Tracks area › Quantize regions · Arrange a project (https://guide.test/guide/logicpro/quantize-regions-lgcpd12112da/mac)\n<<<guide\nQuantizing moves the notes of a region to the nearest point of a grid.\n\nThe Quantize setting in the Region inspector applies to whole regions.\nguide>>>\n"
         ),
         "{}",
         answer.text
@@ -273,13 +273,16 @@ async fn a_question_reads_the_best_matching_topics_once_and_answers_from_their_s
     assert_eq!(m.client.reads.borrow().len(), 2);
     assert_eq!(*m.events.borrow(), [doing("looking up “quantize regions” in Logic Pro's guide")]);
     let stacks = m.tool.execute(input(json!({"question": "what is a summing track stack"})), Signal::new()).await.unwrap();
+    // (M7) A section's passage comes under the title of the topic it's in, which is what's cited, not its heading; the
+    // answer's example citation is a topic it gives.
     assert!(
         stacks.text.contains(
-            "Work with track stacks › Track stacks overview › Summing stacks · Work with tracks (https://guide.test/guide/logicpro/track-stacks-overview-lgcp9bc4b63d/mac#lgcpc434c3ac)\n<<<guide\nA summing stack sends its subtracks to a bus, and its main track is an aux.\nguide>>>"
+            "\n\nTopic “Track stacks overview”: Work with track stacks › Track stacks overview › Summing stacks · Work with tracks (https://guide.test/guide/logicpro/track-stacks-overview-lgcp9bc4b63d/mac#lgcpc434c3ac)\n<<<guide\nA summing stack sends its subtracks to a bus, and its main track is an aux.\nguide>>>"
         ),
         "{}",
         stacks.text
     );
+    assert!(stacks.text.contains("by its title exactly as given (“Logic Pro User Guide, Track stacks overview”)"), "{}", stacks.text);
     // (both topics whose titles name tracks: the stacks', and the Tracks area's key commands; Quantize regions is kept)
     assert_eq!(
         m.client.reads.borrow()[2..],

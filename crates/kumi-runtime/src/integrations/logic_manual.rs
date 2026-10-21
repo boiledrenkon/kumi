@@ -389,11 +389,19 @@ impl KernelTool for ManualTool {
             )));
         }
         let found = shared::search(&sections, &shared::prepare(&sections, OWN), question, HITS, OWN);
-        let mut lines = vec![format!("From Apple's {GUIDE}, best first (cite the topic you answer from, as “{GUIDE}, Quantize regions”):")];
-        for hit in found {
+        // (M7) Each passage under its topic's title, which is what a citation names: only a topic given here, by its
+        // title exactly. A model cited a section's heading ("Edit regions") for the topic it's in.
+        let topic_of = |section: &ManualSection| -> String {
+            topics.iter().find(|topic| topic.number == section.number).map_or(&section.title, |topic| &topic.title).clone()
+        };
+        let example = found.first().map_or_else(|| topics[0].title.clone(), |hit| topic_of(&hit.section));
+        let mut lines = vec![format!(
+            "From Apple's {GUIDE}, best first. Cite only a topic given here, by its title exactly as given (“{GUIDE}, {example}”): nothing else is the guide's, not a section's heading, a chapter or a topic not given here."
+        )];
+        for hit in &found {
             lines.extend([
                 String::new(),
-                format!("{} ({})", place_of(&hit.section), hit.section.url),
+                format!("Topic “{}”: {} ({})", topic_of(&hit.section), place_of(&hit.section), hit.section.url),
                 "<<<guide".into(),
                 hit.passages.join("\n\n"),
                 "guide>>>".into(),
