@@ -83,3 +83,73 @@ fn kumis_copy_of_a_bridge_never_keeps_macos_downloaded_mark() {
         assert!(!quarantined(&tools.join("com.kumi.Bridge.xrnx").join(path)), "{path}");
     }
 }
+
+/// A running REAPER on Windows holds its extension's DLL mapped: an update or a rollback sets the held copy aside and
+/// puts the new one in place, the next action once REAPER has let go removes what was set aside, and an uninstall
+/// names the copy it couldn't remove (nothing of Kumi's will be left to clean it up). Any DLL serves to hold: REAPER's
+/// extension isn't built here.
+#[cfg(windows)]
+#[test]
+fn a_dll_a_running_reaper_holds_is_set_aside_by_an_update_and_named_by_an_uninstall() {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
+        fn FreeLibrary(module: *mut std::ffi::c_void) -> i32;
+    }
+    let hold = |path: &std::path::Path| {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        assert!(!module.is_null(), "{}: {}", path.display(), std::io::Error::last_os_error());
+        module
+    };
+    let root = tempfile::tempdir().unwrap();
+    let plugins = root.path().join("REAPER").join("UserPlugins");
+    let target = Target {
+        daw: Daw::Reaper,
+        dir: plugins.clone(),
+        name: "reaper_kumi.dll".into(),
+        folder: false,
+        reference: plugins.join("kumi-bridge-reference.json"),
+    };
+    let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32").join("version.dll");
+    let (one, two) = (root.path().join("one.dll"), root.path().join("two.dll"));
+    std::fs::copy(&system, &one).unwrap();
+    let mut bytes = std::fs::read(&system).unwrap();
+    bytes.push(0);
+    std::fs::write(&two, &bytes).unwrap();
+    let set_aside = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&plugins)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("reaper_kumi.dll.kumi-old-"))
+            .map(|entry| entry.path())
+            .collect()
+    };
+    let life = Lifecycle::new(&root.path().join("kumi"), target.clone());
+    life.install(&one, "0.1.0").unwrap();
+    let held = hold(&target.path());
+    // Updated and rolled back while REAPER holds the first copy: each time the copy asked for is in place.
+    life.install(&two, "0.1.1").unwrap();
+    assert_eq!(std::fs::read(target.path()).unwrap(), bytes);
+    // (the held copy is set aside, unless this Windows renames over a mapped file outright)
+    assert!(set_aside().len() <= 1, "{:?}", set_aside());
+    life.rollback().unwrap();
+    assert_eq!(std::fs::read(target.path()).unwrap(), std::fs::read(&one).unwrap());
+    assert!(set_aside().len() <= 1, "{:?}", set_aside());
+    // REAPER quit: the next action removes it.
+    assert_ne!(unsafe { FreeLibrary(held) }, 0);
+    life.install(&two, "0.1.1").unwrap();
+    assert!(set_aside().is_empty(), "{:?}", set_aside());
+    // An uninstall while REAPER holds the extension: it's out of REAPER's way, and the copy left is named.
+    let held = hold(&target.path());
+    let removed = life.uninstall(true).unwrap();
+    assert!(!target.path().exists());
+    // Whatever stays in REAPER's folder is named, for the producer to delete once REAPER has quit.
+    let left = removed.history[0].left.clone().map(std::path::PathBuf::from);
+    assert_eq!(set_aside(), left.iter().cloned().collect::<Vec<_>>());
+    assert_ne!(unsafe { FreeLibrary(held) }, 0);
+    if let Some(left) = left {
+        std::fs::remove_file(&left).unwrap();
+    }
+}
