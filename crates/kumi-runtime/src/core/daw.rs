@@ -389,6 +389,12 @@ macro_rules! daw_word {
     };
 }
 
+/// (M5) What Kumi says it can't do in a DAW it is connected to, which doesn't do that through Kumi yet: "Kumi can't
+/// pursue a goal in Logic Pro yet." (never that it isn't connected).
+pub fn cant_yet(profile: &DawProfile, what: &str) -> String {
+    format!("Kumi can't {what} in {} yet.", profile.words.app)
+}
+
 /// A device's name as a parenthetical after what it does: " (EQ Eight)", or nothing for a DAW whose fix names no device.
 pub fn parenthetical(name: &str) -> String {
     if name.is_empty() {
@@ -745,9 +751,13 @@ impl DawProfile {
         words: DawWords { app: "Logic Pro", place: "project", places: "projects", master: "Stereo Out", timeline: "Tracks area" },
         // FOCUS follows Logic (M2): a channel strip's plug-ins, a region's notes, the Tracks area, the focus and transport
         // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window. Kumi's
-        // changes in Logic are undone through its host's journal (M3), each as a new step of Logic's own undo.
+        // changes in Logic are undone through its host's journal (M3), each as a new step of Logic's own undo. (M5) Kumi
+        // hears Logic: it plays a part and captures what Logic outputs, and auditions candidates a pass each; a region's
+        // audio file waits for the bridge's rows to name it, and a goal's render rig for a later slice.
         caps: Capabilities {
             undo: true,
+            hear: true,
+            audition: true,
             device_tree: true,
             note_view: true,
             timeline_strip: true,
@@ -773,7 +783,7 @@ impl DawProfile {
             goal_needs: "Goals need Logic Pro connected, with Kumi's Logic Pro bridge.",
             render_leftovers: "Kumi couldn't clean up after bouncing; remove what it left in the project by hand.",
             safety_limiter: "a Limiter",
-            listen_method: "Kumi bounces the part to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            listen_method: "Kumi plays the part in Logic Pro and captures what it outputs after the Stereo Out, which the producer hears too: from the playhead (seconds, 8 by default) or from_beat and beats; each track is heard alone, soloed for a pass of its own. No bouncing first.",
             write_notes_tool: "the tool that writes MIDI notes into a region",
             eq: "Channel EQ",
             middle_c_octave: 3,
@@ -788,7 +798,7 @@ impl DawProfile {
             own_undo: "Logic Pro's own undo (Cmd-Z in Logic Pro)",
             refs_retired: "Logic Pro may have moved the tracks, so Kumi's references are retired: read them again before using any.",
             structure: "tracks",
-            gain_stage: "the channel strip's last Limiter, else a Gain plug-in it adds",
+            gain_stage: "the strip's last Adaptive Limiter or Limiter, else its last Gain plug-in, else a Gain it adds at the end (the Stereo Out's, for the whole mix)",
             eq_name: "Channel EQ",
             multiband: "Multipressor",
             bass_mono: "",
@@ -980,6 +990,14 @@ mod tests {
         assert_eq!(DawProfile::LOGIC.vocab.eq, "Channel EQ");
         assert!(DawProfile::LOGIC.caps.device_tree && DawProfile::LOGIC.caps.note_view && DawProfile::LOGIC.caps.timeline_strip);
         assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && DawProfile::LOGIC.caps.undo);
+        // (M5) Kumi hears Logic and auditions in it; a region's file and a goal's rig wait (REAPER and Renoise hear
+        // nothing yet). Its words say how it hears and where a judged run turns the level.
+        let caps = DawProfile::LOGIC.caps;
+        assert_eq!((caps.hear, caps.audition, caps.audio_file, caps.goal_rig), (true, true, false, false));
+        assert!(!DawProfile::REAPER.caps.hear && !DawProfile::RENOISE.caps.hear && !DawProfile::REAPER.caps.audition);
+        assert!(DawProfile::LOGIC.vocab.listen_method.contains("captures what it outputs after the Stereo Out"));
+        assert!(DawProfile::LOGIC.vocab.gain_stage.contains("Adaptive Limiter or Limiter, else its last Gain plug-in"));
+        assert_eq!(cant_yet(&DawProfile::LOGIC, "pursue a goal"), "Kumi can't pursue a goal in Logic Pro yet.");
     }
 
     #[test]

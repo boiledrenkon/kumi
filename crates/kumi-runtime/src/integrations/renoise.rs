@@ -34,6 +34,7 @@ pub const DAW: OwnDaw = OwnDaw {
     permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::RENOISE),
     changes: &super::renoise_changes::CHANGES,
     open_project: None,
+    listening: None,
 };
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),

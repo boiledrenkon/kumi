@@ -849,3 +849,23 @@ async fn the_session_offers_another_daws_own_focus_bodies() {
         })
         .await;
 }
+
+/// (M5) Listening to a DAW that is connected but that Kumi doesn't hear yet says what can't be done, not that Kumi
+/// isn't connected: the listen tool over REAPER, as the app has it (in a fallback).
+#[tokio::test(flavor = "current_thread")]
+async fn listening_to_a_daw_kumi_doesnt_hear_yet_says_what_cant_be_done() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
+            let (session, _, _, _) = open(&main, &worker, dir.path(), false, DawProfile::REAPER, INSTRUCTIONS);
+            session.start().await.unwrap();
+            main.script.borrow_mut().extend([step(|_| call("listen", json!({"mix": true}))), step(|_| answer("Done."))]);
+            session.submit("Listen to the mix.", None).await.unwrap();
+            session.close().await.unwrap();
+            let said = main.requests.borrow().join("\n");
+            assert!(said.contains("Kumi can't hear the project in REAPER yet."), "{said}");
+            assert!(!said.contains("isn't connected to REAPER"), "{said}");
+        })
+        .await;
+}

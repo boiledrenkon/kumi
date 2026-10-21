@@ -388,6 +388,49 @@ pub fn tools(host: &Host) -> Value {
             })), "required": ["path", "epoch"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
         }));
+        // (M5) Listening: a part played and what Logic outputs captured (hear), such a pass for each candidate
+        // (audition), a part bounced offline (render), as the bridge's Listening section has them. Audio travels as a
+        // file the bridge writes into folder; an answer carries its path, never its samples. Files written, not the
+        // project: no change and no undo, and Logic is put back as it was (its playhead, solos, metronome and cycle).
+        let part = json!({
+            "fromBeats": {"type": "number", "minimum": 0, "description": "Where the part starts, in beats from the project's start."},
+            "beats": {"type": "number", "minimum": 0.25, "maximum": 14400, "description": "How long the part is, in beats (a pass plays at most 600 s)."},
+            "folder": {"type": "string", "description": "A whole path to a folder that is there: the files go into it, named by the bridge (kumi-hear-<n>.wav, kumi-audition-<n>-<k>.wav, kumi-render-<n>.wav), never over a file."},
+            "epoch": {"type": "string", "description": "The epoch the refs were read in, when the request gives one: if the project's is another, it is refused as stale."},
+        });
+        let mute = json!({"type": "boolean", "description": "Logic Pro is kept from the speakers while it is captured (false by default: the producer hears it)."});
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "hear",
+            "title": "Hear a part of the Logic Pro project",
+            "description": "Plays a part of the open Logic Pro project and captures what Logic Pro outputs, after the Stereo Out, into a WAV file in folder (32-bit float at the output device's rate): the cycle and the metronome off, the playhead placed exactly on the part's first beat, Logic played and followed past the part's end, the capture cut to the part; then Logic Pro put back as it was (its playhead, solos, metronome and cycle). solo hears those tracks alone (none: the whole mix, no track soloed); a track the producer muted stays silent, and the note says so. The answer: file, seconds, sampleRate, channels, lead (0: the file starts on the part's first beat), peak and rms (of full scale, 1.0), aligned (by, latencyMs, errorMs: how the capture was cut to the beats), fromBeats, beats, mute, solo, metronome, epoch, note, and notPutBack (what of Logic Pro couldn't be put back). busy while Logic Pro plays or a dialog is up. The call lasts as long as the part plays, plus a margin. A file written, not the project: no change and no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, merged(&part, json!({
+                "mute": mute,
+                "solo": {"type": "array", "items": {"type": "string"}, "maxItems": 64, "description": "Tracks (their refs) heard alone, soloed for the pass; none for the whole mix."},
+            }))), "required": ["fromBeats", "beats", "folder"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "audition",
+            "title": "Audition candidates in Logic Pro",
+            "description": "Hears each candidate over the same part of the open Logic Pro project, one pass after the other in their order and in one capture, each as hear hears it: a track ({\"ref\": …}) soloed alone, or the whole mix ({\"mix\": true}); Logic Pro is put back as it was after the last. The answer: candidates, in their order, each its candidate (ref, or mix), its name, and what hear's file holds (file, seconds, sampleRate, channels, lead, peak, rms, note); then aligned, fromBeats, beats, mute, metronome, epoch and notPutBack. The call lasts each pass's part plus a margin. Files written, not the project: no change and no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, merged(&part, json!({
+                "mute": mute,
+                "candidates": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "properties": {
+                    "ref": {"type": "string", "description": "A track, heard soloed alone."},
+                    "mix": {"type": "boolean", "description": "true: the whole mix."},
+                }, "additionalProperties": false}},
+            }))), "required": ["candidates", "fromBeats", "beats", "folder"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "render",
+            "title": "Render a part of the Logic Pro project",
+            "description": "Bounces a part of the open Logic Pro project offline into a WAV file in folder (File > Bounce over the part: 32-bit float at the project's rate, Normalize off, the metronome off; nothing plays): ref, a track, is soloed alone for it, so its audio passes its plug-ins and the Stereo Out's (the note says so); without ref, the whole mix. The solos and the metronome are put back. The answer: file, seconds, sampleRate, channels, bits, lead (0), fromBeats, beats, metronome, epoch, ref, note and notPutBack. A file written, not the project: no change and no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, merged(&part, json!({
+                "ref": {"type": "string", "description": "A track to bounce alone, soloed for it; left out, the whole mix."},
+            }))), "required": ["fromBeats", "beats", "folder"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
         property(
             &mut list,
             "focus_body",
@@ -556,6 +599,11 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     if !is_error {
                         written_title(name, &mut answer);
                     }
+                    result(id, tool_result(answer, is_error))
+                }
+                // (M5) Logic heard: a part played and captured, a pass per candidate, a part bounced offline.
+                "hear" | "audition" | "render" if host.daw() == Daw::Logic => {
+                    let (answer, is_error) = host.listen(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 _ => error(id, -32602, &format!("Unknown tool: {name}")),

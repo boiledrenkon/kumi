@@ -595,6 +595,75 @@ impl Plugin {
         let (value, text, _, _) = shown(&self.spec().params[at], self.values[at]);
         Some((value, text))
     }
+
+    /// (M5) What it does to the sound the simulated Logic plays, read from its Controls View as it shows it: a Gain
+    /// turns it by its gain (−96 dB and below silences it), with its balance, phase, swap and mono; a Limiter and an
+    /// Adaptive Limiter turn it by their gain (and input scale) and hold its peaks at their ceiling; one bypassed, or
+    /// any other plug-in, leaves it as it is.
+    pub(super) fn stage(&self) -> Stage {
+        if self.bypassed {
+            return Stage::Through;
+        }
+        let db = |name: &str| self.row_named(name).and_then(|(_, text)| first_number(&text.replace('\u{2212}', "-"))).unwrap_or(0.0);
+        let option = |name: &str| self.row_named(name).is_some_and(|(value, _)| value.unwrap_or(0.0) >= 0.5);
+        match self.name.as_str() {
+            "Gain" => Stage::Gain {
+                db: db("Gain"),
+                balance: db("Balance") / 100.0,
+                invert: (option("Phase Left"), option("Phase Right")),
+                swap: option("Swap L/R"),
+                mono: option("Make Mono"),
+            },
+            "Limiter" => Stage::Limit { db: db("Gain"), ceiling: db("Output Level") },
+            "Adaptive Limiter" => Stage::Limit { db: db("Input Scale") + db("Gain"), ceiling: db("Out Ceiling") },
+            _ => Stage::Through,
+        }
+    }
+}
+
+/// (M5) What a plug-in does to the simulated sound (`Plugin::stage`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Stage {
+    /// A Gain: its gain in dB, its balance (-1 left to 1 right), each side's phase inverted, the sides swapped, mono.
+    Gain { db: f64, balance: f64, invert: (bool, bool), swap: bool, mono: bool },
+    /// A limiter: its gain in, then its ceiling (dBFS) over the peaks.
+    Limit { db: f64, ceiling: f64 },
+    /// Nothing the simulation hears.
+    Through,
+}
+
+impl Stage {
+    /// A stereo frame through it.
+    pub(super) fn apply(self, (left, right): (f64, f64)) -> (f64, f64) {
+        match self {
+            Stage::Gain { db, balance, invert, swap, mono } => {
+                if db <= MIN_DB {
+                    return (0.0, 0.0);
+                }
+                let gain = 10f64.powf(db / 20.0);
+                let (mut l, mut r) = (left * gain * (1.0 - balance).min(1.0), right * gain * (1.0 + balance).min(1.0));
+                if invert.0 {
+                    l = -l;
+                }
+                if invert.1 {
+                    r = -r;
+                }
+                if swap {
+                    (l, r) = (r, l);
+                }
+                if mono {
+                    let both = (l + r) / 2.0;
+                    (l, r) = (both, both);
+                }
+                (l, r)
+            }
+            Stage::Limit { db, ceiling } => {
+                let (gain, most) = (10f64.powf(db / 20.0), 10f64.powf(ceiling.min(0.0) / 20.0));
+                ((left * gain).clamp(-most, most), (right * gain).clamp(-most, most))
+            }
+            Stage::Through => (left, right),
+        }
+    }
 }
 
 /// A send in a strip's send slot: the bus it sends to and its level in dB (−∞ as -96).

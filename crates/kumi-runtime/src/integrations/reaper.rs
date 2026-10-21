@@ -34,6 +34,7 @@ pub const DAW: OwnDaw = OwnDaw {
     permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::REAPER),
     changes: &super::reaper_changes::CHANGES,
     open_project: None,
+    listening: None,
 };
 
 /// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's

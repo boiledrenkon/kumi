@@ -15,7 +15,13 @@
 //! Stereo Out and its gain set through the plug-in window's Controls View, read back as a parameter; a send from track 1
 //! to a bus nothing takes (Logic makes an aux for it); a patch from the Library loaded on a software instrument track
 //! (`--patch` names it, "Piano/Steinway Grand Piano" by default); a bounce of bars 1 to 5 under the `--files` folder,
-//! found on disk with its length and deleted after; each undone or taken away, and the project read as before.
+//! found on disk with its length and deleted after; each undone or taken away, and the project read as before. M5,
+//! listening: the listening tools offered; bars 1 to 5 heard (Logic plays them while the bridge's helper taps what it
+//! outputs: the file's length and loudness); a judged run toward a loudness 3 LU above what was heard, the first
+//! software instrument track up 1 dB, and the round that brings the level back with a Gain added at the end of the
+//! Stereo Out and set (read back as a parameter), then each of the run's changes undone through Kumi; tracks 1 and 2
+//! auditioned, a pass each; a render of bars 1 to 5 of the instrument track found on disk with its length, then
+//! deleted; and the project read as before (its tracks, their faders and solos, the Stereo Out's plug-ins).
 //! It leaves the project as it found it: every change it makes is undone before it ends (the operator's own steps of
 //! M2 aside). It prints a Markdown summary for docs/evidence/ at the end (and writes it to --report, when given). The
 //! bridge must be set up in the home (`kumi --daw logic bridge`) and Accessibility allowed; build the host first:
@@ -29,13 +35,14 @@ use kumi_common::{
 use kumi_runtime::{
     core::{
         context::IntegrationContext,
-        contracts::{ChangeRecord, ChangeState},
+        contracts::{ChangeRecord, ChangeState, HearRequest},
         view::BodyRequest,
     },
     integrations::{
         logic::create_logic_integration,
         own_bridge::{Connect, OwnOptions},
     },
+    listening::measure::{measure_file, MeasureOptions},
     mcp::{
         client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
         types::{CallToolResult, ContentBlock},
@@ -157,6 +164,11 @@ struct Accept {
 
 fn signal() -> Signal {
     abort::timeout(60_000)
+}
+
+/// (M5) A listening tool's time: its passes play in real time, a few after one another.
+fn listening() -> Signal {
+    abort::timeout(300_000)
 }
 
 fn short(text: &str, most: usize) -> String {
@@ -550,6 +562,11 @@ impl Accept {
         }
         println!("\nM4, the second slice: a Gain on the Stereo Out, a send to a new bus, a patch, a bounce, each undone");
         self.m4b_kinds().await?;
+        if self.stopping.get() {
+            return Ok(self.exit_code());
+        }
+        println!("\nM5: bars 1 to 5 heard, a judged round's gain on the Stereo Out, an audition, a render, each undone");
+        self.m5_listening().await?;
         if !self.operator || self.stopping.get() {
             println!("\n(the steps with an operator at Logic Pro were skipped)");
             return Ok(self.exit_code());
@@ -1486,6 +1503,275 @@ impl Accept {
         Ok(())
     }
 
+    /// M5, listening: the listening tools offered; bars 1 to 5 of the mix heard (the file's length, and its loudness
+    /// measured); a judged run toward 3 LU above what was heard (the loudness alone its target), the first software
+    /// instrument track up 1 dB, and the round that brings the level back with a Gain at the end of the Stereo Out, read
+    /// back as a parameter, then each of the run's changes undone through Kumi, last first; tracks 1 and 2 auditioned, a
+    /// pass each; a render of bars 1 to 5 of the instrument track found on disk with its length, then deleted; and the
+    /// project read as before (its tracks, their faders and solos, the Stereo Out's plug-ins).
+    async fn m5_listening(&self) -> Result<(), RuntimeError> {
+        let observation = self.observe().await?;
+        let (Some(read), Some(undo)) = (tool_named(&observation, "logic_read"), tool_named(&observation, "undo_change")) else {
+            self.say(false, None, "M5: no logic_read and undo_change tools");
+            return Ok(());
+        };
+        let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
+        let tracks = context["tracks"].as_array().cloned().unwrap_or_default();
+        let bpm = context["project"]["tempo"].as_f64().unwrap_or(120.0);
+        let expected = 16.0 * 60.0 / bpm;
+        let stereo_out = |context: &Value| {
+            context["outputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|output| output["name"] == "Stereo Out")
+                .and_then(|output| output["ref"].as_str().map(str::to_owned))
+        };
+        let output_plugins = match stereo_out(&context) {
+            Some(strip) => self.rows(&read, json!({"kind": "plugin", "parent": strip, "limit": 200})).await?.len(),
+            None => 0,
+        };
+        // Each track's name, fader and solo, as a look reads them.
+        let mixer = |tracks: &[Value]| -> Vec<(String, f64, bool)> {
+            tracks
+                .iter()
+                .map(|track| {
+                    (
+                        track["name"].as_str().unwrap_or_default().to_owned(),
+                        track["volumeDb"].as_f64().unwrap_or(0.0),
+                        track["solo"] == true,
+                    )
+                })
+                .collect()
+        };
+        let before = mixer(&tracks);
+        let heard = self.changes.borrow().len();
+        // A round's reply as its log's lines.
+        let log = |text: &str| {
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .and_then(|reply| {
+                    reply["log"].as_array().map(|lines| lines.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" / "))
+                })
+                .unwrap_or_else(|| short(text, 300))
+        };
+
+        // The listening tools, and what hears for the listen tool.
+        let names = ["audition", "judge", "tune", "groove", "form", "sound", "render"];
+        let offered: Vec<&str> = names.iter().copied().filter(|name| tool_named(&observation, name).is_some()).collect();
+        let (hears, auditions) = (self.integration.has_hear(), self.integration.has_audition());
+        self.say(
+            offered.len() == names.len() && hears && auditions,
+            None,
+            &format!("the listening tools: {} (hear {hears}, audition {auditions})", offered.join(", ")),
+        );
+
+        // Bars 1 to 5 of the mix: Logic plays them while the helper taps what it outputs, cut to the part.
+        let t0 = perf_now();
+        let mix = HearRequest { mix: Some(true), from_beat: Some(0.0), beats: Some(16.0), ..HearRequest::default() };
+        let mut loudness = None;
+        match self.integration.hear(&mix, listening()).await? {
+            Ok(takes) => {
+                let ms = perf_now() - t0;
+                match takes.first() {
+                    Some(take) => {
+                        let file = wav_seconds(Path::new(&take.file));
+                        let measured =
+                            measure_file(&take.file, MeasureOptions { start: Some(take.start), seconds: take.seconds, signal: None }).await;
+                        loudness = measured.as_ref().ok().and_then(|heard| heard.measures.integrated);
+                        let part = take.seconds.unwrap_or(0.0);
+                        let ok = (part - expected).abs() < 0.05
+                            && file.is_some_and(|file| (file - take.start - part).abs() < 0.05)
+                            && loudness.is_some_and(|loudness| loudness > -70.0);
+                        self.say(
+                            ok,
+                            Some(ms),
+                            &format!(
+                                "hear bars 1 to 5: {part:.3} s of the mix ({expected:.2} s at {bpm} BPM; the file {}, {:.3} s before the part), {}",
+                                file.map(|file| format!("{file:.3} s")).unwrap_or_else(|| "unread".into()),
+                                take.start,
+                                loudness.map(|loudness| format!("{loudness:.1} LUFS")).unwrap_or_else(|| "no loudness measured".into())
+                            ),
+                        );
+                    }
+                    None => self.say(false, Some(ms), "hear bars 1 to 5: no take came back"),
+                }
+            }
+            Err(why) => self.say(false, Some(perf_now() - t0), &format!("hear bars 1 to 5: {}", short(&why, 200))),
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // A judged run toward 3 LU above what was heard, the first software instrument track up 1 dB, and the round that
+        // brings the level back to the goal with a Gain at the end of the Stereo Out.
+        let instrument = tracks.iter().find(|track| track["kind"] == "instrument").cloned();
+        match (loudness, tool_named(&observation, "judge"), instrument) {
+            (Some(loudness), Some(judge), Some(track)) => {
+                let goal = ((loudness + 3.0) * 2.0).round() / 2.0;
+                let t0 = perf_now();
+                let start = json!({"goal": {"loudness": goal, "problems": false}, "from_beat": 0, "beats": 16});
+                let started = judge.execute(start.as_object().cloned().unwrap_or_default(), listening()).await?;
+                self.say(
+                    !started.is_error,
+                    Some(perf_now() - t0),
+                    &format!("judge: a run toward {goal} LUFS starts: {}", short(&log(&started.text), 240)),
+                );
+                if !started.is_error {
+                    let name = track["name"].as_str().unwrap_or("?").to_owned();
+                    let fader = track["volumeDb"].as_f64().unwrap_or(0.0);
+                    let (is_error, text) =
+                        self.run_tool(&observation, "track_volume", json!({"ref": track["ref"], "volumeDb": fader + 1.0})).await?;
+                    self.say(!is_error, None, &format!("“{name}” up 1 dB: {}", short(&text, 160)));
+                    let t0 = perf_now();
+                    let change = json!({"change": format!("{name} up 1 dB")});
+                    let round = judge.execute(change.as_object().cloned().unwrap_or_default(), listening()).await?;
+                    let said = log(&round.text);
+                    self.say(
+                        !round.is_error && said.contains("the Stereo Out"),
+                        Some(perf_now() - t0),
+                        &format!("the round: {}", short(&said, 320)),
+                    );
+                    // The Gain it put at the end of the Stereo Out, read back as a parameter.
+                    let look = self.observe().await?;
+                    let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+                    let reads = match (stereo_out(&context), tool_named(&look, "logic_read")) {
+                        (Some(strip), Some(read)) => {
+                            let plugins = self.rows(&read, json!({"kind": "plugin", "parent": strip, "limit": 200})).await?;
+                            match plugins.last().filter(|row| row["name"] == "Gain").and_then(|row| row["ref"].as_str()) {
+                                Some(gain) => self
+                                    .rows(&read, json!({"kind": "param", "parent": gain, "limit": 200}))
+                                    .await?
+                                    .iter()
+                                    .find(|row| row["name"] == "Gain")
+                                    .and_then(|row| row["text"].as_str().map(str::to_owned)),
+                                None => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    self.say(
+                        reads.is_some(),
+                        None,
+                        &format!(
+                            "a Gain at the end of the Stereo Out: its Gain reads {}",
+                            reads.as_deref().unwrap_or("nothing (no Gain there)")
+                        ),
+                    );
+                }
+            }
+            (None, ..) => self.say(false, None, "judge: no loudness was heard to aim above"),
+            (_, None, _) => self.say(false, None, "judge: no judge tool"),
+            (_, _, None) => self.say(false, None, "judge: no software instrument track to turn up"),
+        }
+        // Each of the run's changes still standing, undone through Kumi, last first (a round not kept took its own back).
+        let mut ids: Vec<String> = Vec::new();
+        for record in self.changes.borrow()[heard..].iter() {
+            if !ids.contains(&record.id) {
+                ids.push(record.id.clone());
+            }
+        }
+        for id in ids.iter().rev() {
+            let Some(row) = self.change(id) else { continue };
+            if !matches!(row.state, ChangeState::Applied | ChangeState::Unsure) {
+                continue;
+            }
+            let t0 = perf_now();
+            let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+            let what = if undone { "undone".to_string() } else { short(&result.text, 200) };
+            self.say(undone, Some(perf_now() - t0), &format!("undo “{}”: {what}", row.title));
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // Tracks 1 and 2 auditioned: a pass each, the producer hearing the first and Logic silent for the second.
+        let look = self.observe().await?;
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let now = context["tracks"].as_array().cloned().unwrap_or_default();
+        match (tool_named(&look, "audition"), now.first(), now.get(1)) {
+            (Some(audition), Some(first), Some(second)) => {
+                let t0 = perf_now();
+                let candidates = json!({"candidates": [{"track": first["ref"], "label": "track 1"}, {"track": second["ref"], "label": "track 2"}], "from_beat": 0, "beats": 16});
+                let result = audition.execute(candidates.as_object().cloned().unwrap_or_default(), listening()).await?;
+                let reply: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
+                let takes: Vec<String> = reply["takes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|take| {
+                        let heard = if take["silent"] == true {
+                            "silent".to_string()
+                        } else {
+                            take["heard"].as_str().unwrap_or("unheard").to_owned()
+                        };
+                        format!("{}: {heard}", take["label"].as_str().unwrap_or("?"))
+                    })
+                    .collect();
+                self.say(
+                    !result.is_error && takes.len() == 2,
+                    Some(perf_now() - t0),
+                    &format!("audition of tracks 1 and 2: {}", if takes.is_empty() { short(&result.text, 200) } else { takes.join("; ") }),
+                );
+            }
+            _ => self.say(false, None, "audition: no audition tool, or fewer than two tracks"),
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // Bars 1 to 5 of the instrument track rendered offline (soloed for the bounce): found on disk, its length the
+        // part's, then deleted.
+        match (tool_named(&look, "render"), now.iter().find(|track| track["kind"] == "instrument")) {
+            (Some(render), Some(track)) => {
+                let name = track["name"].as_str().unwrap_or("?").to_owned();
+                let t0 = perf_now();
+                let asked = json!({"track": track["ref"], "from_beat": 0, "beats": 16});
+                let result = render.execute(asked.as_object().cloned().unwrap_or_default(), listening()).await?;
+                let ms = perf_now() - t0;
+                let reply: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
+                let file = reply["file"].as_str().map(str::to_owned);
+                let seconds = file.as_deref().and_then(|file| wav_seconds(Path::new(file)));
+                let what = match (&file, result.is_error) {
+                    (Some(file), false) => format!(
+                        "render of bars 1 to 5 of “{name}”: {} found, {} s long ({expected:.2} s at {bpm} BPM)",
+                        Path::new(file).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                        seconds.map(|seconds| format!("{seconds:.2}")).unwrap_or_else(|| "not".into())
+                    ),
+                    _ => format!("render of bars 1 to 5 of “{name}”: {}", short(&result.text, 200)),
+                };
+                self.say(!result.is_error && seconds.is_some_and(|seconds| (seconds - expected).abs() < 0.05), Some(ms), &what);
+                if file.is_some_and(|file| std::fs::remove_file(file).is_ok()) {
+                    println!("        (the render is deleted, checked)");
+                }
+            }
+            _ => self.say(false, None, "render: no render tool, or no software instrument track"),
+        }
+
+        // The project as M5 found it.
+        let look = self.observe().await?;
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let after = mixer(&context["tracks"].as_array().cloned().unwrap_or_default());
+        let output_plugins_now = match (stereo_out(&context), tool_named(&look, "logic_read")) {
+            (Some(strip), Some(read)) => self.rows(&read, json!({"kind": "plugin", "parent": strip, "limit": 200})).await?.len(),
+            _ => 0,
+        };
+        let same = after.len() == before.len()
+            && after.iter().zip(&before).all(|(now, was)| now.0 == was.0 && (now.1 - was.1).abs() < 0.05 && now.2 == was.2);
+        self.say(
+            same && output_plugins_now == output_plugins,
+            None,
+            &format!(
+                "the project reads as before M5: {} tracks, faders {}, {} soloed, {output_plugins_now} plug-ins on the Stereo Out (before: {output_plugins})",
+                after.len(),
+                after.iter().map(|(name, db, _)| format!("{name} {db:+.1} dB")).collect::<Vec<_>>().join(", "),
+                after.iter().filter(|(_, _, solo)| *solo).count()
+            ),
+        );
+        Ok(())
+    }
+
     /// M3, with the operator: a rename made through Kumi (a step of Logic's undo, where a fader move is none), then
     /// Cmd-Z in Logic: the bridge names it back (`undone_in_daw`), and HISTORY marks the change undone with Logic's
     /// own undo. Without the Cmd-Z, Kumi undoes it, so nothing of the run is left in the project.
@@ -1568,7 +1854,7 @@ impl Accept {
         let rows = self.rows.borrow();
         let passed = rows.iter().filter(|row| row.ok).count();
         let today = chrono::Utc::now().format("%Y-%m-%d");
-        let mut out = format!("# Logic Pro M2, M3 and M4 acceptance, {today}\n\nStatus: {} of {} checks passed.\n\n", passed, rows.len());
+        let mut out = format!("# Logic Pro M2 to M5 acceptance, {today}\n\nStatus: {} of {} checks passed.\n\n", passed, rows.len());
         out.push_str("| | |\n| --- | --- |\n");
         out.push_str(&format!(
             "| Logic Pro | {} (pid {}, `{}`) |\n| Bridge | {} |\n| Project | {} |\n| Host | `daw-mcp-server --daw logic` from this build |\n\n",

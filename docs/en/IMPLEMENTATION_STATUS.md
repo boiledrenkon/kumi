@@ -135,6 +135,35 @@ and migration checks do not replace a new real-Live acceptance run.
   each undone or taken away. The second slice's gate on this Mac, every check
   passed on its second run, is recorded in
   `docs/evidence/logic-m4b-gate-2026-10-21.md`.
+  M5, listening: Kumi hears Logic Pro. The host offers Logic's `hear` (a part
+  played while the bridge's helper taps what Logic outputs after the Stereo
+  Out, cut to the part, into a WAV file in a folder Kumi names), `audition`
+  (such a pass for each candidate, a track soloed alone or the whole mix) and
+  `render` (a part bounced offline, a track soloed for it), each bounded by the
+  part's length at the tempo Logic plays at, plus a margin; audio travels as a
+  file, never as samples. Logic's integration gives the shared one a listening
+  hook (`OwnDaw::listening`; REAPER and Renoise give none), whose `Renderer`
+  (`integrations/logic_listening.rs`) answers the listening tools (judge, tune,
+  sound, form, groove, audition, render) and the listen tool's `hear`: a track
+  is heard alone by soloing it for a pass of its own, the producer hears an
+  audition's first candidate while Logic stays silent for the others, and a
+  judged round brings the level back at the run's track or the Stereo Out (its
+  last Adaptive Limiter or Limiter that's on, else a last Gain, else a Gain
+  Kumi adds at the end), each set through the Controls View as a change in
+  HISTORY that Kumi's undo takes back; a render's note says the Stereo Out's
+  plug-ins are in it. Logic's capabilities gain `hear` and `audition`, and its
+  words say how it is heard and where a judged round turns the level. The
+  listen tool and the fallback say what Kumi can't do in a DAW that is
+  connected ("Kumi can't pursue a goal in Logic Pro yet."), no longer that it
+  isn't connected. The simulated Logic synthesizes what it plays (each track a
+  tone of its own through its fader, pan and level plug-ins, then the Stereo
+  Out's, so a Gain turned there is heard) and answers the three methods in the
+  shapes of the contract's Listening section (its file names, fields, notes and
+  refusals).
+  The acceptance run gains the M5 checks: bars 1 to 5 heard (the file's length
+  and loudness), a judged round whose gain goes on the Stereo Out (a Gain
+  added, set, read back, undone), tracks 1 and 2 auditioned, a render of bars
+  1 to 5 found on disk, and the project as before at the end.
 
 ## Evidence
 
@@ -171,6 +200,17 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
+- Logic Pro is heard after its Stereo Out (a process tap hears Logic's whole
+  output): a track is heard alone by soloing it, so it passes the Stereo Out's
+  plug-ins, and masking isn't read through any of them but a neutral Gain; each
+  candidate is a real-time pass of its own. Kumi can't yet keep a goal's render
+  rig open in Logic, tune a plug-in's knobs by ear (tune reads no knob of
+  Logic's), or follow a track renamed during a run; nor hear a region's audio
+  file as a file, since Logic shows it by name only (its track is heard over
+  the region's bars instead). A listen turns Logic's metronome off and on (its
+  clicks time the capture), a setting Logic saves with the project, so the
+  project shows as edited after one though nothing in it changed; Kumi says so
+  when it has listened.
 - Logic Pro support can't name or rename a marker, since a marker's name cell
   isn't a text field; nor move or colour a track, since the headers can't be
   dragged from outside and the Color palette's swatches are bare positions that

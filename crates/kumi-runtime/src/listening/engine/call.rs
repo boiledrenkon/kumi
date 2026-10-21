@@ -152,10 +152,11 @@ impl Listening {
         match self.host.render(track, from, beats, signal).await? {
             Err(why) => Ok(ToolResult::error(why)),
             Ok(mut reply) => {
-                reply.insert(
-                    "note".into(),
-                    json!("The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to."),
-                );
+                // (M5) A DAW that renders otherwise says what its file holds in a note of its own (Logic bounces a track
+                // soloed, through its plug-ins); this is Live's.
+                reply.entry("note").or_insert_with(|| {
+                    json!("The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to.")
+                });
                 Ok(ToolResult::text(stringify(&json!(reply))))
             }
         }
