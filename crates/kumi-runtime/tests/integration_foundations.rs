@@ -91,6 +91,9 @@ impl Integration for TestIntegration {
     fn first_heard(&self, since: i64) -> Option<i64> {
         Some(since + 1)
     }
+    fn has_open_place(&self) -> bool {
+        self.name == "live"
+    }
 }
 fn integration(name: &'static str, error: Option<RuntimeError>, log: Rc<RefCell<Vec<String>>>) -> Rc<TestIntegration> {
     Rc::new(TestIntegration { name, error, log, hints: RefCell::new(None), closed: Cell::new(false) })
@@ -115,6 +118,8 @@ async fn live_setup_failure_closes_primary_then_chat_and_other_errors_propagate(
     assert!(!fallen.stop_live(Signal::new()).await.unwrap());
     assert!(fallen.undo(None, Signal::new()).await.unwrap_err().message().contains("isn't connected to Live"));
     assert!(fallen.device_tree("x", Signal::new()).await.unwrap().is_none());
+    // Live's question about another Set stays Live's while the session talks without it (review: has_open_place).
+    assert!(fallen.has_open_place(), "the DAW's own answer, not the chat integration's");
     assert!(fallen.has_goal());
     let request: AuditionRequest = serde_json::from_value(json!({"candidates":[]})).unwrap();
     assert!(fallen.goal(&request, Signal::new()).await.unwrap().is_err());

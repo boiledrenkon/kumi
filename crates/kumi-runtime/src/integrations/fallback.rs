@@ -125,8 +125,10 @@ impl Integration for FallbackIntegration {
     fn words(&self) -> (&'static str, &'static str) {
         self.primary.words()
     }
+    /// The DAW's own answer, as its question and wire are its own: Live's stays Live's while it's closed and the session
+    /// falls back to chat (opening then goes to what's current, which says why it can't).
     fn has_open_place(&self) -> bool {
-        self.current().has_open_place()
+        self.primary.has_open_place()
     }
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
         self.current().open_place(place, signal).await
