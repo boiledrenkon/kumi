@@ -179,17 +179,38 @@ mod platform {
         found.into_iter().map(|b| (b, unsafe { text(object(b, c"title")) })).collect()
     }
 
+    /// A button a timer clicks: found again when the timer fires, never held until then (REAPER frees the progress window,
+    /// and its button, when the render ends between the press and the timer).
+    #[derive(Clone, Copy)]
+    enum Click {
+        RenderCancel = 1,
+        IncompleteNo = 2,
+    }
+
     /// Clicks a button from a timer of its own, so whatever the click opens (an alert's modal loop) runs outside the caller,
-    /// and Kumi's render timer goes on firing inside it.
-    fn click_soon(button: Id) {
+    /// and Kumi's render timer goes on firing inside it. The timer holds which button, not the button: it looks it up again,
+    /// and clicks nothing when it's gone.
+    fn click_soon(click: Click) {
         extern "C" fn fired(_timer: Id, info: *mut c_void) {
             crate::guard("render cancel", (), || {
-                let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id, Id)>(objc_msgSend) };
-                unsafe { send(info, sel(c"performClick:"), std::ptr::null_mut()) };
+                let button = match info as usize {
+                    1 => render_cancel(),
+                    2 => incomplete_no(),
+                    _ => None,
+                };
+                if let Some(button) = button {
+                    let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id, Id)>(objc_msgSend) };
+                    unsafe { send(button, sel(c"performClick:"), std::ptr::null_mut()) };
+                }
             });
         }
-        let mut context =
-            Context { version: 0, info: button, retain: std::ptr::null(), release: std::ptr::null(), copy_description: std::ptr::null() };
+        let mut context = Context {
+            version: 0,
+            info: click as usize as *mut c_void,
+            retain: std::ptr::null(),
+            release: std::ptr::null(),
+            copy_description: std::ptr::null(),
+        };
         let timer = unsafe { CFRunLoopTimerCreate(std::ptr::null_mut(), CFAbsoluteTimeGetCurrent(), 0.0, 0, 0, fired, &mut context) };
         if !timer.is_null() {
             unsafe {
@@ -199,30 +220,46 @@ mod platform {
         }
     }
 
-    /// The render's progress window ("Rendering to file…"), visible: never the render settings dialog behind it.
-    pub fn press() -> bool {
+    /// The Cancel of the render's progress window ("Rendering to file…"), visible: never the render settings dialog behind it.
+    fn render_cancel() -> Option<Id> {
         for window in unsafe { windows() } {
             if !super::is_render_window(&unsafe { text(object(window, c"title")) }) || !unsafe { yes(window, c"isVisible") } {
                 continue;
             }
             if let Some((cancel, _)) = unsafe { buttons(window) }.into_iter().find(|(_, label)| label == "Cancel") {
-                click_soon(cancel);
-                return true;
+                return Some(cancel);
             }
         }
-        false
+        None
+    }
+
+    pub fn press() -> bool {
+        if render_cancel().is_none() {
+            return false;
+        }
+        click_soon(Click::RenderCancel);
+        true
     }
 
     /// REAPER's alert about the files a cancelled render left ("Save incomplete rendered files?"), answered No: Kumi
     /// deletes them itself. False when no such alert is up.
     pub fn answer_incomplete() -> bool {
+        if incomplete_no().is_none() {
+            return false;
+        }
+        click_soon(Click::IncompleteNo);
+        true
+    }
+
+    /// The No of REAPER's alert about a cancelled render's incomplete files, when it's up.
+    fn incomplete_no() -> Option<Id> {
         let app = unsafe { app() };
         if app.is_null() {
-            return false;
+            return None;
         }
         let modal = unsafe { object(app, c"modalWindow") };
         if modal.is_null() {
-            return false;
+            return None;
         }
         let title = unsafe { text(object(modal, c"title")) };
         let class = unsafe { objc_getClass(c"NSTextField".as_ptr()) };
@@ -233,15 +270,9 @@ mod platform {
         let words: Vec<String> = fields.into_iter().map(|f| unsafe { text(object(f, c"stringValue")) }).collect();
         let about = title.to_lowercase().contains("incomplete") || words.iter().any(|w| w.to_lowercase().contains("incomplete"));
         if !about {
-            return false;
+            return None;
         }
-        match unsafe { buttons(modal) }.into_iter().find(|(_, label)| label == "No") {
-            Some((no, _)) => {
-                click_soon(no);
-                true
-            }
-            None => false,
-        }
+        unsafe { buttons(modal) }.into_iter().find(|(_, label)| label == "No").map(|(no, _)| no)
     }
 
     /// Every window: its title, whether it shows, its buttons; and the modal one's.
