@@ -191,7 +191,7 @@ end
 -- Pattern p's mark for the cache: the count of its changed lines (`mark_of(p)`, by the bridge's line notifiers) and, for each
 -- track read that is an alias, the pattern it shows with that one's count: an edit in the source tells the source's notifiers
 -- only (measured). Nil when one is unknown.
-local function cache_mark(song, p, tracks, mark_of)
+local function worked_out_mark(song, p, tracks, mark_of)
   local mark = mark_of and mark_of(p) or nil
   if not mark then return nil end
   local pattern, parts = song:pattern(p), nil
@@ -210,18 +210,26 @@ local function cache_mark(song, p, tracks, mark_of)
   return parts and table.concat(parts, "|") or mark
 end
 
+-- The same, once per pattern in one read of the song (`memo`: a pattern plays in many slots).
+local function cache_mark(song, p, tracks, mark_of, memo)
+  if memo and memo[p] ~= nil then return memo[p] or nil end
+  local mark = worked_out_mark(song, p, tracks, mark_of)
+  if memo then memo[p] = mark or false end
+  return mark
+end
+
 -- Pattern p's cache entry while its lines (and those its aliases show) haven't changed (nil when unknown, which reads again),
 -- whole or part read; nil when there's none.
-local function cached_changes(song, p, tracks, mark_of)
-  local mark = cache_mark(song, p, tracks, mark_of)
+local function cached_changes(song, p, tracks, mark_of, memo)
+  local mark = cache_mark(song, p, tracks, mark_of, memo)
   local cached = S and S.zcache[p]
   if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached end
   return nil, mark
 end
 
 -- A pattern's commands, from the cache, else read, going on from where a slice stopped. nil when `over()` stopped it part way.
-local function pattern_changes(song, p, tracks, mark_of, over)
-  local cached, mark = cached_changes(song, p, tracks, mark_of)
+local function pattern_changes(song, p, tracks, mark_of, over, memo)
+  local cached, mark = cached_changes(song, p, tracks, mark_of, memo)
   if cached and not cached.next_t then return cached.changes, cached.irregular end
   local reading = cached or { mark = mark, tracks = tracks, changes = {}, irregular = false }
   local done = scan_pattern(song, p, tracks, reading, over)
@@ -296,13 +304,14 @@ function M.timeline(song, mark_of)
     over = function() return clock_ms() >= stop end
   end
   local slots, beat, second = {}, 0, 0
+  local marks = {}
   local irregular = speed
   local lpb_met, bpm_met = false, false
   local sets_lpb, sets_bpm = false, false
   for s = 1, count do
     local p = sequencer:pattern(s)
     local lines = song:pattern(p).number_of_lines
-    local changes, broken = pattern_changes(song, p, tracks, mark_of, over)
+    local changes, broken = pattern_changes(song, p, tracks, mark_of, over, marks)
     if not changes then
       return fail("busy", string.format("Renoise is still reading the song's tempo commands for Kumi (pattern %d of %d in the sequence): ask again in a moment", s, count))
     end

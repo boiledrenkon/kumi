@@ -366,6 +366,22 @@ test("listening: a ZL in a pattern that another's track shows as an alias moves 
   H.no_dialogs()
 end)
 
+test("listening: a read of the song's tempo commands works out each pattern's cache mark once, however many slots play it", function()
+  local sequence = {}
+  for s = 1, 30 do sequence[s] = (s - 1) % 3 + 1 end
+  local env, peer = setup(nil, { sequence = sequence, sequence_length = 30 })
+  result((start(peer, "j80", { { id = "mix", what = "master" } }, { fromBeat = 0, beats = 4 })))
+  mock.finish_render()
+  -- (all read now: a second read looks only at the marks)
+  mock.alias_reads = 0
+  result((start(peer, "j81", { { id = "mix", what = "master" } }, { fromBeat = 4, beats = 4 })))
+  mock.finish_render()
+  local tracks = #mock.data.tracks
+  -- (the render's read of the timeline, and the warm-up's look on a later tick: each once per pattern and track)
+  ok(mock.alias_reads <= 2 * 3 * tracks, "once per pattern and track in each read: " .. mock.alias_reads .. " (30 slots, " .. tracks .. " tracks)")
+  H.no_dialogs()
+end)
+
 test("listening: a render times its lines as Renoise renders them: before the song's first ZT it runs at that ZT's tempo, and says so", function()
   local env, peer = setup()
   local function command(text)
