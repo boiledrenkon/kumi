@@ -3,6 +3,24 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.20.0 — 2026-10-21
+
+Ships with bridge 1.0.93, as 1.19.3 did. Brings REAPER extension 0.1.0 and Renoise tool 1.0.0: `kumi
+--daw reaper bridge` and `kumi --daw renoise bridge` put them in.
+
+- Kumi works in REAPER 7+ and Renoise 3.5+ on macOS, Windows and Linux: `kumi --daw reaper` or `kumi
+  --daw renoise` puts Kumi's own extension or tool in place, opens the DAW and connects; `/daw`
+  switches between Live, REAPER and Renoise.
+- In REAPER and Renoise every change shows in HISTORY with Kumi's own undo, a plan is one step of the
+  DAW's undo, and an undo leaves what you changed since unless you tell it to discard that.
+- Listening, goals and judged rounds, groove, catch-up, recipes, instant phrases and FOCUS views work
+  in REAPER and Renoise too, in each DAW's own words; Renoise also gets variations as numbered takes.
+- Kumi's REAPER extension (reaper_kumi), its first release, for REAPER 7 and later.
+- Kumi's Renoise tool (com.kumi.Bridge.xrnx), its first release, for Renoise 3.5 and later.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.19.3 — 2026-10-19
 
 Ships with bridge 1.0.93, as 1.19.2 did.
