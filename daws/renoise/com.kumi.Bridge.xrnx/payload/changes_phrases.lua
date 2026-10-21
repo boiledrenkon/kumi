@@ -606,6 +606,11 @@ local function delete_restore(song, env, restore, desc)
     end
   end
   if #instrument.phrases >= 126 then fail("changed", "the instrument has 126 phrases now: there's no room to put it back") end
+  -- (the patterns its cleared 0Z commands were in, and whose lines changed since: read before anything is written, as Kumi's
+  -- own insert renumbers 0Z commands too)
+  local zero_z = type(material.zeroZ) == "table" and #material.zeroZ > 0
+  local pattern_now = zero_z and import("changes_material").pool_now(song, env, material.pool) or nil
+  local touched = zero_z and base.touched_patterns(env, material.touches, pattern_now) or {}
   song:describe_undo(desc)
   local phrase = instrument:insert_phrase_at(at)
   local notes = {}
@@ -637,11 +642,8 @@ local function delete_restore(song, env, restore, desc)
   end
   -- The 0Z commands Renoise cleared, written again naming it where they still are empty (the patterns followed through the pool,
   -- the tracks through the layout).
-  if type(material.zeroZ) == "table" and #material.zeroZ > 0 then
-    local pattern_now = import("changes_material").pool_now(song, env, material.pool)
+  if zero_z then
     local skipped = 0
-    -- (a pattern whose lines changed since may have had rows inserted or deleted: its cells have no place Kumi can tell)
-    local touched = base.touched_patterns(env, material.touches, pattern_now)
     for _, cell in ipairs(material.zeroZ) do
       local p = pattern_now and not touched[cell.p] and pattern_now(cell.p) or nil
       local t = cell.t

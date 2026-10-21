@@ -2778,3 +2778,11 @@ test("changes: the producer's redo of a Kumi change is told after the player mov
   eq(#told, 1, "the redo is told")
   eq(told[1].data.how, "redo")
 end)
+
+test("changes: a pattern whose lines the tool couldn't count when a record kept its marks counts as touched since", function()
+  local base = T.load_payload_module("changes_base")
+  local env = { pattern_touched_since = function() return false end }
+  local touched = base.touched_patterns(env, { ["3"] = false, ["4"] = "p4=1" }, function(p) return p end)
+  eq(touched[3], true, "can't tell: as touched")
+  eq(touched[4], nil, "counted, and untouched")
+end)

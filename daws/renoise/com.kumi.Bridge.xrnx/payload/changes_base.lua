@@ -1003,8 +1003,9 @@ function M.touched_patterns(env, marks, pattern_now)
     local p = tonumber(key)
     if p then
       local now = pattern_now and pattern_now(p) or nil
+      -- (a pattern whose lines the tool couldn't count then, `false`, is one Kumi can't tell about either)
       local since = now and mark and env.pattern_touched_since and env.pattern_touched_since(now, mark)
-      if since ~= false then touched[p] = true end
+      if since ~= false or not mark then touched[p] = true end
     end
   end
   return touched
