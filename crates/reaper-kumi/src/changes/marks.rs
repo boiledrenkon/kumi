@@ -66,6 +66,34 @@ fn label(marker: &Marker) -> String {
 }
 
 /// Where a time is, as a producer says it: `bar 33`, or `bar 33 beat 2.5` off the bar line.
+/// The project's tempo map as one word: its tempo and every tempo marker (time, tempo, signature, shape). A delete keeps
+/// it: put back at its old time after the map changed, a marker or an item would sit at another bar.
+pub fn tempo_print(reaper: &Reaper, proj: crate::reaper::Project) -> String {
+    let mut text = format!("{:?}", reaper.tempo());
+    for index in 0..reaper.tempo_marker_count(proj) {
+        if let Some(m) = reaper.tempo_marker(proj, index) {
+            text += &format!("|{:.9} {:.6} {} {} {}", m.time, m.bpm, m.num, m.denom, m.linear);
+        }
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// `changed` when the tempo map moved since a delete kept it (`tempo_print`), unless Kumi is told to undo anyway: what
+/// was deleted would come back at its old time, at another bar.
+pub fn tempo_unmoved(ctx: &Ctx, material: &Value, discard: bool, what: &str) -> Done<()> {
+    match material["tempo"].as_str() {
+        Some(kept) if !discard && kept != tempo_print(ctx.reaper, ctx.proj) => Err(changed(format!(
+            "the tempo map has been changed in REAPER since Kumi deleted {what}: put back at its old time it would sit at another bar, \
+             so Kumi leaves it (told to undo anyway, it goes back at its old time)"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 pub fn bar_text(reaper: &Reaper, proj: crate::reaper::Project, time: f64) -> String {
     match reaper.bar_and_beat_at(proj, time) {
         Some((measure, beat)) if beat.abs() < 0.005 => format!("bar {}", measure + 1),
@@ -266,7 +294,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         vec![]
     };
     // (r-tracks) The lane's id too: its number moves when lanes are reordered.
-    let material = json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker), "lane": marker.lane, "laneGuid": super::projectitems::lane_guid(ctx, marker.lane as i64), "matrix": matrix});
+    let material = json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker), "lane": marker.lane, "laneGuid": super::projectitems::lane_guid(ctx, marker.lane as i64), "matrix": matrix, "tempo": tempo_print(ctx.reaper, ctx.proj)});
     if !ctx.reaper.delete_marker(ctx.proj, &marker.guid) {
         return Err(failed("REAPER wouldn't delete the marker"));
     }
@@ -307,6 +335,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
+    tempo_unmoved(ctx, material, restore.discard, if region { "the region" } else { "the marker" })?;
     let start = saved["start"].as_f64().unwrap_or(0.0);
     let end = saved["end"].as_f64().unwrap_or(start);
     let guid = ctx

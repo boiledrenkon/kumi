@@ -888,6 +888,23 @@ fn a_marker_is_moved_renamed_and_coloured_and_each_goes_back() {
 }
 
 #[test]
+fn a_deleted_regions_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:region:{REG-1}"}), "Kumi: Deleted region Verse (kmd07)");
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 4.0, bpm: 90.0, num: 4, denom: 4, linear: false }));
+    let (code, message) = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund7)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert_eq!(state(|s| s.markers.len()), 1, "nothing made again");
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund8)");
+    params["kind"] = "marker-delete".into();
+    params["material"] = applied["material"].clone();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+}
+
+#[test]
 fn deleting_a_marker_keeps_it_to_make_again_with_a_new_id_and_its_number() {
     let lab = Lab::new();
     state(|s| s.markers[1].number = 7);

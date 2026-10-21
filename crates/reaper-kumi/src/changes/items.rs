@@ -1631,6 +1631,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         "chunk": chunk,
         "track": reaper.track_guid(found.track),
         "selected": reaper.item_value(found.item, "B_UISEL") != 0.0,
+        "tempo": marks::tempo_print(reaper, ctx.proj),
     });
     if !reaper.delete_item(found.track, found.item) {
         return Err(failed("REAPER wouldn't delete the item"));
@@ -1690,6 +1691,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
         return Err(changed("an item with that id is in the project again"));
     }
+    marks::tempo_unmoved(ctx, material, restore.discard, "the item")?;
     let item = remake(ctx, track_guid, chunk, &guid)?;
     // The producer's selection stands: the item is selected again only where nothing else is.
     let select = material["selected"] == true && !other_items_selected(ctx, item);

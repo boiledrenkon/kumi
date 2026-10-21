@@ -618,6 +618,20 @@ fn items_are_grouped_in_a_new_group_and_put_back_in_theirs() {
 // ----- deleting -----
 
 #[test]
+fn a_deleted_items_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // The producer adds a tempo change before where it was: at its old time it would sit at another bar.
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 90.0, num: 4, denom: 4, linear: false }));
+    let (code, message) = lab.undo("item-delete", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert!(item("{ITEM-K1}").is_none(), "nothing put back");
+    lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert!(item("{ITEM-K1}").is_some());
+}
+
+#[test]
 fn a_deleted_item_comes_back_with_its_ids_from_its_chunk() {
     let lab = Lab::new();
     state(|s| s.tracks[1].items[0].takes[0].more.markers = vec![(0.2, "hit".into(), 0)]);
