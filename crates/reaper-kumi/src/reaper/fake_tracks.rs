@@ -26,6 +26,8 @@ pub struct Extra {
     /// Track chunks that read the same while the track is the same (a template's undo compares them), with no token to
     /// put back by: for the tests of what compares chunks.
     pub stable_chunks: bool,
+    /// A file system whose times are coarser than two saves (Windows' can be): a save over a file keeps its time.
+    pub coarse_file_times: bool,
     /// Files saved through `Main_SaveProjectEx`: (path, options).
     pub saved_as: Vec<(String, i32)>,
     pub made_from_templates: u32,
@@ -98,6 +100,7 @@ impl Default for Extra {
             actions: actions.into_iter().map(|(id, name)| (id, name.to_string())).collect(),
             marked: false,
             stable_chunks: false,
+            coarse_file_times: false,
             saved_as: vec![],
             made_from_templates: 0,
             no_choke: false,
@@ -466,7 +469,11 @@ unsafe extern "C" fn main_save_project_ex(_proj: *mut ReaProject, path: *const c
     } else {
         "<REAPER_PROJECT 0.1 \"7.82/fake\"\n>\n".to_string()
     };
+    let kept_time = std::fs::metadata(&path).and_then(|m| m.modified()).ok().filter(|_| extra(|e| e.coarse_file_times));
     let _ = std::fs::write(&path, text);
+    if let Some(time) = kept_time {
+        let _ = std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(time));
+    }
     extra(|e| e.saved_as.push((path.clone(), options)));
     if options & 1 == 0 && options & 8 != 0 {
         with(|s| {

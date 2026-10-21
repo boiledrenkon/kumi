@@ -362,7 +362,10 @@ fn tracks_are_saved_as_a_template_never_over_a_file_unless_told_and_the_selectio
     let (code, message) = lab.call("track_template_save", json!({"trackRefs": [KICK], "name": "Mine/Two"})).unwrap_err();
     assert_eq!(code, "bad-params");
     assert!(message.contains("replace: true"), "{message}");
+    // (where file times are coarser than two saves, as Windows' can be, the template written over keeps its time)
+    fake::extra(|e| e.coarse_file_times = true);
     lab.call("track_template_save", json!({"trackRefs": [KICK], "name": "Mine/Two", "replace": true})).unwrap();
+    fake::extra(|e| e.coarse_file_times = false);
     assert!(!std::fs::read_to_string(&file).unwrap().contains("Snare"));
     assert_eq!(fake::extra(|e| e.saved_as.last().map(|(_, options)| *options)), Some(1 | 4));
     for wrong in [
