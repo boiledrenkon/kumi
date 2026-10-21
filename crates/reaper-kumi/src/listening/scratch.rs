@@ -7,9 +7,11 @@
 //! its tracks' sound through sends from each of them, which go when the copy goes. Copies are made and removed as bare
 //! edits, with no undo point: REAPER's undo of a later point may take them away, which drop then finds.
 //!
-//! Each make is written to Kumi's folder (`listening/scratch.json`) before its first copy is made, and forgotten once
-//! dropped: copies a crash left behind are removed when the bridge loads or their project opens again (found by GUID, and
-//! only while they still carry Kumi's mark and name).
+//! Each make is written to Kumi's folder (`listening/scratch.json`) before its first copy is made: copies a crash left
+//! behind are removed when the bridge loads or their project opens again (found by GUID, and only while they still carry
+//! Kumi's mark and name). A drop keeps the copies it removed there too: as bare edits inside the producer's undo points,
+//! REAPER's undo or redo may bring them back, so they're swept whenever an undo or redo moves the project, until their
+//! saved project is seen without them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -339,6 +341,11 @@ fn taken(reaper: &Reaper, track: Track, copy: &Copy) -> Option<String> {
 }
 
 impl Scratch {
+    /// Whether the journal still names copies to sweep (an earlier session's, or dropped ones an undo may bring back).
+    pub fn has_leftovers(&self) -> bool {
+        !self.leftovers.is_empty()
+    }
+
     /// Copies standing now.
     pub fn standing(&self) -> usize {
         self.makes.iter().map(|make| make.copies.len()).sum()
@@ -544,6 +551,10 @@ impl Scratch {
         if let Some(busy) = reaper.busy() {
             return Err(("busy".into(), format!("{}; nothing changed", busy.reason())));
         }
+        // (a project whose tab was closed is never asked anything: its pointer is gone)
+        if !reaper.project_valid(make.proj) {
+            return Err(gone("the project these copies were made in isn't open any more"));
+        }
         // All checked first: a set is written whole or not at all.
         let mut writes: Vec<(Fx, i32, f64)> = Vec::new();
         for value in values {
@@ -602,9 +613,12 @@ impl Scratch {
         let (mut dropped, mut gone_count, mut kept) = (0usize, 0usize, 0usize);
         let mut notes = Vec::new();
         let mut left = Vec::new();
+        // (the copies Kumi removed, or found gone: what an undo or redo may bring back)
+        let mut removed: Vec<String> = Vec::new();
         for copy in &make.copies {
             let Some(track) = alive.then(|| find(reaper, proj, &copy.guid)).flatten() else {
                 gone_count += 1;
+                removed.push(copy.guid.clone());
                 continue;
             };
             let mark = reaper.track_string(track, MARK).unwrap_or_default();
@@ -619,6 +633,7 @@ impl Scratch {
             }
             if reaper.delete_track(track) {
                 dropped += 1;
+                removed.push(copy.guid.clone());
             } else {
                 left.push(format!("REAPER wouldn't delete {}", crate::changes::quoted(&copy.name)));
             }
@@ -629,7 +644,13 @@ impl Scratch {
         for why in &left {
             notes.push(format!("{why}: Kumi left it as yours"));
         }
-        self.makes.remove(at);
+        // The copies Kumi removed (and those REAPER's undo had) were bare edits inside the producer's undo points: an undo or
+        // redo may bring them back. The journal keeps them, to be swept, until their saved project is seen without them.
+        let mut entry = self.makes.remove(at).entry;
+        entry.copies.retain(|(guid, _)| removed.iter().any(|done| done == guid));
+        if !entry.copies.is_empty() {
+            self.leftovers.push(entry);
+        }
         let _ = self.save(folder);
         if dropped > 0 {
             reaper.refresh_after_change();

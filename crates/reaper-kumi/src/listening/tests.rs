@@ -42,6 +42,8 @@ struct Rig {
     tx: Sender<Job>,
     snapshot: Arc<Mutex<Snapshot>>,
     dir: tempfile::TempDir,
+    /// What the extension sent the host (events).
+    out: Recorder,
 }
 
 thread_local! {
@@ -84,7 +86,7 @@ impl Rig {
         ext.tick(Driver::Timer);
         INSIDE.with(|i| i.borrow_mut().clear());
         CANCEL_INSIDE.with(|c| c.set(false));
-        Rig { ext, tx, snapshot, dir }
+        Rig { ext, tx, snapshot, dir, out }
     }
 
     /// Lets the fake's render tick this rig's extension, as REAPER's timer does inside a render.
@@ -919,6 +921,23 @@ fn a_render_stops_the_audition_playing_and_says_so() {
 }
 
 #[test]
+fn a_preview_and_a_scratch_set_never_ask_a_closed_tabs_project_anything() {
+    let rig = Rig::new();
+    let kick = copyable();
+    let file = wav_file(&rig.folder(), "take.wav", 4.0);
+    make(&rig, "s4", &kick, 1);
+    let copy = fake::with(|s| s.tracks[4].guid.clone());
+    rig.ask("audition", json!({"previewId": "p1", "file": file})).unwrap();
+    // The producer closes the tab (another project takes its place): its pointer is freed.
+    fake::with(|s| s.project_id += 1);
+    rig.tick();
+    assert!(rig.board().playing().is_none(), "the preview stopped with its project");
+    let set = rig.ask("scratch", json!({"action": "set", "scratchId": "s4", "values": [{"ref": format!("r:track:{copy}"), "device": 0, "param": 0, "normalized": 0.3}]}));
+    assert_eq!(set.unwrap_err().0, "gone");
+    assert_eq!(fake::with(|s| s.freed_project_uses), 0, "nothing asked of the closed project");
+}
+
+#[test]
 fn a_preview_goes_to_the_masters_hardware_output() {
     let rig = Rig::new();
     let file = wav_file(&rig.folder(), "take.wav", 1.0);
@@ -932,12 +951,26 @@ fn audition_says_why_when_it_cant_play() {
     let rig = Rig::new();
     let file = wav_file(&rig.folder(), "take.wav", 1.0);
     let refused = |params: Value| rig.ask("audition", params).unwrap_err();
+    // A device that isn't running is the producer's choice (freed for another app, say): never opened, only said.
+    fake::with(|s| {
+        s.listening.audio = false;
+        s.listening.device_opens = true;
+    });
+    let (_, why) = refused(json!({"previewId": "p1", "file": file}));
+    assert!(why.contains("audio isn't running") && why.contains("start REAPER's audio"), "{why}");
+    assert_eq!(fake::with(|s| s.listening.inits), 0, "Kumi never opens the producer's device");
+    // Right after Kumi's own render (REAPER closes its device to render, and reopens it a moment after), it's opened.
+    fake::with(|s| s.listening.audio = true);
+    rig.ask(
+        "render_start",
+        json!({"jobId": "jr1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}),
+    )
+    .unwrap();
+    rig.tick();
+    assert_eq!(rig.status("jr1")["state"], "done");
     fake::with(|s| s.listening.audio = false);
-    assert!(refused(json!({"previewId": "p1", "file": file})).1.contains("audio isn't running"));
-    assert_eq!(fake::with(|s| s.listening.inits), 1, "Kumi tried to open it first");
-    // A device REAPER closed (around a render, or stopped in the background) is opened, as pressing play would.
-    fake::with(|s| s.listening.device_opens = true);
     assert!(rig.ask("audition", json!({"previewId": "p0", "file": file})).is_ok());
+    assert_eq!(fake::with(|s| s.listening.inits), 1);
     rig.board().stop_preview(&json!({})).unwrap();
     rig.tick();
     fake::with(|s| {
@@ -1342,7 +1375,12 @@ fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_cha
     );
     // A copy the producer kept: the project stays marked changed.
     assert!(fake::with(|s| s.dirty));
-    assert!(scratch::read_journal(&rig.folder()).is_empty());
+    // The journal keeps the copies Kumi removed (an undo may bring them back), not the one the producer kept.
+    let journal = scratch::read_journal(&rig.folder());
+    assert_eq!(
+        journal.iter().flat_map(|e| e.copies.iter().map(|(_, name)| name.clone())).collect::<Vec<_>>(),
+        ["Kumi · try s6 1", "Kumi · try s6 3"]
+    );
     let _ = made;
     // Asked again: nothing stands.
     assert_eq!(
@@ -1355,6 +1393,35 @@ fn a_drop_takes_the_copies_away_leaves_one_the_producer_renamed_and_puts_the_cha
     fake::with(|s| s.dirty = true);
     rig.ask("scratch", json!({"action": "drop", "scratchId": "s7"})).unwrap();
     assert!(!fake::with(|s| s.dirty));
+}
+
+#[test]
+fn copies_reapers_undo_brings_back_after_a_drop_are_swept_again_and_the_host_told() {
+    let rig = Rig::new();
+    let kick = copyable();
+    make(&rig, "s5", &kick, 2);
+    // The producer moves a fader: REAPER's point holds the whole state, copies included.
+    fake::with(|s| {
+        s.undo_entries += 1;
+        s.undo_cur = None;
+    });
+    rig.tick();
+    let with_copies: Vec<fake::FakeTrack> = fake::with(|s| s.tracks.clone());
+    rig.ask("scratch", json!({"action": "drop", "scratchId": "s5"})).unwrap();
+    assert_eq!(fake::with(|s| s.tracks.len()), 4);
+    // Cmd-Z for the fader brings the copies back with it.
+    fake::with(|s| {
+        s.tracks = with_copies.clone();
+        s.undo_cur = Some(s.undo_entries - 2);
+    });
+    rig.tick();
+    assert_eq!(fake::with(|s| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()), ["Drums", "Kick", "Snare", "Reverb"]);
+    let swept: Vec<Value> = rig.out.events().into_iter().filter(|(name, _)| name == "scratch_swept").map(|(_, data)| data).collect();
+    assert_eq!(swept, [json!({"count": 2, "names": ["Kumi · try s5 1", "Kumi · try s5 2"], "why": "undo"})]);
+    // A redo with them gone: nothing more to sweep, nothing told.
+    fake::with(|s| s.undo_cur = None);
+    rig.tick();
+    assert_eq!(rig.out.events().iter().filter(|(name, _)| name == "scratch_swept").count(), 1);
 }
 
 #[test]

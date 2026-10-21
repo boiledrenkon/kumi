@@ -1984,10 +1984,20 @@ impl<S: RefScheme + 'static> OwnListening<S> {
             return;
         }
         let place = self.renderer.profile().words.place;
+        let (one, app) = (names.len() == 1, self.renderer.app());
+        // (REAPER's undo or redo of the producer's point can bring back copies Kumi had removed: removed again)
+        if data.get("why").and_then(Value::as_str) == Some("undo") {
+            self.renderer.tell_app(&format!(
+                "{app}'s undo brought back Kumi's scratch cop{} {}, which Kumi had removed: removed {} again",
+                if one { "y" } else { "ies" },
+                names.join(", "),
+                if one { "it" } else { "them" }
+            ));
+            return;
+        }
         self.renderer.tell_app(&format!(
-            "{} removed Kumi's scratch cop{} an earlier session left in the {place}: {}",
-            self.renderer.app(),
-            if names.len() == 1 { "y" } else { "ies" },
+            "{app} removed Kumi's scratch cop{} an earlier session left in the {place}: {}",
+            if one { "y" } else { "ies" },
             names.join(", ")
         ));
     }

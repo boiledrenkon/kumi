@@ -26,6 +26,8 @@ unsafe extern "C" {
 
 /// The longest a preview plays (Kumi plays at most a minute of a render out loud).
 pub const MAX_SECONDS: f64 = 600.0;
+/// How long after Kumi's own render an audition may open REAPER's audio device itself (the render closed it).
+pub const AFTER_RENDER: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// REAPER's `preview_register_t`, made by the shim (its lock is the OS's). Freed when the last holder lets go, which is
 /// only ever after REAPER stopped playing it: the socket threads may still silence it a moment after, harmlessly.
@@ -75,13 +77,15 @@ pub struct Preview {
     proj: Project,
 }
 
-/// Why REAPER can't play a file out loud now; None when it can.
-pub fn refusal(reaper: &Reaper, proj: Project) -> Option<String> {
-    if !reaper.audio_running() {
+/// Why REAPER can't play a file out loud now; None when it can. REAPER's audio device is opened only when Kumi's own
+/// render just closed it (`after_render`): otherwise a closed device is the producer's (often freed for another app),
+/// and opening a missing one can bring up REAPER's own error.
+pub fn refusal(reaper: &Reaper, proj: Project, after_render: bool) -> Option<String> {
+    if !reaper.audio_running() && after_render {
         reaper.audio_init();
     }
     if !reaper.audio_running() {
-        return Some("REAPER's audio isn't running, so Kumi can't play its render out loud".into());
+        return Some("REAPER's audio isn't running, so Kumi can't play its render out loud: start REAPER's audio to hear it".into());
     }
     if !reaper.audio_heard() {
         return Some("REAPER's audio device has no output the producer hears (REAPER is on its dummy device), so Kumi can't play its render out loud".into());
@@ -103,7 +107,7 @@ fn failed(message: impl Into<String>) -> Fault {
 
 impl Preview {
     /// Starts playing `file` (an audio file REAPER reads) from `from` for up to `seconds`, at `gain_db`.
-    pub fn start(reaper: &Reaper, proj: Project, params: &Value) -> Result<(Preview, Value), Fault> {
+    pub fn start(reaper: &Reaper, proj: Project, params: &Value, after_render: bool) -> Result<(Preview, Value), Fault> {
         let id = params.get("previewId").and_then(Value::as_str).unwrap_or_default();
         if !super::render::id_ok(id, 40) {
             return Err(bad("previewId: the host's preview id"));
@@ -125,7 +129,7 @@ impl Preview {
         if !std::path::Path::new(file).is_file() {
             return Err(failed(format!("{file} isn't there")));
         }
-        if let Some(why) = refusal(reaper, proj) {
+        if let Some(why) = refusal(reaper, proj, after_render) {
             return Err(failed(why));
         }
         let source = reaper.source_from_file(file).ok_or_else(|| failed("the file isn't audio REAPER reads"))?;
@@ -155,8 +159,12 @@ impl Preview {
         Ok((Preview { id: id.into(), slot, source, until, proj }, answer))
     }
 
-    /// Whether it should stop now: its end reached, or the producer pressed play.
+    /// Whether it should stop now: its end reached, the producer pressed play, or its project's tab was closed (its
+    /// pointer isn't asked anything then).
     pub fn over(&self, reaper: &Reaper) -> bool {
+        if !reaper.project_valid(self.proj) {
+            return true;
+        }
         let state = reaper.play_state(self.proj);
         state.playing || state.recording || self.slot.position() >= self.until - 1e-3
     }

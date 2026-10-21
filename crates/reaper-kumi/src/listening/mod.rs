@@ -115,6 +115,10 @@ pub struct Listening {
     scratch: RefCell<scratch::Scratch>,
     /// Inside REAPER's render for Kumi: the ticks REAPER gives meanwhile only report and cancel.
     rendering: Cell<bool>,
+    /// When Kumi's last render ended: REAPER closes its audio device to render and reopens it a moment after (0.2 s,
+    /// measured), so an audition just after it may open the device itself; at any other time a closed device is the
+    /// producer's choice.
+    rendered_at: Cell<Option<Instant>>,
     /// When the render window's Cancel was last pressed (for this render).
     pressed: Cell<Option<Instant>>,
     told_titles: Cell<bool>,
@@ -192,6 +196,7 @@ impl Listening {
             rendering: Cell::new(false),
             pressed: Cell::new(None),
             told_titles: Cell::new(false),
+            rendered_at: Cell::new(None),
             swept: Cell::new(false),
             beat: Cell::new(None),
             inside_ticks: Cell::new(0),
@@ -285,7 +290,8 @@ impl Listening {
     pub fn audition(&self, reaper: &Reaper, params: &Value) -> Answer {
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
         self.stop_preview(reaper);
-        let (preview, answer) = audition::Preview::start(reaper, info.ptr, params)?;
+        let after_render = self.rendered_at.get().is_some_and(|at| at.elapsed() < audition::AFTER_RENDER);
+        let (preview, answer) = audition::Preview::start(reaper, info.ptr, params, after_render)?;
         crate::log::line(&format!("preview {} plays {}", preview.id, answer));
         self.board.set_playing(Some(Playing { id: preview.id.clone(), slot: preview.slot.clone(), stop: false }));
         *self.preview.borrow_mut() = Some(preview);
@@ -414,7 +420,7 @@ impl Listening {
             self.run_pending(reaper, reads, snapshot, out);
             if !self.swept.get() && self.folder.borrow().is_some() {
                 self.swept.set(true);
-                self.sweep(reaper, &reaper.projects(), out);
+                self.sweep(reaper, &reaper.projects(), out, false);
             }
         }
     }
@@ -551,6 +557,7 @@ impl Listening {
         let hooks = RunHooks { listening: self, snapshot, out, job: &plan.job };
         let mut ended = render::run(reaper, reads, &plan, &hooks);
         self.rendering.set(false);
+        self.rendered_at.set(Some(Instant::now()));
         if auditioning {
             ended.note_first("The audition playing was stopped: REAPER closes its audio device to render".into());
         }
@@ -589,13 +596,22 @@ impl Listening {
         true
     }
 
-    /// Scratch copies an earlier session left in these projects are removed, and the host told.
-    fn sweep(&self, reaper: &Reaper, projects: &[ProjectInfo], out: &dyn Outbox) {
+    /// Scratch copies an earlier session left in these projects (or, `undo`, that REAPER's undo or redo brought back after
+    /// Kumi dropped them) are removed, and the host told.
+    fn sweep(&self, reaper: &Reaper, projects: &[ProjectInfo], out: &dyn Outbox, undo: bool) {
         let Some(folder) = self.folder.borrow().clone() else { return };
         let names = self.scratch.borrow_mut().sweep(reaper, &folder, projects);
         if !names.is_empty() {
-            crate::log::line(&format!("swept {} scratch copies an earlier session left", names.len()));
-            out.event(SWEPT, json!({"count": names.len(), "names": names}));
+            crate::log::line(&format!(
+                "swept {} scratch copies ({})",
+                names.len(),
+                if undo { "REAPER's undo brought them back" } else { "an earlier session left them" }
+            ));
+            let mut event = json!({"count": names.len(), "names": names});
+            if undo {
+                event["why"] = "undo".into();
+            }
+            out.event(SWEPT, event);
             let mut swept = self.swept_names.borrow_mut();
             swept.extend(names);
             let over = swept.len().saturating_sub(64);
@@ -606,7 +622,17 @@ impl Listening {
     /// Another project came to the front (a tab, a load): copies an earlier session left in it are swept.
     pub fn project_changed(&self, reaper: &Reaper, out: &dyn Outbox) {
         if let Some(info) = reaper.current_project() {
-            self.sweep(reaper, &[info], out);
+            self.sweep(reaper, &[info], out, false);
+        }
+    }
+
+    /// The producer's undo or redo moved the project in front: copies it brought back after Kumi dropped them are swept.
+    pub fn undo_moved(&self, reaper: &Reaper, out: &dyn Outbox) {
+        if !self.scratch.borrow().has_leftovers() {
+            return;
+        }
+        if let Some(info) = reaper.current_project() {
+            self.sweep(reaper, &[info], out, true);
         }
     }
 
