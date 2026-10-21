@@ -500,6 +500,31 @@ fn a_folder_kumi_made_is_taken_away_around_a_track_the_producer_put_in_it_only_w
 }
 
 #[test]
+fn a_folder_is_made_only_of_tracks_of_one_folder_each_with_all_of_its_tracks() {
+    let lab = Lab::new();
+    assert_eq!(depths(), [1, 0, -1, 0]);
+    for (refs, why) in [
+        // Drums alone: its tracks would go into the new folder without it.
+        (json!(["r:track:{AAAA}"]), "with all of its tracks"),
+        // Snare and Reverb: past the end of Drums.
+        (json!(["r:track:{CCCC}", "r:track:{DDDD}"]), "one folder"),
+    ] {
+        let (code, message) = lab.call("change_preview", json!({"kind": "track-add", "input": {"asFolderOf": refs}})).unwrap_err();
+        assert_eq!(code, "bad-params", "{refs}");
+        assert!(message.contains(why), "{refs}: {message}");
+    }
+    // Drums with its tracks, and Reverb after them: one folder's worth at the top.
+    let (preview, applied) = lab.make(
+        "track-add",
+        json!({"name": "Bus", "asFolderOf": ["r:track:{AAAA}", KICK, "r:track:{CCCC}", "r:track:{DDDD}"]}),
+        "Kumi: Added folder Bus (kfol3)",
+    );
+    assert_eq!(depths(), [1, 1, 0, -1, -1]);
+    lab.undo("track-add", &preview, &applied, "Kumi: undo (kund9)").unwrap();
+    assert_eq!(depths(), [1, 0, -1, 0]);
+}
+
+#[test]
 fn a_bad_add_is_refused_and_one_whose_place_moved_is_changed() {
     let lab = Lab::new();
     for (input, why) in [

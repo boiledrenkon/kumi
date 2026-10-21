@@ -59,6 +59,36 @@ fn adopted(ctx: &Ctx, input: &Value) -> Done<Vec<(Track, String)>> {
     if found.iter().enumerate().any(|(n, (track, _))| place(ctx.reaper, *track) != first + n as i64) {
         return Err(bad("asFolderOf must be tracks next to each other, in the order they have"));
     }
+    // One folder's worth: tracks in the same folder, each folder among them with all of its tracks. A folder adopted
+    // alone would hand its tracks to the new folder, and a run past a folder's end would pull the next track in.
+    let reaper = ctx.reaper;
+    let run: Vec<Track> = found.iter().map(|(track, _)| *track).collect();
+    let outer = reaper.track_parent(run[0]);
+    if run.iter().any(|track| {
+        let parent = reaper.track_parent(*track);
+        parent != outer && !parent.is_some_and(|parent| run.contains(&parent))
+    }) {
+        return Err(bad("asFolderOf must be tracks of one folder (or none): these are in different folders"));
+    }
+    let mut open = 0i64;
+    for (n, track) in run.iter().enumerate() {
+        let d = depth(reaper, *track);
+        if d > 0 {
+            open += d;
+        } else if d < 0 {
+            let closes = -d;
+            // (only the last may close the folder they are all in, and the ones around it)
+            if closes > open && n + 1 < run.len() {
+                return Err(bad("asFolderOf must be tracks of one folder (or none): these run past the end of their folder"));
+            }
+            open -= closes.min(open);
+        }
+    }
+    if open > 0 {
+        return Err(bad(
+            "asFolderOf must hold each folder in it with all of its tracks: a folder's tracks would go into the new folder without it",
+        ));
+    }
     Ok(found)
 }
 
