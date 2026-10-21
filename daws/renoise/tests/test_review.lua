@@ -1923,6 +1923,45 @@ test("run-lua: a chunk that runs too long is stopped where it is, inside its tim
   failure(run_lua(peer, "return 1", "Kumi: Ran Lua (kl07)", { timeoutMs = 5000 }), "bad-params")
 end)
 
+test("run-lua: the time limit stops a chunk whose calls fire the tool's notifiers, and each notifier runs whole (#361 N4)", function()
+  local env, peer = setup()
+  local patterns = #mock.data.patterns
+  mock.clock_step_ms = 1
+  local done = run_lua(peer, "for i = 1, 3000 do song.sequencer:insert_new_pattern_at(1) end", "Kumi: Ran Lua (kl10)", { timeoutMs = 20 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 20 ms", 1, true), json.encode(done.result.applied.failed or {}))
+  ok(#mock.data.patterns - patterns < 3000, "stopped part way: " .. (#mock.data.patterns - patterns) .. " made")
+end)
+
+test("run-lua: code a chunk loads itself is under the time limit too: the JIT is off while it runs (#361 N18)", function()
+  local env, peer = setup()
+  mock.clock_step_ms = 1
+  local code = "local f = loadstring('local n = 0 for i = 1, 2e8 do n = n + i % 7 end return n') return f()"
+  local done = run_lua(peer, code, "Kumi: Ran Lua (kl11)", { timeoutMs = 50 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 50 ms", 1, true), json.encode(done.result.applied))
+  ok(not jit or jit.status(), "the JIT is on again")
+end)
+
+test("run-lua: a chunk that sets a parameter changed the song; one that only mutes makes no Renoise step; one that reads changed nothing (#361 N8)", function()
+  local env, peer = setup()
+  local done = run_lua(peer, "song:track(1).postfx_volume.value = 0.5", "Kumi: Ran Lua (kl12)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.changed, true, "a parameter no notifier tells")
+  eq(done.result.undo.entry, true)
+  eq(done.result.display.unchanged, nil)
+  local muted = run_lua(peer, "song:track(2).mute_state = renoise.Track.MUTE_STATE_MUTED", "Kumi: Ran Lua (kl13)")
+  ok(muted.result, json.encode(muted.error or {}))
+  eq(muted.result.applied.changed, true)
+  eq(muted.result.undo.entry, false, "Renoise makes no step of a mute")
+  ok(muted.result.display.note:find("nothing Renoise's undo takes back", 1, true), muted.result.display.note)
+  local read = run_lua(peer, "local t = {}\nt.name = song:track(1).name:upper() -- t.x = 1\nt['k'] = \"a = b.c\"\nreturn t", "Kumi: Ran Lua (kl14)")
+  ok(read.result, json.encode(read.error or {}))
+  eq(read.result.display.unchanged, true, "it set only its own table's fields")
+  eq(read.result.undo.entry, false)
+end)
 
 test("places, names × a pattern or an instrument renamed is the same one: the lines go back into it, playing it", function()
   local env, peer = setup(nil, INSTRUMENTS)
