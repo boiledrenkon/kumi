@@ -337,9 +337,10 @@ fn build_shim(shims: &[&Path]) {
 // ----- the generic call: every function the API table has, called by name with JSON arguments -----
 //
 // Each parameter is read from the call's arguments by what its C type and name say it is: a number or a flag, text, a
-// buffer REAPER writes into (with its size, which the caller never passes), a value REAPER writes back (`…Out`), a handle
-// given as a ref (a track, item, take, envelope or project). A function with any other parameter or return (callbacks,
-// windows, bitmaps, sources) can't be called this way: run-lua can.
+// buffer REAPER writes into (with its size, which the caller never passes), a buffer whose size REAPER reads and writes
+// back (`int* name_sz`: made as big as that size says), a value REAPER writes back (`…Out`), a handle given as a ref (a
+// track, item, take, envelope or project). A function with any other parameter or return (callbacks, windows, bitmaps,
+// sources, arrays REAPER fills, binary data passed with its size) can't be called this way: run-lua can.
 
 const HANDLES: [&str; 5] = ["MediaTrack", "MediaItem", "MediaItem_Take", "TrackEnvelope", "ReaProject"];
 
@@ -388,6 +389,11 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
             }),
             None => Err(format!("a {ty}")),
         },
+        // (bytes with their size: REAPER reads that many from a JSON text that can hold no NUL, nor bytes past 0x7f as
+        // themselves)
+        (1, true, "char") if next.is_some_and(|n| n.ty.trim() == "int" && n.name == format!("{name}_sz")) => {
+            Err(format!("binary data with its size ({name})"))
+        }
         (1, true, "char") => Ok(format!("c.text({}, {name:?}, {optional})?", at(k))),
         (1, false, "char") => {
             let size = next.filter(|n| n.ty.trim() == "int" && n.name == format!("{name}_sz"));
@@ -401,6 +407,11 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
             let kind = scalar_kind(b).unwrap();
             if kind == "float" || kind == "isize" || kind == "usize" {
                 return Err(format!("a {ty}"));
+            }
+            // (an array REAPER fills, as GetMediaItemTake_Peaks's buf: one value would be overrun)
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("buf") || lower.contains("samples") || lower.contains("array") {
+                return Err(format!("an array REAPER fills ({name})"));
             }
             let k = if out_only { "None".into() } else { at(k) };
             Ok(format!("c.out_{kind}({k}, {name:?})? as _"))
@@ -466,6 +477,23 @@ fn emit_generic(functions: &[Function]) -> String {
                 continue;
             }
             let input = is_input(p);
+            // A buffer whose size REAPER reads and writes back (`char* name` then `int* name_sz`): one expression that makes
+            // both, the buffer as big as the size the caller gives (the size is an input; the buffer is one when REAPER reads it).
+            if let Some(size) =
+                f.params.get(i + 1).filter(|n| p.ty.trim() == "char*" && n.ty.trim() == "int*" && n.name == format!("{}_sz", p.name))
+            {
+                let at = |k: Option<usize>| k.map_or("None".to_string(), |k| format!("Some({k})"));
+                let buf_k = input.then_some(k);
+                if input {
+                    names.push(format!("{:?}", p.name));
+                    k += 1;
+                }
+                exprs.push(format!("c.buf_in_out({}, {:?}, {}, {:?})?", at(buf_k), p.name, at(Some(k)), size.name));
+                names.push(format!("{:?}", size.name));
+                k += 1;
+                skip = true;
+                continue;
+            }
             let mut sized = false;
             match param_expr(p, f.params.get(i + 1), input.then_some(k), &mut sized) {
                 Ok(expr) => {
@@ -496,7 +524,7 @@ fn emit_generic(functions: &[Function]) -> String {
                 let mut lets = String::new();
                 let mut call_args = Vec::new();
                 for (n, expr) in exprs.iter().enumerate() {
-                    if expr.starts_with("{ let (b, n)") {
+                    if expr.starts_with("{ let (b, n)") || expr.starts_with("c.buf_in_out(") {
                         writeln!(lets, "            let (a{n}, a{n}_sz) = {expr};").unwrap();
                         call_args.push(format!("a{n}"));
                         call_args.push(format!("a{n}_sz"));

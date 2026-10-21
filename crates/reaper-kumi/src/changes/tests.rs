@@ -3586,6 +3586,58 @@ fn a_lua_chunk_leaves_no_undo_block_open_no_refresh_held_and_doesnt_move_reapers
 }
 
 #[test]
+fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_back_what_reaper_wrote() {
+    // A buffer whose size REAPER reads and writes back: it was 64 KiB whatever size REAPER was told, and REAPER overran its
+    // own heap (review R1). The fake writes as much as it's told.
+    let lab = Lab::new();
+    let read = |args: Value| lab.call("read", json!({"kind": "call", "fn": "GetTrackMIDILyrics", "args": args}));
+    let big = read(json!([KICK, 0, "", 200_000])).unwrap();
+    assert_eq!(big["out"]["bufOutWantNeedBig_sz"], 199_999);
+    assert_eq!(big["out"]["bufOutWantNeedBig"].as_str().map(str::len), Some(199_999));
+    // By name, a float that is whole, and the default.
+    let named = read(json!({"track": KICK, "flag": 0, "bufOutWantNeedBig_sz": 1000})).unwrap();
+    assert_eq!(named["out"]["bufOutWantNeedBig"].as_str().map(str::len), Some(999));
+    assert_eq!(read(json!([KICK, 0, "", 2e3])).unwrap()["out"]["bufOutWantNeedBig_sz"], 1999);
+    assert_eq!(read(json!([KICK, 0])).unwrap()["out"]["bufOutWantNeedBig_sz"], 64 * 1024 - 1);
+    // Past 64 MiB, or not a whole size: refused before REAPER is called.
+    assert!(read(json!([KICK, 0, "", 128 << 20])).unwrap_err().1.contains("at most"));
+    assert!(read(json!([KICK, 0, "", 10.5])).unwrap_err().1.contains("whole number"));
+    // What comes back is at most 1 MB, said cut (review R19).
+    let huge = read(json!([KICK, 0, "", 3 << 20])).unwrap();
+    assert_eq!(
+        (huge["out"]["bufOutWantNeedBig"].as_str().map(str::len), huge["out"]["bufOutWantNeedBig_cut"].clone()),
+        (Some(1 << 20), json!(true))
+    );
+    // Bytes come back as hex: a take's MIDI, as many bytes as REAPER said it wrote.
+    let midi = lab.call("read", json!({"kind": "call", "fn": "MIDI_GetAllEvts", "args": [SNARE_TAKE, "", 100_000]})).unwrap();
+    let hex = midi["out"]["bufOutNeedBig"].as_str().unwrap();
+    assert_eq!(
+        (midi["out"]["bufOutNeedBig_hex"].clone(), hex.len() as i64),
+        (json!(true), midi["out"]["bufOutNeedBig_sz"].as_i64().unwrap() * 2)
+    );
+}
+
+#[test]
+fn binary_data_with_its_size_and_arrays_reaper_fills_cant_be_passed_to_the_generic_call() {
+    use crate::reaper::generic::{function, uncallable};
+    for (name, why) in [
+        ("MIDI_SetAllEvts", "binary data"),
+        ("MIDI_InsertEvt", "binary data"),
+        ("MIDI_InsertTextSysexEvt", "binary data"),
+        ("MIDI_SetEvt", "binary data"),
+        ("MIDI_SetTextSysexEvt", "binary data"),
+        ("SendMIDIMessageToHardware", "binary data"),
+        ("GetMediaItemTake_Peaks", "an array"),
+    ] {
+        let said = uncallable(function(name).unwrap()).unwrap_or_else(|| panic!("{name} is callable"));
+        assert!(said.contains(why), "{name}: {said}");
+    }
+    let lab = Lab::new();
+    let refused = lab.call("read", json!({"kind": "call", "fn": "GetMediaItemTake_Peaks", "args": [SNARE_TAKE, 100, 0, 2, 1000, 0]}));
+    assert!(refused.unwrap_err().1.contains("run-lua"));
+}
+
+#[test]
 fn a_getter_that_makes_what_it_gets_is_a_change_not_a_read() {
     // GetFXEnvelope(…, true) makes an envelope; reading container_map.add maps a macro: as reads they'd be bare edits, with
     // no undo point and no HISTORY row (review R6).

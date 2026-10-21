@@ -26,6 +26,8 @@ pub trait Handles {
 /// A sized buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`).
 const BUFFER: usize = 64 * 1024;
 const MOST_BUFFER: usize = 64 * 1024 * 1024;
+/// The most of a buffer's contents an answer carries (past it, `<name>_cut`).
+const MOST_OUT: usize = 1024 * 1024;
 
 enum Slot {
     Int(Box<c_int>),
@@ -36,6 +38,8 @@ enum Slot {
     Bool(Box<bool>),
     Text(Box<*const c_char>),
     Buf(Box<[u8]>),
+    /// A buffer and the size REAPER is told and writes back (its name).
+    Sized(Box<[u8]>, Box<c_int>, String),
 }
 
 /// One call's arguments, and what it keeps alive until REAPER has answered: text, buffers and the values it writes back.
@@ -141,6 +145,47 @@ impl<'h> Call<'h> {
         let ptr = buf.as_mut_ptr().cast::<c_char>();
         self.slots.push((name.to_string(), Slot::Buf(buf), true));
         Ok((ptr, size as c_int))
+    }
+
+    /// A buffer with the size REAPER reads and writes back (`int* <name>_sz`): made as big as that size says (the caller's,
+    /// a whole number of bytes, or 64 KiB) and REAPER told the size it has, so it never writes past it; what REAPER wrote
+    /// comes back (as text, or as hex when it's bytes), with the size it wrote back.
+    pub fn buf_in_out(
+        &mut self,
+        k: Option<usize>,
+        name: &str,
+        k_size: Option<usize>,
+        size_name: &str,
+    ) -> Result<(*mut c_char, *mut c_int), String> {
+        let size = match self.arg(k_size, size_name) {
+            None => BUFFER,
+            Some(v) => {
+                let n = v
+                    .as_f64()
+                    .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+                    .ok_or_else(|| Self::missing(size_name, "a whole number of bytes"))?;
+                if n > MOST_BUFFER as f64 {
+                    return Err(format!("args: {size_name} can be at most {MOST_BUFFER} bytes"));
+                }
+                (n as usize).max(2)
+            }
+        };
+        let mut buf = vec![0u8; size].into_boxed_slice();
+        match self.arg(k, name) {
+            Some(Value::String(s)) => {
+                let bytes = s.as_bytes();
+                if bytes.len() >= size {
+                    return Err(format!("args: {name} is longer than its buffer ({size} bytes): pass a larger {size_name}"));
+                }
+                buf[..bytes.len()].copy_from_slice(bytes);
+            }
+            Some(_) => return Err(Self::missing(name, "text")),
+            None => {}
+        }
+        let mut told = Box::new(size as c_int);
+        let (ptr, told_ptr) = (buf.as_mut_ptr().cast::<c_char>(), &mut *told as *mut c_int);
+        self.slots.push((name.to_string(), Slot::Sized(buf, told, size_name.to_string()), true));
+        Ok((ptr, told_ptr))
     }
 
     fn slot<T>(&mut self, name: &str, slot: Slot, report: bool, ptr: *mut T) -> *mut T {
@@ -274,7 +319,8 @@ impl<'h> Call<'h> {
         }
     }
 
-    /// What REAPER wrote back, by name (a buffer as text, and whether it filled its buffer: it may be cut).
+    /// What REAPER wrote back, by name: a buffer as text up to its end (at most `MOST_OUT`, and `<name>_cut` when it filled
+    /// its buffer or passed that), a sized one as the bytes REAPER said it wrote (hex when they aren't text).
     pub fn outs(&self) -> Map<String, Value> {
         let mut out = Map::new();
         for (name, slot, report) in &self.slots {
@@ -296,11 +342,33 @@ impl<'h> Call<'h> {
                     }
                 }
                 Slot::Buf(b) => {
-                    let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-                    if len + 1 >= b.len() {
+                    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+                    let len = end.min(MOST_OUT);
+                    if end + 1 >= b.len() || len < end {
                         out.insert(format!("{name}_cut"), Value::Bool(true));
                     }
                     Value::String(String::from_utf8_lossy(&b[..len]).into_owned())
+                }
+                Slot::Sized(b, told, size_name) => {
+                    let wrote = (**told).max(0) as usize;
+                    out.insert(size_name.clone(), Value::from(**told));
+                    let exact = &b[..wrote.min(b.len())];
+                    if wrote > b.len() || exact.len() > MOST_OUT {
+                        out.insert(format!("{name}_cut"), Value::Bool(true));
+                    }
+                    let exact = &exact[..exact.len().min(MOST_OUT)];
+                    // (text, maybe with its NUL counted; anything else is bytes, every one of them)
+                    let mut text = exact;
+                    while let [rest @ .., 0] = text {
+                        text = rest;
+                    }
+                    match std::str::from_utf8(text).ok().filter(|text| !text.contains('\0')) {
+                        Some(text) => Value::String(text.to_owned()),
+                        None => {
+                            out.insert(format!("{name}_hex"), Value::Bool(true));
+                            Value::String(exact.iter().map(|b| format!("{b:02x}")).collect())
+                        }
+                    }
                 }
             };
             out.insert(name.clone(), value);
