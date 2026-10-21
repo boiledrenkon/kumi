@@ -26,8 +26,9 @@ pub trait Handles {
 /// A sized buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`).
 const BUFFER: usize = 64 * 1024;
 const MOST_BUFFER: usize = 64 * 1024 * 1024;
-/// The most of a buffer's contents an answer carries (past it, `<name>_cut`).
-const MOST_OUT: usize = 1024 * 1024;
+/// The most of a buffer's contents an answer carries, as text (past it, `<name>_cut`): the host's frame holds 256 KiB
+/// (lab: a take's 144 KB of MIDI, as hex, was refused whole).
+const MOST_OUT: usize = 96 * 1024;
 
 enum Slot {
     Int(Box<c_int>),
@@ -353,22 +354,29 @@ impl<'h> Call<'h> {
                     let wrote = (**told).max(0) as usize;
                     out.insert(size_name.clone(), Value::from(**told));
                     let exact = &b[..wrote.min(b.len())];
-                    if wrote > b.len() || exact.len() > MOST_OUT {
-                        out.insert(format!("{name}_cut"), Value::Bool(true));
-                    }
-                    let exact = &exact[..exact.len().min(MOST_OUT)];
-                    // (text, maybe with its NUL counted; anything else is bytes, every one of them)
+                    // (text, maybe with its NUL counted; anything else is bytes, every one of them, two hex digits each)
                     let mut text = exact;
                     while let [rest @ .., 0] = text {
                         text = rest;
                     }
-                    match std::str::from_utf8(text).ok().filter(|text| !text.contains('\0')) {
-                        Some(text) => Value::String(text.to_owned()),
+                    let (value, shown) = match std::str::from_utf8(text).ok().filter(|text| !text.contains('\0')) {
+                        Some(text) => {
+                            let mut end = text.len().min(MOST_OUT);
+                            while !text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            (Value::String(text[..end].to_owned()), end == text.len())
+                        }
                         None => {
                             out.insert(format!("{name}_hex"), Value::Bool(true));
-                            Value::String(exact.iter().map(|b| format!("{b:02x}")).collect())
+                            let bytes = &exact[..exact.len().min(MOST_OUT / 2)];
+                            (Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()), bytes.len() == exact.len())
                         }
+                    };
+                    if wrote > b.len() || !shown {
+                        out.insert(format!("{name}_cut"), Value::Bool(true));
                     }
+                    value
                 }
             };
             out.insert(name.clone(), value);

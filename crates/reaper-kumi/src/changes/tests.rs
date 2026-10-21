@@ -3618,9 +3618,11 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
     // own heap (review R1). The fake writes as much as it's told.
     let lab = Lab::new();
     let read = |args: Value| lab.call("read", json!({"kind": "call", "fn": "GetTrackMIDILyrics", "args": args}));
+    // (REAPER is told 200,000 bytes and writes 199,999 of them, safely: the buffer is that big; the answer shows 96 KiB)
     let big = read(json!([KICK, 0, "", 200_000])).unwrap();
     assert_eq!(big["out"]["bufOutWantNeedBig_sz"], 199_999);
-    assert_eq!(big["out"]["bufOutWantNeedBig"].as_str().map(str::len), Some(199_999));
+    assert_eq!(big["out"]["bufOutWantNeedBig"].as_str().map(str::len), Some(96 << 10));
+    assert_eq!(big["out"]["bufOutWantNeedBig_cut"], true);
     // By name, a float that is whole, and the default.
     let named = read(json!({"track": KICK, "flag": 0, "bufOutWantNeedBig_sz": 1000})).unwrap();
     assert_eq!(named["out"]["bufOutWantNeedBig"].as_str().map(str::len), Some(999));
@@ -3629,12 +3631,13 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
     // Past 64 MiB, or not a whole size: refused before REAPER is called.
     assert!(read(json!([KICK, 0, "", 128 << 20])).unwrap_err().1.contains("at most"));
     assert!(read(json!([KICK, 0, "", 10.5])).unwrap_err().1.contains("whole number"));
-    // What comes back is at most 1 MB, said cut (review R19).
+    // What comes back is at most 96 KiB of text, within the host's 256 KiB frame, said cut (review R19).
     let huge = read(json!([KICK, 0, "", 3 << 20])).unwrap();
     assert_eq!(
         (huge["out"]["bufOutWantNeedBig"].as_str().map(str::len), huge["out"]["bufOutWantNeedBig_cut"].clone()),
-        (Some(1 << 20), json!(true))
+        (Some(96 << 10), json!(true))
     );
+    assert!(huge.to_string().len() < 200 << 10);
     // Bytes come back as hex: a take's MIDI, as many bytes as REAPER said it wrote.
     let midi = lab.call("read", json!({"kind": "call", "fn": "MIDI_GetAllEvts", "args": [SNARE_TAKE, "", 100_000]})).unwrap();
     let hex = midi["out"]["bufOutNeedBig"].as_str().unwrap();
@@ -3642,6 +3645,7 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
         (midi["out"]["bufOutNeedBig_hex"].clone(), hex.len() as i64),
         (json!(true), midi["out"]["bufOutNeedBig_sz"].as_i64().unwrap() * 2)
     );
+    assert_eq!(midi["out"].get("bufOutNeedBig_cut"), None);
 }
 
 #[test]
