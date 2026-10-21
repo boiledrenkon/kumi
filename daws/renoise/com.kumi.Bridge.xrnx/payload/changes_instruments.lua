@@ -631,6 +631,7 @@ local function delete_write(song, env, input, fence, desc, notes)
   song:delete_instrument_at(i)
   -- (the place it goes back to: after the instrument before it, followed from here)
   material.after = env.instrument_mark and env.instrument_mark() or nil
+  material.touches = base.touch_marks(env, patterns)
   local note = #notes > 0 and string.format("Renoise cleared the %d %s that played it; Kumi puts %s back with it.", #notes, #notes == 1 and "note" or "notes", #notes == 1 and "it" or "them") or nil
   return {
     applied = { deleted = true }, material = material, target = song_target(env),
@@ -701,11 +702,14 @@ local function delete_restore(song, env, restore, desc)
     return (env.shifted(t, restore.layout))
   end
   local skipped = 0
+  -- (a pattern whose lines changed since may have had rows inserted or deleted: its notes have no place Kumi can tell; looked at
+  -- before anything is written, as Kumi's own writes count too)
+  local touched = base.touched_patterns(env, material.touches, pattern_now)
   for _, note in ipairs(material.notes or {}) do
     local p = pattern_now and pattern_now(note.p) or nil
     local t = moved(note.t)
     local column
-    if p and t and t <= rows.track_count(song) and note.line <= song:pattern(p).number_of_lines then
+    if p and not touched[note.p] and t and t <= rows.track_count(song) and note.line <= song:pattern(p).number_of_lines then
       local pattern_track = song:pattern(p):track(t)
       if not pattern_track.is_alias then column = pattern_track:line(note.line):note_column(note.col) end
     end

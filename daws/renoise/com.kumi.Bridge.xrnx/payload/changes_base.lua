@@ -984,4 +984,28 @@ function M.pattern_now(song, env, place)
   return p
 end
 
+-- The count of changed lines of each pattern in `patterns` (a set of numbers), as a record keeps it beside cells it writes back
+-- later by line (false when the tool can't count a pattern's lines).
+function M.touch_marks(env, patterns)
+  if not env.pattern_touch_mark then return nil end
+  local marks = {}
+  for p in pairs(patterns) do marks[tostring(p)] = env.pattern_touch_mark(p) or false end
+  return marks
+end
+
+-- The patterns (by their numbers then) whose lines changed since `marks` were kept, or can't be told: rows inserted or deleted
+-- there move every line, so cells kept by line have no place Kumi can tell. `pattern_now` follows a number then to now. Nothing
+-- is touched for a record that kept no marks.
+function M.touched_patterns(env, marks, pattern_now)
+  local touched = {}
+  if type(marks) ~= "table" then return touched end
+  for key, mark in pairs(marks) do
+    local p = tonumber(key)
+    local now = pattern_now and pattern_now(p) or nil
+    local since = now and mark and env.pattern_touched_since and env.pattern_touched_since(now, mark)
+    if since ~= false then touched[p] = true end
+  end
+  return touched
+end
+
 return M

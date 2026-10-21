@@ -408,6 +408,23 @@ test("instruments: a note the producer wrote where Kumi's kept note was isn't ov
   ok(undone.result.display.note:find("weren't put back", 1, true), undone.result.display.note)
 end)
 
+test("instruments: Kumi's undo of a delete leaves out the notes of a pattern whose lines changed since (rows may have moved), and says so", function()
+  local env, peer = setup()
+  note_at(1, 1)
+  note_at(3, 1)
+  local record = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  -- (the producer inserts rows in the pattern: Renoise moves every line, Kumi's cleared cells too, which the tool sees only as
+  -- lines that changed)
+  mock.ops.set_note(1, 3, 9, 1, { note = 60, instrument = 0 })
+  H.tick(2)
+  local undone = restore(peer, "instrument-delete", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(names(), "Drums,Bass synth,Pad", "the instrument is back")
+  eq(note_value(1), 255, "nothing written where the lines may have moved")
+  eq(note_value(3), 255)
+  ok(undone.result.display.note:find("2 weren't put back", 1, true), undone.result.display.note)
+end)
+
 test("instruments: an instrument too big to keep isn't deleted, and the only instrument can't be", function()
   local env, peer = setup()
   instrument(2).samples[1].buffer.frames = 200 * 1024 * 1024

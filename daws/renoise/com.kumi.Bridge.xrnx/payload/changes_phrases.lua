@@ -516,6 +516,7 @@ local function delete_apply(song, env, input, fence, desc)
     if #cleared > 0 then
       material.zeroZ = cleared
       material.pool = import("changes_material").keep_pool(song, env, patterns)
+      material.touches = base.touch_marks(env, patterns)
       note = string.format("Renoise cleared the %d 0Z %s that named it; Kumi puts %s back with it.", #cleared, #cleared == 1 and "command" or "commands",
         #cleared == 1 and "it" or "them")
     end
@@ -584,8 +585,10 @@ local function delete_restore(song, env, restore, desc)
   if type(material.zeroZ) == "table" and #material.zeroZ > 0 then
     local pattern_now = import("changes_material").pool_now(song, env, material.pool)
     local skipped = 0
+    -- (a pattern whose lines changed since may have had rows inserted or deleted: its cells have no place Kumi can tell)
+    local touched = base.touched_patterns(env, material.touches, pattern_now)
     for _, cell in ipairs(material.zeroZ) do
-      local p = pattern_now and pattern_now(cell.p) or nil
+      local p = pattern_now and not touched[cell.p] and pattern_now(cell.p) or nil
       local t = cell.t
       if type(restore.layout) == "number" and env.shifted then t = env.shifted(cell.t, restore.layout) end
       local placed = p and t and { p = p, t = t, line = cell.line, col = cell.col, kind = cell.kind } or nil

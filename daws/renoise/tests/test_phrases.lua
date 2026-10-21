@@ -95,6 +95,28 @@ test("phrases: Kumi's undo of a phrase delete writes back the 0Z commands Renois
   eq(bass.phrase_program, 2, "the program plays it again")
 end)
 
+test("phrases: Kumi's undo of a phrase delete leaves out the 0Z commands of a pattern whose lines changed since, and says so", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  for k = 1, 2 do
+    mock.ops.set_note(1, 1, k, 1, { note = 48, instrument = 1 })
+    mock.ops.set_effect(1, 1, k, 1, 256 + 35, k)
+  end
+  mock.data.undo.stack = {}
+  local record = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 2) })
+  local function zero_z(k) return mock.song:pattern(1):track(1):line(k):effect_column(1).number_string .. mock.song:pattern(1):track(1):line(k):effect_column(1).amount_string end
+  eq(zero_z(2), "0000", "Renoise cleared the one that named it")
+  -- (the producer inserts rows in the pattern: the lines move, which the tool sees only as lines that changed)
+  mock.ops.set_note(1, 2, 9, 1, { note = 60, instrument = 0 })
+  H.tick(2)
+  local undone = restore(peer, "phrase-delete", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#bass.phrases, 2, "the phrase is back")
+  eq(zero_z(2), "0000", "nothing written where the lines may have moved")
+  ok((undone.result.display.note or ""):find("weren't written again", 1, true), tostring(undone.result.display.note))
+end)
+
 test("phrases: a new phrase's loop is checked against the 32 lines Renoise makes it with (#361 N-N4)", function()
   local env, peer = setup()
   local record, done = change(peer, "phrase-add", { ref = iref(place(peer), 2), loopEnd = 24 })
