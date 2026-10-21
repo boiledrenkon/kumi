@@ -295,6 +295,13 @@ impl SimListening {
         kept
     }
 
+    /// The producer works on a kept track (renames it, here): Kumi's undo of keeping it refuses `changed` from then on.
+    pub fn work_on_kept(&self, reference: &str, name: &str) {
+        if let Some(kept) = self.state.lock().unwrap().kept.get_mut(reference) {
+            *kept = name.into();
+        }
+    }
+
     /// `scratch-keep {ref, name}`, as both bridges make it: a copy kept as a track of the producer's, out of its set (no
     /// drop takes it then), renamed; its restore deletes it while it is as Kumi left it.
     pub fn keep(&self, method: &str, params: &Value, epoch: &str) -> Answer {

@@ -1351,13 +1351,22 @@ impl ReaperScript {
         let all: Vec<Value> = match (kind, params.get("parent").and_then(Value::as_str)) {
             ("project", _) => vec![Self::project(state)],
             ("track", _) => state.tracks.clone(),
-            // Each track plays its one item, from the start for two bars.
+            // Each track plays its MIDI items where they are, else its one item, from the start for two bars.
             ("spans", _) => state
                 .tracks
                 .iter()
                 .skip(1)
                 .map(|row| {
-                    let mut spans = json!({"ref": row["ref"], "name": row["name"], "spans": [[0.0, 8.0]]});
+                    let mut items: Vec<(f64, f64)> = state
+                        .midi
+                        .iter()
+                        .filter(|item| row["ref"] == format!("r:track:{}", item.track.trim_start_matches("r:track:")))
+                        .map(|item| (item.position, item.position + item.length))
+                        .collect();
+                    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let played: Vec<Value> =
+                        if items.is_empty() { vec![json!([0.0, 8.0])] } else { items.iter().map(|(from, to)| json!([from, to])).collect() };
+                    let mut spans = json!({"ref": row["ref"], "name": row["name"], "spans": played});
                     if row["mute"] == true {
                         spans["mute"] = true.into();
                     }

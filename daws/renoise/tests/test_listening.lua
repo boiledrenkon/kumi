@@ -249,6 +249,54 @@ test("listening: two producer solos can't both come back through Renoise's exclu
   H.no_dialogs()
 end)
 
+-- A group's solo solos its members too, and a member soloed reads its group soloed (measured): neither is Kumi's solo of one track.
+local drums = { tracks = { { name = "Kick" }, { name = "Hat" }, { name = "Drums", kind = "group", members = 2 }, { name = "Bass" } } }
+
+test("listening: a track rendered while the producer has its group soloed is heard on its own, and the group's solo comes back", function()
+  local env, peer = setup(nil, drums)
+  mock.ops.solo(3, true)
+  eq(track(1).solo and track(2).solo and track(3).solo, true, "the group's solo solos its members")
+  local before = states()
+  local epoch = place(peer)
+  result((start(peer, "jg1", { { id = "kick", what = "track", ref = track_ref(epoch, 1) } })), "render_start")
+  eq(mock.renders[1].tracks[1].solo, true)
+  eq(mock.renders[1].tracks[2].mute, OFF, "the Hat isn't in the Kick's file")
+  mock.finish_render()
+  eq(status(peer, "jg1").state, "done")
+  eq(states(), before, "the Drums soloed again, with its members")
+  H.no_dialogs()
+end)
+
+test("listening: a group rendered while the producer has one member soloed is heard with all its members, and the solo comes back", function()
+  local env, peer = setup(nil, drums)
+  mock.ops.solo(1, true)
+  eq(track(3).solo, true, "a member's solo reads its group soloed")
+  local before = states()
+  local epoch = place(peer)
+  result((start(peer, "jg2", { { id = "drums", what = "track", ref = track_ref(epoch, 3) } })), "render_start")
+  eq(mock.renders[1].tracks[2].mute, A, "the Hat is in the Drums' file")
+  eq(mock.renders[1].tracks[4].mute, OFF)
+  mock.finish_render()
+  eq(status(peer, "jg2").state, "done")
+  eq(states(), before, "the Kick soloed again on its own")
+  H.no_dialogs()
+end)
+
+test("listening: a track rendered while the producer has two tracks soloed in the GUI is heard on its own", function()
+  local env, peer = setup()
+  mock.ops.solo(1, true)
+  mock.ops.add_solo(3)
+  local epoch = place(peer)
+  result((start(peer, "jg3", { { id = "kick", what = "track", ref = track_ref(epoch, 1) } })), "render_start")
+  eq(mock.renders[1].tracks[3].mute, OFF, "the Bass isn't in the Kick's file")
+  mock.finish_render()
+  local done = status(peer, "jg3")
+  eq(done.state, "done")
+  ok(done.notes and table.concat(done.notes, " "):find("one track at a time", 1, true), json.encode(done.notes))
+  eq(track(3).mute_state, A, "the Bass plays as it did")
+  H.no_dialogs()
+end)
+
 test("listening: the range is planned in lines: pre-roll clamped at the start, end_pos inclusive, where the part begins said", function()
   local env, peer = setup()
   local answer = result((start(peer, "j5", { { id = "mix", what = "master" } }, { fromBeat = 1, beats = 2 }, { preRollBeats = 4 })))
@@ -837,6 +885,54 @@ test("listening: read spans says where each track plays, in beats: muted columns
   local names = {}
   for _, item in ipairs(again.items) do names[#names + 1] = item.name .. (item.mute and "(muted)" or "") end
   eq(table.concat(names, ","), "Kick,Hat(muted),Bass,Pad")
+  H.no_dialogs()
+end)
+
+-- The song's tempo commands are read a slice at a time (every look at the clock costs 100 ms here, so a slice is a few tracks).
+local function cold(sequence)
+  local env, peer = setup(nil, { patterns = #sequence, sequence_length = #sequence, sequence = sequence })
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  -- (ZL08 on pattern 9's line 1: its 16 lines are 2 beats, and slot 10 starts at beat 34, at LPB 8)
+  mock.ops.set_effect(9, 2, 1, 1, command("ZL"), 8)
+  -- (as after a song opens: nothing read yet, and the tool's ticks not reading ahead until told)
+  bridge().listen.zcache = {}
+  bridge().listen.warmed_ms = math.huge
+  mock.clock_step_ms = 100
+  return env, peer
+end
+local twelve = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }
+
+test("listening: a render waits for the song's tempo commands: answered busy past a slice, read on between, then it renders", function()
+  local env, peer = cold(twelve)
+  local before = states()
+  failure((start(peer, "jt1", { { id = "mix", what = "master" } }, { fromBeat = 34, beats = 1 })), "busy", "tempo commands")
+  eq(#mock.renders, 0, "nothing rendered")
+  eq(states(), before, "nothing written")
+  -- (the tool's ticks read the rest ahead, a little at a time)
+  bridge().listen.warmed_ms = nil
+  mock.clock_step_ms = 5
+  for _ = 1, 100 do H.tick(1) end
+  eq(bridge().listen.warm_wanted, false, "all read")
+  local answer = result((start(peer, "jt1", { { id = "mix", what = "master" } }, { fromBeat = 34, beats = 1 })), "render_start")
+  mock.clock_step_ms = 0
+  local r = mock.renders[1]
+  eq(r.options.start_pos.sequence, 10, "beat 34 is slot 10 (pattern 9 is 2 beats at LPB 8)")
+  eq(r.options.end_pos.line, 8, "a beat at LPB 8 is 8 lines")
+  ok(math.abs(answer.seconds - 0.5) < 1e-9, answer.seconds)
+  mock.finish_render()
+  H.no_dialogs()
+end)
+
+test("listening: a sequence read reads the song's tempo commands across its turns, and says where each slot plays", function()
+  local env, peer = cold(twelve)
+  local page = result(call(peer, "read", { kind = "sequence" }, 4000), "sequence")
+  mock.clock_step_ms = 0
+  eq(page.items[9].positionBeats, 32)
+  eq(page.items[9].lengthBeats, 2)
+  eq(page.items[10].positionBeats, 34)
   H.no_dialogs()
 end)
 

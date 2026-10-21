@@ -57,8 +57,57 @@ fn items_hash(reaper: &Reaper, track: Track) -> String {
     format!("{hash:016x}")
 }
 
-/// What the copy is, besides its name and where it sends: its items, its FX, its routing, its fader, its folder. A
-/// producer's edit of any of it is theirs, and Kumi's undo then leaves the track be.
+/// A hash of what the producer works on inside the track: each FX's parameter values (one an envelope moves as the
+/// project plays is left to its points), each item's active take (its MIDI events, offset, rate, pitch, volume), and
+/// every point of the track's envelopes.
+fn content_hash(reaper: &Reaper, track: Track) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash = (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let owner = FxOwner::Track(track);
+    for index in 0..reaper.fx_count(owner) {
+        let fx = crate::reaper::Fx { owner, index };
+        for param in 0..reaper.fx_param_count(fx) {
+            if reaper.fx_param_envelope(track, index, param).is_some() {
+                continue;
+            }
+            if let Some((value, _, _)) = reaper.fx_param_raw(fx, param) {
+                feed(&param.to_le_bytes());
+                feed(&value.to_bits().to_le_bytes());
+            }
+        }
+        feed(b"|");
+    }
+    for index in 0..reaper.track_item_count(track) {
+        let Some(take) = reaper.track_item(track, index).and_then(|item| reaper.active_take(item)) else { continue };
+        for parm in ["D_STARTOFFS", "D_PLAYRATE", "D_PITCH", "D_VOL"] {
+            feed(&reaper.take_value(take, parm).to_bits().to_le_bytes());
+        }
+        for event in reaper.midi_events(take).unwrap_or_default() {
+            feed(&event.pos.to_le_bytes());
+            feed(&[event.flag & !1]);
+            feed(&event.msg);
+        }
+        feed(b"|");
+    }
+    for index in 0..reaper.track_envelope_count(track) {
+        let Some(envelope) = reaper.track_envelope(track, index) else { continue };
+        for point in (0..reaper.env_point_count(envelope, -1)).filter_map(|at| reaper.env_point(envelope, -1, at)) {
+            feed(&point.time.to_bits().to_le_bytes());
+            feed(&point.value.to_bits().to_le_bytes());
+            feed(&point.shape.to_le_bytes());
+            feed(&point.tension.to_bits().to_le_bytes());
+        }
+        feed(b"|");
+    }
+    format!("{hash:016x}")
+}
+
+/// What the copy is, besides its name and where it sends: its items, its FX, its routing, its fader, its folder, and what
+/// it holds (`content_hash`). A producer's edit of any of it is theirs, and Kumi's undo then leaves the track be.
 fn signature(reaper: &Reaper, track: Track) -> Value {
     let owner = FxOwner::Track(track);
     let fx: Vec<Value> = (0..reaper.fx_count(owner))
@@ -83,6 +132,7 @@ fn signature(reaper: &Reaper, track: Track) -> Value {
         "parent": reaper.track_parent(track).map(|parent| reaper.track_guid(parent)),
         "depth": reaper.track_value(track, "I_FOLDERDEPTH") as i64,
         "envelopePoints": points,
+        "content": content_hash(reaper, track),
     })
 }
 

@@ -1,12 +1,18 @@
 -- scratch-keep (M5 contract §9): a scratch copy made a track of the producer's (a goal's best): renamed, turned on (a copy is OFF,
 -- processing nothing), out of the scratch journal so no drop or sweep removes it. Kumi's undo deletes it while it is as Kumi left
 -- it. The rename is a Renoise undo step; the mute isn't (M3 fact), so Renoise's own undo takes back the name only, and says so.
+-- What Kumi left is fenced by a print of everything the producer could work on there (`content_print`): any later work on it, or
+-- a track too long to print in one callback, and Kumi's undo leaves the track where it is.
 
 local import = ...
 local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
 local scratch = import("scratch")
+
+local bit = require("bit")
+local bxor, lshift, tobit, tohex = bit.bxor, bit.lshift, bit.tobit, bit.tohex
+local byte, format = string.byte, string.format
 
 local fail, bad, q = base.fail, base.bad, base.q
 
@@ -22,6 +28,86 @@ local function signature(song, index, track)
     if pattern_track.is_alias or not pattern_track.is_empty then lines = lines + 1 end
   end
   return { id = base.track_id(track), mute = track.mute_state, devices = #track.devices, patternsWithLines = lines }
+end
+
+-- The most pattern lines a print reads (it is one callback: well under a second); past it the kept track is too long to check.
+M.LINES_BUDGET = 100000
+
+-- A 32-bit FNV-1a print (as digest.lua's) of what the producer could work on in the kept track: its routing, mixer, each
+-- device (path, on/off, each parameter that isn't automated, its preset data), its slot mutes, and in every pattern its lines
+-- (the shown columns) and automation. nil when its lines are past LINES_BUDGET.
+local function content_print(song, index, track)
+  local h = -2128831035
+  local function feed(value)
+    local text = tostring(value) or ""
+    for i = 1, #text do
+      h = bxor(h, byte(text, i))
+      h = tobit(lshift(h, 24) + lshift(h, 8) + h * 147)
+    end
+    h = bxor(h, 31)
+    h = tobit(lshift(h, 24) + lshift(h, 8) + h * 147)
+  end
+  local function value(parameter)
+    -- (an automated parameter moves as the song plays: its automation is printed instead)
+    feed(parameter.is_automated and "a" or format("%.5f", parameter.value))
+  end
+  feed(track.output_routing)
+  feed(format("%.3f", track.output_delay or 0))
+  value(track.prefx_volume)
+  value(track.prefx_panning)
+  value(track.prefx_width)
+  value(track.postfx_volume)
+  value(track.postfx_panning)
+  for d = 1, #track.devices do
+    local device = track:device(d)
+    feed(device.device_path or "")
+    feed(device.is_active and "on" or "off")
+    for _, parameter in ipairs(device.parameters) do value(parameter) end
+    -- (a plug-in keeps settings no parameter shows)
+    if d > 1 then feed(device.active_preset_data or "") end
+  end
+  local sequencer = song.sequencer
+  for s = 1, #sequencer.pattern_sequence do
+    if sequencer:track_sequence_slot_is_muted(index, s) then feed("muted " .. s) end
+  end
+  local note_columns, effect_columns = track.visible_note_columns, track.visible_effect_columns
+  feed(note_columns .. "/" .. effect_columns)
+  local budget = M.LINES_BUDGET
+  for p = 1, #song.patterns do
+    local pattern = song:pattern(p)
+    local pattern_track = pattern:track(index)
+    feed("p" .. p)
+    if pattern_track.is_alias then
+      feed("alias " .. pattern_track.alias_pattern_index)
+    elseif not pattern_track.is_empty then
+      local length = pattern.number_of_lines
+      budget = budget - length
+      if budget < 0 then return nil end
+      for l = 1, length do
+        local line = pattern_track:line(l)
+        if not line.is_empty then
+          feed(l)
+          for c = 1, note_columns do
+            local column = line:note_column(c)
+            if not column.is_empty then
+              feed(format("%d:%d %d %d %d %d %d %d", c, column.note_value, column.instrument_value, column.volume_value,
+                column.panning_value, column.delay_value, column.effect_number_value, column.effect_amount_value))
+            end
+          end
+          for c = 1, effect_columns do
+            local column = line:effect_column(c)
+            if not column.is_empty then feed(format("e%d:%d %d", c, column.number_value, column.amount_value)) end
+          end
+        end
+      end
+    end
+    for _, entry in ipairs(pattern_track.automation) do
+      local parameter = entry.dest_parameter
+      feed(format("auto %s %d", parameter and parameter.name or "", entry.playmode))
+      for _, point in ipairs(entry.points) do feed(format("%.5f %.5f", point.time, point.value)) end
+    end
+  end
+  return tohex(h)
 end
 
 -- The copy the ref names: its place, the track, its scratch session and copy.
@@ -77,7 +163,10 @@ local function apply(song, env, input, fence, desc)
   return {
     applied = { name = name, mute = kept.mute, id = kept.id },
     created = { ref = refs.make(env.epoch(), "track", index), kind = "track" },
-    material = { track = index, copyName = old, scratchId = session.id, devices = kept.devices, patternsWithLines = kept.patternsWithLines },
+    material = {
+      track = index, copyName = old, scratchId = session.id, devices = kept.devices, patternsWithLines = kept.patternsWithLines,
+      print = content_print(song, index, track) or "unread",
+    },
     display = { title = "Kept " .. q(name), before = { name = old }, after = { name = name }, note = NOTE },
     undo = { desc = desc, entry = true },
     target = base.target(env, index), place = { track = index }, prior = { name = old }, journal_applied = { name = name },
@@ -95,8 +184,17 @@ local function restore(song, env, record, desc)
     fail("changed", q(label) .. " is not the track Kumi kept any more")
   end
   local now = signature(song, index, track)
-  if not record.discard and (now.mute ~= applied.mute or now.devices ~= material.devices or now.patternsWithLines ~= material.patternsWithLines) then
-    fail("changed", q(label) .. " changed in Renoise since Kumi kept it (its devices, lines or mute)")
+  if not record.discard then
+    if now.mute ~= applied.mute or now.devices ~= material.devices or now.patternsWithLines ~= material.patternsWithLines then
+      fail("changed", q(label) .. " changed in Renoise since Kumi kept it (its devices, lines or mute), so Kumi leaves it")
+    end
+    -- (what the producer did there since: a note, a knob, automation, the fader; a record from before the print has none)
+    if material.print == "unread" then
+      fail("changed", q(label) .. " is too long for Kumi to check for the producer's work, so Kumi leaves it")
+    end
+    if type(material.print) == "string" and content_print(song, index, track) ~= material.print then
+      fail("changed", q(label) .. " changed in Renoise since Kumi kept it (its notes, devices, automation or mixer), so Kumi leaves it")
+    end
   end
   song:describe_undo(desc)
   song:delete_track_at(index)

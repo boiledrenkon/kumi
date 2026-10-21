@@ -131,14 +131,26 @@ end
 
 -- The timeline: every slot's lines with their beats and seconds
 
+-- How long the timeline reads patterns in one request (rule 6: well under Renoise's 10 s watchdog): past it the request is
+-- answered busy, and what was read is kept for the next. A read job's timeline waits for its next turn every YIELD_MS instead.
+-- While nothing else runs, the bridge's ticks read the song's patterns ahead (WARM_MS a tick, every WARM_EVERY_MS).
+M.SCAN_MS = 800
+M.YIELD_MS = 8
+M.WARM_MS = 15
+M.WARM_EVERY_MS = 200
+
+-- The clock (os.clock in ms): Renoise's is a high-precision timer.
+local function clock_ms() return os.clock() * 1000 end
+
 -- The global commands of a pattern that move time, in any track's effect columns (they act from the line they are on, measured:
--- a ZL08 on line 1 makes line 17 two beats): {line = {lpb?, bpm?}}, and whether it breaks or delays its lines (ZB, ZD), which
--- this timeline doesn't follow.
-local function scan_pattern(song, p, tracks)
+-- a ZL08 on line 1 makes line 17 two beats): into `into.changes` ({line = {lpb?, bpm?}}), and `into.irregular` when it breaks or
+-- delays its lines (ZB, ZD), which this timeline doesn't follow. Read a track at a time from `into.next_t`; `over()` after each
+-- says the slice is used up: then the next track to read is kept in `into.next_t` and it answers false (true when all is read).
+local function scan_pattern(song, p, tracks, into, over)
   local pattern = song:pattern(p)
   local lines = pattern.number_of_lines
-  local changes, irregular = {}, false
-  for t = 1, tracks do
+  local changes = into.changes
+  for t = into.next_t or 1, tracks do
     local columns = song:track(t).visible_effect_columns
     if columns > 0 then
       local pattern_track = pattern:track(t)
@@ -159,7 +171,7 @@ local function scan_pattern(song, p, tracks)
                   changes[l] = changes[l] or {}
                   changes[l].bpm = amount
                 elseif number == "ZB" or number == "ZD" then
-                  irregular = true
+                  into.irregular = true
                 end
               end
             end
@@ -167,19 +179,61 @@ local function scan_pattern(song, p, tracks)
         end
       end
     end
+    if t < tracks and over() then
+      into.next_t = t + 1
+      return false
+    end
   end
-  return changes, irregular
+  into.next_t = nil
+  return true
 end
 
--- A pattern's commands, from the cache while its lines haven't changed (`mark_of(p)`: the count of its changed lines, by the
--- bridge's line notifiers; nil when unknown, which scans again).
-local function pattern_changes(song, p, tracks, mark_of)
+-- Pattern p's cache entry while its lines haven't changed (`mark_of(p)`: the count of its changed lines, by the bridge's line
+-- notifiers; nil when unknown, which reads again), whole or part read; nil when there's none.
+local function cached_changes(p, tracks, mark_of)
   local mark = mark_of and mark_of(p) or nil
   local cached = S and S.zcache[p]
-  if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached.changes, cached.irregular end
-  local changes, irregular = scan_pattern(song, p, tracks)
-  if mark and S then S.zcache[p] = { mark = mark, tracks = tracks, changes = changes, irregular = irregular } end
-  return changes, irregular
+  if mark and cached and cached.mark == mark and cached.tracks == tracks then return cached end
+  return nil, mark
+end
+
+-- A pattern's commands, from the cache, else read, going on from where a slice stopped. nil when `over()` stopped it part way.
+local function pattern_changes(song, p, tracks, mark_of, over)
+  local cached, mark = cached_changes(p, tracks, mark_of)
+  if cached and not cached.next_t then return cached.changes, cached.irregular end
+  local reading = cached or { mark = mark, tracks = tracks, changes = {}, irregular = false }
+  local done = scan_pattern(song, p, tracks, reading, over)
+  if mark and S then S.zcache[p] = reading end
+  if not done then return nil end
+  return reading.changes, reading.irregular
+end
+
+-- Reads the song's patterns ahead into the cache (in the sequence's order), WARM_MS at a time while nothing else runs, once
+-- listening has asked for the timeline in this song: a render, an audition or a scratch copy then finds them read (every pattern
+-- is read again after a song opens or is watched again). Stops when all are read, until the timeline is asked for again.
+function M.warm(mark_of)
+  if not S or not S.warm_wanted or not mark_of then return end
+  local now = clock_ms()
+  if S.warmed_ms and now - S.warmed_ms < M.WARM_EVERY_MS then return end
+  S.warmed_ms = now
+  local song = renoise.song()
+  if not song or song.rendering then return end
+  local stop = now + M.WARM_MS
+  local function over() return clock_ms() >= stop end
+  local tracks = rows.track_count(song)
+  local sequencer = song.sequencer
+  local seen = {}
+  for s = 1, #sequencer.pattern_sequence do
+    local p = sequencer:pattern(s)
+    if not seen[p] then
+      seen[p] = true
+      local cached = cached_changes(p, tracks, mark_of)
+      if not cached or cached.next_t then
+        if pattern_changes(song, p, tracks, mark_of, over) == nil or over() then return end
+      end
+    end
+  end
+  S.warm_wanted = false
 end
 
 -- The song's timeline: `slots[s] = {pattern, lines, segments = {...}, beat, second, endBeat, endSecond}` in sequence order, a
@@ -189,6 +243,8 @@ end
 -- transport's LPB and BPM until the first commands; `first_lpb`, `first_bpm` are the song's first ZL and ZT values (a render
 -- starts at them: see render_state). `irregular` when a pattern breaks or delays its lines, or the song keeps Renoise's old speed
 -- timing: then the lines' times are Renoise's own and only said, not checked.
+-- Read a slice at a time: inside a read job (a coroutine) it waits for the job's next turn every YIELD_MS; a request answers busy
+-- past SCAN_MS (what was read is kept, so asking again goes on from there).
 function M.timeline(song, mark_of)
   local transport = song.transport
   local speed = transport.timing_model == renoise.Transport.TIMING_MODEL_SPEED
@@ -197,6 +253,26 @@ function M.timeline(song, mark_of)
   local tracks = rows.track_count(song)
   local sequencer = song.sequencer
   local count = #sequencer.pattern_sequence
+  local patterns = #song.patterns
+  if S then S.warm_wanted = true end
+  local over
+  if coroutine.running() then
+    local slice_end = clock_ms() + M.YIELD_MS
+    over = function()
+      if clock_ms() < slice_end then return false end
+      coroutine.yield()
+      -- (the song may have changed while the job waited)
+      local now = renoise.song()
+      if not now or rows.track_count(now) ~= tracks or #now.patterns ~= patterns or #now.sequencer.pattern_sequence ~= count then
+        fail("changed", "tracks or patterns changed while Renoise read the song's tempo commands: read again")
+      end
+      slice_end = clock_ms() + M.YIELD_MS
+      return false
+    end
+  else
+    local stop = clock_ms() + M.SCAN_MS
+    over = function() return clock_ms() >= stop end
+  end
   local slots, beat, second = {}, 0, 0
   local irregular = speed
   local lpb_met, bpm_met = false, false
@@ -204,7 +280,10 @@ function M.timeline(song, mark_of)
   for s = 1, count do
     local p = sequencer:pattern(s)
     local lines = song:pattern(p).number_of_lines
-    local changes, broken = pattern_changes(song, p, tracks, mark_of)
+    local changes, broken = pattern_changes(song, p, tracks, mark_of, over)
+    if not changes then
+      return fail("busy", string.format("Renoise is still reading the song's tempo commands for Kumi (pattern %d of %d in the sequence): ask again in a moment", s, count))
+    end
     if broken then irregular = true end
     local slot = { pattern = p, lines = lines, segments = {}, beat = beat, second = second }
     local from = 1
@@ -436,9 +515,43 @@ local function same_state(a, b)
   return a ~= nil and b ~= nil and a.mute == b.mute and a.solo == b.solo
 end
 
+local SOLO_ROUNDS = 64 -- (un-solo rounds: a solo takes two at most, the first making a track soloed along with another the soloed one)
+
+-- Every solo taken away (Renoise turns every track Active); false when one stays. The setter toggles a track's own solo, so `false`
+-- on a track soloed only along with another (a group's member) solos it on its own first (measured, 3.5.4).
+local function unsolo_all(song)
+  for _ = 1, SOLO_ROUNDS do
+    local first
+    for t = 1, rows.track_count(song) do
+      local track = song:track(t)
+      if track.type ~= MASTER() and track.solo_state then
+        first = track
+        break
+      end
+    end
+    if not first then return true end
+    first.solo_state = false
+  end
+  return false
+end
+
+-- The tracks that read soloed now, as a key ("2,6"), and how close they are to `set` (each wanted one counts, each other against).
+local function soloed_now(song, set)
+  local key, score = {}, 0
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if track.type ~= MASTER() and track.solo_state then
+      key[#key + 1] = t
+      score = score + (set[t] and 1 or -2)
+    end
+  end
+  return table.concat(key, ","), score
+end
+
 -- Writes `wanted` back (a snapshot, carried to the tracks' places now by `place_now(t)`), except on the tracks someone changed
 -- since Kumi's last write (`others`: track -> their state, kept). Renoise solos by rewriting mutes and an un-solo sets every track
--- ACTIVE, so the order is: Kumi's solo off, the producer's solo on again, then every mute state as it was. Returns the notes.
+-- ACTIVE, so the order is: every solo off, the producer's solo on again (the one track whose solo makes exactly the tracks that read
+-- soloed: a group's brings its members), then every mute state as it was. Returns the notes.
 local function write_back(song, wanted, kumi_solo, others, place_now)
   local notes = {}
   local placed = {}
@@ -452,29 +565,43 @@ local function write_back(song, wanted, kumi_solo, others, place_now)
       lost = lost + 1
     end
   end
-  -- 1. Kumi's solo off (every track ACTIVE, Renoise's doing; what someone else changed is written again below)
-  if kumi_solo then
-    local at = place_now(kumi_solo)
-    if at and at >= 1 and at <= rows.track_count(song) and song:track(at).type ~= MASTER() and song:track(at).solo_state then
-      song:track(at).solo_state = false
-    end
-  end
-  -- 2. the producer's solo on again (solo through the API is exclusive: a second one would undo the first)
-  local soloed
+  -- 1. every solo off (every track ACTIVE, Renoise's doing; what someone else changed is written again below)
+  if kumi_solo and not unsolo_all(song) then notes[#notes + 1] = "Renoise kept a solo on that Kumi couldn't take off." end
+  -- 2. the producer's solo on again: solo through the API is exclusive, so the one track whose solo makes exactly the tracks that
+  -- read soloed (tried from the last back, each from no solo; a group's solo brings its members), else the closest, said
   local order = {}
   for t in pairs(placed) do order[#order + 1] = t end
   table.sort(order)
+  local soloed, set = {}, {}
   for _, t in ipairs(order) do
-    local state = others[t] or placed[t]
-    if state.solo and not song:track(t).solo_state then
-      if soloed then
+    if (others[t] or placed[t]).solo then
+      soloed[#soloed + 1] = t
+      set[t] = true
+    end
+  end
+  if #soloed > 0 then
+    local key = table.concat(soloed, ",")
+    local found, best, best_score = false, nil, nil
+    for k = #soloed, 1, -1 do
+      unsolo_all(song)
+      song:track(soloed[k]).solo_state = true
+      local now_key, score = soloed_now(song, set)
+      if now_key == key then
+        found = true
+        break
+      end
+      if best_score == nil or score >= best_score then best, best_score = soloed[k], score end
+    end
+    if not found and best then
+      unsolo_all(song)
+      song:track(best).solo_state = true
+    end
+    for _, t in ipairs(soloed) do
+      if not song:track(t).solo_state then
         notes[#notes + 1] = string.format("Renoise lets a script solo one track at a time: %s is soloed again, %s isn't (it sounds as it did).",
-          q(base.named(soloed, song:track(soloed))), q(base.named(t, song:track(t))))
-      else
-        song:track(t).solo_state = true
+          q(base.named(best, song:track(best))), q(base.named(t, song:track(t))))
       end
     end
-    if song:track(t).solo_state then soloed = soloed or t end
   end
   -- 3. every mute state as it was
   for _, t in ipairs(order) do
@@ -639,8 +766,9 @@ local function finish(job, env, state, code, message)
 end
 M.finish = finish
 
--- Solos source `k`'s track (a master source wants none of Kumi's: the song as the producer has it, so any of Kumi's solo goes
--- first). Answers nothing; raises with the error to fail with.
+-- Solos source `k`'s track on its own (a master source wants none of Kumi's: the song as the producer has it, so any of Kumi's
+-- solo goes first). Every solo goes first: a track that reads soloed may be so along with others (a group's solo, a GUI solo of
+-- several), and the setter does nothing on it. Answers nothing; raises with the error to fail with.
 local function set_up(job, env, song, source)
   if source.what == "master" then
     if job.solo_at then
@@ -659,27 +787,18 @@ local function set_up(job, env, song, source)
   end
   note_others(job, song, env)
   local track = song:track(at)
-  if not (track.solo_state and job.only_solo(song, at)) then
-    env.quiet(function() track.solo_state = true end)
+  if job.solo_at ~= at then
+    local alone
+    env.quiet(function()
+      alone = unsolo_all(song)
+      if alone then track.solo_state = true end
+    end)
     job.changed = true
     job.solo_at = source.track
+    if not alone then fail("failed", "Renoise kept a solo on, so Kumi couldn't render " .. q(source.label) .. " on its own") end
   end
   -- what Kumi (and Renoise, for it) left, to tell another's change from it later
   job.after = snapshot(song)
-end
-
--- Whether track `t` is the only one soloed on its own (its group parents and send targets come with it).
-local function only_solo(song, t)
-  local probe = song:track(t)
-  if not probe.solo_state then return false end
-  -- (Renoise's solo of `t` turns every other track OFF but what `t` needs: any other ACTIVE track would play)
-  for u = 1, rows.track_count(song) do
-    local track = song:track(u)
-    if u ~= t and track.type ~= MASTER() and track.mute_state == renoise.Track.MUTE_STATE_ACTIVE and not track.solo_state then
-      return false
-    end
-  end
-  return true
 end
 
 local start_render
@@ -852,7 +971,6 @@ local function plan(params, env, kind)
     id = job_id, kind = "render", state = "running", sources = sources, order = render_order(sources), range = range,
     rate = rate, epoch = env.epoch(), layout = env.layout(), document = env.document(), notes = {}, done = 0, others = {},
     irregular = timeline.irregular, line_seconds = M.line_seconds(timeline, range.state.bpm, range.state.lpb), started_ms = now_ms(),
-    only_solo = only_solo,
   }
 end
 M.plan = plan
@@ -905,6 +1023,11 @@ end
 -- A job's state now. A render that reads as ended with no callback for a while stopped (cancelled in Renoise, or failed).
 function M.check(env)
   local job = M.active()
+  if not job then
+    -- (never raises: this runs before every request)
+    local ok, err = pcall(M.warm, env.pattern_mark)
+    if not ok then log.write("error", "listening: reading the tempo commands ahead: " .. tostring(err)) end
+  end
   if not job or not job.rendering then return end
   local song = renoise.song()
   if not song or env.document() ~= job.document then
