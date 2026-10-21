@@ -168,71 +168,82 @@ local function parameter_named(device, name)
 end
 
 -- One copy of track `source`, made at `at` (just before the master): its mixer, columns, devices and lines.
-local function make_copy(song, source, at, name, patterns)
+-- A track made at `at`, named, and set up by `setup(track)`: when setting it up raises (a plug-in that isn't on this computer),
+-- the track goes again at once, so nothing is left that the session, its undo and its journal don't know of.
+local function made_track(song, at, name, setup)
   song:insert_track_at(at)
-  local copy, from = song:track(at), song:track(source)
-  copy.name = name
-  -- (OFF processes nothing: no device and no #Send of a copy reaches what the producer hears; a solo plays it: measured)
-  copy.mute_state = renoise.Track.MUTE_STATE_OFF
-  copy.prefx_volume.value = from.prefx_volume.value
-  copy.prefx_panning.value = from.prefx_panning.value
-  copy.prefx_width.value = from.prefx_width.value
-  copy.postfx_volume.value = from.postfx_volume.value
-  copy.postfx_panning.value = from.postfx_panning.value
-  copy.visible_note_columns = from.visible_note_columns
-  copy.visible_effect_columns = from.visible_effect_columns
-  pcall(function()
-    copy.volume_column_visible = from.volume_column_visible
-    copy.panning_column_visible = from.panning_column_visible
-    copy.delay_column_visible = from.delay_column_visible
-    copy.sample_effects_column_visible = from.sample_effects_column_visible
-  end)
-  for c = 1, from.max_note_columns do
-    if from:column_is_muted(c) then copy:set_column_is_muted(c, true) end
+  local track = song:track(at)
+  track.name = name
+  local ok, err = pcall(setup, track)
+  if not ok then
+    pcall(function() song:delete_track_at(at) end)
+    error(err, 0)
   end
-  local self_aimed = 0
-  for d = 2, #from.devices do
-    local device = from:device(d)
-    local made = copy:insert_device_at(device.device_path, d)
-    if device.active_preset_data ~= "" then pcall(function() made.active_preset_data = device.active_preset_data end) end
-    made.is_active = device.is_active
-    -- (a meta device made from its preset data aims nowhere (measured); one that modulated its own track does the copy's)
-    local dest = device.device_path:find("/Native/*", 1, true) and parameter_named(device, "Dest. Track")
-    if dest and dest.value == source - 1 then
-      local made_dest = parameter_named(made, "Dest. Track")
-      if made_dest then
-        made_dest.value = at - 1
-        for _, field in ipairs({ "Dest. Effect", "Dest. Parameter" }) do
-          local theirs, ours = parameter_named(device, field), parameter_named(made, field)
-          if theirs and ours and theirs.value >= 0 then ours.value = theirs.value end
+  return track
+end
+
+local function make_copy(song, source, at, name, patterns)
+  return made_track(song, at, name, function(copy)
+    local from = song:track(source)
+    -- (OFF processes nothing: no device and no #Send of a copy reaches what the producer hears; a solo plays it: measured)
+    copy.mute_state = renoise.Track.MUTE_STATE_OFF
+    copy.prefx_volume.value = from.prefx_volume.value
+    copy.prefx_panning.value = from.prefx_panning.value
+    copy.prefx_width.value = from.prefx_width.value
+    copy.postfx_volume.value = from.postfx_volume.value
+    copy.postfx_panning.value = from.postfx_panning.value
+    copy.visible_note_columns = from.visible_note_columns
+    copy.visible_effect_columns = from.visible_effect_columns
+    pcall(function()
+      copy.volume_column_visible = from.volume_column_visible
+      copy.panning_column_visible = from.panning_column_visible
+      copy.delay_column_visible = from.delay_column_visible
+      copy.sample_effects_column_visible = from.sample_effects_column_visible
+    end)
+    for c = 1, from.max_note_columns do
+      if from:column_is_muted(c) then copy:set_column_is_muted(c, true) end
+    end
+    local self_aimed = 0
+    for d = 2, #from.devices do
+      local device = from:device(d)
+      local made = copy:insert_device_at(device.device_path, d)
+      if device.active_preset_data ~= "" then pcall(function() made.active_preset_data = device.active_preset_data end) end
+      made.is_active = device.is_active
+      -- (a meta device made from its preset data aims nowhere (measured); one that modulated its own track does the copy's)
+      local dest = device.device_path:find("/Native/*", 1, true) and parameter_named(device, "Dest. Track")
+      if dest and dest.value == source - 1 then
+        local made_dest = parameter_named(made, "Dest. Track")
+        if made_dest then
+          made_dest.value = at - 1
+          for _, field in ipairs({ "Dest. Effect", "Dest. Parameter" }) do
+            local theirs, ours = parameter_named(device, field), parameter_named(made, field)
+            if theirs and ours and theirs.value >= 0 then ours.value = theirs.value end
+          end
+          self_aimed = self_aimed + 1
         end
-        self_aimed = self_aimed + 1
       end
     end
-  end
-  for _, p in ipairs(patterns) do
-    local pattern = song:pattern(p)
-    pattern:track(at):copy_from(pattern:track(source))
-  end
-  return copy
+    for _, p in ipairs(patterns) do
+      local pattern = song:pattern(p)
+      pattern:track(at):copy_from(pattern:track(source))
+    end
+  end)
 end
 
 -- M7 (variations): a player of one phrase instead of a copy: an empty track (no devices, OFF until Kumi solos it to render) whose
 -- line `spot.line` of pattern `spot.pattern` plays the instrument's note with a 0Zxx naming the phrase. Its lines go with it when
 -- the track goes.
 local function make_player(song, at, name, spot)
-  song:insert_track_at(at)
-  local track = song:track(at)
-  track.name = name
-  track.mute_state = renoise.Track.MUTE_STATE_OFF
-  if track.visible_effect_columns < 1 then track.visible_effect_columns = 1 end
-  local line = song:pattern(spot.pattern):track(at):line(spot.line)
-  local column = line:note_column(1)
-  column.note_value = spot.note
-  column.instrument_value = spot.instrument - 1
-  line:effect_column(1).number_string = "0Z"
-  line:effect_column(1).amount_value = spot.phrase
-  return track
+  return made_track(song, at, name, function(track)
+    track.mute_state = renoise.Track.MUTE_STATE_OFF
+    if track.visible_effect_columns < 1 then track.visible_effect_columns = 1 end
+    local line = song:pattern(spot.pattern):track(at):line(spot.line)
+    local column = line:note_column(1)
+    column.note_value = spot.note
+    column.instrument_value = spot.instrument - 1
+    line:effect_column(1).number_string = "0Z"
+    line:effect_column(1).amount_value = spot.phrase
+  end)
 end
 
 -- Where players of phrases play: the instrument, its phrases (from 1) and the note, and the pattern and line the range starts at

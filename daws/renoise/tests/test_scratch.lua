@@ -156,6 +156,18 @@ test("scratch: make copies a track after the last sequencer track, OFF and outsi
   H.no_dialogs()
 end)
 
+test("scratch: a copy Renoise can't finish (a plug-in that isn't on this computer) goes again, and nothing is left behind", function()
+  local env, peer = setup()
+  local bass = track(3)
+  bass.devices[#bass.devices + 1] = { name = "Gone Verb", path = "Audio/Effects/AU/Missing Verb", params = {}, active = true }
+  local before = names()
+  failure(make(peer, "s9f0e", 2), "failed")
+  eq(names(), before, "no copy left, whole or half made")
+  local journal = read_journal(env)
+  eq(journal and #journal.entries or 0, 0, "nothing for a sweep to look for")
+  H.no_dialogs()
+end)
+
 test("scratch: make copies only the patterns a range plays", function()
   local env, peer = setup()
   result(make(peer, "s2", 1, { range = { fromBeat = 8, beats = 4 } }))
