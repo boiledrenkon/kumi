@@ -994,8 +994,9 @@ base.register({
     if plan.commit then script:commit() end
     if env.watch_undo then env.watch_undo(script.paragraphs_assignment_observable) env.watch_undo(script.paragraphs_observable) env.watch_undo(phrase.playback_mode_observable) end
     local n = plan.n
-    local function answer(compile, runtime, waited)
-      local applied = script_state(phrase)
+    -- (`live`: the phrase where it is now)
+    local function answer(compile, runtime, waited, live)
+      local applied = script_state(live)
       applied.compileError = compile ~= "" and compile or json.null
       applied.runtimeError = runtime ~= "" and runtime or json.null
       local note
@@ -1008,22 +1009,39 @@ base.register({
         prior = plan.state, journal_applied = { mode = applied.mode, paragraphs = applied.paragraphs }, place = places_.journal_place("phrase", n),
       }
     end
-    if not plan.commit then return answer("", "", true) end
-    -- (the compile lands a moment later: Kumi waits, writing nothing more)
+    if not plan.commit then return answer("", "", true, phrase) end
+    -- (the compile lands a moment later: Kumi waits, writing nothing more. The change is written already, so what the producer
+    -- does meanwhile never makes it answer as if nothing was: the wait checks nothing, and the phrase is found by its place)
+    local at = places_.place_of(env, "phrase", n)
     return {
       kumi_job = function(job)
-        local started = env.now_ms()
-        local waited = false
+        job.wrote = "The script of " .. plan.label
+        local function live_phrase()
+          local now = places_.follow(env, at)
+          if not now then return nil end
+          local found, objects = pcall(places_.resolve, renoise.song() or song, "phrase", now)
+          if not found or not objects.phrase then return nil end
+          n = now
+          return objects.phrase
+        end
+        local started, waited = env.now_ms(), false
         while env.now_ms() - started < M.COMPILE_WAIT_MS do
-          job.step(50)
-          local live = places_.resolve(renoise.song() or song, "phrase", n).phrase.script
-          if live.pending_changes == 0 and (live.compile_error ~= before.compile or live.runtime_error ~= before.runtime or env.now_ms() - started >= 200) then
+          local resume = env.now_ms() + 50
+          repeat coroutine.yield() until env.now_ms() >= resume
+          local live = live_phrase()
+          if not live then break end
+          local script_now = live.script
+          if script_now.pending_changes == 0 and (script_now.compile_error ~= before.compile or script_now.runtime_error ~= before.runtime or env.now_ms() - started >= 200) then
             waited = true
             break
           end
         end
-        local live = places_.resolve(renoise.song() or song, "phrase", n).phrase.script
-        return answer(live.compile_error, live.runtime_error, waited)
+        job.rebase()
+        local live = live_phrase()
+        if not live then
+          error({ code = "uncertain", message = "Kumi wrote the script of " .. plan.label .. ", and the song changed while Renoise compiled it so that Kumi can't find the phrase now: look at it in Renoise" }, 0)
+        end
+        return answer(live.script.compile_error, live.script.runtime_error, waited, live)
       end,
     }
   end,

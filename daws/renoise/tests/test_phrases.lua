@@ -242,6 +242,28 @@ test("phrases: a script written and committed reports Renoise's compile error; K
   ok(done.result.display.note:find("couldn't compile", 1, true), done.result.display.note)
 end)
 
+test("phrases: a script written while the producer changes the song during the compile wait answers applied, and Kumi's undo puts the old one back (#361 N7)", function()
+  local env, peer = setup()
+  local code = "return cycle(\"c4\")"
+  local previewed, epoch, layout = preview(peer, "phrase-script", { ref = pref(place(peer), 2, 1), code = code })
+  local id = I.send(peer, "change_apply", { kind = "phrase-script", input = { ref = pref(epoch, 2, 1), code = code }, fence = previewed.fence, desc = "Kumi: script (k620)", epoch = epoch, layout = layout })
+  mock.advance(20)
+  mock.song:pattern(1).number_of_lines = 48 -- the producer, while Renoise compiles: the song's shape moves
+  mock.song:instrument(1):insert_sample_at(1)
+  mock.advance(60)
+  mock.compile_scripts()
+  local done = I.wait(peer, id)
+  ok(done.result, "the script is written: " .. json.encode(done.error or {}))
+  eq(phrase(2, 1).script.paragraphs[1], code)
+  local named = false
+  for _, step in ipairs(mock.data.undo.stack) do named = named or step.desc == "Kumi: script (k620)" end
+  ok(named, "Kumi's step is in Renoise's undo")
+  local record = { target = done.result.target, prior = previewed.prior, applied = done.result.applied, epoch = done.result.epoch, layout = done.result.layout }
+  local undone = restore(peer, "phrase-script", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(phrase(2, 1).script.paragraphs[1], "-- a phrase script", "the producer's script is back")
+end)
+
 test("phrases: a script rendered to lines; Kumi's undo puts the lines it had back", function()
   local env, peer = setup()
   local p = mock.song:instrument(2):phrase(1)
