@@ -1449,11 +1449,17 @@ pub fn props_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         ("lock", _) => 2,
         _ => 1,
     });
-    // A lock Kumi set is opened first, so the rest can be put back.
-    if is_locked(ctx.reaper, found.item) {
-        ctx.reaper.set_item_value(found.item, "C_LOCK", (ctx.reaper.item_value(found.item, "C_LOCK") as i64 & !1) as f64);
+    // A lock is opened first, so the rest can be put back; one that isn't Kumi's to put back (the producer's, set since)
+    // is closed again after.
+    let lock = ctx.reaper.item_value(found.item, "C_LOCK");
+    let locked = is_locked(ctx.reaper, found.item);
+    if locked {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", (lock as i64 & !1) as f64);
     }
     write_state(ctx.reaper, found.item, &order, restore.prior);
+    if locked && !fields.iter().any(|field| field.key == "lock") {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", lock);
+    }
     ctx.reaper.update_item(found.item);
     let after = state_of(ctx.reaper, found.item, &fields);
     if !same_state(&fields, &after, restore.prior) {

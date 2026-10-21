@@ -632,6 +632,19 @@ fn a_deleted_items_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_
 }
 
 #[test]
+fn undoing_item_props_puts_back_only_kumis_fields_and_leaves_a_lock_the_producer_set_since() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-props", json!({"ref": K1, "mute": true}));
+    state(|s| {
+        s.tracks[1].items[0].extra.insert("C_LOCK".into(), 1.0);
+    });
+    lab.undo("item-props", &preview, &applied).unwrap();
+    let back = item("{ITEM-K1}").unwrap().1;
+    assert!(!back.mute, "Kumi's mute is taken back");
+    assert_eq!(back.extra.get("C_LOCK"), Some(&1.0), "the producer's lock stays");
+}
+
+#[test]
 fn a_deleted_item_comes_back_with_its_ids_from_its_chunk() {
     let lab = Lab::new();
     state(|s| s.tracks[1].items[0].takes[0].more.markers = vec![(0.2, "hit".into(), 0)]);
