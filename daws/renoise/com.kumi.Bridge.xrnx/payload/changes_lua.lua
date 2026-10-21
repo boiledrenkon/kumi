@@ -176,13 +176,31 @@ local function plain(value, depth)
   if kind == "nil" or kind == "boolean" or kind == "string" then return value end
   if kind == "number" then return (value == value and value ~= math.huge and value ~= -math.huge) and value or tostring(value) end
   if kind ~= "table" or depth > 6 then return tostring(value) end
-  local out, n = {}, 0
+  -- (a list 1..n stays a list; any other table is an object with its keys as text: kept as they were, a list with gaps,
+  -- a 0 key or names among the numbers would make no JSON at all)
+  local count, top, list = 0, 0, true
+  for k in pairs(value) do
+    count = count + 1
+    if list and type(k) == "number" and k >= 1 and k % 1 == 0 then top = math.max(top, k) else list = false end
+  end
+  local out = {}
+  if list and top == count then
+    for i = 1, math.min(count, 1000) do out[i] = plain(value[i], depth + 1) end
+    return out
+  end
+  local n = 0
   for k, v in pairs(value) do
     n = n + 1
     if n > 1000 then break end
-    out[type(k) == "number" and k or tostring(k)] = plain(v, depth + 1)
+    out[tostring(k)] = plain(v, depth + 1)
   end
   return out
+end
+
+-- A value's text for an answer, which nothing in it can make raise (an error object's own __tostring may).
+local function said(value)
+  local ok, text = pcall(tostring, value)
+  return ok and text or "(a value Kumi can't read)"
 end
 
 -- Lua's own functions: an error raised in code one of them called (table.sort's comparator, pcall's function) goes back
@@ -272,13 +290,20 @@ local function apply(song, env, input, fence, desc)
   local note = unkept and UNKEPT_NOTE or NOTE
   if changed and not unkept and not told then note = "It may have changed the song: Kumi can't see all a chunk does. " .. NOTE end
   local display = { title = "Ran Lua: " .. first_line(input.code), note = note }
+  -- (the chunk has run: nothing from here raises, or the answer would say it wrote nothing and a retry would run it again)
   if ok then
-    local value = plain(result, 0)
-    if #json.encode({ v = value }) > MOST_RESULT then value = "(a value of more than 256 KB, not sent)" end
+    local read, value = pcall(plain, result, 0)
+    if not read then value = "(a value Kumi couldn't read: " .. said(value) .. ")" end
+    local text, why = json.encode({ v = value })
+    if not text then
+      value = "(a value Kumi couldn't send: " .. said(why) .. ")"
+    elseif #text > MOST_RESULT then
+      value = "(a value of more than 256 KB, not sent)"
+    end
     applied.result = value
   else
-    applied.failed = { message = tostring(result) }
-    display.note = string.format("It stopped with an error (%s)%s. %s", tostring(result),
+    applied.failed = { message = said(result) }
+    display.note = string.format("It stopped with an error (%s)%s. %s", said(result),
       changed and "; what it changed before that stays" or "", unkept and UNKEPT_NOTE or NOTE)
   end
   if not changed then display.unchanged = true end
