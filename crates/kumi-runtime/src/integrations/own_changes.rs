@@ -614,8 +614,8 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     /// Tracks added this answer (`OwnChangeSet::most_track_adds`).
     added: Cell<usize>,
-    /// The saved project was too big to copy before the step about to run (its size).
-    not_copied: Cell<Option<u64>>,
+    /// Why the saved project wasn't copied before the step about to run (too big, or the copy failed).
+    not_copied: RefCell<Option<Copied>>,
     /// Kumi's track renames, oldest first: the change, the track's ref and the name it had and was given (a judged run
     /// follows its track by them).
     pub(super) renamed: RefCell<Vec<(String, String, String, String)>>,
@@ -633,7 +633,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             names: RefCell::default(),
             on_action,
             added: Cell::new(0),
-            not_copied: Cell::new(None),
+            not_copied: RefCell::new(None),
             renamed: RefCell::default(),
         })
     }
@@ -683,20 +683,20 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         tools
     }
 
-    /// A copy of the saved project before a step that can lose material: its path. One too big to copy is said with the
-    /// step's answer (`not_copied`).
+    /// A copy of the saved project before a step that can lose material: its path. One too big to copy, or a copy that
+    /// failed, is said with the step's answer (`not_copied`).
     async fn copy_before_delete(&self) -> Option<String> {
         // (what an earlier delete couldn't copy isn't this one's to say)
-        self.not_copied.set(None);
+        *self.not_copied.borrow_mut() = None;
         let path = self.link().file.borrow().clone()?;
         // A big song is a big copy: off Kumi's thread.
         match tokio::task::spawn_blocking(move || copy_beside(Path::new(&path))).await.ok()? {
             Copied::Made(copy) => Some(copy),
-            Copied::TooBig(size) => {
-                self.not_copied.set(Some(size));
+            Copied::Nothing => None,
+            not_copied => {
+                *self.not_copied.borrow_mut() = Some(not_copied);
                 None
             }
-            Copied::Nothing => None,
         }
     }
 
@@ -1027,17 +1027,21 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 self.renamed.borrow_mut().push((id.clone(), target.to_owned(), from.to_owned(), to.to_owned()));
             }
         }
-        // No copy kept first (the saved project was too big): said with what it deleted.
-        let note = match (self.not_copied.take().filter(|_| kind.deletes), note) {
-            (Some(size), note) => {
-                let skipped = format!(
-                    "no copy of the {} was kept first: its saved file is {} MB, past the {} MB Kumi copies",
-                    words.place,
-                    size / (1024 * 1024),
-                    MOST_COPIED / (1024 * 1024)
-                );
-                Some(note.map_or(skipped.clone(), |note| format!("{note}; {skipped}")))
+        // No copy kept first (the saved project was too big, or copying it failed): said with what it deleted.
+        let skipped = match self.not_copied.take().filter(|_| kind.deletes) {
+            Some(Copied::TooBig(size)) => Some(format!(
+                "no copy of the {} was kept first: its saved file is {} MB, past the {} MB Kumi copies",
+                words.place,
+                size / (1024 * 1024),
+                MOST_COPIED / (1024 * 1024)
+            )),
+            Some(Copied::Failed(why)) => {
+                Some(format!("no copy of the {} was kept first: copying its saved file failed ({why})", words.place))
             }
+            _ => None,
+        };
+        let note = match (skipped, note) {
+            (Some(skipped), note) => Some(note.map_or(skipped.clone(), |note| format!("{note}; {skipped}"))),
             (None, note) => note,
         };
         // A plan's answer keeps a step's `changed` and not its other fields, so the note goes in it.
@@ -1224,69 +1228,72 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
 const MOST_COPIED: u64 = 512 * 1024 * 1024;
 const COPIES_KEPT: usize = 5;
 
-/// When a copy in "Kumi copies" was saved, from its name ("<stem> saved 2026-10-20 14.05.31 +0900<extension>"): its
-/// local time and offset, or UTC for a copy named before local time (no offset); None for a name that isn't one.
-fn copy_saved_at(name: &str, prefix: &str, extension: &str) -> Option<i64> {
-    let when = name.strip_prefix(prefix)?.strip_suffix(extension)?;
+/// When a copy was saved, from its name ("<stem> (Kumi copy 2026-10-20 14.05.31 +0900)<extension>", `prefix` and
+/// `suffix` around the time): its local time and offset, or UTC for a copy named without an offset; None for a name
+/// that isn't one.
+fn copy_saved_at(name: &str, prefix: &str, suffix: &str) -> Option<i64> {
+    let when = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
     chrono::DateTime::parse_from_str(when, "%Y-%m-%d %H.%M.%S %z")
         .map(|at| at.timestamp())
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%d %H.%M.%S").map(|at| at.and_utc().timestamp()))
         .ok()
 }
 
-/// A copy of the project's saved file in "Kumi copies" beside it, named by when it was saved in the producer's local
-/// time (with its offset, so copies made in another time zone still sort by when they were saved), so one saved version
-/// is copied once whatever the session: its path, or None when there's nothing to copy (never saved, copied already, or
-/// over `MOST_COPIED`). The oldest copies of the project past `COPIES_KEPT` go.
+/// A copy of the project's saved file beside it, in its own folder (so a REAPER project's media, which it names
+/// relative to that folder, is found from the copy too), named by when it was saved in the producer's local time (with
+/// its offset, so copies made in another time zone still sort by when they were saved): one saved version is copied once
+/// whatever the session. Its path; nothing when there's nothing to copy (never saved, copied already); or why it wasn't
+/// copied (over `MOST_COPIED`, or the copy failed). The oldest copies of the project past `COPIES_KEPT` go.
 fn copy_beside(path: &Path) -> Copied {
     let Ok(stats) = std::fs::metadata(path) else { return Copied::Nothing };
     if stats.len() > MOST_COPIED {
         return Copied::TooBig(stats.len());
     }
-    let made = || -> Option<String> {
-        let saved: chrono::DateTime<chrono::Local> = stats.modified().ok()?.into();
-        let folder = path.parent()?.join("Kumi copies");
-        let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let made = || -> Result<Option<String>, String> {
+        let unnamed = || "the project has no name to copy it by".to_string();
+        let saved: chrono::DateTime<chrono::Local> = stats.modified().map_err(|why| why.to_string())?.into();
+        let folder = path.parent().ok_or_else(unnamed)?;
+        let stem = path.file_stem().ok_or_else(unnamed)?.to_string_lossy().into_owned();
         let extension = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-        let prefix = format!("{stem} saved ");
-        let name = format!("{prefix}{}{extension}", saved.format("%Y-%m-%d %H.%M.%S %z"));
+        let (prefix, suffix) = (format!("{stem} (Kumi copy "), format!("){extension}"));
+        let name = format!("{prefix}{}{suffix}", saved.format("%Y-%m-%d %H.%M.%S %z"));
         let copy = folder.join(&name);
         if copy.exists() {
-            return None;
+            return Ok(None);
         }
-        std::fs::create_dir_all(&folder).ok()?;
         // Copied under another name and renamed once whole: a copy that stopped part-way (a full disk) is never taken
         // for this version's.
         let part = folder.join(format!(".{name}.part"));
-        if std::fs::copy(path, &part).is_err() || std::fs::rename(&part, &copy).is_err() {
+        if let Err(why) = std::fs::copy(path, &part).and_then(|_| std::fs::rename(&part, &copy)) {
             let _ = std::fs::remove_file(&part);
-            return None;
+            return Err(why.to_string());
         }
         // This project's copies only (another with the same name in the folder, Song.rpp and Song.xrns, keeps its own),
         // and never the one just made (an older save than those kept is copied too, and named in the answer).
-        let mut copies: Vec<_> = std::fs::read_dir(&folder)
-            .ok()?
+        let mut copies: Vec<_> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
             .flatten()
             .map(|entry| entry.path())
             .filter(|kept| {
-                *kept != copy
-                    && kept.file_name().is_some_and(|name| {
-                        let name = name.to_string_lossy();
-                        name.starts_with(&prefix) && name.ends_with(&extension)
-                    })
+                *kept != copy && kept.file_name().is_some_and(|name| copy_saved_at(&name.to_string_lossy(), &prefix, &suffix).is_some())
             })
             .collect();
         // Oldest first, by when each was saved (its name's time and offset), not by how its name sorts.
         copies.sort_by_key(|kept| {
             let name = kept.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            (copy_saved_at(&name, &prefix, &extension).unwrap_or(i64::MIN), name)
+            (copy_saved_at(&name, &prefix, &suffix).unwrap_or(i64::MIN), name)
         });
         for old in copies.iter().take((copies.len() + 1).saturating_sub(COPIES_KEPT)) {
             let _ = std::fs::remove_file(old);
         }
-        Some(copy.to_string_lossy().into_owned())
+        Ok(Some(copy.to_string_lossy().into_owned()))
     };
-    made().map_or(Copied::Nothing, Copied::Made)
+    match made() {
+        Ok(Some(copy)) => Copied::Made(copy),
+        Ok(None) => Copied::Nothing,
+        Err(why) => Copied::Failed(why),
+    }
 }
 
 /// What a copy before a delete came to.
@@ -1295,6 +1302,8 @@ enum Copied {
     Made(String),
     /// The saved file is past `MOST_COPIED` (its size): nothing copied, and the producer is told.
     TooBig(u64),
+    /// Copying it failed (a folder Kumi can't write in, a full disk): why. Nothing copied, and the producer is told.
+    Failed(String),
     /// Never saved, or this saved version is copied already.
     Nothing,
 }
@@ -1611,30 +1620,33 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let project = folder.path().join("Mix.rpp");
         std::fs::write(&project, "<REAPER_PROJECT").unwrap();
-        let copies = folder.path().join("Kumi copies");
-        std::fs::create_dir_all(&copies).unwrap();
-        // Six kept already. In UTC: 00:30 (named before local time), 01:00 (made in Tokyo), then 02:00 to 05:00.
+        let copies = folder.path();
+        // Six kept already. In UTC: 00:30 (named without an offset), 01:00 (made in Tokyo), then 02:00 to 05:00.
         for name in [
-            "Mix saved 2026-10-20 00.30.00.rpp",
-            "Mix saved 2026-10-20 10.00.00 +0900.rpp",
-            "Mix saved 2026-10-20 02.00.00 +0000.rpp",
-            "Mix saved 2026-10-20 03.00.00 +0000.rpp",
-            "Mix saved 2026-10-20 04.00.00 +0000.rpp",
-            "Mix saved 2026-10-20 05.00.00 +0000.rpp",
+            "Mix (Kumi copy 2026-10-20 00.30.00).rpp",
+            "Mix (Kumi copy 2026-10-20 10.00.00 +0900).rpp",
+            "Mix (Kumi copy 2026-10-20 02.00.00 +0000).rpp",
+            "Mix (Kumi copy 2026-10-20 03.00.00 +0000).rpp",
+            "Mix (Kumi copy 2026-10-20 04.00.00 +0000).rpp",
+            "Mix (Kumi copy 2026-10-20 05.00.00 +0000).rpp",
         ] {
             std::fs::write(copies.join(name), "kept").unwrap();
         }
         let Copied::Made(copy) = copy_beside(&project) else { panic!("a copy") };
         let saved: chrono::DateTime<chrono::Local> = std::fs::metadata(&project).unwrap().modified().unwrap().into();
-        let named = format!("Mix saved {}.rpp", saved.format("%Y-%m-%d %H.%M.%S %z"));
+        let named = format!("Mix (Kumi copy {}).rpp", saved.format("%Y-%m-%d %H.%M.%S %z"));
         assert_eq!(Path::new(&copy).file_name().unwrap().to_string_lossy(), named, "local time, with its offset");
-        let mut left: Vec<String> =
-            std::fs::read_dir(&copies).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let mut left: Vec<String> = std::fs::read_dir(copies)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("(Kumi copy "))
+            .collect();
         left.sort();
         assert_eq!(left.len(), COPIES_KEPT);
-        assert!(!left.contains(&"Mix saved 2026-10-20 00.30.00.rpp".to_string()), "the oldest went: {left:?}");
-        assert!(!left.contains(&"Mix saved 2026-10-20 10.00.00 +0900.rpp".to_string()), "the next oldest (01:00 UTC) went: {left:?}");
-        assert!(left.contains(&"Mix saved 2026-10-20 02.00.00 +0000.rpp".to_string()), "a later one stays: {left:?}");
+        assert!(!left.contains(&"Mix (Kumi copy 2026-10-20 00.30.00).rpp".to_string()), "the oldest went: {left:?}");
+        assert!(!left.contains(&"Mix (Kumi copy 2026-10-20 10.00.00 +0900).rpp".to_string()), "the next oldest (01:00 UTC) went: {left:?}");
+        assert!(left.contains(&"Mix (Kumi copy 2026-10-20 02.00.00 +0000).rpp".to_string()), "a later one stays: {left:?}");
+        assert!(project.exists(), "the project itself is never taken for a copy");
     }
 
     #[test]
@@ -1642,8 +1654,13 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let project = folder.path().join("Night Drive.rpp");
         std::fs::write(&project, "<REAPER_PROJECT").unwrap();
+        let copies =
+            || std::fs::read_dir(folder.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("(Kumi copy "));
         let Copied::Made(copy) = copy_beside(&project) else { panic!("a copy") };
-        assert!(copy.contains("Kumi copies") && copy.ends_with(".rpp") && copy.contains("Night Drive saved "), "{copy}");
+        // Review K12: in the project's own folder, so the media REAPER names relative to it (Audio/kick.wav) is found
+        // from the copy too, and "next to it" is where it is.
+        assert_eq!(Path::new(&copy).parent(), project.parent(), "{copy}");
+        assert!(copy.ends_with(").rpp") && copy.contains("Night Drive (Kumi copy "), "{copy}");
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "<REAPER_PROJECT");
         assert_eq!(copy_beside(&project), Copied::Nothing, "the same saved version is copied once, in this session or the next");
         // Each newer save is copied again, and only the newest few are kept.
@@ -1654,22 +1671,19 @@ mod tests {
             file.set_modified(saved + std::time::Duration::from_secs(n)).unwrap();
             assert!(matches!(copy_beside(&project), Copied::Made(_)), "save {n} is copied");
         }
-        let kept = std::fs::read_dir(folder.path().join("Kumi copies")).unwrap().count();
-        assert_eq!(kept, COPIES_KEPT);
+        assert_eq!(copies().count(), COPIES_KEPT);
         // A save older than those kept (a project put back from elsewhere) is copied, and the copy named is there.
         std::fs::write(&project, "<REAPER_PROJECT older>").unwrap();
         let file = std::fs::File::options().write(true).open(&project).unwrap();
         file.set_modified(saved - std::time::Duration::from_secs(3600)).unwrap();
         let Copied::Made(older) = copy_beside(&project) else { panic!("a copy") };
         assert!(Path::new(&older).exists(), "{older} was pruned as soon as it was made");
-        let kept = std::fs::read_dir(folder.path().join("Kumi copies")).unwrap().count();
-        assert_eq!(kept, COPIES_KEPT);
+        assert_eq!(copies().count(), COPIES_KEPT);
         // Another project of the same name beside it keeps its own copies.
         let song = folder.path().join("Night Drive.xrns");
         std::fs::write(&song, "xrns").unwrap();
         assert!(matches!(copy_beside(&song), Copied::Made(_)));
-        let kept = std::fs::read_dir(folder.path().join("Kumi copies")).unwrap().count();
-        assert_eq!(kept, COPIES_KEPT + 1, "the song's copy doesn't prune the project's, nor the other way");
+        assert_eq!(copies().count(), COPIES_KEPT + 1, "the song's copy doesn't prune the project's, nor the other way");
         // Never saved: nothing to copy; past the size Kumi copies: said so.
         assert_eq!(copy_beside(&folder.path().join("Untitled.rpp")), Copied::Nothing);
         let big = folder.path().join("Big.rpp");
@@ -1684,9 +1698,32 @@ mod tests {
         std::fs::write(&project, "<REAPER_PROJECT").unwrap();
         let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, Some(project.to_string_lossy().into_owned()));
         // An earlier delete found the saved file too big, and was refused: its size is not this delete's to say.
-        plan.not_copied.set(Some(600 * 1024 * 1024));
+        *plan.not_copied.borrow_mut() = Some(Copied::TooBig(600 * 1024 * 1024));
         assert!(plan.copy_before_delete().await.is_some());
-        assert_eq!(plan.not_copied.get(), None);
+        assert_eq!(*plan.not_copied.borrow(), None);
+    }
+
+    /// Review K12: a copy that fails (a folder Kumi can't write in) is told apart from one there's no need for, and the
+    /// delete says no copy was kept first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_copy_that_fails_is_said_not_taken_for_one_made_already() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions. Root writes in a read-only folder.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let project = folder.path().join("Locked.rpp");
+        std::fs::write(&project, "<REAPER_PROJECT").unwrap();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let copied = copy_beside(&project);
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, Some(project.to_string_lossy().into_owned()));
+        let made = plan.copy_before_delete().await;
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(&copied, Copied::Failed(why) if why.contains("ermission denied")), "{copied:?}");
+        assert_eq!(made, None);
+        assert!(matches!(*plan.not_copied.borrow(), Some(Copied::Failed(_))), "the delete says so");
     }
 
     #[test]

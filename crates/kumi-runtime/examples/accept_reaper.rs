@@ -1170,9 +1170,12 @@ async fn extras(s: &Session, out: &mut Vec<Extra>) {
     extra(out, "action: save_project (version)", !ran.error, Some(ran.ms), short(&ran.text, 200));
     let t = one_track(s, "saved delete").await.unwrap_or_default();
     let ran = s.plan(vec![("track_delete", json!({"ref": t}))]).await;
-    let copies: Vec<String> = std::fs::read_dir(projects.join("Kumi copies"))
+    let copies: Vec<String> = std::fs::read_dir(&projects)
         .map(|d| {
-            d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("accept-")).collect()
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&format!("accept-{stamp} (Kumi copy ")))
+                .collect()
         })
         .unwrap_or_default();
     extra(
