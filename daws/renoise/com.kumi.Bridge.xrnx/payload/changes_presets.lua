@@ -113,6 +113,15 @@ end
 
 local function identity(track, device) return base.track_id(track) .. "|" .. device.device_path end
 
+-- A device whose settings hold more than its parameters: a Doofer's or a Splitter's devices inside, a Notepad's text, a
+-- plug-in's state. Its whole content is fenced, not only its parameters.
+local DEEP = { ["Audio/Effects/Native/Doofer"] = true, ["Audio/Effects/Native/Splitter"] = true, ["Audio/Effects/Native/Notepad"] = true }
+local function content_fence(device)
+  local path = device.device_path
+  if DEEP[path] or not path:find("^Audio/Effects/Native/") then return M.content_of(device.active_preset_data) end
+  return nil
+end
+
 -- Where a record finds the device again, and what it was called then (for the words of a refusal).
 local function keep(env, t, d, track, device)
   return { track = t, dev = material_.device_place(env, t, d, device), label = devices_.label(device) }
@@ -182,7 +191,7 @@ local function preset_preview(song, env, input)
   local label = label_of(t, track, device)
   return {
     target = target_of(t, d), prior = { preset = device.active_preset, print = M.print_of(xml) },
-    fence = { id = identity(track, device), state = material_.device_state(device).state, preset = device.active_preset },
+    fence = { id = identity(track, device), state = material_.device_state(device).state, preset = device.active_preset, content = content_fence(device) },
     display = {
       title = string.format("%s: preset %s", label, q(name)),
       before = { preset = preset_name(device, device.active_preset) }, after = { preset = name },
@@ -196,7 +205,7 @@ local function preset_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(t) end
   local label = label_of(t, track, device)
   if fence.id ~= identity(track, device) then fail("changed", base.moved_text(label)) end
-  if material_.device_state(device).state ~= fence.state or device.active_preset ~= fence.preset then
+  if material_.device_state(device).state ~= fence.state or device.active_preset ~= fence.preset or content_fence(device) ~= fence.content then
     fail("changed", label .. "'s settings changed since the preview")
   end
   local n, name = preset_number(device, input.preset)
@@ -213,7 +222,7 @@ local function preset_apply(song, env, input, fence, desc)
   end
   local back = device.active_preset_data
   return {
-    applied = { preset = n, state = material_.device_state(device).state, print = M.print_of(back) },
+    applied = { preset = n, state = material_.device_state(device).state, print = M.print_of(back), content = content_fence(device) },
     material = (function()
       local kept = keep(env, t, d, track, device)
       kept.presetData = xml
@@ -240,6 +249,10 @@ local function settings_restore(kind, song, env, restore, desc, what)
   if not restore.discard and material_.device_state(device).state ~= applied.state then
     fail("changed", string.format("%s's settings changed in Renoise since Kumi %s (automation and meta devices move them too)", label, what))
   end
+  -- (a Doofer's or Splitter's devices inside, a Notepad's text, a plug-in's state: what its parameters don't show)
+  if not restore.discard and applied.content ~= nil and content_fence(device) ~= applied.content then
+    fail("changed", string.format("%s changed in Renoise since Kumi %s (what's inside it, its text or its state)", label, what))
+  end
   song:describe_undo(desc)
   watch_all(env, t, d, device)
   local ok, err = pcall(function() device.active_preset_data = material.presetData end)
@@ -251,7 +264,9 @@ local function settings_restore(kind, song, env, restore, desc, what)
   if type(preset) == "number" and preset >= 1 and preset <= #device.presets then
     local wanted = material_.device_state(device).state
     local chosen = pcall(function() device.active_preset = preset end)
-    if not chosen or material_.device_state(device).state ~= wanted then
+    -- (a container's preset brings its own inside, a plug-in's its own state: unless that is what was kept, the kept data stays)
+    local deep = applied.content ~= nil or content_fence(device) ~= nil
+    if not chosen or material_.device_state(device).state ~= wanted or (deep and M.content_of(device.active_preset_data) ~= M.content_of(material.presetData)) then
       pcall(function() device.active_preset_data = material.presetData end)
     end
   end
@@ -288,7 +303,7 @@ local function data_preview(song, env, input)
   local xml = device.active_preset_data
   return {
     target = target_of(t, d), prior = { preset = device.active_preset, print = M.print_of(xml) },
-    fence = { id = identity(track, device), state = material_.device_state(device).state },
+    fence = { id = identity(track, device), state = material_.device_state(device).state, content = content_fence(device) },
     display = {
       title = data_title(input, label), unchanged = xml == input.presetData or nil,
       note = "Kumi keeps the settings it replaces to put back.",
@@ -301,7 +316,7 @@ local function data_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(t) end
   local label = label_of(t, track, device)
   if fence.id ~= identity(track, device) then fail("changed", base.moved_text(label)) end
-  if material_.device_state(device).state ~= fence.state then fail("changed", label .. "'s settings changed since the preview") end
+  if material_.device_state(device).state ~= fence.state or content_fence(device) ~= fence.content then fail("changed", label .. "'s settings changed since the preview") end
   check_preset_data(device, input.presetData, label)
   local xml = device.active_preset_data
   if #xml > M.MAX_PRESET_BYTES then
@@ -316,7 +331,7 @@ local function data_apply(song, env, input, fence, desc)
   local kept = keep(env, t, d, track, device)
   kept.presetData = xml
   return {
-    applied = { state = material_.device_state(device).state, print = M.print_of(back) }, material = kept, target = target_of(t, d),
+    applied = { state = material_.device_state(device).state, print = M.print_of(back), content = content_fence(device) }, material = kept, target = target_of(t, d),
     display = { title = data_title(input, label) }, undo = { desc = desc, entry = true },
     prior = { print = M.print_of(xml) }, journal_applied = { print = M.print_of(back) }, place = { track = t, device = d },
   }

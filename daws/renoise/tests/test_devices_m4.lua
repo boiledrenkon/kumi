@@ -288,6 +288,27 @@ test("devices m4: preset data is written whole in one step and put back; another
   H.no_dialogs()
 end)
 
+test("devices m4: the undo of a Doofer's preset data refuses what the producer changed inside it since, and discard writes anyway (#361 N2)", function()
+  local _, peer = setup()
+  local epoch = place(peer)
+  local current = mock.song:track(3):device(2).active_preset_data
+  local wanted = current:gsub("(<Macro0>%s*<Value>)[^<]*", "%175", 1)
+  local record = change(peer, "device-preset-data", { ref = epoch .. ":device:3.2", presetData = wanted })
+  eq(value(3, 2, 1), 75)
+  -- the producer puts a device inside it (its macros don't move)
+  local inner = "<GainerDevice type=\"GainerDevice\">\n          <Volume>\n            <Value>1.0</Value>\n          </Volume>\n        </GainerDevice>"
+  device_data(3, 2).preset_data = device_data(3, 2).preset_data:gsub("</Devices>", inner .. "\n      </Devices>", 1)
+  local theirs = device_data(3, 2).preset_data
+  local before = steps()
+  failure(restore(peer, "device-preset-data", record), "changed", "inside")
+  eq(device_data(3, 2).preset_data, theirs, "what they put inside stays")
+  eq(steps(), before)
+  local forced = restore(peer, "device-preset-data", record, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(value(3, 2, 1), 50)
+  H.no_dialogs()
+end)
+
 test("devices m4: preset data a plug-in of another kind would get is refused", function()
   local plugin = { name = "AUDelay", path = "Audio/Effects/AU/aufx:dely:appl", slot = "AudioPluginDevice",
     params = { { name = "Dry/Wet Mix", value = 0.5, min = 0, max = 1 } },
