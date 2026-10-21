@@ -50,6 +50,8 @@ mod projectitems;
 mod templates;
 // M6 (m6-library): a sampler kit made from sample files.
 mod kits;
+// Review H4: a file in Kumi's own folder is copied into the project's media folder before REAPER plays it.
+pub(crate) mod kumi_files;
 mod trackprops;
 mod volatile;
 // M5 listening (m5-reaper): a scratch copy kept as the producer's track.

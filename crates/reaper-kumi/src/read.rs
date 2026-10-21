@@ -98,6 +98,8 @@ pub struct Reads {
     /// The project each recent epoch was about (its identity), so that a look at another tab and back doesn't make what
     /// was done before it un-undoable: the epoch moved, the project is the same.
     eras: RefCell<std::collections::VecDeque<(String, String)>>,
+    /// Kumi's own folder (from the bridge's reference): a file in it is copied into the project before REAPER plays it.
+    kumi_folder: RefCell<Option<std::path::PathBuf>>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -236,6 +238,15 @@ fn active(reaper: &Reaper) -> Result<(Project, crate::reaper::ProjectInfo), (Str
 type CursorParts = (String, Option<String>);
 
 impl Reads {
+    /// Kumi's own folder, once the reference names it.
+    pub fn set_kumi_folder(&self, folder: std::path::PathBuf) {
+        *self.kumi_folder.borrow_mut() = Some(folder);
+    }
+
+    pub fn kumi_folder(&self) -> Option<std::path::PathBuf> {
+        self.kumi_folder.borrow().clone()
+    }
+
     pub fn epoch(&self) -> String {
         self.epoch.borrow().text()
     }

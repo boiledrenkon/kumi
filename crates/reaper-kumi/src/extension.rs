@@ -336,6 +336,11 @@ impl Extension {
         self.listening.set_folder(folder);
     }
 
+    /// Kumi's own folder: a file in it is copied into the project's media folder before a change makes REAPER play it.
+    pub fn set_kumi_folder(&self, folder: std::path::PathBuf) {
+        self.reads.set_kumi_folder(folder);
+    }
+
     pub fn tick(&self, driver: Driver) {
         // A request's REAPER call can call back into the surface (Run included): that tick is skipped.
         if self.in_tick.replace(true) {

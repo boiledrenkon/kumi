@@ -76,7 +76,10 @@ where
             Ok(count) => framer.feed(&chunk[..count]),
         }
     }
-    while tasks.join_next().await.is_some() {}
+    // The input is over: Kumi stops the host soon after it closes stdin, so what runs on the bridge is stopped now (a
+    // render's settings put back), while the requests in flight answer, not after them.
+    let joining = async { while tasks.join_next().await.is_some() {} };
+    tokio::join!(host.cancel_running_jobs(), joining);
     forwarding.abort();
     drop(answers);
     writer.await.unwrap_or(Ok(()))?;

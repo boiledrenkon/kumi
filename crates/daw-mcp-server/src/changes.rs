@@ -896,6 +896,18 @@ impl crate::host::Host {
             _ => &[],
         };
         let mut params = json!({});
+        // (a field and its …Ref name the same thing: one of the two, or both the same)
+        for field in fields.iter().filter(|field| !field.ends_with("Ref")) {
+            let named = |name: &str| arguments.get(name).filter(|value| !value.is_null());
+            if let (Some(plain), Some(aliased)) = (named(field), named(&format!("{field}Ref"))) {
+                if plain != aliased {
+                    return (
+                        json!({"error": format!("{field} and {field}Ref name different things: pass one of the two"), "code": "bad-params"}),
+                        true,
+                    );
+                }
+            }
+        }
         for field in fields {
             if let Some(value) = arguments.get(*field) {
                 params[*field] = value.clone();

@@ -9,9 +9,46 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The tools, described for the model.
+/// Whether a DAW's tool list has this tool (the names read once per DAW).
+fn listed(daw: Daw, name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(Default::default);
+    let mut names = names.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = names.entry(daw.to_string()).or_insert_with(|| {
+        tool_list(daw).as_array().into_iter().flatten().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect()
+    });
+    list.iter().any(|listed| listed == name)
+}
+
 pub fn tools(host: &Host) -> Value {
-    let daw = host.daw();
+    tool_list(host.daw())
+}
+
+fn tool_list(daw: Daw) -> Value {
     let kinds = kinds(daw);
+    // Each DAW's own words: what it opens, what a read's parent holds, what a view is about.
+    let (place, inside, parent, about) = match daw {
+        Daw::Renoise => (
+            "song",
+            "a track's devices or a device's parameters",
+            "The ref of what the rows are in: a track for its devices, a device for its parameters, an instrument for its samples or phrases, a pattern (with track) for its lines.",
+            "the track, pattern or instrument it is about",
+        ),
+        _ => (
+            "project",
+            "a track's items or an FX's parameters",
+            "The ref of what the rows are in: a track for its items or sends, an FX for its parameters.",
+            "the take or track it is about",
+        ),
+    };
+    // Renoise plays from a slot and line; REAPER from where it is (cursor_set moves it).
+    let play = match daw {
+        Daw::Renoise => (
+            "Starts Renoise's playback from where it is, or from sequence (a slot, from 1) and line.",
+            json!({"sequence": {"type": "integer", "minimum": 1}, "line": {"type": "integer", "minimum": 1}, "epoch": {"type": "string"}}),
+        ),
+        _ => ("Starts REAPER's playback from where it is (cursor_set moves it first).", json!({"epoch": {"type": "string"}})),
+    };
     let pick = json!({
         "pid": {"type": "integer", "minimum": 1, "description": format!("The {daw} process to use, from discover, when several run.")},
         "resource": {"type": "string", "description": format!("The {daw} resource or preferences folder to use, from discover, when several run.")},
@@ -20,24 +57,24 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "status",
             "title": format!("{daw} status"),
-            "description": format!("Whether Kumi's bridge in {daw} is connected: the {daw} and bridge versions, the open project, and whether {daw} is busy (a dialog, a render). With several {daw} instances running, pass pid or resource from discover."),
+            "description": format!("Whether Kumi's bridge in {daw} is connected: the {daw} and bridge versions, the open {place}, and whether {daw} is busy (a dialog, a render). With several {daw} instances running, pass pid or resource from discover."),
             "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
         {
             "name": "discover",
             "title": format!("Find running {daw}"),
-            "description": format!("Every running {daw} with Kumi's bridge: process id, port, resource folder, versions, open project, and whether it answers. Use it when status reports none, or to choose among several."),
+            "description": format!("Every running {daw} with Kumi's bridge: process id, port, resource folder, versions, open {place}, and whether it answers. Use it when status reports none, or to choose among several."),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
         {
             "name": "read",
             "title": format!("Read {daw}"),
-            "description": format!("Rows of one kind from the open {daw} project, a page at a time: {{items, nextCursor?, epoch}}. Pass parent (a row's ref) to read what is inside it, such as a track's items or an FX's parameters; pass the previous page's nextCursor as cursor for the next page. Or pass ref alone for the one object it names. Refs hold until the epoch changes. With several {daw} instances running, pass pid or resource from discover."),
+            "description": format!("Rows of one kind from the open {daw} {place}, a page at a time: {{items, nextCursor?, epoch}}. Pass parent (a row's ref) to read what is inside it, such as {inside}; pass the previous page's nextCursor as cursor for the next page. Or pass ref alone for the one object it names. Refs hold until the epoch changes. With several {daw} instances running, pass pid or resource from discover."),
             "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                 "kind": {"type": "string", "enum": kinds.read, "description": format!("What to read in {daw}.")},
-                "parent": {"type": "string", "description": "The ref of what the rows are in: a track for its items or sends, an FX for its parameters."},
+                "parent": {"type": "string", "description": parent},
                 "ref": {"type": "string", "description": "The ref of one object to read instead of a page of rows."},
                 "cursor": {"type": "string", "description": "The nextCursor an earlier page gave, unchanged."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": format!("Rows in a page ({DEFAULT_LIMIT} by default).")},
@@ -48,7 +85,7 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "snapshot",
             "title": format!("{daw} snapshot"),
-            "description": format!("The open {daw} project on one screen: {{epoch, project, transport, tracks, selection, markers?}}. What is too big to include is named under truncated, to read with `read`."),
+            "description": format!("The open {daw} {place} on one screen: {{epoch, project, transport, tracks, selection, markers?}}. What is too big to include is named under truncated, to read with `read`."),
             "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
@@ -62,7 +99,7 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "focus_body",
             "title": format!("{daw} view"),
-            "description": format!("What {daw} shows in one of its views, ready to draw: pass kind, and ref (the take, track or pattern it is about) or window (the range to show) where the kind takes them. Long ones come in pages: pass the nextCursor as cursor."),
+            "description": format!("What {daw} shows in one of its views, ready to draw: pass kind, and ref ({about}) or window (the range to show) where the kind takes them. Long ones come in pages: pass the nextCursor as cursor."),
             "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                 "kind": {"type": "string", "enum": kinds.bodies, "description": "Which view."},
                 "ref": {"type": "string", "description": "The ref of what the view is about."},
@@ -118,12 +155,8 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "transport_play",
             "title": format!("Play {daw}"),
-            "description": format!("Starts {daw}'s playback from where it is, or (Renoise) from sequence (a slot, from 1) and line."),
-            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
-                "sequence": {"type": "integer", "minimum": 1},
-                "line": {"type": "integer", "minimum": 1},
-                "epoch": {"type": "string"},
-            })), "additionalProperties": false},
+            "description": play.0,
+            "inputSchema": {"type": "object", "properties": merged(&pick, play.1), "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
         {
@@ -232,9 +265,10 @@ pub fn tools(host: &Host) -> Value {
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
-        // Renoise's scripts can't hear what it plays: it only renders.
+        // Renoise's scripts can't hear what it plays: it only renders. Its tool has no edit cursor to move in beats or
+        // seconds (transport_play takes a slot and line).
         if let Some(tools) = list.as_array_mut() {
-            tools.retain(|tool| tool["name"] != "hear");
+            tools.retain(|tool| tool["name"] != "hear" && tool["name"] != "cursor_set");
         }
         // (M4 n-devices) A device read by ref says what a Doofer, Splitter or Notepad holds; its preset data on ask.
         list[2]["inputSchema"]["properties"]["presetData"] = json!({"type": "boolean", "description": "With ref of a device: also its preset data, its settings as Renoise's XML (for device_preset_data). A Doofer's, Splitter's or Notepad's contents come by themselves."});
@@ -268,11 +302,12 @@ pub fn tools(host: &Host) -> Value {
                 "title": "Save a device's preset",
                 "description": "Saves a native device's settings as a preset file named name in Renoise's user library (Effect Presets, in the device's folder): {file, listed}. Renoise lists it in the device's presets from its next start. A preset of that name is replaced only with replace; plug-ins are refused (Renoise lists only the presets it saves for them).",
                 "inputSchema": {"type": "object", "properties": own(json!({"name": {"type": "string", "maxLength": 128}, "replace": {"type": "boolean"}})), "required": ["ref", "name"], "additionalProperties": false},
-                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
             }));
         }
         // Renoise's actions (M4): a note auditioned, things selected or shown, an instrument saved to a file (n-instruments).
         // None is a change. (Saving the song is the neutral project_save, listed for both DAWs.)
+        let same_as = |name: &str| json!({"type": "string", "description": format!("As {name}: pass one of the two.")});
         let actions = json!([
             {
                 "name": "audition_note",
@@ -280,15 +315,15 @@ pub fn tools(host: &Host) -> Value {
                 "description": "Plays a note (or notes, at once) on an instrument, out loud, for durationMs, on track (the selected one by default); sample plays that sample alone. stop: true ends what is playing.",
                 "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                     "instrument": {"type": "string", "description": "The instrument's ref."},
-                    "instrumentRef": {"type": "string", "description": "The instrument's ref (as instrument)."},
+                    "instrumentRef": {"type": "string", "description": "The instrument's ref (as instrument: pass one of the two)."},
                     "track": {"type": "string", "description": "The track's ref to play on."},
-                    "trackRef": {"type": "string", "description": "The track's ref (as track)."},
+                    "trackRef": {"type": "string", "description": "The track's ref (as track: pass one of the two)."},
                     "note": {"type": ["string", "integer"], "description": "C-4, C#5 or 0 to 119 (48 is C-4)."},
                     "notes": {"type": "array", "items": {"type": ["string", "integer"]}, "minItems": 1, "maxItems": 16},
                     "volume": {"type": "number", "minimum": 0, "maximum": 1},
                     "durationMs": {"type": "number", "minimum": 1, "maximum": 10000},
                     "sample": {"type": "string", "description": "A sample's ref, to play it alone."},
-                    "sampleRef": {"type": "string", "description": "A sample's ref (as sample)."},
+                    "sampleRef": {"type": "string", "description": "A sample's ref (as sample: pass one of the two)."},
                     "stop": {"type": "boolean"},
                     "epoch": {"type": "string"},
                     "layout": {"type": "integer", "minimum": 0},
@@ -302,8 +337,8 @@ pub fn tools(host: &Host) -> Value {
                 "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                     "track": {"type": "string"}, "device": {"type": "string"}, "instrument": {"type": "string"},
                     "sample": {"type": "string"}, "phrase": {"type": "string"}, "sequence": {"type": "string"}, "pattern": {"type": "string"},
-                    "trackRef": {"type": "string"}, "deviceRef": {"type": "string"}, "instrumentRef": {"type": "string"},
-                    "sampleRef": {"type": "string"}, "phraseRef": {"type": "string"}, "sequenceRef": {"type": "string"}, "patternRef": {"type": "string"},
+                    "trackRef": same_as("track"), "deviceRef": same_as("device"), "instrumentRef": same_as("instrument"),
+                    "sampleRef": same_as("sample"), "phraseRef": same_as("phrase"), "sequenceRef": same_as("sequence"), "patternRef": same_as("pattern"),
                     "line": {"type": "integer", "minimum": 1},
                     "frame": {"type": "string", "enum": ["pattern", "mixer", "phrase", "keyzones", "sample", "modulation", "effects", "plugin", "midi"]},
                     "lower": {"type": "string", "enum": ["dsp", "automation", "hidden"]},
@@ -325,7 +360,7 @@ pub fn tools(host: &Host) -> Value {
                     "epoch": {"type": "string"},
                     "layout": {"type": "integer", "minimum": 0},
                 })), "required": ["path"], "additionalProperties": false},
-                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
             },
         ]);
         if let (Some(tools), Value::Array(more)) = (list.as_array_mut(), actions) {
@@ -346,7 +381,7 @@ pub fn tools(host: &Host) -> Value {
                 "overwrite": {"type": "boolean"},
                 "epoch": {"type": "string"},
             })), "required": ["ref", "name"], "additionalProperties": false},
-            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
         }));
     }
     // M6: what changed in the project while Kumi wasn't looking, and what the producer did while it watched.
@@ -406,7 +441,7 @@ fn listening_tools(daw: Daw, pick: &Value) -> Vec<Value> {
                 "epoch": {"type": "string"},
                 "layout": {"type": "integer", "minimum": 0},
             })), "required": ["sources", "range"], "additionalProperties": false},
-            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
         }),
         json!({
             "name": "hear",
@@ -462,7 +497,7 @@ fn listening_tools(daw: Daw, pick: &Value) -> Vec<Value> {
                 "epoch": {"type": "string"},
                 "layout": {"type": "integer", "minimum": 0},
             })), "required": ["ref"], "additionalProperties": false},
-            "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         }),
         json!({
             "name": "scratch",
@@ -561,6 +596,10 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if !arguments.is_object() {
                 return Some(error(id, -32602, "Invalid params"));
+            }
+            // A tool this DAW's list doesn't have (the other DAW's, say) is unknown here: its bridge isn't asked.
+            if !listed(host.daw(), name) {
+                return Some(error(id, -32602, &format!("Unknown tool: {name}")));
             }
             match name {
                 "status" => match Pick::from_arguments(&arguments) {

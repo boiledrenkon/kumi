@@ -118,6 +118,9 @@ impl Loaded {
         if let Some(folder) = listening::folder_beside(&config.discovery_dir) {
             self.extension.set_listening_folder(folder);
         }
+        if let Some(folder) = changes::kumi_files::kumi_folder_beside(&config.discovery_dir) {
+            self.extension.set_kumi_folder(folder);
+        }
         log::line(&format!("a dialog over the main window is noticed through: {}", window::describe()));
         let started =
             config.bind().and_then(|listener| Server::start(listener, config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()));
