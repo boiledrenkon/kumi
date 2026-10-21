@@ -1390,12 +1390,18 @@ impl Terminal for PlainTerminal {
                 if value["pending"] == true { format!(" (kept once the {} is saved)", crate::daw::words().place) } else { String::new() }
             )),
             "forgot" => self.notice(&format!("[memory] Forgot: {}", str_(&value["note"]["text"]))),
-            "action" => self.notice(&format!("[live] {}", get("title"))),
+            // (tagged with the DAW's name as /daw takes it: [live] in Live, as always)
+            "action" => self.notice(&format!("[{}] {}", crate::daw::command_name(crate::daw::current().id()), get("title"))),
             "watching" => self.notice(&if value["on"] == true {
                 let words = crate::daw::words();
-                format!("[live] Kumi is watching the {}; do it in {}, then tell Kumi you're done.", words.place, words.app)
+                format!(
+                    "[{}] Kumi is watching the {}; do it in {}, then tell Kumi you're done.",
+                    crate::daw::command_name(crate::daw::current().id()),
+                    words.place,
+                    words.app
+                )
             } else {
-                "[live] Kumi stopped watching.".to_string()
+                format!("[{}] Kumi stopped watching.", crate::daw::command_name(crate::daw::current().id()))
             }),
             "recipe" => self.notice(&format!(
                 "[recipe] {} “{}” ({} steps)",

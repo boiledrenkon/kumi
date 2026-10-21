@@ -724,3 +724,23 @@ case!(lives_beat_light_keeps_whole_beats_in_odd_meters_and_reapers_lights_the_ba
     }
     work_with(DawId::Ableton);
 });
+
+// An unnamed REAPER take in FOCUS is an "Untitled take", never Live's "Untitled clip" (review L9).
+case!(an_unnamed_reaper_take_is_an_untitled_take, async {
+    work_with(DawId::Reaper);
+    let h = Harness::with(120, 36, Rc::new(Control::default()), |_| {});
+    h.start().await;
+    h.connect();
+    let body = json!({"ref": "r:take:{T1}", "itemRef": "r:item:{I1}", "name": "", "length": 4.0, "beatsPerBar": 4.0, "noteCount": 1,
+        "notes": [{"pitch": 36, "start": 0.0, "length": 1.0, "velocity": 100, "selected": false}], "ccLanes": []});
+    let request = BodyRequest::Notes { item_ref: "r:take:{T1}".into() };
+    let Some(FocusBody::Notes(view)) = (reaper::DAW.to_body)(&request, &body) else { panic!() };
+    *h.control.clip.borrow_mut() = Some(view);
+    let focus = json!({"view": "midi", "selection": {"track": {"name": "Bass", "type": "midi"}, "trackRef": "r:track:{B}",
+        "takeRef": "r:take:{T1}", "itemRef": "r:item:{I1}"}});
+    h.emit(focus_of(reaper::DAW.fill_focus, focus));
+    shows(&h, "Untitled take").await;
+    assert!(!h.screen().join("\n").contains("Untitled clip"));
+    h.close().await;
+    work_with(DawId::Ableton);
+});

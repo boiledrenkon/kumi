@@ -909,6 +909,8 @@ async fn plain_mode_in_reaper_and_renoise_never_speaks_lives_words() {
                         json!({"type":"change","change":{"id":"c1","family":"mixer","title":"Bass volume","state":"unsure","at":1}}),
                         json!({"type":"remembered","scope":"set","note":{"id":"s1","text":"The Reese is the main bass","at":1},"pending":true}),
                         json!({"type":"watching","on":true}),
+                        json!({"type":"action","title":"Playing"}),
+                        json!({"type":"watching","on":false}),
                         json!({"type":"connection","state":"disconnected"}),
                     ] {
                         f.emit(event);
