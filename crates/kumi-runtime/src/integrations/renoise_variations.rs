@@ -12,7 +12,7 @@ use crate::core::{
     contracts::JsonObject,
     refs::RefScheme,
     variations::{
-        backend::{Rendered, Source, VariationsBackend, Words},
+        backend::{Rendered, Rewritten, Source, VariationsBackend, Words},
         heard::{heard_of, Heard},
         tool::names,
         Rng, TakeSet, TakeState,
@@ -34,7 +34,7 @@ pub static WORDS: Words = Words {
     app: "Renoise",
     sources: "a pattern track's lines (patternRef, or a slot for its pattern and its matrix mutes; trackRef; first and last, as Renoise numbers lines, from 00), a phrase (phraseRef), or an instrument (instrumentRef: new phrases from lines you write)",
     anchors: "the lines (as Renoise numbers them) every take keeps as they are: the kick and snare that make it the producer's",
-    ops: "shuffle, retrig, reverse, ghosts, thin, fill, accent, octave, transpose, swing, offsets, speed; amount 0 to 1",
+    ops: "shuffle, retrig, reverse, ghosts, thin, fill, accent, octave, transpose, swing, offsets, speed (phrase takes only: a pattern has no LPB of its own); amount 0 to 1",
     lines: "lines you write, as notes_write takes them, numbered as the source's lines",
     places: "patterns (each take a slot of its own in a \"Variations of …\" section at the sequence's end, its other tracks playing the source pattern's, so playing it plays the take in context: a play or render of the whole song plays them too, and drop removes the ones not kept; the default for a pattern's lines) or phrases (new phrases of the instrument; the default otherwise)",
     place_names: &["patterns", "phrases"],
@@ -207,16 +207,15 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
         only_named(&rows, track_name).ok_or(format!("the source's track “{track_name}” isn't in the song where Kumi left it: read again"))
     }
 
-    /// The refs of the instrument's phrases (or the song's patterns) by name, for takes found by their names.
-    async fn rows_by_name(&self, set: &RenoiseSet, signal: &Signal) -> Result<BTreeMap<String, String>, String> {
-        let rows = match &set.source.data.placement {
+    /// The instrument's phrases (or the song's patterns), for takes found by their names.
+    async fn named_rows(&self, set: &RenoiseSet, signal: &Signal) -> Result<Vec<Value>, String> {
+        match &set.source.data.placement {
             Placement::Phrases { .. } => {
                 let instrument = self.instrument_now(set, signal).await?;
-                self.rows(json!({"kind": "phrase", "parent": instrument, "limit": 200}), signal).await?
+                self.rows(json!({"kind": "phrase", "parent": instrument, "limit": 200}), signal).await
             }
-            Placement::Patterns { .. } => self.rows(json!({"kind": "pattern", "limit": 200}), signal).await?,
-        };
-        Ok(rows.iter().filter_map(|row| Some((row.get("name")?.as_str()?.to_string(), row.get("ref")?.as_str()?.to_string()))).collect())
+            Placement::Patterns { .. } => self.rows(json!({"kind": "pattern", "limit": 200}), signal).await,
+        }
     }
 
     /// Where the source's lines and each take's lines start in the song (beats), and the track to render them on.
@@ -453,6 +452,11 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                     (Placement::Phrases { instrument: row.get("place").cloned().unwrap_or(Value::Null), settings }, named(row, ""))
                 }
             };
+            // (phrase takes of a range are a set of their own: a make with another place starts another set)
+            let key = match placement {
+                Placement::Patterns { .. } => key,
+                Placement::Phrases { .. } => format!("{key}:phrases"),
+            };
             let data = RenoiseData { kind, placement, instrument_name };
             return Ok(Source { label, short: pattern_name, key, material: Some(material), data });
         }
@@ -524,8 +528,12 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         }
     }
 
-    fn check_ops(&self, ops: &[Value]) -> Result<(), String> {
-        ops.iter().map(Op::parse).collect::<Result<Vec<_>, _>>().map(|_| ())
+    fn check_ops(&self, source: &Source<Lines, RenoiseData>, ops: &[Value]) -> Result<(), String> {
+        let parsed = ops.iter().map(Op::parse).collect::<Result<Vec<_>, _>>()?;
+        if matches!(source.data.placement, Placement::Patterns { .. }) && parsed.iter().any(|op| matches!(op, Op::Speed { .. })) {
+            return Err("speed is for phrase takes: a pattern has no LPB of its own (place: \"phrases\" makes phrase takes)".into());
+        }
+        Ok(())
     }
 
     fn apply_ops(&self, ops: &[Value], factor: f64, take: &mut Lines, source: &Lines, rng: &mut Rng) -> Result<Vec<String>, String> {
@@ -564,8 +572,8 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
             .map_err(|line| format!("line {line:02} (from the source's first) is an anchor: every take keeps it as it is"))
     }
 
-    fn judge(&self, source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
-        judge(source, take, ops)
+    fn judge(&self, source: Option<&Lines>, take: &Lines, ops: &[Value], factor: f64) -> Vec<String> {
+        judge(source, take, ops, factor)
     }
 
     fn digest(&self, material: &Lines) -> String {
@@ -659,12 +667,13 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         if !found.iter().any(lost) {
             return Ok(found);
         }
-        let by_name = self.rows_by_name(set, signal).await?;
+        // (a name only one phrase or pattern has: a copy the producer made of a take, named the same, is never taken for it)
+        let rows = self.named_rows(set, signal).await?;
         for (k, number) in numbers.iter().enumerate() {
             if !found.get(k).is_some_and(lost) {
                 continue;
             }
-            let Some(reference) = names(*number, &set.source.short).iter().find_map(|name| by_name.get(name)).cloned() else { continue };
+            let Some(reference) = names(*number, &set.source.short).iter().find_map(|name| only_named(&rows, name)) else { continue };
             let again = self.locate(vec![item(&set.source.data.placement, json!(reference))], None, signal).await?;
             if let Some(row) = again.into_iter().next().filter(|row| row.get("ref").is_some()) {
                 if let Some(take) = set.take_mut(*number) {
@@ -678,8 +687,9 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
 
     async fn current(&self, set: &RenoiseSet, row: &Value, signal: &Signal) -> Result<Lines, String> {
         let reference = row.get("ref").and_then(Value::as_str).ok_or("the take wasn't found")?;
-        match &set.source.data.kind {
-            SourceKind::Range { first, last, .. } => {
+        // (by where the takes went: a range's takes may be phrases)
+        match (&set.source.data.placement, &set.source.data.kind) {
+            (Placement::Patterns { .. }, SourceKind::Range { first, last, .. }) => {
                 let track = self.track_now(set, signal).await?;
                 let rows =
                     self.rows(json!({"kind": "line", "parent": reference, "track": track, "hidden": true, "limit": 200}), signal).await?;
@@ -702,22 +712,34 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         before: &Lines,
         after: &Lines,
         signal: &Signal,
-    ) -> Result<String, (String, bool)> {
+    ) -> Result<Rewritten<Lines>, (String, bool)> {
         let reference = row.get("ref").and_then(Value::as_str).unwrap_or("").to_string();
-        match &set.source.data.kind {
-            SourceKind::Range { first, .. } => {
+        match (&set.source.data.placement, &set.source.data.kind) {
+            (Placement::Patterns { .. }, SourceKind::Range { first, .. }) => {
                 let track = self.track_now(set, signal).await.map_err(|why| (why, true))?;
                 let input = json!({"patternRef": reference, "trackRef": track, "lines": after.rewrite(before, *first)});
-                self.change("notes_write", input, signal).await.map(|(change, _)| change)
+                self.change("notes_write", input, signal).await.map(|(change, _)| (change, None))
             }
             _ => {
-                // (a phrase's LPB is its own setting: a speed change is a step before its lines)
-                if after.lpb != before.lpb {
-                    self.change("phrase_set", json!({"ref": reference, "lpb": after.lpb}), signal).await?;
+                let lines = after.rewrite(before, 0);
+                let write = |lines: Vec<Value>| self.change("phrase_write", json!({"ref": reference, "lines": lines}), signal);
+                if after.lpb == before.lpb {
+                    return write(lines).await.map(|(change, _)| (change, None));
                 }
-                self.change("phrase_write", json!({"ref": reference, "lines": after.rewrite(before, 0)}), signal)
-                    .await
-                    .map(|(change, _)| change)
+                // (a phrase's LPB is a setting of its own, a step of its own: the lines first, when any changed, so a refusal there
+                // writes nothing; an LPB Renoise then refuses leaves lines that went in, told as what the take holds)
+                let written = if lines.is_empty() { None } else { Some(write(lines).await?.0) };
+                match self.change("phrase_set", json!({"ref": reference, "lpb": after.lpb}), signal).await {
+                    Ok((change, _)) => Ok((change, None)),
+                    Err((why, stops)) => match written {
+                        Some(change) => {
+                            let mut holds = after.clone();
+                            holds.lpb = before.lpb;
+                            Ok((change, Some((holds, format!("its LPB stayed {}: {why}", before.lpb)))))
+                        }
+                        None => Err((why, stops)),
+                    },
+                }
             }
         }
     }
@@ -823,10 +845,11 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
             return Err("Kumi is listening to something else just now".into());
         }
         let _listening = self.renderer.begin_listen();
-        let rendered = match set.source.data.kind.clone() {
-            SourceKind::Range { first, last, .. } => {
+        let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb) as f64;
+        // (by where the takes went: pattern takes where their slots play, phrase takes through players of their phrases)
+        let rendered = match (set.source.data.placement.clone(), set.source.data.kind.clone()) {
+            (Placement::Patterns { .. }, SourceKind::Range { first, last, .. }) => {
                 let (source_at, track, takes) = self.where_slots(set, numbers, signal).await?;
-                let lpb = set.source.material.as_ref().map_or(4, |material| material.lpb) as f64;
                 let (offset, beats) = (first as f64 / lpb, (last - first + 1) as f64 / lpb);
                 let source = if with_source { Some(self.hear(source_at + offset, beats, &track, signal).await?) } else { None };
                 let mut heard = BTreeMap::new();
@@ -836,6 +859,17 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                     }
                 }
                 Ok((source, heard))
+            }
+            (Placement::Phrases { .. }, SourceKind::Range { first, last, .. }) => {
+                // (the range heard where a slot plays it, when one does: what the takes are judged against)
+                let mut source = None;
+                if with_source {
+                    if let Ok((source_at, track, _)) = self.where_slots(set, &[], signal).await {
+                        let (offset, beats) = (first as f64 / lpb, (last - first + 1) as f64 / lpb);
+                        source = self.hear(source_at + offset, beats, &track, signal).await.ok();
+                    }
+                }
+                self.hear_phrases(set, numbers, false, signal).await.map(|(_, heard)| (source, heard))
             }
             _ => self.hear_phrases(set, numbers, with_source, signal).await,
         };
@@ -972,8 +1006,9 @@ fn lines_of(value: &Value) -> Option<Lines> {
 }
 
 /// What a take breaks that the source keeps: notes outside the source's pitches (shifted by a transpose asked for; an octave
-/// keeps them), and delays past the source's latest one (or the swing asked for).
-fn judge(source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
+/// keeps them; the anchors are the source's own), and delays past the source's latest one (or the swing as it was applied,
+/// `factor` times the amount asked).
+fn judge(source: Option<&Lines>, take: &Lines, ops: &[Value], factor: f64) -> Vec<String> {
     let Some(source) = source else { return vec![] };
     let mut issues = Vec::new();
     let notes = |lines: &Lines| -> Vec<(u32, u8, u8)> {
@@ -992,7 +1027,7 @@ fn judge(source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
     if !pitches.is_empty() {
         let mut outside: Vec<String> = notes(take)
             .iter()
-            .filter(|(_, value, _)| !pitches.contains(&(*value as i32).rem_euclid(12)))
+            .filter(|(number, value, _)| !source.anchors.contains(number) && !pitches.contains(&(*value as i32).rem_euclid(12)))
             .map(|(number, value, _)| format!("{} on line {number:02}", note_text(*value)))
             .collect();
         outside.dedup();
@@ -1002,8 +1037,10 @@ fn judge(source: Option<&Lines>, take: &Lines, ops: &[Value]) -> Vec<String> {
     }
     let swing = ops
         .iter()
-        .filter(|op| op.get("op").and_then(Value::as_str) == Some("swing"))
-        .map(|op| (op.get("amount").and_then(Value::as_f64).unwrap_or(0.35).clamp(0., 1.) * 96.).round() as u8)
+        .filter_map(|op| match Op::parse(op).ok()?.scaled(factor) {
+            Op::Swing { amount } => Some((amount * 96.).round() as u8),
+            _ => None,
+        })
         .max()
         .unwrap_or(0);
     let allowed = notes(source).iter().map(|(_, _, delay)| *delay).max().unwrap_or(0).max(swing);
@@ -1168,22 +1205,51 @@ mod tests {
         );
         let mut octave = source.clone();
         octave.rows.get_mut(&0).unwrap().notes[0].note = "C-5".into();
-        assert!(judge(Some(&source), &octave, &[]).is_empty(), "an octave keeps the key");
+        assert!(judge(Some(&source), &octave, &[], 1.).is_empty(), "an octave keeps the key");
         let mut sharp = source.clone();
         sharp.rows.get_mut(&4).unwrap().notes[0].note = "F#4".into();
-        let issues = judge(Some(&source), &sharp, &[]);
+        let issues = judge(Some(&source), &sharp, &[], 1.);
         assert!(issues[0].contains("outside the source's key: F#4 on line 04"), "{issues:?}");
         let mut up = source.clone();
         up.rows.get_mut(&0).unwrap().notes[0].note = "D-4".into();
         up.rows.get_mut(&4).unwrap().notes[0].note = "F#4".into();
         assert!(
-            judge(Some(&source), &up, &[json!({"op": "transpose", "semitones": 2})]).is_empty(),
+            judge(Some(&source), &up, &[json!({"op": "transpose", "semitones": 2})], 1.).is_empty(),
             "a transpose moves the key on purpose"
         );
         let mut late = source.clone();
         late.rows.get_mut(&0).unwrap().notes[0].delay = 0x60;
-        assert!(judge(Some(&source), &late, &[])[0].contains("off the grid"), "past the source's feel");
-        assert!(judge(Some(&source), &late, &[json!({"op": "swing", "amount": 1})]).is_empty(), "within the swing asked for");
+        assert!(judge(Some(&source), &late, &[], 1.)[0].contains("off the grid"), "past the source's feel");
+        assert!(judge(Some(&source), &late, &[json!({"op": "swing", "amount": 1})], 1.).is_empty(), "within the swing asked for");
+    }
+
+    /// (review W7) A transpose take's anchors keep the source's notes: they aren't outside its key.
+    #[test]
+    fn a_transpose_take_keeps_its_anchors_notes() {
+        let row = |line: u32, slice: &str| json!({"line": line, "notes": [{"col": 1, "note": "C-4", "fx": format!("0S{slice}")}]});
+        let mut source = Lines::from_rows(&[row(0, "00"), row(2, "40"), row(4, "80"), row(6, "C0")], 0, 7, 4);
+        source.anchors = [0, 4].into_iter().collect();
+        let mut take = source.clone();
+        for line in [2, 6] {
+            take.rows.get_mut(&line).unwrap().notes[0].note = "D-4".into();
+        }
+        assert!(judge(Some(&source), &take, &[json!({"op": "transpose", "semitones": 2})], 1.).is_empty());
+    }
+
+    /// (review W8) The grid allows the swing as it was applied: a re-roll's 1.35 times as much.
+    #[test]
+    fn a_rerolled_swing_is_judged_as_it_was_applied() {
+        let source = Lines::from_rows(
+            &[json!({"line": 0, "notes": [{"col": 1, "note": "C-4"}]}), json!({"line": 2, "notes": [{"col": 1, "note": "E-4"}]})],
+            0,
+            7,
+            4,
+        );
+        let mut take = source.clone();
+        take.rows.get_mut(&2).unwrap().notes[0].delay = 26;
+        let swing = [json!({"op": "swing", "amount": 0.2})];
+        assert!(judge(Some(&source), &take, &swing, 1.35).is_empty(), "26/256 is 0.2 × 1.35 of a swing");
+        assert!(!judge(Some(&source), &take, &swing, 1.).is_empty(), "past the swing as first asked");
     }
 
     #[test]

@@ -1202,3 +1202,114 @@ async fn a_take_that_clips_where_the_source_doesnt_is_drawn_again_and_nothing_re
         })
         .await;
 }
+
+/// (review W6, W9, W5) Phrase takes of a pattern's lines are heard through players of their phrases, and changed and dropped as
+/// phrases; they're a set apart from the range's pattern takes. Speed is refused for pattern takes, before anything is drawn.
+#[tokio::test(flavor = "current_thread")]
+async fn phrase_takes_of_a_patterns_lines_are_heard_changed_and_dropped_as_phrases() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            script.set_lines(
+                2,
+                1,
+                json!([
+                    {"line": 8, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+                    {"line": 10, "notes": [{"col": 1, "note": "D-4", "instrument": "00", "volume": "30"}]},
+                    {"line": 12, "notes": [{"col": 1, "note": "E-4", "instrument": "00"}]},
+                    {"line": 14, "notes": [{"col": 1, "note": "G-4", "instrument": "00"}]},
+                ]),
+            );
+            run_tool(&tool(&observed, "renoise_read"), json!({"kind": "pattern"})).await;
+            let variations = tool(&observed, "variations");
+            let source = json!({"patternRef": "pattern:2", "trackRef": "track:1", "first": 8, "last": 15});
+            let speed = variations
+                .execute(
+                    input(json!({"action": "make", "source": source, "takes": [{"ops": [{"op": "speed", "factor": 2}]}]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(speed.is_error && speed.text.contains("speed is for phrase takes"), "{}", speed.text);
+            let patterns = run_tool(&variations, json!({"action": "make", "source": source, "count": 1, "seed": 2, "listen": false})).await;
+            assert_eq!(patterns["set"], 1, "{patterns}");
+            let made = run_tool(&variations, json!({"action": "make", "source": source, "place": "phrases", "count": 2, "seed": 3})).await;
+            assert_eq!(made["set"], 2, "phrase takes of the range are a set of their own: {made}");
+            let takes = made["takes"].as_array().unwrap();
+            assert_eq!(takes.len(), 2, "{made}");
+            assert!(takes.iter().all(|take| take["line"].as_str().unwrap().contains(" \u{b7} heard: peak \u{2212}")), "heard: {made}");
+            assert_eq!(script.made_phrases(1).len(), 2);
+            let before = told.borrow().len();
+            let lines_before = script.made_phrases(1)[0].1.clone();
+            let changed = run_tool(&variations, json!({"action": "change", "names": ["V2"], "listen": false})).await;
+            assert_eq!(changed["changed"].as_array().unwrap().len(), 1, "a phrase take rewritten as a phrase: {changed}");
+            assert_eq!(told.borrow().len(), before + 1);
+            assert_ne!(script.made_phrases(1)[0].1, lines_before, "its phrase holds the new lines");
+            let dropped = run_tool(&variations, json!({"action": "drop"})).await;
+            assert_eq!(dropped["dropped"], json!(["V2", "V3"]), "{dropped}");
+            assert!(script.made_phrases(1).is_empty());
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (review W10) When places are lost, a take is found only by a name no other phrase has: a copy the producer made of it, named
+/// the same, is never dropped for it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_copy_named_like_a_take_is_never_taken_for_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, _) = renoise_with_changes(home.path()).await;
+            let read = tool(&observed, "renoise_read");
+            let pad = run_tool(&read, json!({"kind": "instrument"})).await["items"][1]["ref"].as_str().unwrap().to_owned();
+            let arp: Value = serde_json::from_str(ARP).unwrap();
+            let variations = tool(&observed, "variations");
+            run_tool(&variations, json!({"action": "make", "source": {"instrumentRef": pad}, "takes": [{"lines": arp}], "count": 2, "seed": 4, "listen": false})).await;
+            let phrases = run_tool(&read, json!({"kind": "phrase", "parent": pad})).await;
+            let second = phrases["items"].as_array().unwrap().iter().find(|row| row["name"] == "V2 \u{b7} Pad").cloned().unwrap();
+            let rows = script.made_phrases(2)[1].1.clone();
+            let copy = json!({"tool": "phrase_add", "input": {"ref": pad, "name": "V2 \u{b7} Pad", "lines": second["lines"], "lpb": second["lpb"], "content": rows}});
+            run_tool(&tool(&observed, "make_changes"), json!({"steps": [copy]})).await;
+            script.forget_places();
+            let dropped = run_tool(&variations, json!({"action": "drop"})).await;
+            assert_eq!(dropped["dropped"], json!(["V1"]), "{dropped}");
+            assert!(dropped["skipped"][0].as_str().unwrap().contains("can't find V2"), "{dropped}");
+            let names: Vec<String> = script.made_phrases(2).into_iter().map(|(name, _)| name).collect();
+            assert_eq!(names, ["V2 \u{b7} Pad", "V2 \u{b7} Pad"], "the take and the producer's copy both stay");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (review W12) A phrase take changed only in speed is one phrase_set: changed, told once, and still Kumi's to drop.
+#[tokio::test(flavor = "current_thread")]
+async fn a_phrase_take_changed_only_in_speed_is_one_change_and_stays_kumis() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            let pad = run_tool(&tool(&observed, "renoise_read"), json!({"kind": "instrument"})).await["items"][1]["ref"].as_str().unwrap().to_owned();
+            let arp: Value = serde_json::from_str(ARP).unwrap();
+            let variations = tool(&observed, "variations");
+            run_tool(&variations, json!({"action": "make", "source": {"instrumentRef": pad}, "takes": [{"lines": arp}], "count": 2, "seed": 5, "listen": false})).await;
+            let before = script.made_phrases(2)[0].1.clone();
+            let changed = run_tool(
+                &variations,
+                json!({"action": "change", "names": ["V1"], "takes": [{"direction": "twice as fast", "ops": [{"op": "speed", "factor": 2}]}], "listen": false}),
+            )
+            .await;
+            assert_eq!(changed["changed"].as_array().unwrap().len(), 1, "{changed}");
+            assert!(changed["changed"][0]["line"].as_str().unwrap().contains("LPB 8"), "{changed}");
+            assert_eq!(told.borrow().len(), 3, "the two takes, then the LPB alone");
+            assert_eq!(script.made_phrases(2)[0].1, before, "its lines as they were");
+            let dropped = run_tool(&variations, json!({"action": "drop"})).await;
+            assert_eq!(dropped["dropped"], json!(["V1", "V2"]), "never taken for edited: {dropped}");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
