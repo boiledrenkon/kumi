@@ -3314,12 +3314,8 @@ fn a_function_that_changes_the_project_is_a_change_reapers_undo_takes_back_and_k
 
 // A stand-in for REAPER's Lua: what the wrapper would do, from the wrapper's text.
 fn token_of(script: &str) -> String {
-    let start = script.find("local TOKEN, LIMIT_MS, CHECK = \"").unwrap() + "local TOKEN, LIMIT_MS, CHECK = \"".len();
+    let start = script.find("local TOKEN, LIMIT_MS = \"").unwrap() + "local TOKEN, LIMIT_MS = \"".len();
     script[start..].split('"').next().unwrap().to_string()
-}
-
-fn checking(script: &str) -> bool {
-    script.lines().find(|l| l.starts_with("local TOKEN, LIMIT_MS, CHECK")).unwrap().ends_with("true")
 }
 
 fn answer(script: &str, text: &str) {
@@ -3328,9 +3324,6 @@ fn answer(script: &str, text: &str) {
 }
 
 fn lua_ok(script: &str) {
-    if checking(script) {
-        return answer(script, r#"{"compiled":true}"#);
-    }
     // (what `reaper.SetMediaTrackInfo_Value(track, "D_VOL", 0.25); print("hi"); return 42, track` would do)
     state(|s| {
         s.tracks[1].volume = 0.25;
@@ -3344,9 +3337,6 @@ fn lua_syntax(script: &str) {
 }
 
 fn lua_fails(script: &str) {
-    if checking(script) {
-        return answer(script, r#"{"compiled":true}"#);
-    }
     state(|s| {
         s.tracks[1].volume = 0.125;
         s.undo_dirty = true;
@@ -3354,11 +3344,7 @@ fn lua_fails(script: &str) {
     answer(script, r#"{"compiled":true,"ok":false,"error":{"message":"attempt to call a nil value","line":3},"printed":[]}"#);
 }
 
-fn lua_silent(script: &str) {
-    if checking(script) {
-        answer(script, r#"{"compiled":true}"#);
-    }
-}
+fn lua_silent(_script: &str) {}
 
 #[test]
 fn a_lua_chunk_runs_once_in_one_undo_point_and_only_reapers_undo_takes_it_back() {
@@ -3367,7 +3353,7 @@ fn a_lua_chunk_runs_once_in_one_undo_point_and_only_reapers_undo_takes_it_back()
     let code = "-- louder\nlocal track = reaper.GetTrack(0, 1)\nreaper.SetMediaTrackInfo_Value(track, \"D_VOL\", 0.25)\nprint(\"hi\")\nreturn 42, track";
     let (preview, applied) = lab.make("run-lua", json!({"code": code}), "Kumi: Ran Lua (kl001)");
     assert_eq!(preview["display"]["title"], "Ran Lua: local track = reaper.GetTrack(0, 1)");
-    assert_eq!(state(|s| s.tracks[1].volume), 0.25, "run once: the preview only compiled it");
+    assert_eq!(state(|s| s.tracks[1].volume), 0.25, "run once");
     assert_eq!(applied["applied"]["result"], json!([42, KICK]));
     assert_eq!(applied["applied"]["printed"], json!(["hi"]));
     assert_eq!((&applied["undo"]["entry"], top().as_deref()), (&json!(true), Some("Kumi: Ran Lua (kl001)")));
@@ -3388,12 +3374,27 @@ fn a_hundred_lua_chunks_leave_no_action_behind_and_never_write_reapers_key_map()
 }
 
 #[test]
-fn a_lua_chunk_that_doesnt_compile_is_refused_at_the_preview_and_one_that_fails_says_where_and_what_stays() {
+fn a_lua_chunks_preview_runs_nothing_in_reaper() {
+    // A script run moves REAPER's state count, and right after REAPER's undo it can wipe the redo list (review R11).
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_ok));
+    let before = state(|s| (s.actions.len(), s.state_count, s.undo_entries));
+    lab.call("change_preview", json!({"kind": "run-lua", "input": {"code": "return 1"}})).unwrap();
+    assert_eq!(state(|s| (s.actions.len(), s.state_count, s.undo_entries)), before, "no script ran");
+}
+
+#[test]
+fn a_lua_chunk_that_doesnt_compile_is_refused_at_the_apply_and_one_that_fails_says_where_and_what_stays() {
     let lab = Lab::new();
     state(|s| s.on_script = Some(lua_syntax));
-    let (code, message) = lab.call("change_preview", json!({"kind": "run-lua", "input": {"code": "local x =\nx x"}})).unwrap_err();
+    let input = json!({"code": "local x =\nx x"});
+    let preview = lab.call("change_preview", json!({"kind": "run-lua", "input": input})).unwrap();
+    let (code, message) = lab
+        .call("change_apply", json!({"kind": "run-lua", "input": input, "fence": preview["fence"], "desc": "Kumi: Ran Lua (kl005)"}))
+        .unwrap_err();
     assert_eq!(code, "bad-params");
     assert!(message.contains("line 2") && message.contains("unexpected symbol"), "{message}");
+    assert_ne!(top().as_deref(), Some("Kumi: Ran Lua (kl005)"), "nothing ran: no point");
     state(|s| s.on_script = Some(lua_fails));
     let (_, applied) = lab.make(
         "run-lua",
@@ -3432,13 +3433,13 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let run = |code: &str, limit: u64, check: bool| -> Value {
+    let run = |code: &str, limit: u64| -> Value {
         // (LuaJIT calls no hook inside code it compiled: REAPER's Lua compiles nothing, so neither does this)
         let stub = "if jit then jit.off() end\nreaper = { SetExtState = function(_, _, v) io.write(v) end, time_precise = os.clock, \
                     ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end, \
                     MB = function() return 1 end }\n";
         let path = dir.path().join("w.lua");
-        std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit, check))).unwrap();
+        std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit))).unwrap();
         // (a wrapper whose limit doesn't hold would run on: it's stopped after 20 s, and the test fails)
         let mut child = std::process::Command::new("luajit").arg(&path).stdout(std::process::Stdio::piped()).spawn().unwrap();
         let started = std::time::Instant::now();
@@ -3453,22 +3454,21 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
         let out = child.wait_with_output().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
-    assert_eq!(run("return 1", 1000, true), json!({"compiled": true}));
-    let ran = run("print('a', 2)\nreaper.ShowConsoleMsg('b')\nreturn {x = 1.5, y = {1, 2, 'q\"'}}, nil, true", 1000, false);
+    let ran = run("print('a', 2)\nreaper.ShowConsoleMsg('b')\nreturn {x = 1.5, y = {1, 2, 'q\"'}}, nil, true", 1000);
     assert_eq!(ran["ok"], true);
     assert_eq!(ran["printed"], json!(["a\t2", "b"]));
     assert_eq!(ran["result"], json!([{"x": 1.5, "y": [1, 2, "q\""]}, null, true]));
-    let bad = run("local x =\nx x", 1000, false);
+    let bad = run("local x =\nx x", 1000);
     assert_eq!((&bad["compiled"], &bad["error"]["line"]), (&json!(false), &json!(2)));
-    let failed = run("local a = 1\nerror('boom')", 1000, false);
+    let failed = run("local a = 1\nerror('boom')", 1000);
     assert_eq!((&failed["ok"], &failed["error"]["line"], &failed["error"]["message"]), (&json!(false), &json!(2), &json!("boom")));
-    let looped = run("while true do end", 50, false);
+    let looped = run("while true do end", 50);
     assert!(looped["error"]["message"].as_str().unwrap().contains("stopped after 50 ms"), "{looped}");
     // The time limit holds against a chunk that catches errors, a coroutine and an answer like `_G` or one of many shared
     // tables (review R2: a pcall loop ran 3 s past a 50 ms limit, and `return _G` was still encoding after 10 s).
     let timed = |code: &str| {
         let started = std::time::Instant::now();
-        let ran = run(code, 50, false);
+        let ran = run(code, 50);
         (ran, started.elapsed())
     };
     for code in [
@@ -3491,18 +3491,18 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert!(shared["ok"] == true && took < std::time::Duration::from_secs(2), "{took:?}");
     assert!(shared["result"].to_string().contains("(seen above)"), "{shared}");
     // What a chunk prints is kept up to 2,000 lines and 1 MB, and says how much more there was (review R17).
-    let chatty = run("for i = 1, 100000 do print(i) end\nprint(string.rep('x', 2000000))", 5000, false);
+    let chatty = run("for i = 1, 100000 do print(i) end\nprint(string.rep('x', 2000000))", 5000);
     let printed = chatty["printed"].as_array().unwrap();
     assert_eq!((printed.len(), printed[0].as_str(), printed[1999].as_str()), (2001, Some("1"), Some("2000")));
     assert_eq!(printed[2000], "(98001 more printed lines not kept)");
     // A dialog would hold REAPER until someone answers it: refused.
-    let dialog = run("reaper.MB('done', 'Kumi', 0)", 1000, false);
+    let dialog = run("reaper.MB('done', 'Kumi', 0)", 1000);
     assert!(dialog["error"]["message"].as_str().unwrap().contains("opens a dialog"), "{dialog}");
     // A chunk that closes the wrapper's own long bracket is still one string, and so is one that ends in `]` or `]=`.
-    assert_eq!(run("return ']]'", 1000, false)["result"], "]]");
-    assert_eq!(run("local t = {5}\nreturn t[1]", 1000, false)["result"], 5);
-    assert_eq!(run("local t = {5}\nreturn t[#t]", 1000, false)["result"], 5);
-    assert_eq!(run("local s = 'a]='\nreturn s", 1000, false)["result"], "a]=");
+    assert_eq!(run("return ']]'", 1000)["result"], "]]");
+    assert_eq!(run("local t = {5}\nreturn t[1]", 1000)["result"], 5);
+    assert_eq!(run("local t = {5}\nreturn t[#t]", 1000)["result"], 5);
+    assert_eq!(run("local s = 'a]='\nreturn s", 1000)["result"], "a]=");
 }
 
 // ----- sidechains: a send's channels, a track's channels, an FX's pins (S8) -----

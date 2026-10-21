@@ -4,7 +4,9 @@
 //!
 //! The chunk is wrapped (see `wrapper`): it is compiled first, run with a time limit where REAPER's Lua has a debug hook,
 //! `print` and the console are kept, and what it returns comes back as JSON (a track, item or take as its ref). The
-//! wrapper leaves its answer for the extension in an ext state that it reads and deletes.
+//! wrapper leaves its answer for the extension in an ext state that it reads and deletes. The preview runs nothing in
+//! REAPER (a script run moves REAPER's state count, and right after REAPER's undo it can wipe the redo list): a chunk
+//! that doesn't compile is refused at the apply, with nothing run.
 
 use serde_json::{json, Value};
 
@@ -63,11 +65,11 @@ fn long_string(code: &str) -> String {
     format!("[{eq}[\n{code} ]{eq}]")
 }
 
-/// The ReaScript that runs `code` (or only compiles it, `check`) and leaves its answer in the ext state `token`.
-pub fn wrapper(code: &str, token: &str, timeout_ms: u64, check: bool) -> String {
+/// The ReaScript that runs `code` and leaves its answer in the ext state `token`.
+pub fn wrapper(code: &str, token: &str, timeout_ms: u64) -> String {
     format!(
         r##"-- Kumi: a Lua chunk run once, then taken away.
-local TOKEN, LIMIT_MS, CHECK = "{token}", {timeout_ms}, {check}
+local TOKEN, LIMIT_MS = "{token}", {timeout_ms}
 local code = {code}
 local sethook, getinfo = debug and debug.sethook, debug and debug.getinfo
 local STOP = "stopped after " .. LIMIT_MS .. " ms (the chunk's time limit)"
@@ -160,7 +162,6 @@ end
 local function answer(text) reaper.SetExtState("{section}", TOKEN, text, false) end
 local chunk, err = load(code, "=chunk", "t")
 if not chunk then answer('{{"compiled":false,"error":' .. where(err) .. '}}') return end
-if CHECK then answer('{{"compiled":true}}') return end
 -- What it prints, up to {most_lines} lines and {most_printed} bytes (a print loop would fill REAPER's memory and ext state).
 local printed, held, dropped = {{}}, 0, 0
 local function hold(text)
@@ -263,9 +264,9 @@ fn token() -> String {
 }
 
 /// Runs the wrapper and reads what it left: None when it left nothing (REAPER didn't run it, or it was cut short).
-fn run(ctx: &Ctx, code: &str, timeout_ms: u64, check: bool) -> Done<Option<Value>> {
+fn run(ctx: &Ctx, code: &str, timeout_ms: u64) -> Done<Option<Value>> {
     let token = token();
-    ctx.reaper.run_script(ctx.proj, &wrapper(code, &token, timeout_ms, check)).map_err(failed)?;
+    ctx.reaper.run_script(ctx.proj, &wrapper(code, &token, timeout_ms)).map_err(failed)?;
     let Some(text) = ctx.reaper.take_ext_state(SECTION, &token) else { return Ok(None) };
     if text.len() > MOST_ANSWER {
         return Ok(Some(
@@ -282,13 +283,9 @@ fn compile_error(error: &Value) -> String {
     }
 }
 
-pub fn preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+pub fn preview(_ctx: &Ctx, input: &Value) -> Done<Preview> {
     let code = code_of(input)?;
     timeout_of(input)?;
-    let checked = run(ctx, code, MOST_TIMEOUT_MS, true)?.ok_or_else(|| failed("REAPER didn't run the check of the chunk"))?;
-    if checked["compiled"] != true {
-        return Err(bad(compile_error(&checked["error"])));
-    }
     Ok(Preview {
         target: json!({"kind": "lua"}),
         prior: json!({}),
@@ -303,7 +300,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if fence["chars"] != code.chars().count() {
         return Err(bad("the chunk isn't the one previewed"));
     }
-    let ran = run(ctx, code, timeout_ms, false)?;
+    let ran = run(ctx, code, timeout_ms)?;
     let Some(ran) = ran else {
         // (REAPER was asked to run it and nothing came back: whether it ran, and what it did, can't be told)
         return Err((
