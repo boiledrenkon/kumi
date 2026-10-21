@@ -346,6 +346,14 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
             }
             reaper.set_item_value(item, "D_POSITION", make.start);
             reaper.set_item_value(item, "D_LENGTH", make.end - make.start);
+            // (m7) As the producer's own import (Insert Media) makes it: looped as their REAPER loops imported media, and
+            // with no fades (an item AddMediaItemToTrack makes always loops and has the new-item fades; KP1 lab: Insert
+            // Media gave none whatever the fade settings).
+            if let Some(loops) = crate::setup::loops_imported_media(reaper) {
+                reaper.set_item_value(item, "B_LOOPSRC", if loops { 1.0 } else { 0.0 });
+            }
+            reaper.set_item_value(item, "D_FADEINLEN", 0.0);
+            reaper.set_item_value(item, "D_FADEOUTLEN", 0.0);
             if let Some(take) = take {
                 let file = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
                 reaper.set_take_string(take, "P_NAME", make.name.as_deref().unwrap_or(&file));

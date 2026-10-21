@@ -153,6 +153,7 @@ function M.snapshot(job, epoch, changed)
     transport = transport_of(song),
     tracks = array(tracks),
     selection = selection_of(song, epoch),
+    setup = rows.setup(song),
     changed = changed,
   }
   if count > M.SNAPSHOT_TRACKS then result.moreTracks = true end

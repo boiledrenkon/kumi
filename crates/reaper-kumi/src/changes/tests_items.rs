@@ -217,6 +217,32 @@ fn a_media_file_is_imported_in_place_and_a_missing_or_unreadable_one_is_refused(
     }
 }
 
+#[test]
+fn an_imported_file_loops_as_the_producers_reaper_loops_imported_media() {
+    let lab = Lab::new();
+    let path = media_file("pad.wav", "WAVE", 2.0, false);
+    let loops = |lab: &Lab| {
+        let (_, applied) = lab.make("item-import", json!({"ref": SNARE, "path": path, "position": 0.0}));
+        item(&guid_in(&applied["created"]["ref"])).unwrap().1.extra.get("B_LOOPSRC").copied()
+    };
+    assert_eq!(loops(&lab), Some(1.0), "REAPER's factory setting loops imported media");
+    // A power user's "loop source" off for imported media (loopnewitems without &4).
+    fake::extra(|e| e.config.insert("loopnewitems".into(), "10".into()));
+    assert_eq!(loops(&lab), Some(0.0), "the producer's setting holds for Kumi's imports too");
+}
+
+#[test]
+fn an_imported_file_has_no_fades_as_the_producers_own_import_has_none() {
+    let lab = Lab::new();
+    let path = media_file("kick.wav", "WAVE", 0.5, false);
+    // REAPER's factory setup: new items get 10 ms fades, but Insert Media's items get none, and an imported kick keeps
+    // its hit.
+    let (_, applied) = lab.make("item-import", json!({"ref": SNARE, "path": path, "position": 0.0}));
+    let (_, imported) = item(&guid_in(&applied["created"]["ref"])).unwrap();
+    let fade = |key: &str| imported.extra.get(key).copied().unwrap_or(0.0);
+    assert_eq!((fade("D_FADEINLEN"), fade("D_FADEOUTLEN")), (0.0, 0.0));
+}
+
 /// Kumi's own folder with a render in it, and the project's media folder: the render's path and the folders (kept alive).
 pub(super) fn kumi_render(lab: &Lab, name: &str) -> (tempfile::TempDir, tempfile::TempDir, String) {
     let kumi = tempfile::tempdir().unwrap();

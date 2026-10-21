@@ -166,6 +166,49 @@ function M.song_settings(song, row)
   end
 end
 
+-- (m7) The producer's setup, read on each look: how long the song's patterns usually are, its groups and their colours,
+-- and the tools installed (Paketti's among them). The song row has the rest (BPM, LPB, TPL, edit step, octave).
+M.SETUP_SLOTS = 512
+M.SETUP_GROUPS = 32
+M.SETUP_TOOLS = 40
+local OWN_TOOL = "com.kumi.Bridge"
+function M.setup(song)
+  local counts, usual, most, lengths = {}, nil, 0, 0
+  local sequence = song.sequencer.pattern_sequence
+  for s = 1, math.min(#sequence, M.SETUP_SLOTS) do
+    local lines = song:pattern(sequence[s]).number_of_lines
+    if not counts[lines] then lengths = lengths + 1 end
+    counts[lines] = (counts[lines] or 0) + 1
+    -- (a tie goes to the length that got there first)
+    if counts[lines] > most then usual, most = lines, counts[lines] end
+  end
+  local groups = {}
+  for i = 1, song.sequencer_track_count do
+    local track = song:track(i)
+    if track.type == renoise.Track.TRACK_TYPE_GROUP and #groups < M.SETUP_GROUPS then
+      groups[#groups + 1] = { name = status.cap(track.name), color = hex(track.color), tracks = #track.members }
+    end
+  end
+  -- (Renoise lists each tool as a table of its manifest's fields: name, id, enabled…)
+  local tools, paketti = {}, false
+  for _, entry in pairs(renoise.app().installed_tools or {}) do
+    local tool = entry --[[@as table]]
+    if type(tool) == "table" and tool.id ~= OWN_TOOL and tool.enabled ~= false then
+      local id, name = tostring(tool.id or ""), tostring(tool.name or "")
+      if (id .. " " .. name):lower():find("paketti", 1, true) then paketti = true end
+      if #tools < M.SETUP_TOOLS then tools[#tools + 1] = status.cap(name ~= "" and name or id) end
+    end
+  end
+  table.sort(tools)
+  return {
+    patternLines = usual or json.null,
+    patternLinesVary = lengths > 1 or nil,
+    groups = array(groups),
+    tools = array(tools),
+    paketti = paketti,
+  }
+end
+
 -- The note columns of a track that are muted (their numbers) and the ones that are named ({"2": "Pad"}); nil for none.
 local function column_state(track)
   local muted, names

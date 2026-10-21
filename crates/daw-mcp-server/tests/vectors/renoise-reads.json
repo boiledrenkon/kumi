@@ -1151,6 +1151,23 @@
             },
             "trackRef": "1:track:1"
           },
+          "setup": {
+            "groups": [
+              {
+                "color": "#29a699",
+                "name": "Drums",
+                "tracks": 2
+              },
+              {
+                "color": "#29a699",
+                "name": "Mix",
+                "tracks": 4
+              }
+            ],
+            "paketti": false,
+            "patternLines": 32,
+            "tools": []
+          },
           "tracks": [
             {
               "collapsed": false,

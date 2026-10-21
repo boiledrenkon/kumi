@@ -20,6 +20,7 @@ pub mod reaper;
 pub mod refs;
 pub mod rows;
 pub mod server;
+pub mod setup;
 pub mod window;
 
 use std::cell::{Cell, RefCell};

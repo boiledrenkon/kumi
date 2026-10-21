@@ -553,6 +553,8 @@ function M.reset(options)
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
     window = M.window,
+    -- (m7) Each tool as a table of its manifest's fields; a test adds to it. Kumi's own is always there.
+    installed_tools = { { name = "Kumi Bridge", id = "com.kumi.Bridge", author = "Kumi", version = "1.0", enabled = true } },
     -- M4 (n-song): saving, as Renoise does it (measured: a folder that isn't there shows a modal error; another file is
     -- written over with no prompt; the document points at the file it was saved as)
     save_song = function()

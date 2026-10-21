@@ -1,6 +1,8 @@
 //! The DAWs Kumi integrates, and what their integrations share. Outside Live's own integration, only this registry
 //! and the crate root name it: the crate root's constructors for Live come through here.
 pub mod ableton;
+#[cfg(test)]
+mod daws_doc;
 pub mod fallback;
 pub mod none;
 pub mod own_bridge;
@@ -12,6 +14,8 @@ pub mod own_listening;
 pub mod own_phrases;
 pub mod own_pictures;
 pub mod own_views;
+#[cfg(test)]
+mod pack_tests;
 pub mod reaper;
 pub mod reaper_changes;
 pub mod renoise;

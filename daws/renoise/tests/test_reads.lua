@@ -370,6 +370,35 @@ test("reads: snapshot gathers the small things", function()
   H.no_dialogs()
 end)
 
+test("reads: the snapshot carries the producer's setup: usual pattern length, groups and colours, tools", function()
+  local env, peer = setup()
+  fill_demo()
+  local s = call(peer, "snapshot").result
+  eq(s.setup.patternLines, 32)
+  eq(s.setup.patternLinesVary, nil)
+  eq(#s.setup.groups, 2)
+  eq(s.setup.groups[1].name, "Drums")
+  eq(s.setup.groups[1].tracks, 2)
+  eq(s.setup.groups[2].name, "Mix")
+  eq(s.setup.groups[2].tracks, 4)
+  ok(s.setup.groups[1].color:match("^#%x%x%x%x%x%x$"), "a group's colour")
+  eq(#s.setup.tools, 0, "Kumi's own tool isn't listed")
+  eq(s.setup.paketti, false)
+  -- A song whose patterns mostly run 64 lines, with Paketti and another tool installed (one switched off).
+  local song = renoise.song()
+  song:pattern(1).number_of_lines = 64
+  local tools = renoise.app().installed_tools
+  tools[#tools + 1] = { name = "Paketti", id = "org.lackluster.Paketti", enabled = true }
+  tools[#tools + 1] = { name = "Slices to Pattern", id = "com.example.Slices", enabled = true }
+  tools[#tools + 1] = { name = "Off Tool", id = "com.example.Off", enabled = false }
+  s = call(peer, "snapshot").result
+  eq(s.setup.patternLines, 64, "the length most slots play (slots 1 and 3 play pattern 1)")
+  eq(s.setup.patternLinesVary, true)
+  T.same(s.setup.tools, { "Paketti", "Slices to Pattern" })
+  eq(s.setup.paketti, true)
+  H.no_dialogs()
+end)
+
 test("reads: focus is cheap, names the view and follows the selection and the transport", function()
   local env, peer = setup()
   fill_demo()

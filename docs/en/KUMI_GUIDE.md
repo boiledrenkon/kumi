@@ -257,7 +257,8 @@ own views ([commands, keys and screens](KUMI_TUI.md#reaper-and-renoise)). It
 listens, judges its changes, works with `/loop` and `/goal`, matches
 references, takes instant phrases, catches up on what changed while it was
 closed, turns what you do by hand into recipes, and uses your library, notes
-and conversations, all in the DAW's words. In REAPER it can also run REAPER's
+and conversations, all in the DAW's words ([what Kumi does in Live, REAPER and
+Renoise](DAWS.md) compares them). In REAPER it can also run REAPER's
 actions, its API and Lua (ReaScript); in Renoise, Lua. These stay Live's: Max
 for Live devices, Kumi Ears, Willington, Kumi's Live extension (with **Ask
 Kumi about this**), Live's own commands and Live's manual.

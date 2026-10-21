@@ -37,6 +37,8 @@ pub struct Extra {
     pub note_names: Vec<(String, i32, i32, String)>,
     /// The track REAPER takes as last touched once an action made it so (40914, by GUID); else the first selected one.
     pub last_touched: Option<String>,
+    /// (m7) API functions extensions registered (SWS's `CF_GetSWSVersion`…), for `APIExists`.
+    pub extension_apis: Vec<String>,
 }
 
 impl Default for Extra {
@@ -48,6 +50,11 @@ impl Default for Extra {
             ("tempoenvtimelock", "1"),
             ("defsavepath", "/lab/Projects"),
             ("projmetroen", "0"),
+            // (m7) REAPER 7.82's factory defaults for new items and tracks (KP1, lab 2026-10-21).
+            ("deffadelen", "0.01000000000000"),
+            ("splitautoxfade", "0"),
+            ("loopnewitems", "14"),
+            ("deftrackvol", "1.00000000000000"),
         ];
         let project_info = [("RULER_LANE_COUNT", 2.0), ("RULER_LANE_DEFAULT:0", 1.0), ("RULER_LANE_DEFAULT:1", 2.0)];
         let actions = [
@@ -97,6 +104,7 @@ impl Default for Extra {
             sampler_refuses_files: false,
             note_names: vec![],
             last_touched: None,
+            extension_apis: vec![],
         }
     }
 }
@@ -342,6 +350,12 @@ unsafe extern "C" fn get_config_var_string(name: *const c_char, buf: *mut c_char
         None => false,
     }
 }
+/// REAPER's own functions (the fake's table) and those an extension registered.
+unsafe extern "C" fn api_exists(name: *const c_char) -> bool {
+    let name = name_of(name);
+    let c_name = CString::new(name.as_str()).unwrap_or_default();
+    !super::lookup(&c_name).is_null() || extra(|e| e.extension_apis.contains(&name))
+}
 unsafe extern "C" fn set_config_var_string(name: *const c_char, value: *const c_char, _persist: c_int) -> c_int {
     let (name, value) = (name_of(name), name_of(value));
     extra(|e| match e.config.get_mut(&name) {
@@ -511,6 +525,7 @@ pub fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetProjectNotes" => get_set_project_notes as unsafe extern "C" fn(*mut ReaProject, bool, *mut c_char, c_int),
         b"GetSetProjectGrid" => get_set_project_grid as unsafe extern "C" fn(*mut ReaProject, bool, *mut f64, *mut c_int, *mut f64) -> c_int,
         b"get_config_var_string" => get_config_var_string as unsafe extern "C" fn(*const c_char, *mut c_char, c_int) -> bool,
+        b"APIExists" => api_exists as unsafe extern "C" fn(*const c_char) -> bool,
         b"set_config_var_string" => set_config_var_string as unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
         b"SectionFromUniqueID" => section_from_unique_id as unsafe extern "C" fn(c_int) -> *mut api::KbdSectionInfo,
         b"kbd_enumerateActions" => kbd_enumerate_actions as unsafe extern "C" fn(*mut api::KbdSectionInfo, c_int, *mut *const c_char) -> c_int,
