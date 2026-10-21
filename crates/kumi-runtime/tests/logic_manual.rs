@@ -557,7 +557,7 @@ async fn offers() {
     let names = |profile: &DawProfile| -> Vec<String> {
         library.tools_for(profile, Default::default()).iter().map(|tool| tool.name().to_owned()).collect()
     };
-    assert_eq!(names(&DawProfile::LOGIC), ["find_sounds", "my_sets", "logic_manual"]);
+    assert_eq!(names(&DawProfile::LOGIC), ["find_sounds", "find_presets", "my_sets", "logic_manual"]);
     assert_eq!(names(&DawProfile::ABLETON), ["find_sounds", "find_presets", "my_sets", "live_manual"]);
     for profile in [DawProfile::REAPER, DawProfile::RENOISE] {
         assert!(!names(&profile).iter().any(|name| name.ends_with("_manual")), "{:?}", profile.id);
