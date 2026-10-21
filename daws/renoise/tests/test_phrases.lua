@@ -71,6 +71,30 @@ test("phrases: a deleted phrase comes back with its lines, settings, column name
   ok(again.result.display.title:find("back already", 1, true), again.result.display.title)
 end)
 
+test("phrases: Kumi's undo of a phrase delete writes back the 0Z commands Renoise cleared, and plays it as the program again (#361 N-S23)", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  bass:insert_phrase_at(3).name = "P3"
+  for k = 1, 3 do
+    mock.ops.set_note(1, 1, k, 1, { note = 48, instrument = 1 }) -- Bass synth's notes, each with its phrase's 0Z
+    mock.ops.set_effect(1, 1, k, 1, 256 + 35, k)
+  end
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  mock.data.undo.stack = {}
+  local record, done = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 2) })
+  local function zero_z(k) return mock.song:pattern(1):track(1):line(k):effect_column(1).number_string .. mock.song:pattern(1):track(1):line(k):effect_column(1).amount_string end
+  eq(zero_z(2), "0000", "Renoise cleared the one that named it")
+  eq(zero_z(3), "0Z02", "and moved the later one down")
+  ok((done.display.note or ""):find("cleared the 1 0Z command", 1, true), tostring(done.display.note))
+  local undone = restore(peer, "phrase-delete", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(zero_z(2), "0Z02", "written again, naming it")
+  eq(zero_z(3), "0Z03")
+  eq(bass.phrase_program, 2, "the program plays it again")
+end)
+
 test("phrases: settings change and go back (lines, LPB, loop, shuffle, key tracking, base note, columns); a loop past its lines is bad-params", function()
   local env, peer = setup()
   local record = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), lines = 32, lpb = 16, loopStart = 16, loopEnd = 31, shuffle = 0.5, keyTracking = "offset", baseNote = 36, noteColumns = 4, delayColumn = true })

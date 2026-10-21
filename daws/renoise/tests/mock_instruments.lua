@@ -222,6 +222,38 @@ local function each_note(fn)
   end
 end
 
+-- The 0Z commands that name an instrument's phrases, on lines where a note plays it: a phrase deleted at `ph` clears those that
+-- name it and moves the later ones down; one made at `ph` moves those from it up, and never fills a cleared one (lab 2026-10-21).
+local ZERO_Z = 256 + 35 -- (the mock's value for the command 0Z: 256 + 36 * "0" + "Z")
+local function renumber_phrases(instrument, type_, ph)
+  local v
+  for k, candidate in ipairs(M.data.instruments) do if candidate == instrument then v = k - 1 end end
+  if v == nil then return end
+  for _, pattern in ipairs(M.data.patterns) do
+    for _, pattern_track in pairs(pattern.tracks) do
+      for _, l in pairs(pattern_track.lines or {}) do
+        local plays = false
+        for _, note in pairs(l.notes or {}) do if note.instrument == v then plays = true end end
+        if plays then
+          local function move(get, set)
+            local number, amount = get()
+            if number ~= ZERO_Z then return end
+            if type_ == "remove" and amount == ph then set(0, 0)
+            elseif type_ == "remove" and amount > ph then set(number, amount - 1)
+            elseif type_ == "insert" and amount >= ph then set(number, amount + 1) end
+          end
+          for _, effect in pairs(l.effects or {}) do
+            move(function() return effect.number, effect.amount end, function(n, a) effect.number, effect.amount = n, a end)
+          end
+          for _, note in pairs(l.notes or {}) do
+            move(function() return note.fxn, note.fxa end, function(n, a) note.fxn, note.fxa = n, a end)
+          end
+        end
+      end
+    end
+  end
+end
+
 local function renumber(type_, a, b)
   -- (instrument values count from 0; 255 is none)
   each_note(function(note, l, c)
@@ -1372,6 +1404,7 @@ function M.instrument_proxy(i)
     if #instrument.phrases >= 126 then error("can't have more than 126 phrases", 2) end
     if ph < 1 or ph > #instrument.phrases + 1 then out_of_range("phrase", ph) end
     -- (Renoise's new phrase: lab)
+    renumber_phrases(instrument, "insert", ph)
     list_op(instrument.phrases, instrument.phrases_observable, "insert", ph, nil, phrase_data({ name = string.format("Phrase %02d", #instrument.phrases + 1),
       lpb = M.data.transport_fields.lpb, lines = 32, loop_end = 32, key_tracking = 2, autoseek = true, note_columns = 4, instrument_column_visible = false }))
     return M.phrase_proxy(instrument, ph)
@@ -1382,6 +1415,7 @@ function M.instrument_proxy(i)
     for m, mapping in ipairs(instrument.mappings) do
       if mapping.phrase == phrase then list_op(instrument.mappings, instrument.mappings_observable, "remove", m) break end
     end
+    renumber_phrases(instrument, "remove", ph)
     list_op(instrument.phrases, instrument.phrases_observable, "remove", ph)
   end
   fields.can_insert_phrase_mapping_at = function(_, m) return m >= 1 and m <= #instrument.mappings + 1 end
