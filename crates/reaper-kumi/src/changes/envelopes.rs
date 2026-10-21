@@ -263,13 +263,19 @@ fn lane_ref(ctx: &Ctx, lane: &Lane) -> Done<String> {
 
 fn lane_label(ctx: &Ctx, lane: &Lane) -> String {
     match lane.item {
-        Some(item) => format!("the automation item at {} on {}", seconds(item.position), env_label(ctx, &lane.at)),
+        Some(item) => format!("the automation item at {} on {}", bar_at(ctx, item.position), env_label(ctx, &lane.at)),
         None => env_label(ctx, &lane.at),
     }
 }
 
+/// A length or an offset, in seconds.
 fn seconds(time: f64) -> String {
     format!("{:.3} s", time).replace(".000 s", " s")
+}
+
+/// Where a time on the project's timeline is, as items and markers say it: `bar 6`, `bar 6 beat 2.5`.
+fn bar_at(ctx: &Ctx, time: f64) -> String {
+    super::marks::bar_text(ctx.reaper, ctx.proj, time)
 }
 
 fn lane_points(ctx: &Ctx, lane: &Lane) -> Vec<EnvPoint> {
@@ -367,7 +373,11 @@ fn lane_time(ctx: &Ctx, lane: &Lane, time: f64) -> Done<f64> {
     if let Some(item) = lane.item {
         let length = ctx.reaper.ai_value(lane.at.envelope, item.index, "D_LENGTH");
         if time < item.position - 1e-9 || time > item.position + length + 1e-9 {
-            return Err(bad(format!("that automation item runs from {} to {}", seconds(item.position), seconds(item.position + length))));
+            return Err(bad(format!(
+                "that automation item runs from {} to {}",
+                bar_at(ctx, item.position),
+                bar_at(ctx, item.position + length)
+            )));
         }
         return Ok(time);
     }
@@ -379,8 +389,8 @@ fn lane_time(ctx: &Ctx, lane: &Lane, time: f64) -> Done<f64> {
             if time < start - 1e-9 || time > start + length + 1e-9 {
                 return Err(bad(format!(
                     "a take envelope's points are inside its item, from {} to {}",
-                    seconds(start),
-                    seconds(start + length)
+                    bar_at(ctx, start),
+                    bar_at(ctx, start + length)
                 )));
             }
             Ok((time - start).max(0.0))
@@ -569,8 +579,8 @@ fn plan_title(ctx: &Ctx, lane: &Lane, plan: &Plan, count: usize) -> String {
         Plan::Clear(start, end) => {
             format!(
                 "Cleared {label} from {} to {} ({points})",
-                seconds(project_time(ctx, lane, *start)),
-                seconds(project_time(ctx, lane, *end))
+                bar_at(ctx, project_time(ctx, lane, *start)),
+                bar_at(ctx, project_time(ctx, lane, *end))
             )
         }
     }
@@ -1246,8 +1256,7 @@ pub fn item_add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         Some(pool) => format!("a pooled copy (pool {pool})"),
         None => "an automation item".into(),
     };
-    let mut display =
-        json!({"title": format!("Added {what} to {} at {} ({} long)", env_label(ctx, &at), seconds(position), seconds(length))});
+    let mut display = json!({"title": format!("Added {what} to {} from {} to {}", env_label(ctx, &at), bar_at(ctx, position), bar_at(ctx, position + length))});
     if pool.is_none() && points.iter().any(|p| p.time >= position && p.time < position + length) {
         display["note"] = "The envelope's points in its range go into the new item (REAPER's way); an undo puts them back.".into();
     }
@@ -1301,7 +1310,7 @@ pub fn item_add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> 
     Ok(Applied {
         applied: json!({"pool": made_pool, "position": made_position, "hash": points_hash(reaper, at.envelope, &points), "items": items_print(ctx, at.envelope)}),
         created: Some(json!({"ref": reference, "kind": "aitem"})),
-        display: json!({"title": format!("Added an automation item to {label} at {} ({} long)", seconds(made_position), seconds(length)), "ref": reference}),
+        display: json!({"title": format!("Added an automation item to {label} from {} to {}", bar_at(ctx, made_position), bar_at(ctx, made_position + length)), "ref": reference}),
         ..Default::default()
     })
 }
@@ -1427,11 +1436,11 @@ fn item_title(ctx: &Ctx, at: &EnvAt, position: f64, writes: &[(&str, f64)]) -> S
             "D_AMPLITUDE" => format!("amplitude {v:.2}"),
             "D_PLAYRATE" => format!("rate {v}"),
             "D_STARTOFFS" => format!("start offset {}", seconds(*v)),
-            "D_POSITION" => format!("moved to {}", seconds(*v)),
+            "D_POSITION" => format!("moved to {}", bar_at(ctx, *v)),
             _ => format!("length {}", seconds(*v)),
         })
         .collect();
-    format!("The automation item at {} on {}: {}", seconds(position), env_label(ctx, at), parts.join(", "))
+    format!("The automation item at {} on {}: {}", bar_at(ctx, position), env_label(ctx, at), parts.join(", "))
 }
 
 pub fn item_set_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -1572,7 +1581,7 @@ pub fn item_delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         target,
         prior: state.clone(),
         fence: json!({"items": items_print(ctx, lane.at.envelope)}),
-        display: json!({"title": format!("Deleted the automation item at {} from {}", seconds(item.position), env_label(ctx, &lane.at))}),
+        display: json!({"title": format!("Deleted the automation item at {} from {}", bar_at(ctx, item.position), env_label(ctx, &lane.at))}),
     })
 }
 
@@ -1591,7 +1600,7 @@ pub fn item_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applie
     Ok(Applied {
         applied: json!({"deleted": {"pool": item.pool, "position": item.position}}),
         material: Some(json!({"state": state, "points": points_json(&points), "poolName": name})),
-        display: json!({"title": format!("Deleted the automation item at {} from {label}", seconds(item.position))}),
+        display: json!({"title": format!("Deleted the automation item at {} from {label}", bar_at(ctx, item.position))}),
         ..Default::default()
     })
 }
@@ -1617,7 +1626,7 @@ pub fn item_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     let lane = Lane { at: at.clone(), item: Some(ItemAt { index, pool, position }) };
     let points = points_from(&material["points"])?;
-    let mut display = json!({"title": format!("The automation item at {} put back on {label}", seconds(position))});
+    let mut display = json!({"title": format!("The automation item at {} put back on {label}", bar_at(ctx, position))});
     if lane_points(ctx, &lane).is_empty() && !points.is_empty() {
         // No other copy of its pool was left, so REAPER emptied the pool: its points go back in.
         for point in &points {
