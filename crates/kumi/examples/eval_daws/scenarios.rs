@@ -707,7 +707,7 @@ note(seq:pattern(1), 1, 0, "C-4", 0)
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let count = |state: &Value| list(&state["instruments"]).len();
-                let new = list(&after["instruments"]).into_iter().skip(count(before)).next().cloned().unwrap_or(Value::Null);
+                let new = list(&after["instruments"]).into_iter().nth(count(before)).cloned().unwrap_or(Value::Null);
                 let frames = list(&new["samples"]).first().and_then(|s| s["frames"].as_f64()).unwrap_or(0.0);
                 let rate = list(&new["samples"]).first().and_then(|s| s["rate"].as_f64()).unwrap_or(44_100.0).max(1.0);
                 let want = 16.0 * 60.0 / 170.0;
