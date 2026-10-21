@@ -486,9 +486,17 @@ impl DawProvider for Own {
             let lines = match logs {
                 Some(logs) => logs().await.unwrap_or_default(),
                 None => {
+                    // Oldest first, so the report reads in the order things happened.
+                    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&folder)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|entry| (entry.metadata().and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH), entry.path()))
+                        .collect();
+                    files.sort();
                     let mut lines = vec![];
-                    for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
-                        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                    for (_, file) in files {
+                        if let Ok(text) = std::fs::read_to_string(&file) {
                             lines.extend(text.lines().rev().take(200).map(str::to_owned).collect::<Vec<_>>().into_iter().rev());
                         }
                     }

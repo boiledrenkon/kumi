@@ -183,11 +183,20 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
 /// `/daw` says which DAW Kumi works with, and takes the DAW by the producer's name for it ("live") or Kumi's id.
 #[test]
 fn daw_says_which_daw_kumi_works_with_and_switches_by_name() {
-    use kumi::daw::{daw_command, work_with, DawCommand};
+    use kumi::daw::{daw_command, daw_command_among, work_with, DawCommand};
     work_with(DawId::Reaper);
     assert_eq!(
-        daw_command(""),
+        daw_command_among("", &|_| true),
         DawCommand::Say("Kumi works with REAPER. /daw live or /daw renoise opens Kumi again with Live or Renoise.".into())
+    );
+    // Review K43: only the DAWs on this computer are offered.
+    assert_eq!(
+        daw_command_among("", &|provider| provider.id() == DawId::Ableton),
+        DawCommand::Say("Kumi works with REAPER. /daw live opens Kumi again with Live.".into())
+    );
+    assert_eq!(
+        daw_command_among("", &|_| false),
+        DawCommand::Say("Kumi works with REAPER, the only DAW it works with on this computer.".into())
     );
     for typed in [" Live", "live", "ableton"] {
         assert_eq!(daw_command(typed), DawCommand::Switch(DawId::Ableton, "Kumi closes and opens again with Live.".into()), "{typed}");
@@ -691,4 +700,21 @@ async fn the_doctor_names_each_fix_and_says_when_kumis_host_wont_start() {
     let host = host.unwrap_or_else(|| panic!("{checks:?}"));
     assert_eq!(host.status, CheckStatus::Fix);
     assert!(host.next.as_deref().is_some_and(|next| next.contains(kumi_runtime::KUMI_REPAIR.as_str())), "{host:?}");
+}
+
+/// Review K43: the report reads the bridge's logs oldest first, whatever order their folder lists them in.
+#[tokio::test(flavor = "current_thread")]
+async fn the_report_reads_the_bridge_logs_oldest_first() {
+    let (dir, env) = renoise_home();
+    let logs = dir.path().join(".kumi/bridges/renoise/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let now = std::time::SystemTime::now();
+    for (name, hours_ago) in [("a.log", 1), ("b.log", 3), ("c.log", 2)] {
+        std::fs::write(logs.join(name), format!("{name} line\n")).unwrap();
+        let file = std::fs::File::options().write(true).open(logs.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(hours_ago * 3600)).unwrap();
+    }
+    let (heading, lines) = own::RENOISE.report_log(&env, "", None).await;
+    assert_eq!(heading, "Renoise's bridge log");
+    assert_eq!(lines, "b.log line\nc.log line\na.log line");
 }

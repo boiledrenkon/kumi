@@ -39,8 +39,12 @@ fn choosing_live_reads_as_choosing_nothing() {
 #[test]
 fn only_a_daw_this_kumi_integrates_can_be_chosen() {
     let env = env();
-    for asked in [vec!["--daw"], vec!["--daw", "Live"], vec!["--daw", "ABLETON"], vec!["--daw", "bitwig"]] {
+    for asked in [vec!["--daw"], vec!["--daw", "bitwig"]] {
         assert_eq!(config(&asked, &env), Err("Use: --daw <daw>, with daw one of ableton, reaper, renoise.".into()), "{asked:?}");
+    }
+    // A name in any case, as /daw takes it.
+    for asked in [vec!["--daw", "Live"], vec!["--daw", "ABLETON"]] {
+        assert_eq!(config(&asked, &env), config(&[], &env), "{asked:?}");
     }
     let mut chosen = env.clone();
     chosen.insert("KUMI_DAW".into(), "bitwig".into());
@@ -58,8 +62,12 @@ fn reaper_or_renoise_chosen_is_written_and_read_back() {
     }
     let mut chosen = env.clone();
     chosen.insert("KUMI_DAW".into(), "renoise".into());
-    let config: serde_json::Value = serde_json::from_str(&config(&[], &chosen).unwrap()).unwrap();
-    assert_eq!(config["daw"], "renoise");
+    let read: serde_json::Value = serde_json::from_str(&config(&[], &chosen).unwrap()).unwrap();
+    assert_eq!(read["daw"], "renoise");
+    // Review K43: KUMI_DAW in capitals, as environment variables often are.
+    chosen.insert("KUMI_DAW".into(), "REAPER".into());
+    let read: serde_json::Value = serde_json::from_str(&config(&[], &chosen).unwrap()).unwrap();
+    assert_eq!(read["daw"], "reaper");
 }
 
 /// With no DAW's bridge installed and none asked for, Kumi chats without a DAW in Live's words: Live stays the DAW Kumi

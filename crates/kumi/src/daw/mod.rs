@@ -191,12 +191,22 @@ pub enum DawCommand {
 
 /// `/daw` with `typed` after it ("", "renoise", "live").
 pub fn daw_command(typed: &str) -> DawCommand {
+    let env = kumi_runtime::system::process_env();
+    daw_command_among(typed, &|provider| provider.here(&env) || provider.bridge_installed(&env))
+}
+
+/// [`daw_command`], offering the other DAWs `here` says are on this computer (any can still be asked for by name).
+pub fn daw_command_among(typed: &str, here: &dyn Fn(&dyn DawProvider) -> bool) -> DawCommand {
     let current = current().id();
     let app = |id: DawId| provider(id).map(|provider| provider.profile().words.app).unwrap_or_default();
     let ids = providers().map(|provider| provider.id());
     let word = typed.trim().to_lowercase();
     if word.is_empty() {
-        let others: Vec<DawId> = ids.into_iter().filter(|id| *id != current).collect();
+        let others: Vec<DawId> =
+            providers().into_iter().filter(|provider| provider.id() != current && here(*provider)).map(|provider| provider.id()).collect();
+        if others.is_empty() {
+            return DawCommand::Say(format!("Kumi works with {}, the only DAW it works with on this computer.", app(current)));
+        }
         let commands: Vec<String> = others.iter().map(|id| format!("/daw {}", command_name(*id))).collect();
         let names: Vec<&str> = others.iter().map(|id| app(*id)).collect();
         return DawCommand::Say(format!(

@@ -157,9 +157,11 @@ fn registered_daws() -> String {
     kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ")
 }
 
-/// A DAW this Kumi integrates, by its name: "live" is another name for Live's ("ableton", the one written), as /daw takes it.
+/// A DAW this Kumi integrates, by its name in any case: "live" is another name for Live's ("ableton", the one written), as
+/// /daw takes it.
 fn known_daw(text: &str) -> Option<DawId> {
-    let daw = if text == "live" { Some(DawId::Ableton) } else { DawId::parse(text) };
+    let text = text.trim().to_ascii_lowercase();
+    let daw = if text == "live" { Some(DawId::Ableton) } else { DawId::parse(&text) };
     daw.filter(|daw| kumi_runtime::integrations::profile(*daw).is_some())
 }
 
