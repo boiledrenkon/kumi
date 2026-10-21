@@ -20,8 +20,7 @@ local M = {}
 M.MAX_SAMPLES = 120
 M.MAX_BYTES = instruments_.MAX_LOAD_BYTES
 
-local NOTE_NAMES = { "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-" }
-local function note_text(k) return NOTE_NAMES[k % 12 + 1] .. math.floor(k / 12) end
+local note_text = base.note_name
 M.note_text = note_text
 
 local BLACK = { [1] = true, [3] = true, [6] = true, [8] = true, [10] = true }

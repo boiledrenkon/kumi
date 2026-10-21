@@ -643,7 +643,7 @@ test("listening: audio_file saves a sample's audio into Kumi's folder, and a sli
   local env, peer = setup({}, { instrument_specs = { { name = "Drums", samples = 3 } } })
   local samples = mock.data.instruments[1].samples
   samples[1].name = "Break"
-  samples[1].buffer = { rate = 44100, frames = 44100, channels = 2 }
+  samples[1].buffer = { rate = 44100, frames = 44100, channels = 2, content = "audio:Break" }
   samples[1].markers = { 1, 22051 }
   samples[2].slice_alias, samples[3].slice_alias = true, true
   local epoch = place(peer)
@@ -658,8 +658,10 @@ test("listening: audio_file saves a sample's audio into Kumi's folder, and a sli
   ok(exists(answer.file))
   local slice = result(call(peer, "audio_file", { ref = epoch .. ":sample:1.3", jobId = "j22", epoch = epoch }), "audio_file of a slice")
   eq(slice.file, env.listening .. "/j22-sample.wav")
-  ok(math.abs(slice.offset - 0.5) < 1e-9, "slice 2 starts half way: " .. tostring(slice.offset))
-  ok(math.abs(slice.length - 0.5) < 1e-9, "and lasts the rest: " .. tostring(slice.length))
+  -- (#361 N-N15: the slice's frames alone, not its whole sample)
+  ok(math.abs(slice.seconds - 0.5) < 1e-6, "the file holds slice 2 alone: " .. tostring(slice.seconds))
+  eq(slice.offset, nil)
+  eq(slice.channels, 2)
   eq(#mock.data.undo.stack, 0, "no undo step")
   H.no_dialogs()
 end)

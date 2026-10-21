@@ -236,7 +236,9 @@ local function solo_preview(song, env, input)
     end
     notes[#notes + 1] = "Renoise solos by turning every other track Off but what it plays through (its group, the send tracks it feeds); "
       .. "the end of a solo turns every track back on, muted ones too. Kumi's undo puts each track back as it was."
-    if #others > 0 and not soloed then
+    -- (also when the track reads soloed only along with another's solo, a group's or a multi-solo made in Renoise: its own solo
+    -- ends theirs)
+    if #others > 0 then
       notes[#notes + 1] = string.format("Renoise's solo is exclusive: %s stops being soloed.", solo_names(song, others))
     end
     if #plan.with > 0 then

@@ -197,11 +197,14 @@ end)
 
 test("bridge: two Renoise started in the same second start their epochs apart", function()
   setup({ real_random = true })
-  local first = KUMI_BRIDGE.bridge.epoch_n
+  local first, first_run = KUMI_BRIDGE.bridge.epoch_n, KUMI_BRIDGE.bridge.run
   setup({ real_random = true })
-  local second = KUMI_BRIDGE.bridge.epoch_n
+  local second, second_run = KUMI_BRIDGE.bridge.epoch_n, KUMI_BRIDGE.bridge.run
   ok(first ~= second, "both start at " .. first)
-  ok(first < 2 ^ 28 and second < 2 ^ 28 and first == math.floor(first), "below 2^28, whole")
+  ok(first < 2 ^ 44 and second < 2 ^ 44 and first == math.floor(first), "44 random bits, whole")
+  -- (#361 N-S10: the place logs carry each run's own name, so a mark kept in one run never resolves in another's)
+  ok(first_run ~= second_run and #first_run == 8, "each run names its logs apart: " .. tostring(first_run) .. ", " .. tostring(second_run))
+  ok(KUMI_BRIDGE.bridge.ilog.id:sub(1, 8) == second_run, "the instruments' log is this run's: " .. tostring(KUMI_BRIDGE.bridge.ilog.id))
   -- (without /dev/urandom, as on Windows: from the nonce's hash)
   mock.urandom = false
   local wire = T.load_payload_module("wire")
@@ -224,7 +227,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,show_status,digest,render_start,listen_status,listen_cancel,audition,audition_stop,audio_file,scratch")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,show_status,digest,render_start,listen_status,listen_cancel,audition,audition_stop,audio_file,scratch,preset_read,instrument_export,macro_read,device_editor,preset_save")
   eq(table.concat(welcome.events, ","), "project,tracks,selection,transport,undone_in_daw,scratch_swept")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()

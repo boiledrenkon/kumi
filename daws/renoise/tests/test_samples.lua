@@ -164,6 +164,8 @@ test("samples: a keyzone's notes, velocities, base note, layer and key tracking 
   eq(data.layer, 2)
   eq(data.map_key_to_pitch, false)
   ok(done.display.title:find("keyzone", 1, true), done.display.title)
+  ok(done.display.title:find("notes C-3\226\128\147B-3", 1, true) and done.display.title:find("base note E-3", 1, true),
+    "notes as Renoise names them: " .. done.display.title)
   local undone = restore(peer, "keyzone-set", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(data.note_range[1], 0)
@@ -283,6 +285,15 @@ test("samples: after Renoise's own undo and redo of a sample Kumi loaded, Kumi's
       eq(sample_names(1), "Kick,Snare,Hat")
     end
   end
+end)
+
+test("samples: Kumi's undo of a replaced sample refuses once the producer edited its end in the sample editor (#361 N-N10)", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-load", { ref = sref(place(peer), 1, 1), path = wav_file("Kick2", 4000) })
+  local buffer = sample(1, 1).buffer
+  buffer.edits = { [buffer.frames] = 0 } -- a fade on its last frames: between the probe points that were
+  failure(restore(peer, "sample-load", record), "changed")
+  eq(sample(1, 1).buffer.frames, 4000, "their edit stays")
 end)
 
 test("samples: a sample's audio replaced by a file is kept and put back by the undo, its name and loop too", function()

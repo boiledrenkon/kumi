@@ -1394,6 +1394,12 @@ function M.make_song(options)
     transport_fields.playing = false
     M.fire(transport_fields.playing_observable)
   end
+  -- (every note off, every voice ended: counted, as a test asks it)
+  transport_fields.panic = function()
+    M.panics = (M.panics or 0) + 1
+    M.triggers = M.triggers or {}
+    M.triggers[#M.triggers + 1] = { "panic" }
+  end
   transport_fields.start = function(_, mode)
     transport_fields.playing, d.started_mode = true, mode
     M.fire(transport_fields.playing_observable)

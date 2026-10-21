@@ -546,6 +546,19 @@ local function saved_instrument(peer, i)
   return path
 end
 
+test("instruments: a zip named .xrni that isn't an instrument (a song renamed) is refused before Renoise's dialog (#361 N-N12)", function()
+  local env, peer = setup()
+  local path = mock.temp_dir .. "/renamed-song.xrni"
+  local f = assert(io.open(path, "wb"))
+  f:write("PK\3\4" .. string.rep("z", 200) .. "PK\1\2 Song.xml")
+  f:close()
+  local epoch = place(peer)
+  local refused = call(peer, "change_preview", { kind = "instrument-load", input = { path = path }, epoch = epoch })
+  failure(refused, "bad-params")
+  ok(refused.error.message:find("contents say otherwise", 1, true), refused.error.message)
+  os.remove(path)
+end)
+
 test("instruments: an .xrni, an .sfz and a sample file load into a new instrument; Kumi's undo takes it away", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 2)

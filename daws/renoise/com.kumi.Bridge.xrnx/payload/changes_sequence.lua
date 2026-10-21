@@ -131,13 +131,7 @@ local function pattern_print(song, p)
       parts[#parts + 1] = string.format("u%d:%d:%d:%s", t, k, automation.playmode, table.concat(points, ";"))
     end
   end
-  local text, a, b = table.concat(parts, "|"), 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(table.concat(parts, "|"))
 end
 
 local function keep_pattern(song, env, p)

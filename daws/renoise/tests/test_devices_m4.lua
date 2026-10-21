@@ -660,6 +660,18 @@ test("devices m4: a meta device is aimed at a device's parameter by refs, and Ku
   ok(again.result and again.result.undo.entry == false, "back already: " .. json.encode(again))
 end)
 
+test("devices m4: a meta device aimed at a track but no device yet gets that track back from Kumi's undo (#361 N-N7)", function()
+  local _, peer = meta_song()
+  local l = device_data(1, 2)
+  l.params[1].value = 2 -- the producer's half-made aim: Pad (track 3), no device yet
+  local epoch = place(peer)
+  local record = change(peer, "meta-destination", { ref = epoch .. ":device:1.2", targetRef = epoch .. ":device:2.2", param = "Gain" })
+  eq(values(1, 2, 1, 3), "1/1/1")
+  local back = restore(peer, "meta-destination", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 3), "2/-1/-1", "Pad again, no device: as the producer left it")
+end)
+
 test("devices m4: a meta device aimed elsewhere before is aimed back there, followed; gone or changed since, refused", function()
   local _, peer = meta_song()
   -- Before Kumi: the LFO drives Pad's EQ (device 3) Gain 2.
@@ -796,6 +808,16 @@ test("devices m4: a made Doofer's undo refuses a knob turned inside it since, wh
   local forced = restore(peer, "doofer-make", done.result, nil, { discard = true })
   ok(forced.result, json.encode(forced.error or {}))
   eq(paths(2), "EQ 5, Gainer, *LFO")
+end)
+
+test("devices m4: a Doofer's preset data with a routing device inside is refused before the container is made, leaving no step (#361 N-N2)", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  local bad_xml = DOOFER_XML:gsub("</Devices>", "<SendDevice type=\"SendDevice\"/>\n      </Devices>", 1)
+  local refused = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" }, { presetData = bad_xml })
+  failure(refused, "bad-params", "routing")
+  eq(paths(2), "EQ 5, Gainer, *LFO", "nothing made")
+  eq(steps(), 0, "no step in Renoise's undo")
 end)
 
 test("devices m4: a Doofer isn't made of a device with automation, or one something outside aims at; a meta device inside keeps its aim", function()
@@ -1164,6 +1186,7 @@ test("devices m4: a native device's settings are saved as a preset in the user l
     local saved = save(2, "Bright")
     ok(saved.result, json.encode(saved.error or {}))
     eq(saved.result.file, home .. "/Documents/Renoise/User Library/Effect Presets/EQ 5/Bright.xrdp")
+    ok(saved.result.note:find("Effect Presets/EQ 5", 1, true) and saved.result.note:find("preferences", 1, true), "where it went, said (#361 N-N8)")
     local f = assert(io.open(saved.result.file, "rb"))
     eq(f:read("*a"), mock.song:track(1):device(2).active_preset_data, "its preset data")
     f:close()

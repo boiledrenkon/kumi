@@ -134,13 +134,7 @@ M.write_moddevice = write_moddevice
 
 local function state_hash(state)
   local text = json.encode(state, { sort_keys = true }) or ""
-  local a, b = 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(text)
 end
 
 -- modset-add {ref: instrument, index?, name?}

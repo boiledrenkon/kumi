@@ -794,7 +794,16 @@ function M.looks_like(path, extension)
   local f = io.open(path, "rb")
   if not f then return false end
   local head = f:read(1024) or ""
+  -- (an .xrni is a zip whose central directory, at its end, names Instrument.xml: another zip named .xrni (a song, a tool) would
+  -- reach Renoise's modal "Unknown instrument type!")
+  local tail = ""
+  if extension == "xrni" then
+    local size = f:seek("end") or 0
+    f:seek("set", math.max(0, size - 65536))
+    tail = f:read(65536) or ""
+  end
   f:close()
+  if extension == "xrni" and not tail:find("Instrument.xml", 1, true) then return false end
   if extension == "sfz" then return head ~= "" and not head:find("%z") end
   for _, pattern in ipairs(MAGIC[extension] or {}) do
     if head:find(pattern) then return true end

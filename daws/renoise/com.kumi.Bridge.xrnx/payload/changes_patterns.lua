@@ -1,7 +1,8 @@
 -- M4 (n-song): Kumi's changes to a pattern itself (its name and number of lines) and to a pattern's track (its slot colour in the
 -- pattern matrix). A pattern is named by its ref (`E:pattern:p`) or by a sequence slot's (`E:seq:s`, the pattern it plays); a
--- pattern's track by the pattern and a track ref, kept as `E:ptrack:p.t`. Records hold them as refs: a pattern pool that changed
--- since (a pattern made or deleted) makes them `stale`, and nothing is written.
+-- pattern's track by the pattern and a track ref, kept as `E:ptrack:p.t`. Records keep the pattern as a place in the pool (its
+-- log since then followed, as the tracks are through the layout), so patterns made or deleted since leave them working; a pool
+-- whose changes can't be followed makes them `stale`, and nothing is written.
 --
 -- Measured in Renoise 3.5.4 (lab, 2026-10-19): the name, the number of lines and the slot colour are undo steps; a pattern
 -- made shorter keeps the lines past its end (they show again when it is made longer), and its automation points too.
@@ -330,13 +331,7 @@ local function own_print(song, p, t)
   for k, automation in ipairs(pattern_track.automation) do
     for _, point in ipairs(automation.points) do parts[#parts + 1] = string.format("a%d:%.9g:%.9g:%.9g", k, point.time, point.value, point.scaling) end
   end
-  local text, a, b = table.concat(parts, "|"), 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(table.concat(parts, "|"))
 end
 
 local function alias_input(song, env, input)

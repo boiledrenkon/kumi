@@ -63,6 +63,27 @@ function M.db_text(db)
   return "+" .. trimmed(rounded)
 end
 
+-- A text's short print: two 32-bit sums of its bytes, as 16 hex digits (the fingerprints the changes keep).
+function M.hash(text)
+  local a, b = 5381, 0
+  for i = 1, #text do
+    local byte = text:byte(i)
+    a = (a * 33 + byte) % 4294967296
+    b = (b * 65599 + byte) % 4294967296
+  end
+  return string.format("%08x%08x", a, b)
+end
+
+-- A note value as Renoise writes it: C-4 is 48, C#4 is 49 (its own naming, with the octave last).
+local NOTE_NAMES = { "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-" }
+function M.note_name(value) return NOTE_NAMES[value % 12 + 1] .. math.floor(value / 12) end
+
+-- A range of notes, as a title says it: "C-5–B-5", or one note.
+function M.notes_text(low, high)
+  if low == high then return M.note_name(low) end
+  return M.note_name(low) .. "\226\128\147" .. M.note_name(high)
+end
+
 function M.pan_text(pan)
   local percent = math.floor(math.abs(pan) * 100 + 0.5)
   if percent == 0 then return "centre" end

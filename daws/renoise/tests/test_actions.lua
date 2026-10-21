@@ -39,6 +39,24 @@ test("actions: a note auditioned plays out loud and is ended after its time; a c
   H.no_dialogs()
 end)
 
+test("actions: an audition's note-off reaches the instrument where it is now, and everything stops when that can't be told (#361 N-S14)", function()
+  local _, peer = K.setup(nil, { instruments = 2, instrument_specs = { { name = "Piano" }, { name = "Pad" } } })
+  local E = K.place(peer)
+  ok(K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 2), track = K.ref(E, "track", 3), note = "C-4", durationMs = 300 }).result)
+  mock.ops.insert_instrument_at(1, { name = "Organ" }) -- made while Pad plays: Pad is instrument 3 now
+  H.tick(2)
+  mock.advance(400)
+  H.tick(2)
+  eq(mock.triggers[#mock.triggers][1] .. " " .. mock.triggers[#mock.triggers][2], "off 3", "the note-off goes to Pad, where it is now")
+  -- an audition whose instrument can't be followed: every note stops
+  ok(K.call(peer, "audition_note", { instrument = K.ref(K.place(peer), "instrument", 3), note = "C-4", durationMs = 300 }).result)
+  mock.fire(mock.tool.app_new_document_observable) -- the tool watches the song anew: what moved can't be told
+  mock.advance(400)
+  H.tick(2)
+  eq(mock.triggers[#mock.triggers][1], "panic", "Renoise's panic: no voice hangs on")
+  H.no_dialogs()
+end)
+
 test("actions: an audition asks nothing Renoise can't play, and waits for nothing while Renoise is busy", function()
   local _, peer = K.setup()
   local E = K.place(peer)
@@ -87,6 +105,27 @@ test("actions: select shows a track, its device, an instrument, a slot that play
   refused({ line = -1 }, "bad-params")
   refused({ track = K.ref(E, "track", 9) }, "gone")
   H.no_dialogs()
+end)
+
+test("actions: saving into a folder named outside ASCII leaves no probe file there (#361 N-N9)", function()
+  local env, peer = K.setup()
+  local dir = T.temp_dir("save") .. "/S\195\182ngs"
+  os.execute("mkdir -p '" .. dir .. "'")
+  mock.data.song_fields.file_name = dir .. "/mine.xrns"
+  local saved = K.call(peer, "project_save", {}).result
+  ok(saved, "saved")
+  eq(io.exists(dir .. "/.kumi-save-check"), false, "no probe file written there")
+end)
+
+test("actions: project_save refuses a song whose own folder is gone, before Renoise stops at its error (#361 N-S15)", function()
+  local env, peer = K.setup()
+  local dir = T.temp_dir("save-gone")
+  mock.data.song_fields.file_name = dir .. "/moved/mine.xrns" -- its folder renamed or its drive gone since it was opened
+  local saves = #(mock.saves or {})
+  local refused = K.call(peer, "project_save", {})
+  K.failure(refused, "bad-params")
+  ok(refused.error.message:find("give path", 1, true), refused.error.message)
+  eq(#(mock.saves or {}), saves, "nothing saved")
 end)
 
 test("actions: project_save writes the song's own file, or saves it as a new .xrns; an unsaved song needs the path", function()
@@ -138,6 +177,18 @@ test("actions: the bridge says it has the actions", function()
   local methods = table.concat(T.load_payload_module("status").METHODS, ",")
   ok(methods:find("audition_note,select,project_save", 1, true), methods)
   H.no_dialogs()
+end)
+
+test("actions: status advertises every method the bridge answers (#361 N-N14)", function()
+  local methods = {}
+  for _, name in ipairs(T.load_payload_module("status").METHODS) do methods[name] = true end
+  local f = assert(io.open(T.tests_dir .. "../com.kumi.Bridge.xrnx/payload/bridge.lua", "rb"))
+  local text = f:read("*a")
+  f:close()
+  local missing = {}
+  for name in text:gmatch("\nfunction handlers%.([%w_]+)") do if not methods[name] then missing[#missing + 1] = name end end
+  for name in text:gmatch("\nhandlers%.([%w_]+) = ") do if not methods[name] then missing[#missing + 1] = name end end
+  eq(table.concat(missing, ","), "", "every handler is in status's methods")
 end)
 
 test("actions: refs come as Kumi names them (instrumentRef, trackRef, sequenceRef) and are carried through the layout", function()

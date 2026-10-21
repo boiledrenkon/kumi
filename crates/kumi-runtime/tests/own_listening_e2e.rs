@@ -845,7 +845,8 @@ fn pattern_eighths(delay: Option<&str>, volume: Option<&str>) -> Value {
                     cell["volume"] = volume.into();
                 }
             }
-            json!({"line": n * 2 + 1, "notes": [cell]})
+            // (lines by Renoise's numbers, from 00, as the tool's rows give them)
+            json!({"line": n * 2, "notes": [cell]})
         })
         .collect();
     Value::Array(rows)
@@ -869,13 +870,13 @@ async fn groove_moves_a_renoise_pattern_tracks_notes_by_their_delays_and_volumes
                 .await
                 .unwrap();
             assert!(!start.is_error, "{}", start.text);
-            assert!(start.text.contains("“Kick” in pattern 1"), "{}", start.text);
+            assert!(start.text.contains("“Kick” in pattern 00"), "{}", start.text);
             let applied = groove.execute(object(json!({"apply": true})), Signal::new()).await.unwrap();
             assert!(!applied.is_error, "{}", applied.text);
             let reply: Value = serde_json::from_str(&applied.text).unwrap();
             assert_eq!(reply["kept"], true, "{reply}");
             let lines = script.lines(1, 1);
-            let offbeat = lines.as_array().unwrap().iter().find(|row| row["line"] == 3).unwrap()["notes"][0].clone();
+            let offbeat = lines.as_array().unwrap().iter().find(|row| row["line"] == 2).unwrap()["notes"][0].clone();
             assert!(offbeat["delay"].is_string() && offbeat["volume"].is_string(), "the off-beat delayed and softer: {offbeat}");
             assert_eq!(lines.as_array().unwrap().len(), 16, "the notes stay on their lines");
             // A slot and a track name the part too, and a ref that isn't one says how to name it.

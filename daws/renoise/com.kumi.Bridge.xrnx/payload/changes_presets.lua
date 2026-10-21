@@ -650,14 +650,24 @@ end
 local function place_of_numbers(song, env, numbers)
   if numbers.track < 0 then return { none = true } end
   local t, d = numbers.track + 1, numbers.effect + 1
-  if t > rows.track_count(song) or numbers.effect < 0 or d > #song:track(t).devices then return { none = true, track_only = numbers.track } end
+  if t > rows.track_count(song) then return { none = true } end
+  -- (a track aimed at with no device yet: the producer's half-made aim, its track kept)
+  if numbers.effect < 0 or d > #song:track(t).devices then return { none = true, track_only = numbers.track } end
   local device = song:track(t):device(d)
   return { to = t, dev = material_.device_place(env, t, d, device), param = numbers.parameter, label = label_of(t, song:track(t), device) }
 end
 
 -- The numbers a kept place names now (its track carried from `layout`, its device followed), or nil and why.
 local function numbers_of_place(song, env, place, layout)
-  if place.none then return { track = -1, effect = -1, parameter = -1 } end
+  if place.none then
+    -- (a half-made aim at a track: that track, where it is now, with no device)
+    if type(place.track_only) == "number" and place.track_only >= 0 then
+      local t = place.track_only + 1
+      if type(layout) == "number" then t = env.shifted(t, layout) end
+      if t and t >= 1 and t <= rows.track_count(song) then return { track = t - 1, effect = -1, parameter = -1 } end
+    end
+    return { track = -1, effect = -1, parameter = -1 }
+  end
   local t, why = place.to, nil
   if type(layout) == "number" then t, why = env.shifted(place.to, layout) end
   if not t then return nil, why end
@@ -914,6 +924,12 @@ base.register({
       bad(string.format("index must be a whole number from 2 (after the mixer device) to %d", #track.devices + 1))
     end
     if type(input.presetData) ~= "string" or #input.presetData > M.MAX_PRESET_BYTES then bad("presetData: the container's preset data") end
+    -- (what can be told of the data before the container is made: a refusal after it would leave a step in Renoise's undo,
+    -- which clears the producer's redo)
+    local slot = path == CONTAINER_PATHS.splitter and "SplitterDevice" or "DooferDevice"
+    if preset_kind(input.presetData).slot ~= slot then bad("presetData isn't a " .. (input.type or "doofer") .. "'s preset data (" .. slot .. ")") end
+    local trouble = container_trouble(input.presetData)
+    if trouble then bad("that preset data won't go into the " .. (input.type or "doofer") .. ": " .. trouble) end
     -- What goes back on the undo: each device as it is (ascending places), and which of the others each meta device aims at.
     local by_place = {}
     for i, m in ipairs(list) do by_place[i] = m end
@@ -1156,7 +1172,9 @@ function M.save(params, env)
   for _, preset in ipairs(device.presets) do
     if preset == name then listed = true end
   end
-  return { epoch = env.epoch(), layout = env.layout(), file = file, listed = listed, label = label }
+  -- (where it went, said: Kumi takes the user library from where Renoise makes it, which its preferences can move)
+  local note = string.format("Saved in %s. Renoise lists it from its next start if that is the user library its preferences name.", dir)
+  return { epoch = env.epoch(), layout = env.layout(), file = file, listed = listed, label = label, note = note }
 end
 
 return M

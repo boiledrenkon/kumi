@@ -323,7 +323,7 @@ local function watch_track(song, i)
   token.devices = {}
   -- (the track's devices' log: a new one for every watch, so a place from before the track was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.dlog = places.new("d" .. b.ids)
+  token.dlog = places.new(b.run .. "d" .. b.ids)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
@@ -365,7 +365,7 @@ local function watch_pattern(song, p, tracks)
   local token = b.groups.patterns[p]
   -- (the count of its changed lines, under an id of this watch: a mark from before the pattern was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.pid, token.touches = "p" .. b.ids, 0
+  token.pid, token.touches = b.run .. "p" .. b.ids, 0
   observers:owned(token, nil, function()
     observers:watch_lines(pattern)
     observers:watch_changes(pattern.name_observable)
@@ -393,7 +393,7 @@ local function watch_phrase(phrase, token, instrument_token)
   -- (n-instruments: the count of its changed lines, under an id of this watch, as a pattern's: a phrase change's undo goes
   -- through only if none came since its step)
   b.ids = (b.ids or 0) + 1
-  token.pid, token.touches = "ph" .. b.ids, 0
+  token.pid, token.touches = b.run .. "ph" .. b.ids, 0
   observers:owned(token, instrument_token, function()
     observers:watch_lines(phrase, token)
     observers:watch_changes(phrase.name_observable)
@@ -411,7 +411,7 @@ end
 -- for every watch, as a track's devices have).
 local function watch_modset(set, token, instrument_token)
   b.ids = (b.ids or 0) + 1
-  token.log, token.parent, token.devices = places.new("m" .. b.ids), instrument_token, {}
+  token.log, token.parent, token.devices = places.new(b.run .. "m" .. b.ids), instrument_token, {}
   for d = 1, #set.devices do token.devices[d] = group() end
   observers:owned(token, instrument_token, function()
     observers:watch_changes(set.name_observable)
@@ -421,7 +421,7 @@ end
 
 local function watch_chain(chain, token, instrument_token)
   b.ids = (b.ids or 0) + 1
-  token.log, token.parent, token.devices = places.new("c" .. b.ids), instrument_token, {}
+  token.log, token.parent, token.devices = places.new(b.run .. "c" .. b.ids), instrument_token, {}
   for d = 1, #chain.devices do token.devices[d] = group() end
   observers:owned(token, instrument_token, function()
     observers:watch_changes(chain.name_observable)
@@ -436,8 +436,8 @@ local function watch_instrument(song, i)
   token.samples, token.phrases = {}, {}
   -- n-instruments: the logs of its lists, new for every watch (a place from before the instrument was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.slog, token.phlog = places.new("s" .. b.ids), places.new("ph" .. b.ids)
-  token.mlog, token.clog = places.new("ms" .. b.ids), places.new("cs" .. b.ids)
+  token.slog, token.phlog = places.new(b.run .. "s" .. b.ids), places.new(b.run .. "ph" .. b.ids)
+  token.mlog, token.clog = places.new(b.run .. "ms" .. b.ids), places.new(b.run .. "cs" .. b.ids)
   token.modsets, token.chains = {}, {}
   observers:owned(token, nil, function()
     observers:watch_changes(instrument.name_observable)
@@ -1566,12 +1566,14 @@ function M.start(h, reloading)
       b.remake = "too many connections held open after being refused (" .. open .. ")"
     end,
   })
-  -- (a random start: two Renoise running at once never count through the same epochs, so a ref or a change from one is
-  -- refused as stale by the other)
-  b.epoch_n = b.epoch_n or wire.random28()
+  -- (a random start, 44 bits wide: two Renoise running at once, or one started again, never count through the same epochs, so
+  -- a ref or a change from one is refused as stale by the other; and the place logs carry this run's own name, so a mark kept
+  -- in one run never resolves in another's logs)
+  b.epoch_n = b.epoch_n or wire.random28() * 65536
+  b.run = b.run or string.sub(wire.nonce(), 1, 8)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.ids = b.ids or 0
-  b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")
+  b.plog, b.ilog = b.plog or places.new(b.run .. "p"), b.ilog or places.new(b.run .. "i")
   b.cat, b.snap = b.cat or {}, b.snap or {}
   if not b.snap[b.epoch_n] then
     local snapshot = {}

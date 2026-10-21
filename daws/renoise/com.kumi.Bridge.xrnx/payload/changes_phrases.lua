@@ -182,13 +182,7 @@ end
 local function lines_print(phrase)
   local rows = read_lines(phrase)
   local text = json.encode(rows, { sort_keys = true }) or ""
-  local a, b = 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(text)
 end
 
 -- The phrase's mapping (its keys in keymap mode): its note range, or nil.
@@ -262,12 +256,15 @@ local function add_plan(song, env, input)
       settings[key] = value
     end
   end
-  -- (a new phrase has 16 lines unless given: its loop must fit what it will have)
-  local lines = settings.lines or 16
+  -- (a new phrase has 32 lines unless given, lab 3.5.4: its loop must fit what it will have)
+  local lines = settings.lines or M.NEW_PHRASE_LINES
   if (settings.loopStart or 0) >= lines or (settings.loopEnd or 0) >= lines then bad("the loop must be within the phrase's lines") end
   if settings.loopStart and settings.loopEnd and settings.loopStart > settings.loopEnd then bad("loopStart must not be after loopEnd") end
   return { n = n, label = label, count = count, index = index, settings = settings }
 end
+
+-- What Renoise makes a new phrase with (lab 3.5.4): 32 lines, 4 note columns, key tracking transpose, autoseek on.
+M.NEW_PHRASE_LINES = 32
 
 local function phrase_print(phrase)
   return { name = phrase.name, lines = phrase.number_of_lines, empty = phrase.is_empty, mode = phrase.playback_mode, print = lines_print(phrase) }
@@ -385,6 +382,54 @@ local function write_script_parameters(phrase, kept)
   return missed
 end
 
+-- The 0Z commands that name phrase `ph` (an effect column's, or a note column's sample effect), as places {p, t, line, col,
+-- kind}; nil when the song is too big to look through in one callback. Renoise 3.5.4 clears those that name a phrase it deletes
+-- (and renumbers the later ones), and an insert renumbers again but never fills a cleared one (lab 2026-10-21).
+M.ZERO_Z_READS = 200000
+local function zero_z_cells(song, ph)
+  local rows_ = import("rows")
+  local found, reads = {}, 0
+  for p = 1, #song.patterns do
+    local pattern = song:pattern(p)
+    for t = 1, rows_.track_count(song) do
+      local pattern_track = pattern:track(t)
+      if not pattern_track.is_alias and not pattern_track.is_empty then
+        for l = 1, pattern.number_of_lines do
+          local line = pattern_track:line(l)
+          reads = reads + 1
+          if not line.is_empty then
+            for c = 1, 8 do
+              local column = line:effect_column(c)
+              if column.number_string == "0Z" and column.amount_value == ph then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "effect" } end
+            end
+            if song:track(t).max_note_columns > 0 then
+              for c = 1, 12 do
+                local column = line:note_column(c)
+                local ok, number = pcall(function() return column.effect_number_string end)
+                if ok and number == "0Z" and column.effect_amount_value == ph then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "note" } end
+              end
+            end
+            reads = reads + 20
+          end
+          if reads > M.ZERO_Z_READS then return nil end
+        end
+      end
+    end
+  end
+  return found
+end
+
+local function zero_z_column(song, cell)
+  local line = song:pattern(cell.p):track(cell.t):line(cell.line)
+  return cell.kind == "effect" and line:effect_column(cell.col) or line:note_column(cell.col)
+end
+
+local function zero_z_empty(song, cell)
+  local column = zero_z_column(song, cell)
+  if cell.kind == "effect" then return column.number_value == 0 and column.amount_value == 0 end
+  return column.effect_number_value == 0 and column.effect_amount_value == 0
+end
+
 local function delete_apply(song, env, input, fence, desc)
   local ok, n, objects, label = pcall(places_.locate, song, env, "phrase", input, "phrase-delete")
   if not ok then base.gone_is_changed(n) end
@@ -400,13 +445,35 @@ local function delete_apply(song, env, input, fence, desc)
     -- (its count of changed lines, for the one Kumi puts back to take on)
     logs = env.logs_of and env.logs_of("phrase", n) or nil,
   }
+  -- (the 0Z commands that name it: those Renoise clears are kept, to be written again when it comes back)
+  local named = zero_z_cells(song, n[2])
   song:describe_undo(desc)
   instrument:delete_phrase_at(n[2])
   material.instrument = places_.place_of(env, "instrument", { n[1] })
   material.after = env.list_mark and env.list_mark("phrases", n[1]) or nil
+  -- (the program Renoise moved it to, for the undo to know the producer didn't choose another since)
+  if material.program then material.programAfter = instrument.phrase_program end
+  local note
+  if named then
+    local cleared, patterns = {}, {}
+    for _, cell in ipairs(named) do
+      if zero_z_empty(song, cell) then
+        cleared[#cleared + 1] = cell
+        patterns[cell.p] = true
+      end
+    end
+    if #cleared > 0 then
+      material.zeroZ = cleared
+      material.pool = import("changes_material").keep_pool(song, env, patterns)
+      note = string.format("Renoise cleared the %d 0Z %s that named it; Kumi puts %s back with it.", #cleared, #cleared == 1 and "command" or "commands",
+        #cleared == 1 and "it" or "them")
+    end
+  else
+    note = "The song is too big for Kumi to look for the 0Z commands that name it: Renoise clears them, and Kumi's undo won't write them again."
+  end
   return {
     applied = { deleted = true }, material = material, target = places_.target_of(env, "instrument", { n[1] }),
-    display = { title = "Deleted phrase " .. label }, undo = { desc = desc, entry = true }, prior = { deleted = false },
+    display = { title = "Deleted phrase " .. label, note = note }, undo = { desc = desc, entry = true }, prior = { deleted = false },
     place = places_.journal_place("phrase", n), shape = "deleted",
   }
 end
@@ -453,10 +520,38 @@ local function delete_restore(song, env, restore, desc)
   end
   if material.program then
     pcall(function()
-      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and (instrument.phrase_program == 0 or instrument.phrase_program > #instrument.phrases) then
+      local program = instrument.phrase_program
+      -- (Renoise moved the program off the phrase it deleted: unless the producer chose another since, it plays this one again)
+      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE
+        and (program == 0 or program > #instrument.phrases or (material.programAfter ~= nil and program == material.programAfter)) then
         instrument.phrase_program = at
       end
     end)
+  end
+  -- The 0Z commands Renoise cleared, written again naming it where they still are empty (the patterns followed through the pool,
+  -- the tracks through the layout).
+  if type(material.zeroZ) == "table" and #material.zeroZ > 0 then
+    local pattern_now = import("changes_material").pool_now(song, env, material.pool)
+    local skipped = 0
+    for _, cell in ipairs(material.zeroZ) do
+      local p = pattern_now and pattern_now(cell.p) or nil
+      local t = cell.t
+      if type(restore.layout) == "number" and env.shifted then t = env.shifted(cell.t, restore.layout) end
+      local placed = p and t and { p = p, t = t, line = cell.line, col = cell.col, kind = cell.kind } or nil
+      local written = placed and pcall(function()
+        if placed.line > song:pattern(placed.p).number_of_lines or not zero_z_empty(song, placed) then error("taken") end
+        local column = zero_z_column(song, placed)
+        if placed.kind == "effect" then
+          column.number_string, column.amount_value = "0Z", at
+        else
+          column.effect_number_string, column.effect_amount_value = "0Z", at
+        end
+      end)
+      if not written then skipped = skipped + 1 end
+    end
+    if skipped > 0 then
+      notes[#notes + 1] = string.format("%d of the 0Z commands that named it weren't written again (their pattern, track or cell changed since).", skipped)
+    end
   end
   -- (the phrase Kumi deleted, at its place again with its lines: what was kept by its place, and its lines' count, follow it)
   if env.back then env.back("phrases", n[1], nil, material.after, at) end
@@ -780,7 +875,8 @@ local function used_columns(phrase)
   return used
 end
 
-local function lower(phrase, prior, applied)
+-- (`on_write`, when given, runs just before anything is written: a restore that found the lines back names its step there)
+local function lower(phrase, prior, applied, on_write)
   if type(prior) ~= "table" or type(applied) ~= "table" then return end
   local now, used = phrase_columns(phrase), used_columns(phrase)
   local back = {}
@@ -789,7 +885,11 @@ local function lower(phrase, prior, applied)
   for _, flag in ipairs({ "volume", "panning", "delay", "sampleEffects", "instrument" }) do
     if prior[flag] == false and applied[flag] == true and now[flag] == true and not used[flag] then back[flag] = false end
   end
-  if next(back) then set_phrase_columns(phrase, back) end
+  if next(back) then
+    if on_write then on_write() end
+    set_phrase_columns(phrase, back)
+    return true
+  end
 end
 
 -- What a request's lines name in the phrase: the cells and what they get (cells.parse_cells takes a pattern and a track:
@@ -910,8 +1010,12 @@ local function lines_kind(spec)
     end
     local place = places_.journal_place("phrase", n)
     if #todo == 0 then
-      lower(phrase, restore_.prior.columns, restore_.applied.columns)
+      -- (the lines are back; hiding the columns Kumi showed is a step of Renoise's undo, named as Kumi's)
+      local hid = lower(phrase, restore_.prior.columns, restore_.applied.columns, function() song:describe_undo(desc) end)
       base.note_restored(env.journal, kind, place, restore_.applied, base.KINDS[kind])
+      if hid then
+        return { restored = { done = true }, display = { title = noun .. " in " .. label .. " are back already: the columns Kumi showed are hidden again" }, undo = { desc = desc, entry = true } }
+      end
       return { restored = { done = true }, display = { title = noun .. " in " .. label .. " are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     song:describe_undo(desc)
@@ -1127,12 +1231,14 @@ base.register({
         -- (the render switches the phrase to play its lines: Renoise's undo of it switches it back, which the journal hears)
         if env.watch_undo then env.watch_undo(phrase.playback_mode_observable) env.watch_undo(phrase.number_of_lines_observable) end
         now_song:describe_undo(desc)
-        local started, err = pcall(function()
-          phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
+        local started, accepted, why = pcall(function()
+          return phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
             result = { error = error_text, rendered = rendered, skipped = skipped }
           end)
         end)
-        if not started then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(type(err) == "table" and err.message or err) }, 0) end
+        if not started then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(type(accepted) == "table" and accepted.message or accepted) }, 0) end
+        -- (Renoise refusing at once answers false and why: nothing was rendered, and nothing waits)
+        if accepted == false and not result then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(why or "it refused") }, 0) end
         job.wrote = "The render of " .. plan.label
         local from = env.now_ms()
         while not result do
@@ -1155,7 +1261,7 @@ base.register({
         local applied = { print = lines_print(phrase), mode = phrase.playback_mode, rendered = result.rendered, skipped = result.skipped }
         return {
           applied = applied,
-          material = { at = places_.place_of(env, "phrase", n), lines = plan.lines, settings = plan.settings },
+          material = { at = places_.place_of(env, "phrase", n), lines = plan.lines, settings = plan.settings, print = fence.print, mode = fence.mode },
           target = places_.target_of(env, "phrase", n), display = display, undo = { desc = desc, entry = true },
           -- (the journal compares the phrase's lines and playback mode with what they were and what the render left)
           prior = { lines = plan.lines, settings = plan.settings, print = fence.print, mode = fence.mode },
@@ -1172,6 +1278,11 @@ base.register({
     local objects = places_.resolve(song, "phrase", n)
     local phrase, label = objects.phrase, places_.label_of("phrase", n, objects)
     local now = lines_print(phrase)
+    -- (Renoise's own undo of the render brought its lines and mode back already)
+    if material.print ~= nil and now == material.print and phrase.playback_mode == material.mode then
+      base.note_restored(env.journal, "phrase-render", places_.journal_place("phrase", n), { print = applied.print, mode = applied.mode }, base.KINDS["phrase-render"])
+      return { restored = { done = true }, display = { title = label .. "'s lines are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    end
     if not restore.discard and (now ~= applied.print or phrase.playback_mode ~= applied.mode) then fail("changed", label .. " changed in Renoise since Kumi rendered it") end
     song:describe_undo(desc)
     phrase:clear()
