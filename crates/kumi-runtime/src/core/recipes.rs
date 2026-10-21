@@ -213,7 +213,19 @@ impl RecipeStore for FileRecipeStore {
         recipes.sort_by(|a, b| {
             b.last_used.unwrap_or(b.created).partial_cmp(&a.last_used.unwrap_or(a.created)).unwrap_or(std::cmp::Ordering::Equal)
         });
-        recipes.truncate(MAX_RECIPES);
+        // Each DAW's newest `MAX_RECIPES`: one DAW's recipes never push another's out.
+        let mut kept: Vec<(DawId, usize)> = vec![];
+        recipes.retain(|recipe| match kept.iter_mut().find(|(daw, _)| *daw == recipe.daw()) {
+            Some((_, count)) if *count >= MAX_RECIPES => false,
+            Some((_, count)) => {
+                *count += 1;
+                true
+            }
+            None => {
+                kept.push((recipe.daw(), 1));
+                true
+            }
+        });
         Ok(recipes)
     }
     async fn get(&self, name: &str) -> Result<Option<Recipe>, RuntimeError> {
@@ -481,7 +493,7 @@ impl RecipeTool {
         let daw = self.profile.id.unwrap_or(DawId::Ableton);
         let existing = self.options.store.get_in(&name, daw).await?;
         let recipes = self.options.store.list().await?;
-        if existing.is_none() && recipes.len() >= MAX_RECIPES {
+        if existing.is_none() && recipes.iter().filter(|recipe| recipe.daw() == daw).count() >= MAX_RECIPES {
             return Ok(ToolResult::error(format!("{MAX_RECIPES} recipes are kept; ask the producer which one to forget first.")));
         }
         for p in &mut params {

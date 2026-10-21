@@ -28,7 +28,6 @@ const METHODS: [&str; 6] = ["read", "snapshot", "focus", "focus_body", "show_sta
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
 const CHANGE_METHODS: [&str; 4] = ["change_preview", "change_apply", "change_restore", "project_save"];
-/// (m6-places) A line in the status bar, which a song made to be changed shows too.
 
 struct Case {
     method: String,

@@ -261,6 +261,41 @@ async fn each_daw_keeps_its_own_recipes_and_never_offers_another_daws() {
     assert!(f.dir.path().join("recipes/drum-bus.json").is_file());
 }
 
+// Each DAW keeps its own MAX_RECIPES: REAPER's newer recipes never push Live's oldest out, nor fill the room Live's take.
+#[tokio::test]
+async fn each_daw_keeps_its_own_number_of_recipes() {
+    use kumi_runtime::core::daw::{DawId, DawProfile};
+    let f = Fixture::new();
+    let kept = |name: String, created: f64, daw: Option<DawId>| Recipe {
+        version: 1,
+        name,
+        about: "A kept recipe".into(),
+        params: vec![],
+        steps: vec![json!({"tool": "set_mixer", "input": {}}).as_object().unwrap().clone()],
+        created,
+        used: 0.0,
+        last_used: None,
+        daw,
+    };
+    for n in 0..MAX_RECIPES {
+        f.store.save(&kept(format!("Live {n}"), 1_000.0 + n as f64, None)).await.unwrap();
+    }
+    for n in 0..3 {
+        f.store.save(&kept(format!("Reaper {n}"), 9_000.0 + n as f64, Some(DawId::Reaper))).await.unwrap();
+    }
+    let all = f.store.list().await.unwrap();
+    let count = |daw: DawId| all.iter().filter(|recipe| recipe.daw() == daw).count();
+    assert_eq!((count(DawId::Ableton), count(DawId::Reaper)), (MAX_RECIPES, 3));
+    // REAPER saves another; Live, full, is asked to forget one first.
+    let (reaper, _) = tools_in(DawProfile::REAPER, f.store.clone(), &["fx_add"]);
+    let saved =
+        call(&reaper, "save_recipe", json!({"name":"Reaper 3","about":"one more","steps":[{"tool":"fx_add","input":{"name":"ReaEQ"}}]}))
+            .await;
+    assert!(!saved.is_error, "{}", saved.text);
+    let refused = f.run("save_recipe", json!({"name":"Live 500","about":"one more","steps":[{"tool":"set_mixer","input":{}}]})).await;
+    assert!(refused.is_error && refused.text.contains("recipes are kept"), "{}", refused.text);
+}
+
 #[tokio::test]
 async fn a_daws_recipe_kept_beside_lives_by_an_earlier_kumi_is_found_as_that_daws_and_moves_to_its_folder() {
     use kumi_runtime::core::daw::{DawId, DawProfile};

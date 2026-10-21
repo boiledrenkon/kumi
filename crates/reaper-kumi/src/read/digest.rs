@@ -5,11 +5,13 @@
 //! `MOST_MARKERS`. A facet leaf named `…Hash` is a fingerprint; a null leaf wasn't read (an automated fader or
 //! parameter follows its envelope, so it's left to the envelope's fingerprint).
 //!
-//! Bounded: each page holds about `PAGE_BYTES` and `PAGE_TIME` of work; parameters, envelope points and (with
-//! `values`) parameter values have budgets for the whole digest, carried in the cursor. `content: false` (watch_me's
-//! looks) leaves out items and envelope points.
+//! Bounded: each page holds about `PAGE_BYTES` and `PAGE_TIME` of work, inside a track too (a track of many items or
+//! points is read over several pages, and read once for all its pages); parameters, envelope points and (with `values`)
+//! parameter values have budgets for the whole digest, carried in the cursor. `content: false` (watch_me's looks) leaves
+//! out items and envelope points.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -35,10 +37,37 @@ const POINTS_BUDGET: usize = 200_000;
 const PAGE_BYTES: usize = 192 * 1024;
 const PAGE_TIME: Duration = Duration::from_millis(20);
 
+/// Tracks read part way (or read, for their later pages) kept at once: a few digests may go on side by side.
+const KEPT_WORK: usize = 4;
+
 #[cfg(test)]
 thread_local! {
     /// A test's own page size, item and marker limits: (page bytes, most items, most markers).
     pub static TEST_LIMITS: std::cell::Cell<Option<(usize, usize, usize)>> = const { std::cell::Cell::new(None) };
+    /// A test's page share of the main thread as a number of points and items read, in place of `PAGE_TIME`.
+    pub static TEST_READS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// A page's share of REAPER's main thread.
+struct Clock {
+    started: Instant,
+    reads: usize,
+}
+
+impl Clock {
+    fn over(&self) -> bool {
+        #[cfg(test)]
+        if let Some(most) = TEST_READS.with(|reads| reads.get()) {
+            return self.reads >= most;
+        }
+        self.started.elapsed() >= PAGE_TIME
+    }
+
+    /// One more point or item read; whether the page's share is used up.
+    fn spend(&mut self) -> bool {
+        self.reads += 1;
+        self.over()
+    }
 }
 
 fn limits() -> (usize, usize, usize) {
@@ -79,12 +108,14 @@ fn round(value: f64, places: i32) -> f64 {
     (value * scale).round() / scale
 }
 
-/// Where a digest goes on from, and what it has used of its budgets by then. Written `g1.<epoch>.<n>.<sub>.<params>.
-/// <points>.<values>.<items>.<markers>`: `n` the track (0 the master) or, past the tracks, the marker; `sub` the record
-/// within it; the budgets as they were when that track began, so it's read again the same way.
+/// Where a digest goes on from, and what it has used of its budgets by then. Written `g2.<epoch>.<digest>.<n>.<sub>.
+/// <params>.<points>.<values>.<items>.<markers>`: `digest` this digest's serial (what it read of a track part way is kept
+/// by it); `n` the track (0 the master) or, past the tracks, the marker; `sub` the record within it; the budgets as they
+/// were when that track began, so it's read again the same way.
 #[derive(Debug, Clone, PartialEq)]
 struct Cursor {
     epoch: String,
+    digest: u64,
     n: usize,
     sub: usize,
     params: usize,
@@ -97,26 +128,27 @@ struct Cursor {
 impl Cursor {
     fn text(&self) -> String {
         format!(
-            "g1.{}.{}.{}.{}.{}.{}.{}.{}",
-            self.epoch, self.n, self.sub, self.params, self.points, self.values, self.items as u8, self.markers as u8
+            "g2.{}.{}.{}.{}.{}.{}.{}.{}.{}",
+            self.epoch, self.digest, self.n, self.sub, self.params, self.points, self.values, self.items as u8, self.markers as u8
         )
     }
 
     fn parse(text: &str) -> Option<Cursor> {
         let parts: Vec<&str> = text.split('.').collect();
-        if parts.len() != 9 || parts[0] != "g1" || parts[1].is_empty() {
+        if parts.len() != 10 || parts[0] != "g2" || parts[1].is_empty() {
             return None;
         }
         let number = |at: usize| parts[at].parse::<usize>().ok();
         Some(Cursor {
             epoch: parts[1].into(),
-            n: number(2)?,
-            sub: number(3)?,
-            params: number(4)?,
-            points: number(5)?,
-            values: number(6)?,
-            items: parts[7] == "1",
-            markers: parts[8] == "1",
+            digest: parts[2].parse().ok()?,
+            n: number(3)?,
+            sub: number(4)?,
+            params: number(5)?,
+            points: number(6)?,
+            values: number(7)?,
+            items: parts[8] == "1",
+            markers: parts[9] == "1",
         })
     }
 }
@@ -129,6 +161,88 @@ struct Budget {
     params: usize,
     points: usize,
     value_count: usize,
+}
+
+/// The digest, the track, the project's change count and the budgets as the track began.
+type WorkKey = (u64, usize, Option<i32>, usize, usize, usize);
+
+/// A track being read, kept between the pages of one digest: where its points' and items' loops are and their prints so
+/// far, so a page out of time goes on from there; once read, its records, which its later pages take as they are.
+struct Work {
+    /// Another digest, track, change count or budgets, and the track is read again.
+    key: WorkKey,
+    budget: Budget,
+    envelope: i32,
+    point: i32,
+    points: Print,
+    points_read: bool,
+    points_done: bool,
+    item: i32,
+    item_print: Print,
+    item_records: Vec<Value>,
+    items_done: bool,
+    records: Option<Vec<Value>>,
+}
+
+impl Work {
+    /// Nothing read yet (`content: false` reads no points or items).
+    fn new(key: WorkKey, budget: Budget) -> Self {
+        let content = budget.content;
+        Work {
+            key,
+            budget,
+            envelope: 0,
+            point: 0,
+            points: Print::new(),
+            points_read: content,
+            points_done: !content,
+            item: 0,
+            item_print: Print::new(),
+            item_records: vec![],
+            items_done: !content,
+            records: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Kept {
+    /// The serial the next digest takes.
+    next: u64,
+    works: VecDeque<Work>,
+}
+
+thread_local! {
+    /// The tracks read part way, or read for their later pages (REAPER's main thread reads them all).
+    static KEPT: RefCell<Kept> = RefCell::new(Kept::default());
+}
+
+/// A new digest's serial.
+fn serial() -> u64 {
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        kept.next += 1;
+        kept.next
+    })
+}
+
+/// The work kept for a track by its key, taken out (it's kept again if the page ends inside the track).
+fn take_work(key: &WorkKey) -> Option<Work> {
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let at = kept.works.iter().position(|work| work.key == *key)?;
+        kept.works.remove(at)
+    })
+}
+
+fn keep_work(work: Work) {
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        kept.works.push_back(work);
+        while kept.works.len() > KEPT_WORK {
+            kept.works.pop_front();
+        }
+    })
 }
 
 /// The parameters a track's envelopes automate, by FX (as `TrackFX_` addresses it), and its automated faders.
@@ -182,6 +296,7 @@ impl Reads {
                     .sum();
                 Cursor {
                     epoch: epoch.clone(),
+                    digest: serial(),
                     n: 0,
                     sub: 0,
                     params: 0,
@@ -204,7 +319,8 @@ impl Reads {
             Some(_) => return Err(bad("cursor must be a string")),
         };
         let first = cursor.n == 0 && cursor.sub == 0;
-        let started = Instant::now();
+        let mut clock = Clock { started: Instant::now(), reads: 0 };
+        let changed = reaper.state_change_count(proj);
         let mut records: Vec<Value> = vec![];
         let mut bytes = 0;
         let mut next: Option<Cursor> = None;
@@ -216,22 +332,43 @@ impl Reads {
                 cursor.sub = 0;
                 continue;
             };
-            let mut budget =
-                Budget { values, content, items: cursor.items, params: cursor.params, points: cursor.points, value_count: cursor.values };
-            let stream = self.track_records(reaper, proj, track, cursor.n, &mut budget);
+            let key = (cursor.digest, cursor.n, changed, cursor.params, cursor.points, cursor.values);
+            let mut work = take_work(&key).unwrap_or_else(|| {
+                let budget = Budget {
+                    values,
+                    content,
+                    items: cursor.items,
+                    params: cursor.params,
+                    points: cursor.points,
+                    value_count: cursor.values,
+                };
+                Work::new(key, budget)
+            });
+            if !self.read_track(reaper, proj, track, cursor.n, &mut work, &mut clock) {
+                keep_work(work);
+                next = Some(cursor.clone());
+                break 'tracks;
+            }
+            let stream = work.records.as_deref().unwrap_or_default();
+            let mut full = false;
             for record in stream.iter().skip(cursor.sub) {
                 let size = super::json_len(record) + 1;
-                if !records.is_empty() && (bytes + size > page_bytes || started.elapsed() >= PAGE_TIME) {
-                    next = Some(cursor.clone());
-                    break 'tracks;
+                if !records.is_empty() && (bytes + size > page_bytes || clock.over()) {
+                    full = true;
+                    break;
                 }
                 bytes += size;
                 records.push(record.clone());
                 cursor.sub += 1;
             }
+            if full {
+                keep_work(work);
+                next = Some(cursor.clone());
+                break 'tracks;
+            }
             cursor.n += 1;
             cursor.sub = 0;
-            (cursor.params, cursor.points, cursor.values) = (budget.params, budget.points, budget.value_count);
+            (cursor.params, cursor.points, cursor.values) = (work.budget.params, work.budget.points, work.budget.value_count);
         }
         // Then the markers and regions, one record each.
         if next.is_none() && cursor.markers {
@@ -252,7 +389,7 @@ impl Reads {
                         },
                     });
                     let size = super::json_len(&record) + 1;
-                    if !records.is_empty() && (bytes + size > page_bytes || started.elapsed() >= PAGE_TIME) {
+                    if !records.is_empty() && (bytes + size > page_bytes || clock.over()) {
                         next = Some(cursor.clone());
                         break;
                     }
@@ -309,8 +446,110 @@ impl Reads {
         Ok(answer)
     }
 
-    /// A track's records: its own, then its FX (containers' children after them), then its items.
-    fn track_records(&self, reaper: &Reaper, proj: Project, track: Track, position: usize, budget: &mut Budget) -> Vec<Value> {
+    /// Reads a track's records into `work` as far as the page's share of time goes: its envelopes' points, its items,
+    /// then its own record, its FX (containers' children after them) and its items' records. True once they're read.
+    fn read_track(&self, reaper: &Reaper, proj: Project, track: Track, position: usize, work: &mut Work, clock: &mut Clock) -> bool {
+        if work.records.is_some() {
+            return true;
+        }
+        // The automation: every envelope's points and automation items, within the budget.
+        let envelope_count = reaper.track_envelope_count(track);
+        while !work.points_done && work.envelope < envelope_count {
+            let Some(envelope) = reaper.track_envelope(track, work.envelope) else {
+                work.envelope += 1;
+                continue;
+            };
+            let count = reaper.envelope_point_count(envelope).max(0);
+            if work.point == 0 {
+                if work.budget.points + count as usize > POINTS_BUDGET {
+                    work.budget.points = POINTS_BUDGET;
+                    work.points_read = false;
+                    break;
+                }
+                work.budget.points += count as usize;
+                work.points.text(&reaper.envelope_name(envelope)).number(count as f64, 0);
+                work.points.text(if reaper.envelope_flag(envelope, "ACTIVE") { "on" } else { "off" });
+            }
+            while work.point < count {
+                if let Some(p) = reaper.env_point(envelope, -1, work.point) {
+                    work.points.number(p.time, 6).number(p.value, 6).number(p.shape as f64, 0).number(p.tension, 4);
+                }
+                work.point += 1;
+                if clock.spend() && work.point < count {
+                    return false;
+                }
+            }
+            for item in 0..reaper.ai_count(envelope) {
+                for key in ["D_POSITION", "D_LENGTH", "D_POOL_ID", "D_STARTOFFS", "D_PLAYRATE", "D_BASELINE", "D_AMPLITUDE", "D_LOOPSRC"] {
+                    work.points.number(reaper.ai_value(envelope, item, key), 6);
+                }
+            }
+            work.envelope += 1;
+            work.point = 0;
+            if clock.over() && work.envelope < envelope_count {
+                return false;
+            }
+        }
+        work.points_done = true;
+        // The items: each one's place, length and what it plays, summed up on the track either way.
+        let item_count = reaper.track_item_count(track).max(0);
+        let guid = if position == 0 { "master".to_string() } else { reaper.track_guid(track) };
+        while !work.items_done && work.item < item_count {
+            let index = work.item;
+            work.item += 1;
+            let Some(item) = reaper.track_item(track, index) else { continue };
+            let item_guid = reaper.item_guid(item);
+            let take = reaper.active_take(item);
+            let (at, length) = (round(reaper.item_value(item, "D_POSITION"), 6), round(reaper.item_value(item, "D_LENGTH"), 6));
+            let mute = reaper.item_value(item, "B_MUTE") != 0.0;
+            let mut what = Print::new();
+            for parm in ["D_VOL", "D_FADEINLEN", "D_FADEOUTLEN", "B_LOOPSRC", "I_FIXEDLANE", "D_SNAPOFFSET"] {
+                what.number(reaper.item_value(item, parm), 6);
+            }
+            if let Some(take) = take {
+                match reaper.take_is_midi(take) {
+                    true => what.text(&reaper.midi_hash(take, false).unwrap_or_default()),
+                    false => what.text(&reaper.take_file(take).unwrap_or_default()),
+                };
+                for parm in ["D_STARTOFFS", "D_PLAYRATE", "D_PITCH", "D_VOL", "D_PAN", "B_PPITCH"] {
+                    what.number(reaper.take_value(take, parm), 6);
+                }
+                what.number(reaper.fx_count(FxOwner::Take(take)) as f64, 0);
+            }
+            let takes = reaper.take_count(item);
+            let content_hash = what.number(takes as f64, 0).hex();
+            work.item_print.text(&item_guid).number(at, 6).number(length, 6).text(if mute { "m" } else { "" }).text(&content_hash);
+            if work.budget.items {
+                let take_name = take.map(|t| reaper.take_name(t)).unwrap_or_default();
+                work.item_records.push(json!({
+                    "k": "item",
+                    "id": item_guid,
+                    "n": rows::clip(&take_name),
+                    "o": index,
+                    "p": guid,
+                    "f": {
+                        "position": at,
+                        "length": length,
+                        "mute": mute,
+                        "takes": takes,
+                        "source": rows::source_word(reaper, take),
+                        "content": {"contentHash": content_hash},
+                    },
+                }));
+            }
+            if clock.spend() && work.item < item_count {
+                return false;
+            }
+        }
+        work.items_done = true;
+        work.records = Some(self.track_records(reaper, proj, track, position, work));
+        true
+    }
+
+    /// A track's records once its points and items are read: its own, then its FX (containers' children after them),
+    /// then its items.
+    fn track_records(&self, reaper: &Reaper, proj: Project, track: Track, position: usize, work: &mut Work) -> Vec<Value> {
+        let Work { budget, points, points_read, item_print, item_records, .. } = work;
         let master = position == 0;
         let guid = if master { "master".to_string() } else { reaper.track_guid(track) };
         let own_name = reaper.track_string(track, "P_NAME").unwrap_or_default();
@@ -339,84 +578,8 @@ impl Reads {
                 }
             }
         }
-        // The automation: every envelope's points and automation items, within the budget.
         let envelope_count = reaper.track_envelope_count(track);
-        let mut points = Print::new();
-        let mut points_read = budget.content;
-        if budget.content {
-            for index in 0..envelope_count {
-                let Some(envelope) = reaper.track_envelope(track, index) else { continue };
-                let count = reaper.envelope_point_count(envelope).max(0) as usize;
-                if budget.points + count > POINTS_BUDGET {
-                    budget.points = POINTS_BUDGET;
-                    points_read = false;
-                    break;
-                }
-                budget.points += count;
-                points.text(&reaper.envelope_name(envelope)).number(count as f64, 0);
-                points.text(if reaper.envelope_flag(envelope, "ACTIVE") { "on" } else { "off" });
-                for point in 0..count as i32 {
-                    if let Some(p) = reaper.env_point(envelope, -1, point) {
-                        points.number(p.time, 6).number(p.value, 6).number(p.shape as f64, 0).number(p.tension, 4);
-                    }
-                }
-                for item in 0..reaper.ai_count(envelope) {
-                    for key in
-                        ["D_POSITION", "D_LENGTH", "D_POOL_ID", "D_STARTOFFS", "D_PLAYRATE", "D_BASELINE", "D_AMPLITUDE", "D_LOOPSRC"]
-                    {
-                        points.number(reaper.ai_value(envelope, item, key), 6);
-                    }
-                }
-            }
-        }
-        // The items: each one's place, length and what it plays, summed up on the track either way.
         let item_count = reaper.track_item_count(track).max(0);
-        let mut item_print = Print::new();
-        let mut item_records = vec![];
-        if budget.content {
-            for index in 0..item_count {
-                let Some(item) = reaper.track_item(track, index) else { continue };
-                let item_guid = reaper.item_guid(item);
-                let take = reaper.active_take(item);
-                let (position, length) = (round(reaper.item_value(item, "D_POSITION"), 6), round(reaper.item_value(item, "D_LENGTH"), 6));
-                let mute = reaper.item_value(item, "B_MUTE") != 0.0;
-                let mut what = Print::new();
-                for parm in ["D_VOL", "D_FADEINLEN", "D_FADEOUTLEN", "B_LOOPSRC", "I_FIXEDLANE", "D_SNAPOFFSET"] {
-                    what.number(reaper.item_value(item, parm), 6);
-                }
-                if let Some(take) = take {
-                    match reaper.take_is_midi(take) {
-                        true => what.text(&reaper.midi_hash(take, false).unwrap_or_default()),
-                        false => what.text(&reaper.take_file(take).unwrap_or_default()),
-                    };
-                    for parm in ["D_STARTOFFS", "D_PLAYRATE", "D_PITCH", "D_VOL", "D_PAN", "B_PPITCH"] {
-                        what.number(reaper.take_value(take, parm), 6);
-                    }
-                    what.number(reaper.fx_count(FxOwner::Take(take)) as f64, 0);
-                }
-                let takes = reaper.take_count(item);
-                let content_hash = what.number(takes as f64, 0).hex();
-                item_print.text(&item_guid).number(position, 6).number(length, 6).text(if mute { "m" } else { "" }).text(&content_hash);
-                if budget.items {
-                    let take_name = take.map(|t| reaper.take_name(t)).unwrap_or_default();
-                    item_records.push(json!({
-                        "k": "item",
-                        "id": item_guid,
-                        "n": rows::clip(&take_name),
-                        "o": index,
-                        "p": guid,
-                        "f": {
-                            "position": position,
-                            "length": length,
-                            "mute": mute,
-                            "takes": takes,
-                            "source": rows::source_word(reaper, take),
-                            "content": {"contentHash": content_hash},
-                        },
-                    }));
-                }
-            }
-        }
         let owner = FxOwner::Track(track);
         let chain: Vec<Fx> = (0..reaper.fx_count(owner))
             .map(|index| Fx { owner, index })
@@ -441,7 +604,7 @@ impl Reads {
                 "sends": {"count": send_count, "sendsHash": sends.hex()},
                 "FX": {"count": chain.len()},
                 "items": {"count": item_count, "itemsHash": if budget.content { json!(item_print.hex()) } else { Value::Null }},
-                "automation": {"count": envelope_count, "pointsHash": if points_read { json!(points.hex()) } else { Value::Null }},
+                "automation": {"count": envelope_count, "pointsHash": if *points_read { json!(points.hex()) } else { Value::Null }},
             },
         });
         if !master {
@@ -456,7 +619,7 @@ impl Reads {
         for (position, fx) in chain.iter().enumerate() {
             self.fx_records(reaper, proj, *fx, position, &guid, &automated, budget, &mut records, 0);
         }
-        records.extend(item_records);
+        records.append(item_records);
         records
     }
 
@@ -598,9 +761,17 @@ mod tests {
 
     #[test]
     fn a_cursor_reads_back_as_it_was_written() {
-        let cursor = Cursor { epoch: "1f-3".into(), n: 7, sub: 2, params: 900, points: 12, values: 0, items: true, markers: false };
+        let cursor =
+            Cursor { epoch: "1f-3".into(), digest: 4, n: 7, sub: 2, params: 900, points: 12, values: 0, items: true, markers: false };
         assert_eq!(Cursor::parse(&cursor.text()), Some(cursor));
-        for bad in ["", "g1.1f-3.7", "g2.1f-3.7.2.900.12.0.1.0", "g1.1f-3.x.2.900.12.0.1", "g1..7.2.900.12.0.1.0"] {
+        for bad in [
+            "",
+            "g2.1f-3.4.7",
+            "g1.1f-3.7.2.900.12.0.1.0",
+            "g2.1f-3.4.x.2.900.12.0.1.0",
+            "g2..4.7.2.900.12.0.1.0",
+            "g2.1f-3.x.7.2.900.12.0.1.0",
+        ] {
             assert_eq!(Cursor::parse(bad), None, "{bad}");
         }
     }
@@ -762,6 +933,55 @@ mod tests {
         assert_eq!(records, 1 + 200 + 1000 + 4000 + 2, "the master, the tracks, their FX and items, the lab's two markers");
         assert!(most <= super::super::ANSWER_BYTES, "every page inside the frame bound: {most}");
         assert!(pages > 1);
+    }
+
+    /// The lab project with Drums holding 600 items and a pan lane of 3,000 points.
+    fn one_big_track() {
+        use crate::reaper::fake::{FakeEnvelope, FakeItem, FakeTake};
+        fake::lab_project();
+        fake::with(|s| {
+            let drums = &mut s.tracks[0];
+            drums.items = (0..600)
+                .map(|i| FakeItem::new(&format!("{{I{i:04}}}"), i as f64, 1.0, vec![FakeTake::wave(&format!("{{K{i:04}}}"), "hit.wav")]))
+                .collect();
+            drums.envelopes.push(FakeEnvelope::own("Pan", "<PANENV2", 3000));
+        });
+    }
+
+    // Review R9: a track of many items or points is read over several pages, a page's share at a time, and once for all
+    // of them.
+    #[test]
+    fn one_big_track_is_read_a_share_at_a_time_and_once_however_many_pages_it_takes() {
+        one_big_track();
+        let reads = Reads::default();
+        let calls = || fake::with(|s| s.calls);
+        let before = calls();
+        let (_, whole_records) = whole(&reads, false, true);
+        let once = calls() - before;
+        // Pages of 2 KB: Drums's records take dozens of pages, and its items and points are read once for them all.
+        TEST_LIMITS.with(|limits| limits.set(Some((2048, MOST_ITEMS, MOST_MARKERS))));
+        let before = calls();
+        let (first, paged) = whole(&reads, false, true);
+        let paged_calls = calls() - before;
+        TEST_LIMITS.with(|limits| limits.set(None));
+        assert!(first["pages"].as_u64().unwrap() > 50, "{}", first["pages"]);
+        assert_eq!(paged, whole_records);
+        assert!(paged_calls < once * 2, "{paged_calls} REAPER calls in pages, {once} in one go");
+        // A page's share of the main thread (here 100 points or items) holds inside the track too.
+        TEST_READS.with(|reads| reads.set(Some(100)));
+        let mut answer = page(&reads, json!({})).unwrap();
+        let (mut pages, mut most, mut records) = (1, 0, answer["records"].as_array().unwrap().clone());
+        while let Some(cursor) = answer["nextCursor"].as_str().map(str::to_owned) {
+            let before = calls();
+            answer = page(&reads, json!({"cursor": cursor})).unwrap();
+            most = most.max(calls() - before);
+            records.extend(answer["records"].as_array().unwrap().clone());
+            pages += 1;
+        }
+        TEST_READS.with(|reads| reads.set(None));
+        assert_eq!(records, whole_records);
+        assert!(pages >= 3600 / 100, "{pages} pages");
+        assert!(most < once / 4, "the most REAPER calls on one page, {most}, against {once} for the whole track");
     }
 
     #[test]
