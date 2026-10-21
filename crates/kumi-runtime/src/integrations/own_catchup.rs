@@ -164,6 +164,8 @@ pub struct Remembered {
     saved_at: Cell<Option<Instant>>,
     took_ms: Cell<u64>,
     saved_counter: RefCell<Option<Value>>,
+    /// Saves in a row that the host answered with an error, or that got no answer: each waits twice as long as the last.
+    failed: Cell<u32>,
     /// The change counter as the focus last showed it, and when something last changed (the counter moved, or Kumi made a
     /// change).
     counter: RefCell<Option<Value>>,
@@ -222,7 +224,9 @@ impl Remembered {
             return false;
         }
         let Some(moved) = self.moved_at.get() else { return false };
-        let gap = MOST_OFTEN.max(Duration::from_millis(self.took_ms.get().saturating_mul(50)));
+        let failed = self.failed.get();
+        let backoff = if failed == 0 { Duration::ZERO } else { MOST_OFTEN * (1u32 << failed.min(6)) };
+        let gap = MOST_OFTEN.max(Duration::from_millis(self.took_ms.get().saturating_mul(50))).max(backoff);
         moved.elapsed() >= SETTLE && self.saved_at.get().is_none_or(|at| at.elapsed() >= gap)
     }
 
@@ -245,7 +249,14 @@ impl Remembered {
         }
         let began = Instant::now();
         let answer = host.call("baseline_save", JsonObject::new(), signal).await.ok().map(|result| answer_of(&result));
+        if !matches!(answer, Some(Ok(_))) {
+            // An error (a full disk where the host keeps the snapshots, a digest past its time) or no answer: asked again
+            // later, and later each time, never every second (each try reads the whole project).
+            self.saved_at.set(Some(Instant::now()));
+            self.failed.set(self.failed.get().saturating_add(1));
+        }
         if let Some(Ok(answer)) = answer {
+            self.failed.set(0);
             self.saved_at.set(Some(Instant::now()));
             self.took_ms.set(answer.get("ms").and_then(Value::as_u64).unwrap_or(began.elapsed().as_millis() as u64));
             if answer.get("saved") == Some(&Value::Bool(true)) {
@@ -919,6 +930,8 @@ mod tests {
         catch_up: RefCell<Value>,
         save: RefCell<Value>,
         asked: RefCell<Vec<String>>,
+        /// baseline_save answers its text as an error.
+        save_fails: Cell<bool>,
     }
     #[async_trait(?Send)]
     impl McpEndpoint for Told {
@@ -934,7 +947,8 @@ mod tests {
         async fn call(&self, name: &str, _: JsonObject, _: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
             self.asked.borrow_mut().push(name.into());
             let answer = if name == "catch_up" { self.catch_up.borrow().clone() } else { self.save.borrow().clone() };
-            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": false})).unwrap())
+            let error = name == "baseline_save" && self.save_fails.get();
+            Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": error})).unwrap())
         }
         fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
             Box::new(|| {})
@@ -951,7 +965,12 @@ mod tests {
     }
 
     fn answers(catch_up: Value, save: Value) -> Rc<Told> {
-        Rc::new(Told { catch_up: RefCell::new(catch_up), save: RefCell::new(save), asked: RefCell::default() })
+        Rc::new(Told {
+            catch_up: RefCell::new(catch_up),
+            save: RefCell::new(save),
+            asked: RefCell::default(),
+            save_fails: Cell::new(false),
+        })
     }
 
     const REFUSED: &str = r#"{"saved": false, "compared": false, "why": "not compared yet: catch_up first"}"#;
@@ -984,6 +1003,24 @@ mod tests {
         remembered.kumi_changed();
         assert_eq!(keep_for_a_minute(&remembered, &host).await, 1);
         assert!(!remembered.due(), "kept: nothing changed since");
+    }
+
+    /// A save the host answers with an error (its snapshots' folder is full, the digest ran out of time) isn't asked again
+    /// each second, each a whole project's digest: each try waits twice as long as the last, until one is kept.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failed_save_is_asked_again_later_each_time_not_every_second() {
+        let host = answers(json!({"first": true}), json!("the disk is full"));
+        host.save_fails.set(true);
+        let remembered = Rc::new(Remembered::default());
+        remembered.clone().catch_up(host.clone(), "A".into(), "Song".into(), &WORDS, None, Signal::new()).await;
+        remembered.kumi_changed();
+        // (after 2 s, 10 s later, then 20 s later: the next is 40 s on)
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 3, "{:?}", host.asked.borrow());
+        host.save_fails.set(false);
+        *host.save.borrow_mut() = json!({"saved": true, "ms": 20});
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 1, "kept once the host can");
+        remembered.kumi_changed();
+        assert_eq!(keep_for_a_minute(&remembered, &host).await, 1, "and back to its usual pace");
     }
 
     /// (#361 review K15) Kumi's host started again compares the project before it keeps a snapshot: the next look's
