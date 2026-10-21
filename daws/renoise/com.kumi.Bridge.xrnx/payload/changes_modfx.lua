@@ -481,8 +481,11 @@ local function device_in_list(spec)
     -- (the device Kumi deleted, at its place again: what was kept by its place before the delete follows it)
     if env.back then env.back(spec.list, n[1], n[2], material.after, at) end
     base.note_restored_at(env.journal, spec.kind, places_.journal_place(spec.of, { n[1], n[2], at }))
+    local note = spec.restore_note
+    if type(note) == "function" then note = note(state) end
     return {
-      restored = { ref = places_.ref_of(env, spec.of, { n[1], n[2], at }) }, display = { title = label .. " put back", note = spec.restore_note },
+      restored = { ref = places_.ref_of(env, spec.of, { n[1], n[2], at }) },
+      display = { title = label .. " put back", note = note },
       undo = { desc = desc, entry = true },
     }
   end
@@ -801,13 +804,30 @@ M.param_kind({ kind = "moddevice-param", of = "moddevice", device_of = function(
 
 -- Sample FX chains
 
+-- How many destinations a meta device in a chain aims at (its "… Effect" parameters set): a device made again from its
+-- settings aims at nothing (Renoise, measured on tracks), so its undo says so.
+local function aims_of(device)
+  local ok, path = pcall(function() return device.device_path end)
+  if not ok or type(path) ~= "string" or not path:find("/Native/*", 1, true) then return 0 end
+  local count = 0
+  for k = 1, #device.parameters do
+    local parameter = device:parameter(k)
+    if parameter.name:match("Effect$") and parameter.value >= 0 then count = count + 1 end
+  end
+  return count
+end
+local AIMS_NOTE = "Its meta devices come back aimed at nothing (Renoise gives a device made from its settings no destination): aim them again."
+
 local function chain_state(chain)
-  local devices = {}
-  for d = 2, #chain.devices do devices[#devices + 1] = material_.read_device(chain:device(d)) end
+  local devices, aimed = {}, 0
+  for d = 2, #chain.devices do
+    devices[#devices + 1] = material_.read_device(chain:device(d))
+    aimed = aimed + aims_of(chain:device(d))
+  end
   local mixer = {}
   local first = chain:device(1)
   for k = 1, #first.parameters do mixer[k] = first:parameter(k).value end
-  return { name = chain.name, routing = chain.output_routing, devices = devices, mixer = mixer }
+  return { name = chain.name, routing = chain.output_routing, devices = devices, mixer = mixer, aimed = aimed > 0 or nil }
 end
 
 function M.chain_print(chain)
@@ -877,6 +897,7 @@ local function write_chain(chain, state)
   for d, device in ipairs(state.devices or {}) do
     if not pcall(material_.restore_device, chain, d + 1, device) then notes[#notes + 1] = "A device of it (" .. tostring(device.path) .. ") couldn't be made again." end
   end
+  if state.aimed then notes[#notes + 1] = AIMS_NOTE end
   return notes
 end
 
@@ -1004,9 +1025,15 @@ device_in_list({
   kind = "chaindevice-delete", of = "chaindevice", owner = "chain", list = "chaindevices", first = 2,
   check = function(n) if n[3] == 1 then bad("a chain's first device is its mixer: it stays") end end,
   note = function(instrument) return "Kumi keeps its settings (its preset data) to put back." .. (has_mappings(instrument) and (" " .. MAPPING_NOTE) or "") end,
-  print = chaindevice_print, back_print = chaindevice_back_print, state = function(device) return material_.read_device(device) end,
+  print = chaindevice_print, back_print = chaindevice_back_print,
+  state = function(device)
+    local state = material_.read_device(device)
+    if aims_of(device) > 0 then state.aimed = true end
+    return state
+  end,
   print_of_state = function(state) return { path = state.path, active = state.active ~= false, display = state.display } end,
   make = function(chain, at, state) return material_.restore_device(chain, at, state) end,
+  restore_note = function(state) return state.aimed and "It comes back aimed at nothing (Renoise gives a device made from its settings no destination): aim it again." or nil end,
 })
 
 -- chaindevice-move {ref: chaindevice, index}: by swaps; the device ends at index.

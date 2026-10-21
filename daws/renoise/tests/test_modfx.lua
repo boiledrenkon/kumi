@@ -415,3 +415,20 @@ test("modfx: a settings change Renoise refuses part way puts back what it wrote 
   eq(set.devices[stepper].display_name, name, "the name it took first is put back")
   ok(steps() <= before + 1, "at most the one step Renoise made of it")
 end)
+
+test("modfx: a chain or chain device deleted with a meta device's aim comes back saying the aim isn't put back (#361 N-S22)", function()
+  local env, peer, epoch = setup_modfx()
+  mock.device_catalog["Audio/Effects/Native/*LFO"] = { { name = "Dest. Effect", value = -1, min = -1, max = 16 } }
+  local chain = instrument(1).chains[1]
+  chain.devices[3] = { name = "*LFO", path = "Audio/Effects/Native/*LFO", params = { { name = "Dest. Effect", value = 1, min = -1, max = 16 } }, active = true, preset_data = "<lfo/>" }
+  mock.fire(mock.tool.app_new_document_observable)
+  local lfo = change(peer, "chaindevice-delete", { ref = chaindevice_ref(place(peer), 1, 1, 3) })
+  local back = restore(peer, "chaindevice-delete", lfo)
+  ok(back.result, json.encode(back.error or {}))
+  ok((back.result.display.note or ""):find("aimed at nothing", 1, true), tostring(back.result.display.note))
+  instrument(1).chains[1].devices[3].params[1].value = 1
+  local whole = change(peer, "chain-delete", { ref = chain_ref(place(peer), 1, 1) })
+  local again = restore(peer, "chain-delete", whole)
+  ok(again.result, json.encode(again.error or {}))
+  ok((again.result.display.note or ""):find("aimed at nothing", 1, true), tostring(again.result.display.note))
+end)
