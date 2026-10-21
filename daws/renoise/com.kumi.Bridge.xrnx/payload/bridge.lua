@@ -1205,6 +1205,8 @@ local function change_env()
       return dir and (dir:gsub("[/\\][^/\\]*[/\\]?$", "") .. "/work") or nil
     end,
     replacing_instrument = function(i, fn)
+      -- (the instrument loaded in its place takes on the logs it had, so the places Kumi's records keep inside it follow)
+      local kept = place_env.logs_of("instrument", { i })
       b.replacing = { i = i, insert = true, remove = true }
       local ok, err = pcall(fn)
       -- (told now or on a later pass: kept for those two ops for a moment)
@@ -1213,6 +1215,7 @@ local function change_env()
         b.replacing = nil
         error(err, 0)
       end
+      if kept then place_env.adopt("instrument", { i }, kept) end
     end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end

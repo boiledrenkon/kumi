@@ -894,14 +894,17 @@ local function with_instrument_files(fn)
       instrument.name = state.name
       for k = 1, 8 do instrument.macros[k].mappings = state.macros[k] end
     end
-    put(after)
-    mock.fire(fields.instruments_observable, { type = "insert", index = i + 1 })
-    mock.fire(fields.instruments_observable, { type = "remove", index = i })
-    -- (Renoise's undo tells the old instrument back at i and the loaded one's remove after it; its redo the other way: lab)
+    -- (the loaded instrument goes in after the slot and the old one out, as Renoise tells it; here the same data stands for
+    -- both, so the list keeps its contents while the tool sees an object replaced)
     local function told(first, second)
+      table.insert(mock.data.instruments, first, instrument)
       mock.fire(fields.instruments_observable, { type = "insert", index = first })
+      table.remove(mock.data.instruments, second)
       mock.fire(fields.instruments_observable, { type = "remove", index = second })
     end
+    put(after)
+    told(i + 1, i)
+    -- (Renoise's undo tells the old instrument back at i and the loaded one's remove after it; its redo the other way: lab)
     mock.record(function() put(before) told(i, i + 1) end, function() put(after) told(i + 1, i) end)
     return true
   end
@@ -923,6 +926,26 @@ local function host_edit(file, k, mappings)
   out:close()
   return edited
 end
+
+test("devices m4: Kumi's records inside an instrument still find their places after a macro map loads it again from a file (#361 N-S5)", function()
+  local env, peer = mapped_song()
+  mock.song:instrument(1):insert_sample_at(1).name = "Saw"
+  with_instrument_files(function()
+    mock.data.song_fields.selected_instrument_index = 1
+    local tuned = change(peer, "sample-set", { ref = place(peer) .. ":sample:1.1", transpose = 3 })
+    local epoch, layout = place(peer)
+    local export = call(peer, "instrument_export", { ref = epoch .. ":instrument:1", epoch = epoch, layout = layout })
+    ok(export.result, json.encode(export.error or {}))
+    local mappings = { { param = "Cutoff", min = 0, max = 1, scaling = 3 }, { param = "Resonance", min = 0.2, max = 0.8, scaling = 3 } , { param = "Drive", min = 0, max = 0.5, scaling = 1 } }
+    local input = { ref = epoch .. ":instrument:1", macro = 1, file = host_edit(export.result.file, 1, mappings), print = export.result.print, display = { title = "Lead macro 1: mapped to Drive" } }
+    local done = call(peer, "change_apply", { kind = "instrument-macro-map", input = input, fence = {}, desc = "Kumi: map (ks51)", epoch = epoch, layout = layout })
+    ok(done.result, json.encode(done.error or {}))
+    H.tick(2)
+    local back = restore(peer, "sample-set", tuned)
+    ok(back.result, "the sample is where it was: " .. json.encode(back.error or {}))
+    eq(mock.song:instrument(1):sample(1).transpose, 0)
+  end)
+end)
 
 test("devices m4: a macro's mappings get their ranges and scaling in one step, and Kumi's undo writes back what they were", function()
   local _, peer = mapped_song()
