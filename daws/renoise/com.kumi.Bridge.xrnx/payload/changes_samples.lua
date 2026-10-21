@@ -530,7 +530,14 @@ local function load_apply(song, env, input, fence, desc)
     end
     song:describe_undo(desc)
     local loaded = sample.sample_buffer:load_from(plan.path)
-    if not loaded then fail("failed", "Renoise wouldn't load " .. plan.path) end
+    if not loaded then
+      -- (the audio it had, loaded again if Renoise cleared it before refusing)
+      local back = true
+      if kept.file and not base.same_table(M.buffer_print(sample.sample_buffer), fence.print) then
+        back = pcall(function() if not sample.sample_buffer:load_from(kept.file) then error("refused") end end)
+      end
+      fail("failed", "Renoise wouldn't load " .. plan.path .. (back and "" or "; the audio it had couldn't be loaded back either: Renoise's own undo may bring it"))
+    end
     if input.name ~= nil then sample.name = input.name end
     if env.watch_undo then env.watch_undo(sample.sample_buffer_observable) end
     local print = M.buffer_print(sample.sample_buffer)

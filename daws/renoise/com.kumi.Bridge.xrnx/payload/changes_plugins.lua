@@ -109,7 +109,16 @@ base.register({
     local name = plan.instrument.name
     local loaded = plan.instrument.plugin_properties:load_plugin(plan.path)
     if not loaded or (plan.path ~= "" and not plan.instrument.plugin_properties.plugin_loaded) then
-      fail("failed", "Renoise wouldn't load the plug-in " .. plan.path)
+      -- (the plug-in it had, with its state, loaded again if Renoise let it go before refusing)
+      local properties, back = plan.instrument.plugin_properties, true
+      if plan.kept.path ~= "" and (not properties.plugin_loaded or properties.plugin_device.device_path ~= plan.kept.path) then
+        back = pcall(function()
+          if not properties:load_plugin(plan.kept.path) then error("refused") end
+          properties.plugin_device.active_preset_data = plan.kept.state
+        end)
+      end
+      pcall(function() if plan.instrument.name ~= name then plan.instrument.name = name end end)
+      fail("failed", "Renoise wouldn't load the plug-in " .. plan.path .. (back and "" or "; the plug-in it had couldn't be loaded back either: Renoise's own undo may bring it"))
     end
     if plan.now.path == "" and name ~= "" and plan.instrument.name ~= name then plan.instrument.name = name end
     if plan.instrument.name ~= name and plan.instrument.name == "" then

@@ -1167,6 +1167,12 @@ local function plugin_props_object(instrument)
   end
   fields.load_plugin = function(_, path)
     local old = instrument.plugin
+    -- (a plug-in Renoise lets go of the old one for, then fails to load: M.plugin_unloads_and_fails names it)
+    if M.plugin_unloads_and_fails and path == M.plugin_unloads_and_fails then
+      instrument.plugin = nil
+      M.fire(obs(instrument, "plugin"))
+      return false
+    end
     local made
     if path ~= "" then
       local spec = (M.plugin_catalog or {})[path]

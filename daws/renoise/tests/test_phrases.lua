@@ -444,6 +444,22 @@ test("plugins: a plug-in loaded by name into an instrument; Kumi's undo takes it
   failure(call(peer, "change_preview", { kind = "plugin-load", input = { ref = iref(place(peer), 3), path = "Moog" }, epoch = place(peer) }), "bad-params")
 end)
 
+test("plugins: a plug-in load that Renoise refuses after letting the old one go loads the old one back with its state (#361 N-N11)", function()
+  plugin_catalog()
+  local env, peer = setup()
+  change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "DLSMusicDevice" })
+  instrument(3).plugin.preset_data = "<dls mine/>"
+  mock.plugin_unloads_and_fails = "Audio/Generators/VST3/Synth"
+  local epoch = place(peer)
+  local input = { ref = iref(epoch, 3), path = "Audio/Generators/VST3/Synth" }
+  local previewed = preview(peer, "plugin-load", input)
+  local refused = apply(peer, "plugin-load", input, "Kumi: load (k660)", previewed.fence, epoch)
+  mock.plugin_unloads_and_fails = nil
+  failure(refused, "failed")
+  ok(instrument(3).plugin and instrument(3).plugin.path == "Audio/Generators/AU/aumu:dls :appl", "the old plug-in is back")
+  eq(instrument(3).plugin.preset_data, "<dls mine/>", "with its state")
+end)
+
 test("plugins: a plug-in's parameter by name or by its ref, its program, its settings; each goes back", function()
   plugin_catalog()
   local env, peer = setup()
