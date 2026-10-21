@@ -262,6 +262,20 @@ fn stretch_markers_are_added_moved_and_deleted_and_each_change_undone_by_value()
 }
 
 #[test]
+fn a_stretch_marker_added_without_a_source_pins_what_plays_there_now_after_the_producers_markers_moved() {
+    let lab = Lab::new();
+    // The producer's markers: the second dragged so that source 0.8 plays at 1.0 s.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.5, 0.5, 0.0), (1.0, 0.8, 0.0)]);
+    let markers = || item("{ITEM-K1}").unwrap().1.takes[0].more.stretch.clone();
+    let (preview, applied) = lab.make("stretch-markers-add", json!({"ref": T1, "markers": [{"position": 1.5}]}));
+    // What plays at 1.5 s now is 0.8 + 0.5 into the source, not 1.5: the audio around it isn't re-timed.
+    assert_eq!(markers()[2], (1.5, 1.3, 0.0));
+    assert_eq!(applied["applied"]["added"][0][1], 1.3, "what REAPER wrote is kept");
+    lab.undo("stretch-markers-add", &preview, &applied).unwrap();
+    assert_eq!(markers(), vec![(0.5, 0.5, 0.0), (1.0, 0.8, 0.0)]);
+}
+
+#[test]
 fn stretch_markers_keep_reapers_rules_and_their_undo_refuses_what_the_producer_moved() {
     let lab = Lab::new();
     state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.5, 0.5, 0.0), (1.0, 1.0, 0.0)]);

@@ -737,7 +737,15 @@ pub(super) unsafe extern "C" fn set_take_stretch_marker(take: *mut MediaItem_Tak
                 -1
             } else {
                 let at = list.iter().position(|m| m.0 > pos).unwrap_or(list.len());
-                list.insert(at, (pos, given.unwrap_or(pos * rate + offs), 0.0));
+                // Without a source, the point that plays there now: between two markers, in proportion; past the
+                // last (or before the first), from it at the take's rate; with none, the offset plus the position.
+                let source = given.unwrap_or_else(|| match (at.checked_sub(1).map(|i| list[i]), list.get(at).copied()) {
+                    (Some(a), Some(b)) if b.0 > a.0 => a.1 + (pos - a.0) * (b.1 - a.1) / (b.0 - a.0),
+                    (Some(a), _) => a.1 + (pos - a.0) * rate,
+                    (None, Some(b)) => b.1 - (b.0 - pos) * rate,
+                    (None, None) => pos * rate + offs,
+                });
+                list.insert(at, (pos, source, 0.0));
                 at as c_int
             }
         } else if let Some(marker) = list.get(index as usize).copied() {
