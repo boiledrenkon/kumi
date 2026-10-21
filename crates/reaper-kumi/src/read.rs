@@ -1126,7 +1126,8 @@ impl Reads {
 
     // ----- snapshot -----
 
-    /// The project on one screen: the project, the transport, the tracks (the first 200), the selection and the markers.
+    /// The project on one screen: the project, the transport, the tracks (the first 200), the selection, the markers and
+    /// the producer's setup.
     /// What doesn't fit is named in `truncated`, with the cursor for `read`.
     pub fn snapshot(&self, reaper: &Reaper) -> Answer {
         let (proj, info) = active(reaper)?;
@@ -1149,6 +1150,7 @@ impl Reads {
             "tracks": tracks.rows,
             "selection": focus::selection(self, reaper, proj),
             "markers": markers.rows,
+            "setup": crate::setup::setup(reaper, proj),
         });
         let mut truncated = serde_json::Map::new();
         if let Some(next) = next_track {

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions REAPER's turns carry (M7 brings the full instruction pack).
-const INSTRUCTIONS: &str = "You work in REAPER through Kumi's extension. Read the project with reaper_read before you describe it: its tracks (depth and folder show the folders), items and takes, FX and their parameters, sends and receives, markers, regions and envelopes. A ref such as track:3 is this turn's: pass it back as parent to read what's inside.";
+const INSTRUCTIONS: &str = "You work in REAPER through Kumi's extension. Read the project with reaper_read before you describe it: its tracks (depth and folder show the folders), items and takes, FX and their parameters, sends and receives, markers, regions and envelopes. A ref such as track:3 is this turn's: pass it back as parent to read what's inside. The look's setup is how this producer set REAPER up, and the project's timebase is in project: respect both rather than REAPER's factory defaults. New items get newItemFades (off, or that long; no fade-in on a hit), so add no fade an item wouldn't get. An item extended past its source repeats it only when it loops (loopSourceOfNewItems for new ones; read an item's own), and with the items timebase time a tempo change leaves items where they are in seconds. Call an extension's functions or named commands (SWS's _SWS_…, ReaPack, ReaImGui, js_ReaScriptAPI) only when setup.extensions says it's there. render is what File > Render does now: say so before you change it.";
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::REAPER,

@@ -169,6 +169,12 @@ impl Reaper<'_> {
         ok.then_some(text)
     }
 
+    /// Whether an API function is registered (`APIExists`): REAPER's own, or one an extension adds (SWS's `CF_…`).
+    pub fn api_exists(&self, name: &str) -> bool {
+        let name = cstring(name);
+        self.api.APIExists().is_some_and(|f| unsafe { f(name.as_ptr()) })
+    }
+
     /// Sets one in memory (never in reaper.ini): 2 when it is a project setting, 1 a global one, 0 when REAPER refused.
     pub fn set_config_text(&self, name: &str, value: &str) -> i32 {
         let (name, value) = (cstring(name), cstring(value));

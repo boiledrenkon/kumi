@@ -259,7 +259,10 @@ pub(super) unsafe extern "C" fn add_media_item_to_track(track: *mut MediaTrack) 
         }
         let id = new_id(s, "ITEM");
         let t = &mut s.tracks[at as usize];
-        t.items.push(FakeItem::new(&id, 0.0, 0.0, vec![]));
+        let mut item = FakeItem::new(&id, 0.0, 0.0, vec![]);
+        // As REAPER 7.82's: an item this makes loops its source whatever the preferences say (m7 KP1 lab).
+        item.extra.insert("B_LOOPSRC".into(), 1.0);
+        t.items.push(item);
         s.undo_dirty = true;
         item_ptr(at as usize, t.items.len() - 1)
     })

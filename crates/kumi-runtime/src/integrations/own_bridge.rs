@@ -1029,6 +1029,11 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         context["transport"] = snapshot.get("transport").cloned().unwrap_or(Value::Null);
         context["tracks"] = json!(folded.tracks);
         context["selection"] = selection;
+        // (m7) How the producer set the DAW up (REAPER's new-item defaults, extensions and render settings; Renoise's usual
+        // pattern length, groups and tools), read each look: the instructions say to respect it.
+        if let Some(setup) = snapshot.get("setup").filter(|setup| setup.is_object()) {
+            context["setup"] = shown_setup(setup);
+        }
         if let Some(folded_note) = folded.folded {
             context["folded"] = json!(folded_note);
         }
@@ -1551,6 +1556,23 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
         }
         if transport.is_some_and(|transport| transport.get("loop").is_some()) {
             row.remove("loop");
+        }
+    }
+    shown
+}
+
+/// The setup as the model sees it: a render folder outside the project is named by its last folder, as the project's file is
+/// (the folders it's in stay on this computer).
+fn shown_setup(setup: &Value) -> Value {
+    let mut shown = setup.clone();
+    if let Some(folder) = shown.pointer_mut("/render/folder") {
+        let absolute = |path: &&str| path.starts_with(['/', '~', '\\']) || matches!(path.get(1..3), Some(":\\" | ":/"));
+        let last = folder
+            .as_str()
+            .filter(absolute)
+            .map(|path| path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default().to_owned());
+        if let Some(last) = last {
+            *folder = json!(format!("…/{last}"));
         }
     }
     shown

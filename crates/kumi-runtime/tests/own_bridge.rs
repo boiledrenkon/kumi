@@ -258,6 +258,63 @@ async fn renoises_refs_are_positions_under_the_songs_epoch_and_a_new_song_retire
         .await;
 }
 
+/// (m7) Each look carries the producer's setup as the bridge read it, with the instructions to respect it; a render folder
+/// outside the project is named by its last folder only.
+#[tokio::test(flavor = "current_thread")]
+async fn each_look_carries_the_producers_setup_and_the_instructions_to_respect_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut snapshot = reaper_snapshot();
+            snapshot["setup"] = json!({
+                "newItemFades": "off", "loopSourceOfNewItems": {"imported": false, "midi": true}, "newTrackVolumeDb": -6.0,
+                "extensions": {"SWS": true, "ReaPack": true, "ReaImGui": false, "js_ReaScriptAPI": false},
+                "render": {"source": "region render matrix", "bounds": "all project regions", "channels": 2, "sampleRate": 48000,
+                           "pattern": "$region", "folder": "/Users/someone/Game/Renders/"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            let seen = reaper.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["setup"]["newItemFades"], "off");
+            assert_eq!(context["setup"]["loopSourceOfNewItems"]["imported"], false);
+            assert_eq!(context["setup"]["extensions"]["SWS"], true);
+            assert_eq!(context["setup"]["render"]["pattern"], "$region");
+            assert_eq!(context["setup"]["render"]["folder"], "…/Renders");
+            assert!(!seen.context.contains("/Users/someone"), "{}", seen.context);
+            for words in ["newItemFades", "loopSourceOfNewItems", "setup.extensions", "File > Render"] {
+                assert!(seen.instructions.contains(words), "{words}");
+            }
+
+            let song = json!({
+                "epoch": "3",
+                "project": {"id": null, "identity": "99:3", "name": "Amen", "bpm": 340, "lpb": 4},
+                "transport": {"playing": false},
+                "tracks": [{"ref": "3:track:1", "index": 1, "name": "Break", "type": "sequencer"}],
+                "selection": {"trackRef": "3:track:1"},
+                "setup": {"patternLines": 128, "groups": [{"name": "Drums", "color": "#ff0000", "tracks": 3}], "tools": ["Paketti"], "paketti": true},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["setup"]["patternLines"], 128);
+            assert_eq!(context["setup"]["groups"][0]["name"], "Drums");
+            assert_eq!(context["setup"]["paketti"], true);
+            for words in ["patternLines", "paketti", "2× or 4×"] {
+                assert!(seen.instructions.contains(words), "{words}");
+            }
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn with_nothing_drawing_the_focus_the_daw_is_asked_about_once_a_second() {
     tokio::task::LocalSet::new()
