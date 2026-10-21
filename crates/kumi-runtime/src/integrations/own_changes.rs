@@ -865,8 +865,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// One change: previewed, applied in one named step of the DAW's undo, and kept in HISTORY.
     async fn one_change(&self, kind: &'static OwnKind, asked: JsonObject, signal: Signal) -> ChangeOutcome {
         let words = self.link().words().words;
-        if self.history.changes_this_turn.get() >= 5_000 {
-            return ChangeOutcome::stop("That's 5000 changes in one answer; carry on in the next one");
+        if self.history.changes_this_turn.get() >= crate::core::plan::MAX_CHANGES {
+            return ChangeOutcome::stop(crate::core::plan::too_many_changes());
         }
         // Each track a DAW like Renoise adds costs it more in a big song (and it stalls near 600): an answer adds a few.
         let most = self.link().daw.changes.most_track_adds.filter(|_| kind.kind == "track-add");
