@@ -125,6 +125,9 @@ impl Integration for FallbackIntegration {
     fn words(&self) -> (&'static str, &'static str) {
         self.primary.words()
     }
+    fn has_open_place(&self) -> bool {
+        self.current().has_open_place()
+    }
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
         self.current().open_place(place, signal).await
     }

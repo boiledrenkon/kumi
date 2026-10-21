@@ -1345,6 +1345,7 @@ impl Session {
         }
         let row = self.wanted_row(&wanted).await;
         let (daw, noun) = self.words();
+        let by_hand = !self.0.state.borrow().integration.as_ref().is_some_and(|integration| integration.has_open_place());
         self.emit(SessionEvent::SetAsked {
             ask: Some(SetAsk {
                 id: wanted.id.clone(),
@@ -1353,6 +1354,7 @@ impl Session {
                 open,
                 daw: daw.into(),
                 noun: noun.into(),
+                by_hand,
             }),
         });
     }
@@ -2700,6 +2702,11 @@ impl SessionController for Session {
             SetChoice::Open => {
                 let integration = self.0.state.borrow().integration.clone();
                 let opened = match integration {
+                    // The producer opens it (they were asked to): nothing to say Kumi couldn't.
+                    Some(integration) if !integration.has_open_place() => {
+                        self.notice(format!("Open {set} in {daw}, and this conversation carries on there."));
+                        return Ok(());
+                    }
                     Some(integration) => integration.open_place(&wanted.place, abort::timeout(30_000)).await?,
                     None => Err(format!("Kumi isn't connected to {daw}.")),
                 };

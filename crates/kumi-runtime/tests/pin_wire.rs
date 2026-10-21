@@ -391,6 +391,7 @@ fn events() -> Vec<SessionEvent> {
             open: Some("Sunrise".into()),
             daw: "Live".into(),
             noun: "Set".into(),
+            by_hand: false,
         }),
     });
     events.push(SessionEvent::SetAsked {
@@ -401,6 +402,7 @@ fn events() -> Vec<SessionEvent> {
             open: None,
             daw: "Live".into(),
             noun: "Set".into(),
+            by_hand: false,
         }),
     });
     events.push(SessionEvent::SetAsked { ask: None });

@@ -556,6 +556,9 @@ pub struct SetAsk {
     /// What the producer calls the DAW and a place in it ("Live", "Set").
     pub daw: String,
     pub noun: String,
+    /// Kumi can't open places in this DAW: the producer opens it, and the conversation carries on there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_hand: bool,
 }
 
 /// The producer's answer when a conversation belongs to another Set.
@@ -768,6 +771,10 @@ pub trait Integration {
     /// What the producer calls the DAW and a place in it (Live's integration: "Live", "Set"); plain words otherwise.
     fn words(&self) -> (&'static str, &'static str) {
         self.profile().word_pair()
+    }
+    /// Whether Kumi can open a saved place in the DAW ([`Integration::open_place`]); else the producer opens it.
+    fn has_open_place(&self) -> bool {
+        false
     }
     /// Open the saved place (a Set, a project) a kept conversation belongs to in the DAW, which may ask first whether to
     /// save the open one. `Err(why)` inside when it can't.
