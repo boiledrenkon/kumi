@@ -475,6 +475,29 @@ test("instruments: in a big song Kumi's undo of an instrument it made looks for 
   eq(#mock.data.instruments, 3)
 end)
 
+test("instruments: a delete's look counts reads, not lines: dense patterns under the line budget are looked through in a job (#361 N-S17)", function()
+  local env, peer = patched("changes_instruments.lua", "M%.SCAN_BUDGET = 300000", "M.SCAN_BUDGET = 700")
+  for p = 1, 2 do
+    for l = 1, 32 do
+      local column = mock.song:pattern(p):track(3):line(l):note_column(1)
+      column.note_value, column.instrument_value = 48, 0
+    end
+  end
+  note_at(1, 1)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, epoch, layout = preview(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  local id = send(peer, "change_apply", { kind = "instrument-delete", input = { ref = iref(epoch, 2) }, fence = previewed.fence, desc = "Kumi: d (k171)", epoch = epoch, layout = layout })
+  local answered = false
+  for _, line in ipairs(peer:frames(nil)) do
+    local frame = json.decode(line)
+    if frame.type == "response" and frame.id == id then answered = true end
+  end
+  ok(not answered, "not answered inside the request's own callback: a job looks")
+  local done = wait(peer, id, 800)
+  ok(done.result, json.encode(done.error or {}))
+  eq(#done.result.material.notes, 1)
+end)
+
 test("instruments: a big song is looked through in slices before the delete, which is one step; a pattern changed meanwhile is looked at again", function()
   local env, peer = setup({ patch = function(env_)
     local path = env_.bundle .. "payload/changes_instruments.lua"

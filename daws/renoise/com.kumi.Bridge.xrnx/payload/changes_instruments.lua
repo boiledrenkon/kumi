@@ -333,39 +333,66 @@ local function scan_cost(song)
   return cost * rows.track_count(song)
 end
 
-local function notes_in_pattern(song, p, v, found)
+-- The notes of one pattern track, and how many reads that took (a line looked at, and each note column of a line that holds
+-- something: a dense line costs a dozen).
+local function notes_in_track(song, p, t, v, found)
   local pattern = song:pattern(p)
-  for t = 1, rows.track_count(song) do
-    local pattern_track = pattern:track(t)
-    if not pattern_track.is_alias and not pattern_track.is_empty and song:track(t).max_note_columns > 0 then
-      for l = 1, pattern.number_of_lines do
-        local line = pattern_track:line(l)
-        if not line.is_empty then
-          for c = 1, 12 do
-            local column = line:note_column(c)
-            if column.instrument_value == v then
-              found[#found + 1] = {
-                p = p, t = t, line = l, col = c, note = column.note_value, volume = column.volume_value, panning = column.panning_value,
-                delay = column.delay_value, fxn = column.effect_number_value, fxa = column.effect_amount_value,
-              }
-            end
-          end
+  local pattern_track = pattern:track(t)
+  if pattern_track.is_alias or pattern_track.is_empty or song:track(t).max_note_columns == 0 then return 1 end
+  local reads = 0
+  for l = 1, pattern.number_of_lines do
+    local line = pattern_track:line(l)
+    reads = reads + 1
+    if not line.is_empty then
+      for c = 1, 12 do
+        local column = line:note_column(c)
+        reads = reads + 1
+        if column.instrument_value == v then
+          found[#found + 1] = {
+            p = p, t = t, line = l, col = c, note = column.note_value, volume = column.volume_value, panning = column.panning_value,
+            delay = column.delay_value, fxn = column.effect_number_value, fxa = column.effect_amount_value,
+          }
         end
       end
     end
   end
+  return reads
+end
+
+local function notes_in_pattern(song, p, v, found)
+  local reads = 0
+  for t = 1, rows.track_count(song) do reads = reads + notes_in_track(song, p, t, v, found) end
+  return reads
 end
 M.notes_in_pattern = notes_in_pattern
 
-local function scan(job, env, v)
+-- A look through the song in one callback, stopped (nil) once it has read more than the budget: then a job looks, in slices.
+local function scan_inline(env, v)
   local song = rows.the_song()
-  local found, marks = {}, {}
+  if scan_cost(song) > M.SCAN_BUDGET then return nil end
+  local found, marks, reads = {}, {}, 0
   for p = 1, #song.patterns do
-    if job then job.slice() end
+    marks[p] = env.pattern_touch_mark and env.pattern_touch_mark(p) or false
+    reads = reads + notes_in_pattern(song, p, v, found)
+    if reads > M.SCAN_BUDGET then return nil end
+  end
+  return found, marks
+end
+
+-- The look in a job: a slice may end after any pattern track (a dense pattern is a lot of reads).
+local function scan(job, env, v)
+  local found, marks = {}, {}
+  local patterns = #rows.the_song().patterns
+  for p = 1, patterns do
     local live = rows.the_song()
     if p > #live.patterns then break end
     marks[p] = env.pattern_touch_mark and env.pattern_touch_mark(p) or false
-    notes_in_pattern(live, p, v, found)
+    for t = 1, rows.track_count(live) do
+      job.slice()
+      live = rows.the_song()
+      if p > #live.patterns or t > rows.track_count(live) then break end
+      notes_in_track(live, p, t, v, found)
+    end
   end
   return found, marks
 end
@@ -417,7 +444,8 @@ local function remove_checked(song, env, restore, locate, write, no_notes)
     end
     return done
   end
-  if scan_cost(song) <= M.SCAN_BUDGET then return finish(song, (scan(nil, env, i - 1))) end
+  local inline = scan_inline(env, i - 1)
+  if inline then return finish(song, inline) end
   return {
     kumi_job = function(job)
       base.wait_while_busy(job, env)
@@ -610,10 +638,8 @@ end
 
 local function delete_apply(song, env, input, fence, desc)
   local v = fence.index - 1
-  if scan_cost(song) <= M.SCAN_BUDGET then
-    local found = scan(nil, env, v)
-    return delete_write(song, env, input, fence, desc, found)
-  end
+  local inline = scan_inline(env, v)
+  if inline then return delete_write(song, env, input, fence, desc, inline) end
   -- A big song: looked through in slices (nothing written), then the delete in one step of its own.
   return {
     kumi_job = function(job)
