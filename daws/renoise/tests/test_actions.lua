@@ -179,6 +179,18 @@ test("actions: the bridge says it has the actions", function()
   H.no_dialogs()
 end)
 
+test("actions: status advertises every method the bridge answers (#361 N-N14)", function()
+  local methods = {}
+  for _, name in ipairs(T.load_payload_module("status").METHODS) do methods[name] = true end
+  local f = assert(io.open(T.tests_dir .. "../com.kumi.Bridge.xrnx/payload/bridge.lua", "rb"))
+  local text = f:read("*a")
+  f:close()
+  local missing = {}
+  for name in text:gmatch("\nfunction handlers%.([%w_]+)") do if not methods[name] then missing[#missing + 1] = name end end
+  for name in text:gmatch("\nhandlers%.([%w_]+) = ") do if not methods[name] then missing[#missing + 1] = name end end
+  eq(table.concat(missing, ","), "", "every handler is in status's methods")
+end)
+
 test("actions: refs come as Kumi names them (instrumentRef, trackRef, sequenceRef) and are carried through the layout", function()
   local _, peer = K.setup()
   local E, layout = K.place(peer)
