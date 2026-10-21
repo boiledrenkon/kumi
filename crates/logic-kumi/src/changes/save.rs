@@ -139,7 +139,7 @@ fn save_as(ctx: &mut Ctx, path: &Path) -> Done<String> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     front::ensure(ctx.ax)?;
     super::structure::file_menu(ctx, &["Save As…"])?;
-    let panel = panel::find(ctx.ax)?;
+    let panel = panel::find_or_close(ctx.ax)?;
     let result = (|| {
         panel::go_to(ctx.ax, &panel, &folder.to_string_lossy())?;
         // A folder that isn't there leaves the panel where it was (the sheet closes anyway): the panel's own

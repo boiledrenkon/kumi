@@ -56,20 +56,38 @@ fn service_with_panel(ax: &mut Ax) -> Done<Option<Panel>> {
     Ok(None)
 }
 
-/// Waits for a panel to come up after a menu item: Logic shows it as a modal dialog, the service draws it.
+/// Waits for a panel to come up after a menu item: Logic shows it as a modal dialog, the service draws it. A read the
+/// helper doesn't answer in time is tried again until the wait is up: the service can be slow to draw a panel, and the
+/// M4 gate's fourth run lost its save as to one such read.
 pub fn find(ax: &mut Ax) -> Done<Panel> {
     let until = Instant::now() + PANEL_WAIT;
     loop {
-        if logic_modal(ax)?.is_some() {
-            if let Some(panel) = service_with_panel(ax)? {
-                return Ok(panel);
-            }
+        let seen = match logic_modal(ax) {
+            Ok(Some(_)) => service_with_panel(ax),
+            Ok(None) => Ok(None),
+            Err(fault) => Err(fault),
+        };
+        match seen {
+            Ok(Some(panel)) => return Ok(panel),
+            Err(fault) if Instant::now() >= until => return Err(fault),
+            _ => {}
         }
         if Instant::now() >= until {
             return Err(failed("Logic Pro showed no open or save panel"));
         }
         super::pause(Duration::from_millis(150));
     }
+}
+
+/// [`find`] right after the menu item that opens a panel: when no panel is found, Escape goes to Logic, so a panel that
+/// came up unseen is never left standing in front of the project (the M4 gate's fourth run left a Save panel up).
+pub fn find_or_close(ax: &mut Ax) -> Done<Panel> {
+    let found = find(ax);
+    if found.is_err() {
+        let _ = ax.keys("escape", &[]);
+        let _ = gone(ax, Duration::from_millis(800));
+    }
+    found
 }
 
 /// Waits for the panel to go: Logic's windows show no modal dialog any more. Whether it went.
@@ -237,6 +255,34 @@ mod tests {
         // The panel gone: Logic shows no modal any more.
         hands.set_windows(json!([window("Song - Tracks", "AXStandardWindow", false, true)]), &[]);
         assert!(gone(&mut ax, Duration::from_millis(10)).unwrap());
+    }
+
+    #[test]
+    fn a_read_the_helper_did_not_answer_is_tried_again_while_the_panel_comes_up() {
+        let hands = MockHands::new();
+        hands.set_apps(vec![json!({"bundle": "com.apple.logic10", "pid": 7, "active": true})]);
+        hands.set_windows(json!([window("Save", "AXDialog", true, true)]), &[]);
+        hands.reply("windows", Err(crate::helper::HelperError::Timeout));
+        hands.reply("windows", Ok(json!({"windows": [window("Save", "AXDialog", true, true)], "listed": []})));
+        hands.reply("processes", Ok(json!({"pids": [200]})));
+        hands.reply("windows", Ok(json!({"windows": [window("Save", "AXSystemDialog", false, true)], "listed": []})));
+        let mut launcher = hands.clone();
+        let mut helper = Launch::launch(&mut launcher).unwrap();
+        let mut ax = Ax::new(helper.as_mut(), 7);
+        assert_eq!(find(&mut ax).unwrap(), Panel { pid: 200, title: "Save".into() });
+    }
+
+    #[test]
+    fn a_panel_never_found_is_closed_with_escape_in_case_it_came_up_unseen() {
+        let hands = MockHands::new();
+        hands.set_apps(vec![json!({"bundle": "com.apple.logic10", "pid": 7, "active": true})]);
+        hands.set_windows(json!([window("Song - Tracks", "AXStandardWindow", false, true)]), &[]);
+        let mut launcher = hands.clone();
+        let mut helper = Launch::launch(&mut launcher).unwrap();
+        let mut ax = Ax::new(helper.as_mut(), 7);
+        crate::changes::set_settling(false);
+        assert_eq!(find_or_close(&mut ax).unwrap_err().0, "failed");
+        assert!(hands.calls().iter().any(|(op, params)| op == "keys" && params.to_string().contains("escape")), "{:?}", hands.calls());
     }
 
     #[test]

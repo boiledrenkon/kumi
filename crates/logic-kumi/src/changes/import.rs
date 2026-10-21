@@ -194,7 +194,7 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     timeline::set_playhead(ctx, Position { bar: position.bar, beat: position.beat, ..Position::START })?;
     front::ensure(ctx.ax)?;
     structure::file_menu(ctx, &["Import", "MIDI File…"])?;
-    let the_panel = panel::find(ctx.ax)?;
+    let the_panel = panel::find_or_close(ctx.ax)?;
     let driven = (|| {
         panel::go_to(ctx.ax, &the_panel, &file.to_string_lossy())?;
         panel::press(ctx.ax, &the_panel, "OKButton")?;
