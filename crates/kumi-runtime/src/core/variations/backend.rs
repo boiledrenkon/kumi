@@ -76,6 +76,9 @@ pub fn gone(row: &Value) -> bool {
     row.get("gone") == Some(&Value::Bool(true))
 }
 
+/// A rewrite made: its change, and what the take holds instead of what was asked when only part went in (and why).
+pub type Rewritten<M> = (String, Option<(M, String)>);
+
 /// What each take sounded like (or why it wasn't rendered), and the source when it was asked for.
 pub type Rendered = (Option<Heard>, BTreeMap<usize, Result<Heard, String>>);
 
@@ -95,8 +98,8 @@ pub trait VariationsBackend: Sized {
     /// The operators of a direction Kumi picked.
     fn direction_ops(&self, direction: &str) -> Vec<Value>;
 
-    /// Whether the model's operators are the DAW's (before anything is drawn).
-    fn check_ops(&self, ops: &[Value]) -> Result<(), String>;
+    /// Whether the model's operators are the DAW's, and fit where the source's takes go (before anything is drawn).
+    fn check_ops(&self, source: &Source<Self::Material, Self::Data>, ops: &[Value]) -> Result<(), String>;
 
     /// Applies the operators, each `factor` times as much, to a take drawn from `source`: what each did, in a few words.
     fn apply_ops(
@@ -117,9 +120,9 @@ pub trait VariationsBackend: Sized {
     /// Whether a take keeps what every take keeps (the anchors): why not.
     fn anchors_kept(&self, source: &Self::Material, take: &Self::Material) -> Result<(), String>;
 
-    /// What a take breaks that the source keeps (its key, its grid), with the operators asked for (a transpose moves the key on
-    /// purpose): words, none when nothing.
-    fn judge(&self, source: Option<&Self::Material>, take: &Self::Material, ops: &[Value]) -> Vec<String>;
+    /// What a take breaks that the source keeps (its key, its grid), with the operators asked for as they were applied (`factor`
+    /// times as much; a transpose moves the key on purpose): words, none when nothing.
+    fn judge(&self, source: Option<&Self::Material>, take: &Self::Material, ops: &[Value], factor: f64) -> Vec<String>;
 
     /// What a take holds, to tell later whether anyone changed it.
     fn digest(&self, material: &Self::Material) -> String;
@@ -140,7 +143,7 @@ pub trait VariationsBackend: Sized {
     async fn current(&self, set: &Set<Self>, row: &Value, signal: &Signal) -> Result<Self::Material, String>;
 
     /// Writes `after` over a found take that holds `before` (one change, or two for a setting the DAW changes apart): the id of
-    /// the change that wrote its lines.
+    /// the last change made, and, when only part of `after` went in, what the take holds instead and why.
     async fn rewrite(
         &self,
         set: &Set<Self>,
@@ -148,7 +151,7 @@ pub trait VariationsBackend: Sized {
         before: &Self::Material,
         after: &Self::Material,
         signal: &Signal,
-    ) -> Result<String, (String, bool)>;
+    ) -> Result<Rewritten<Self::Material>, (String, bool)>;
 
     /// Marks a found take kept in the DAW (renames it "… · kept"): the change, or None when the producer named it otherwise.
     async fn mark_kept(&self, set: &Set<Self>, number: usize, row: &Value, signal: &Signal) -> Result<Option<String>, String>;

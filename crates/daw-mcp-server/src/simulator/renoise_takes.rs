@@ -272,6 +272,10 @@ impl Takes {
             }
             ("phrase-write" | "phrase-set", "change_preview") => {
                 let n = numbers(input["ref"].as_str(), "phrase").ok_or(bad("ref: a phrase"))?;
+                // (as the tool's phrase-write: lines to write, at least one)
+                if kind == "phrase-write" && input["lines"].as_array().is_none_or(Vec::is_empty) {
+                    return Err(bad("lines: a list of {line, notes?, effects?, clear?}"));
+                }
                 let phrase = self.phrase_at(n[0], n[1]).ok_or(("gone".to_string(), "that phrase isn't there".to_string()))?;
                 answer(
                     json!({"target": {"ref": input["ref"], "kind": "phrase"}, "prior": {"rows": phrase.rows, "lpb": phrase.lpb, "id": phrase.id},

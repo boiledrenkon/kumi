@@ -1,7 +1,7 @@
 //! The variations tool against a fake DAW of sixteen steps, with no DAW at all: what core owns, the same for every backend
 //! (numbering across makes, keep, change, drop and "rest", the checks and their warnings, the sets kept across a restart,
 //! takes found again by their names, and when takes are rendered and drawn again).
-use super::backend::{Rendered, Set, Source, VariationsBackend, Words};
+use super::backend::{Rendered, Rewritten, Set, Source, VariationsBackend, Words};
 use super::heard::Heard;
 use super::tool::{names, Variations};
 use super::{Material, Rng};
@@ -31,7 +31,8 @@ impl Material for Steps {
 }
 
 /// The fake DAW: its takes by id (name and steps), the changes it made, whether it plays, the renders it made and how many of
-/// the next takes rendered clip. `generation` moves when it starts again: places from before are unknown then.
+/// the next takes rendered clip. `generation` moves when it starts again: places from before are unknown then. `unreadable`: a
+/// take whose reads fail.
 #[derive(Default)]
 struct Daw {
     takes: RefCell<BTreeMap<u64, (String, Steps)>>,
@@ -41,6 +42,7 @@ struct Daw {
     renders: Cell<usize>,
     clips: Cell<usize>,
     generation: Cell<u64>,
+    unreadable: Cell<Option<u64>>,
 }
 
 impl Daw {
@@ -109,7 +111,7 @@ impl VariationsBackend for Fake {
         vec![json!({"op": "flip", "amount": amount})]
     }
 
-    fn check_ops(&self, ops: &[Value]) -> Result<(), String> {
+    fn check_ops(&self, _: &Source<Steps, ()>, ops: &[Value]) -> Result<(), String> {
         match ops.iter().find(|op| op["op"] != "flip") {
             Some(op) => Err(format!("{op}: op is flip")),
             None => Ok(()),
@@ -146,7 +148,7 @@ impl VariationsBackend for Fake {
         Ok(())
     }
 
-    fn judge(&self, _: Option<&Steps>, _: &Steps, _: &[Value]) -> Vec<String> {
+    fn judge(&self, _: Option<&Steps>, _: &Steps, _: &[Value], _: f64) -> Vec<String> {
         vec![]
     }
 
@@ -203,16 +205,19 @@ impl VariationsBackend for Fake {
     }
 
     async fn current(&self, _: &Set<Self>, row: &Value, _: &Signal) -> Result<Steps, String> {
+        if self.0.unreadable.get() == Some(id_of(row)) {
+            return Err("the DAW was busy".into());
+        }
         self.0.takes.borrow().get(&id_of(row)).map(|(_, steps)| steps.clone()).ok_or("gone".into())
     }
 
-    async fn rewrite(&self, _: &Set<Self>, row: &Value, _: &Steps, after: &Steps, _: &Signal) -> Result<String, (String, bool)> {
+    async fn rewrite(&self, _: &Set<Self>, row: &Value, _: &Steps, after: &Steps, _: &Signal) -> Result<Rewritten<Steps>, (String, bool)> {
         let daw = &self.0;
         match daw.takes.borrow_mut().get_mut(&id_of(row)) {
             Some((_, steps)) => *steps = after.clone(),
             None => return Err(("gone".into(), false)),
         }
-        Ok(daw.change())
+        Ok((daw.change(), None))
     }
 
     async fn mark_kept(&self, set: &Set<Self>, number: usize, row: &Value, _: &Signal) -> Result<Option<String>, String> {
@@ -439,4 +444,34 @@ async fn nothing_renders_while_the_daw_plays_and_a_take_that_clips_where_the_sou
     assert!(line.contains(" \u{b7} heard: peak \u{2212}6.0 dBFS"), "heard again, fine now: {made}");
     assert_eq!(daw.changes.get(), 3, "the first take, the second, and its rewrite");
     assert_eq!(daw.renders.get(), 2, "the take, then the take drawn again");
+}
+
+/// (review W9) A make on the same source goes on with the source as it is now: a take is drawn from the producer's edit.
+#[tokio::test(flavor = "current_thread")]
+async fn a_make_on_the_same_source_draws_from_the_source_as_it_is_now() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 8, "listen": false})).await.unwrap();
+    let edited: Vec<u8> = BEAT.iter().map(|level| if *level == 0 { 3 } else { 0 }).collect();
+    let more = run(&tool, json!({"action": "make", "source": {"steps": edited}, "count": 1, "seed": 9, "listen": false})).await.unwrap();
+    assert_eq!((&more["set"], &more["takes"][0]["take"]), (&json!(1), &json!("V2")), "the same set: {more}");
+    let take = daw.takes.borrow()[&2].1.clone();
+    assert!(take.distance(&Steps(edited.clone())) <= 0.5, "drawn from the edit, not the source as it was: {take:?}");
+}
+
+/// (review W11) A take that can't be read in a change is left and said; the takes rewritten before it stay Kumi's.
+#[tokio::test(flavor = "current_thread")]
+async fn a_take_that_cant_be_read_in_a_change_is_left_and_the_others_stay_told() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 4, "seed": 10, "listen": false})).await.unwrap();
+    daw.unreadable.set(Some(3));
+    let changed = run(&tool, json!({"action": "change", "names": ["rest"], "listen": false})).await.unwrap();
+    assert_eq!(changed["changed"].as_array().unwrap().len(), 3, "{changed}");
+    assert!(changed["skipped"][0].as_str().unwrap().contains("V3 wasn't changed: Kumi couldn't read it"), "{changed}");
+    daw.unreadable.set(None);
+    let dropped = run(&tool, json!({"action": "drop"})).await.unwrap();
+    assert_eq!(dropped["dropped"], json!(["V1", "V2", "V3", "V4"]), "none of them taken for edited: {dropped}");
 }

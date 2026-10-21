@@ -1,7 +1,7 @@
 //! The variations tool (M7), the same in every DAW: make takes of a source, then keep, change and drop them by number. Core
 //! draws and checks each take, keeps the sets (in Kumi's folder, by the project's own id, so a restart forgets nothing kept),
 //! renders and hears takes before they're shown, and answers a line per take; the DAW's backend reads, writes, finds and renders.
-use super::backend::{found, gone, Recipe, Set, Source, VariationsBackend, Words};
+use super::backend::{found, gone, Recipe, Rewritten, Set, Source, VariationsBackend, Words};
 use super::heard::Heard;
 use super::{check, kept_name, roll, seed_of, take_name, Bounds, Material, Purpose, Rng, Take, TakeSet, TakeState, Verdict};
 use crate::core::contracts::{JsonObject, KernelTool, Reach, ToolResult};
@@ -188,14 +188,19 @@ impl<B: VariationsBackend + 'static> Variations<B> {
 
     async fn make(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String> {
         let source = self.backend.source(input, signal).await?;
-        let recipes = self.recipes_of(input, source.material.is_some())?;
+        let recipes = self.recipes_of(input, &source)?;
         let bounds = bounds_of(input);
         let seed = input.get("seed").and_then(Value::as_u64).unwrap_or_else(fresh_seed);
         // (the same source again: its set goes on, V10 after V9; another source's set stays, by its number or name)
         let (mut set, continued) = {
             let sets = self.sets.borrow();
             match sets.iter().rev().find(|set| set.source.key == source.key && set.source.short == source.short) {
-                Some(set) => (set.clone(), true),
+                Some(set) => {
+                    // (the source as it is now, its lines, anchors and settings; its takes and their places stay)
+                    let mut set = set.clone();
+                    set.source = source;
+                    (set, true)
+                }
                 None => {
                     let id = sets.iter().map(|set| set.id).max().unwrap_or(0) + 1;
                     // (numbers once given to takes of the same name never come back: names stay apart in the DAW)
@@ -287,7 +292,7 @@ impl<B: VariationsBackend + 'static> Variations<B> {
             let set = pick_set(&sets, input)?;
             (set.pick(&names, Purpose::Change, force)?, set.clone())
         };
-        let given = self.given(input)?;
+        let given = self.given(input, &set.source)?;
         if given.len() > numbers.len() || numbers.len() > MOST_TAKES {
             return Err(format!(
                 "change names {} takes and gives {} recipes: give one per take, or fewer and Kumi picks the rest",
@@ -315,7 +320,14 @@ impl<B: VariationsBackend + 'static> Variations<B> {
                 skipped.push(format!("V{number} isn't in the {} any more", self.backend.words().app));
                 continue;
             }
-            let current = self.backend.current(&set, &row, signal).await?;
+            // (a take that can't be read now is left: the takes rewritten before it stay told)
+            let current = match self.backend.current(&set, &row, signal).await {
+                Ok(current) => current,
+                Err(why) => {
+                    skipped.push(format!("V{number} wasn't changed: Kumi couldn't read it ({why})"));
+                    continue;
+                }
+            };
             if self.backend.digest(&current) != take.digest {
                 skipped.push(format!("V{number} was edited in {} since Kumi wrote it: left as it is", words.app));
                 continue;
@@ -332,14 +344,14 @@ impl<B: VariationsBackend + 'static> Variations<B> {
                 }
             };
             match self.backend.rewrite(&set, &row, &current, &drawn.material, signal).await {
-                Ok(change) => {
+                Ok(done) => {
                     rewritten.insert(number, recipe);
-                    let line = take_line(&drawn, &change);
+                    let (change, material, line) = holding(&drawn, done);
                     let reference = row.get("ref").and_then(Value::as_str).unwrap_or("");
                     lines_out.push(json!({"take": format!("V{number}"), "ref": self.backend.short(reference), "line": line}));
                     if let Some(take) = set.take_mut(number) {
-                        take.digest = self.backend.digest(&drawn.material);
-                        take.material = drawn.material;
+                        take.digest = self.backend.digest(&material);
+                        take.material = material;
                         take.direction = drawn.direction;
                         take.change = Some(change);
                         take.line = line;
@@ -472,11 +484,11 @@ impl<B: VariationsBackend + 'static> Variations<B> {
 
     // Drawing
 
-    fn given(&self, input: &JsonObject) -> Result<Vec<Recipe>, String> {
+    fn given(&self, input: &JsonObject, source: &Source<B::Material, B::Data>) -> Result<Vec<Recipe>, String> {
         let recipes: Vec<Recipe> =
             input.get("takes").and_then(Value::as_array).into_iter().flatten().map(parse_recipe).collect::<Result<_, _>>()?;
         for recipe in &recipes {
-            self.backend.check_ops(&recipe.ops)?;
+            self.backend.check_ops(source, &recipe.ops)?;
         }
         Ok(recipes)
     }
@@ -486,8 +498,9 @@ impl<B: VariationsBackend + 'static> Variations<B> {
     }
 
     /// The recipes a make asks for: the model's, then (to `count`) directions Kumi picks that none of them has.
-    fn recipes_of(&self, input: &JsonObject, has_source: bool) -> Result<Vec<Recipe>, String> {
-        let given = self.given(input)?;
+    fn recipes_of(&self, input: &JsonObject, source: &Source<B::Material, B::Data>) -> Result<Vec<Recipe>, String> {
+        let has_source = source.material.is_some();
+        let given = self.given(input, source)?;
         let count = input.get("count").and_then(Value::as_u64).map(|n| n as usize);
         if given.is_empty() && !has_source {
             return Err("takes of a source with nothing in it need lines you write (later takes can start from: \"V1\")".into());
@@ -578,7 +591,7 @@ impl<B: VariationsBackend + 'static> Variations<B> {
             if let Some(source) = source {
                 backend.anchors_kept(source, &take)?;
             }
-            let issues = backend.judge(source.or(Some(&base)), &take, &recipe.ops);
+            let issues = backend.judge(source.or(Some(&base)), &take, &recipe.ops, factor.get());
             if !issues.is_empty() {
                 if recipe.ops.is_empty() {
                     *warnings.borrow_mut() = issues;
@@ -712,11 +725,11 @@ impl<B: VariationsBackend + 'static> Variations<B> {
         if !found(&row) {
             return Err(format!("it isn't in the {} any more", self.backend.words().app));
         }
-        let change = self.backend.rewrite(set, &row, &before, &redrawn.material, signal).await.map_err(|(why, _)| why)?;
-        let line = take_line(&redrawn, &change);
+        let done = self.backend.rewrite(set, &row, &before, &redrawn.material, signal).await.map_err(|(why, _)| why)?;
+        let (change, material, line) = holding(&redrawn, done);
         if let Some(take) = set.take_mut(number) {
-            take.digest = self.backend.digest(&redrawn.material);
-            take.material = redrawn.material;
+            take.digest = self.backend.digest(&material);
+            take.material = material;
             take.change = Some(change);
             take.line = line;
         }
@@ -852,6 +865,20 @@ fn bounds_of(input: &JsonObject) -> Bounds {
         Some("subtle") => Bounds { min_source: 0.03, max_source: 0.6, min_others: 0.03 },
         Some("bold") => Bounds { min_source: 0.2, max_source: 0.95, min_others: 0.1 },
         _ => Bounds::default(),
+    }
+}
+
+/// A rewrite's change, what the take holds now and its line: what was drawn, or (when only part of it went in) what the backend
+/// says it holds, the line saying why.
+fn holding<M: Clone>(drawn: &Drawn<M>, done: Rewritten<M>) -> (String, M, String) {
+    let (change, instead) = done;
+    let mut line = take_line(drawn, &change);
+    match instead {
+        Some((holds, why)) => {
+            line.push_str(&format!(" (only part went in: {why})"));
+            (change, holds, line)
+        }
+        None => (change, drawn.material.clone(), line),
     }
 }
 
