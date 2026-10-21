@@ -54,6 +54,21 @@ fn fixed_lanes_go_on_and_their_undo_puts_the_track_back() {
 }
 
 #[test]
+fn a_lane_names_undo_is_refused_once_a_lane_went_in_above_it() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 1, "name": "Take 2"}));
+    // A comp lane goes in on top: every lane moves down one, and lane 2 is the unnamed one now.
+    state(|s| s.tracks[1].lane_names.insert(0, "C1".into()));
+    state(|s| s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 3.0));
+    for discard in [false, true] {
+        let (code_, message) = lab.undo_with("lane-name", &preview, &applied, discard).unwrap_err();
+        assert_eq!(code_, "changed", "discard {discard}");
+        assert!(message.contains("added or taken away"), "{message}");
+    }
+    assert_eq!(state(|s| s.tracks[1].lane_names.clone()), ["C1", "1", "Take 2"], "no lane renamed");
+}
+
+#[test]
 fn undoing_lanes_off_leaves_the_track_once_the_producer_added_an_item_while_they_were_off_unless_told_to_discard() {
     let lab = lanes_lab();
     let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
