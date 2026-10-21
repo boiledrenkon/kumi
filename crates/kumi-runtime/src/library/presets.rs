@@ -6,8 +6,12 @@ use crate::core::daw::DawId;
 use indexmap::IndexSet;
 use kumi_common::js::string::{head, trim};
 use serde::{Deserialize, Serialize};
-use std::{io, path::Path, sync::LazyLock};
-use tokio::io::AsyncReadExt;
+use std::{
+    io::{self, SeekFrom},
+    path::Path,
+    sync::LazyLock,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 pub const PRESET_EXTENSIONS: &[&str] = &[".adv", ".adg", ".amxd", ".vstpreset", ".aupreset", ".fxp", ".fxb"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PresetCategory {
@@ -438,15 +442,35 @@ fn element(text: &str, name: &str) -> Option<String> {
 /// The sample files a Renoise instrument holds, from its zip's directory (`SampleData/Sample00 (Kick).flac`): names only,
 /// nothing unpacked. None when it isn't a zip Kumi reads.
 async fn xrni_samples(path: &str) -> io::Result<Vec<String>> {
-    let bytes = tokio::fs::read(path).await?;
-    let tail = &bytes[bytes.len().saturating_sub(65_557)..];
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    zip_samples(&mut file, len).await
+}
+
+/// The most of a zip's directory Kumi reads (tens of thousands of names).
+const MOST_DIRECTORY: u64 = 8 << 20;
+
+/// `xrni_samples` from a zip of `len` bytes: only its end record and its directory are read, never the samples (a
+/// multi-sampled instrument can be hundreds of MB, and the learner reads one after another).
+async fn zip_samples<R: AsyncRead + AsyncSeek + Unpin>(zip: &mut R, len: u64) -> io::Result<Vec<String>> {
+    let mut tail = vec![0; len.min(65_557) as usize];
+    zip.seek(SeekFrom::Start(len - tail.len() as u64)).await?;
+    zip.read_exact(&mut tail).await?;
     let end = tail.windows(4).rposition(|w| w == b"PK\x05\x06").ok_or_else(|| invalid("not a zip"))?;
     let record = &tail[end..];
     if record.len() < 22 {
         return Err(invalid("not a zip"));
     }
     let count = u16::from_le_bytes([record[10], record[11]]) as usize;
-    let mut at = u32::from_le_bytes([record[16], record[17], record[18], record[19]]) as usize;
+    let size = u32::from_le_bytes([record[12], record[13], record[14], record[15]]) as u64;
+    let start = u32::from_le_bytes([record[16], record[17], record[18], record[19]]) as u64;
+    if size > MOST_DIRECTORY || start + size > len {
+        return Err(invalid("a cut zip"));
+    }
+    let mut bytes = vec![0; size as usize];
+    zip.seek(SeekFrom::Start(start)).await?;
+    zip.read_exact(&mut bytes).await?;
+    let mut at = 0;
     let mut names = Vec::new();
     for _ in 0..count {
         let header = bytes.get(at..at + 46).ok_or_else(|| invalid("a cut zip"))?;
@@ -577,4 +601,88 @@ pub async fn read_daw_preset(format: &str, path: &str, relative: &str) -> io::Re
         }
         _ => PresetFacts::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    /// A zip in memory that counts the bytes read from it.
+    struct Counted {
+        zip: io::Cursor<Vec<u8>>,
+        read: usize,
+    }
+    impl AsyncRead for Counted {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<io::Result<()>> {
+            let before = buf.filled().len();
+            let polled = Pin::new(&mut self.zip).poll_read(cx, buf);
+            self.read += buf.filled().len() - before;
+            polled
+        }
+    }
+    impl AsyncSeek for Counted {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+            Pin::new(&mut self.zip).start_seek(position)
+        }
+        fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+            Pin::new(&mut self.zip).poll_complete(cx)
+        }
+    }
+
+    /// A stored zip of these files.
+    fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let at = out.len() as u32;
+            let header = |signature: &[u8], central: bool| {
+                let mut h = signature.to_vec();
+                if central {
+                    h.extend([20, 0]);
+                }
+                h.extend([20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                h.extend((data.len() as u32).to_le_bytes());
+                h.extend((data.len() as u32).to_le_bytes());
+                h.extend((name.len() as u16).to_le_bytes());
+                h.extend([0, 0]);
+                if central {
+                    h.extend([0; 10]);
+                    h.extend(at.to_le_bytes());
+                }
+                h.extend(name.as_bytes());
+                h
+            };
+            out.extend(header(b"PK\x03\x04", false));
+            out.extend(*data);
+            central.extend(header(b"PK\x01\x02", true));
+        }
+        let start = out.len() as u32;
+        out.extend(&central);
+        out.extend(b"PK\x05\x06\0\0\0\0");
+        out.extend((files.len() as u16).to_le_bytes());
+        out.extend((files.len() as u16).to_le_bytes());
+        out.extend((central.len() as u32).to_le_bytes());
+        out.extend(start.to_le_bytes());
+        out.extend([0, 0]);
+        out
+    }
+
+    /// (#361 review K32) A Renoise instrument's samples are listed from its zip's end and directory alone: its sample
+    /// data, most of the file, is never read.
+    #[tokio::test]
+    async fn an_instruments_samples_are_listed_without_reading_their_data() {
+        let kick = vec![7u8; 4 << 20];
+        let bytes = zip(&[
+            ("Instrument.xml", b"<RenoiseInstrument/>"),
+            ("SampleData/Sample00 (Kick).flac", &kick),
+            ("SampleData/Sample01 (Snare).flac", &kick),
+        ]);
+        let len = bytes.len() as u64;
+        let mut counted = Counted { zip: io::Cursor::new(bytes), read: 0 };
+        assert_eq!(zip_samples(&mut counted, len).await.unwrap(), ["Kick", "Snare"]);
+        assert!(counted.read < 70_000, "read {} of {len} bytes", counted.read);
+    }
 }
