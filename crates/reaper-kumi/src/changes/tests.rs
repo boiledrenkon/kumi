@@ -3649,6 +3649,27 @@ fn the_generic_call_gives_reaper_a_buffer_as_big_as_it_tells_reaper_and_sends_ba
 }
 
 #[test]
+fn a_buffer_reaper_isnt_told_the_size_of_is_never_smaller_than_64_kib_whatever_the_caller_asks() {
+    // `stringNeedBig` (the GetSet…Info_String family) and `strNeed64` (mkvolstr): REAPER writes the whole value, told no
+    // size, and the buffer was made as small as the caller's `<name>_sz` asked. The fake writes a track's whole P_EXT
+    // value, as REAPER does.
+    let lab = Lab::new();
+    let value = "x".repeat(50_000);
+    state(|s| {
+        let guid = s.tracks[1].guid.clone();
+        s.listening.track_ext.insert((guid, "P_EXT:big".into()), value.clone());
+    });
+    let args = json!({"tr": KICK, "parmname": "P_EXT:big", "setNewValue": false, "stringNeedBig_sz": 16});
+    let read = lab.call("read", json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": args})).unwrap();
+    assert_eq!(read["result"], true);
+    assert_eq!(read["out"]["stringNeedBig"].as_str().map(str::len), Some(value.len()), "the whole value, in a 64 KiB buffer");
+    assert_eq!(read["out"].get("stringNeedBig_cut"), None);
+    // A buffer REAPER is told the size of still takes the caller's size.
+    let short = lab.call("read", json!({"kind": "call", "fn": "GetTrackName", "args": {"track": KICK, "bufOut_sz": 3}})).unwrap();
+    assert_eq!((&short["out"]["bufOut"], &short["out"]["bufOut_cut"]), (&json!("Ki"), &json!(true)));
+}
+
+#[test]
 fn binary_data_with_its_size_and_arrays_reaper_fills_cant_be_passed_to_the_generic_call() {
     use crate::reaper::generic::{function, uncallable};
     for (name, why) in [

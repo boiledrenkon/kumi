@@ -400,7 +400,8 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
             let input = in_out || name.contains("NeedBig") && !out_only;
             *sized = size.is_some();
             let k = if input { at(k) } else { "None".into() };
-            Ok(format!("c.buf({k}, {name:?})?"))
+            // (a buffer REAPER isn't told the size of is never made smaller than the default, whatever the caller asks)
+            Ok(format!("c.buf({k}, {name:?}, {sized})?", sized = size.is_some()))
         }
         (1, true, b) if scalar_kind(b).is_some() => Ok(format!("c.in_ptr_{}({}, {name:?})? as _", scalar_kind(b).unwrap(), at(k))),
         (1, false, b) if scalar_kind(b).is_some() => {

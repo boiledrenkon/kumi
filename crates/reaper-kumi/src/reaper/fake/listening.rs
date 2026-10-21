@@ -949,7 +949,9 @@ unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, par
     }
     with(|s| match s.listening.track_ext.get(&(guid, key)) {
         Some(value) => {
-            write(buf, 4096, value);
+            // (REAPER isn't told the buffer's size: like it, the fake writes the whole value, so a buffer handed to it
+            // must hold that)
+            write(buf, c_int::MAX, value);
             true
         }
         None => false,
