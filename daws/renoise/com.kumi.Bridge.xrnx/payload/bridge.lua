@@ -1555,7 +1555,7 @@ function M.start(h, reloading)
     end,
     identity = identity,
     on_request = M.handle,
-    start_job = function(record, request, work) return jobs:add(record, request, work) end,
+    start_job = function(record, request, work, wrote) return jobs:add(record, request, work, wrote) end,
     cancel_jobs = function(record) jobs:cancel(record) end,
     on_authenticated = function(record)
       log.write("info", "Kumi connected from " .. record.key)

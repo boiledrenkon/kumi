@@ -360,6 +360,21 @@ test("phrases: a script written while the producer changes the song during the c
   eq(phrase(2, 1).script.paragraphs[1], "-- a phrase script", "the producer's script is back")
 end)
 
+test("phrases: a script written just before the producer makes an instrument answers applied, though its wait hadn't begun (#361 N7, final review)", function()
+  local env, peer = setup()
+  local code = "return cycle(\"c4 g4\")"
+  local previewed, epoch, layout = preview(peer, "phrase-script", { ref = pref(place(peer), 2, 1), code = code })
+  local id = I.send(peer, "change_apply", { kind = "phrase-script", input = { ref = pref(epoch, 2, 1), code = code }, fence = previewed.fence, desc = "Kumi: script (k640)", epoch = epoch, layout = layout })
+  eq(phrase(2, 1).script.paragraphs[1], code, "written in the request's own callback")
+  -- (before the job's first turn: an instrument made moves the epoch)
+  mock.song:insert_instrument_at(4)
+  mock.advance(60)
+  mock.compile_scripts()
+  local done = I.wait(peer, id)
+  ok(done.result, "the script is written, and the answer says so: " .. json.encode(done.error or {}))
+  eq(done.result.applied.mode, "script")
+end)
+
 test("phrases: after Renoise's undo of a script Kumi wrote (its text back, uncommitted), Kumi's undo commits it so the old script plays (#361 N-S8)", function()
   local env, peer = setup()
   local code = "return cycle(\"c4 e4\")"

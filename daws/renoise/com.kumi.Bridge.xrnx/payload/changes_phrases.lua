@@ -1429,6 +1429,8 @@ base.register({
     -- does meanwhile never makes it answer as if nothing was: the wait checks nothing, and the phrase is found by its place)
     local at = places_.place_of(env, "phrase", n)
     return {
+      -- (written already: the job runs whatever the producer does before its first turn)
+      kumi_wrote = "The script of " .. plan.label,
       kumi_job = function(job)
         job.wrote = "The script of " .. plan.label
         local function live_phrase()

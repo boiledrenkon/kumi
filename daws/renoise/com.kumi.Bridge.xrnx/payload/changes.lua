@@ -90,7 +90,7 @@ function M.apply(params, env)
   -- (n-instruments: a change that reads in slices before its one writing callback, or waits for Renoise after it, is a job)
   if done.kumi_job then
     local work = done.kumi_job
-    return { kumi_job = function(job) return applied_answer(env, spec, desc, work(job)) end }
+    return { kumi_job = function(job) return applied_answer(env, spec, desc, work(job)) end, kumi_wrote = done.kumi_wrote }
   end
   return applied_answer(env, spec, desc, done)
 end
