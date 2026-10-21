@@ -436,9 +436,43 @@ local function same_state(a, b)
   return a ~= nil and b ~= nil and a.mute == b.mute and a.solo == b.solo
 end
 
+local SOLO_ROUNDS = 64 -- (un-solo rounds: a solo takes two at most, the first making a track soloed along with another the soloed one)
+
+-- Every solo taken away (Renoise turns every track Active); false when one stays. The setter toggles a track's own solo, so `false`
+-- on a track soloed only along with another (a group's member) solos it on its own first (measured, 3.5.4).
+local function unsolo_all(song)
+  for _ = 1, SOLO_ROUNDS do
+    local first
+    for t = 1, rows.track_count(song) do
+      local track = song:track(t)
+      if track.type ~= MASTER() and track.solo_state then
+        first = track
+        break
+      end
+    end
+    if not first then return true end
+    first.solo_state = false
+  end
+  return false
+end
+
+-- The tracks that read soloed now, as a key ("2,6"), and how close they are to `set` (each wanted one counts, each other against).
+local function soloed_now(song, set)
+  local key, score = {}, 0
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if track.type ~= MASTER() and track.solo_state then
+      key[#key + 1] = t
+      score = score + (set[t] and 1 or -2)
+    end
+  end
+  return table.concat(key, ","), score
+end
+
 -- Writes `wanted` back (a snapshot, carried to the tracks' places now by `place_now(t)`), except on the tracks someone changed
 -- since Kumi's last write (`others`: track -> their state, kept). Renoise solos by rewriting mutes and an un-solo sets every track
--- ACTIVE, so the order is: Kumi's solo off, the producer's solo on again, then every mute state as it was. Returns the notes.
+-- ACTIVE, so the order is: every solo off, the producer's solo on again (the one track whose solo makes exactly the tracks that read
+-- soloed: a group's brings its members), then every mute state as it was. Returns the notes.
 local function write_back(song, wanted, kumi_solo, others, place_now)
   local notes = {}
   local placed = {}
@@ -452,29 +486,43 @@ local function write_back(song, wanted, kumi_solo, others, place_now)
       lost = lost + 1
     end
   end
-  -- 1. Kumi's solo off (every track ACTIVE, Renoise's doing; what someone else changed is written again below)
-  if kumi_solo then
-    local at = place_now(kumi_solo)
-    if at and at >= 1 and at <= rows.track_count(song) and song:track(at).type ~= MASTER() and song:track(at).solo_state then
-      song:track(at).solo_state = false
-    end
-  end
-  -- 2. the producer's solo on again (solo through the API is exclusive: a second one would undo the first)
-  local soloed
+  -- 1. every solo off (every track ACTIVE, Renoise's doing; what someone else changed is written again below)
+  if kumi_solo and not unsolo_all(song) then notes[#notes + 1] = "Renoise kept a solo on that Kumi couldn't take off." end
+  -- 2. the producer's solo on again: solo through the API is exclusive, so the one track whose solo makes exactly the tracks that
+  -- read soloed (tried from the last back, each from no solo; a group's solo brings its members), else the closest, said
   local order = {}
   for t in pairs(placed) do order[#order + 1] = t end
   table.sort(order)
+  local soloed, set = {}, {}
   for _, t in ipairs(order) do
-    local state = others[t] or placed[t]
-    if state.solo and not song:track(t).solo_state then
-      if soloed then
+    if (others[t] or placed[t]).solo then
+      soloed[#soloed + 1] = t
+      set[t] = true
+    end
+  end
+  if #soloed > 0 then
+    local key = table.concat(soloed, ",")
+    local found, best, best_score = false, nil, nil
+    for k = #soloed, 1, -1 do
+      unsolo_all(song)
+      song:track(soloed[k]).solo_state = true
+      local now_key, score = soloed_now(song, set)
+      if now_key == key then
+        found = true
+        break
+      end
+      if best_score == nil or score >= best_score then best, best_score = soloed[k], score end
+    end
+    if not found and best then
+      unsolo_all(song)
+      song:track(best).solo_state = true
+    end
+    for _, t in ipairs(soloed) do
+      if not song:track(t).solo_state then
         notes[#notes + 1] = string.format("Renoise lets a script solo one track at a time: %s is soloed again, %s isn't (it sounds as it did).",
-          q(base.named(soloed, song:track(soloed))), q(base.named(t, song:track(t))))
-      else
-        song:track(t).solo_state = true
+          q(base.named(best, song:track(best))), q(base.named(t, song:track(t))))
       end
     end
-    if song:track(t).solo_state then soloed = soloed or t end
   end
   -- 3. every mute state as it was
   for _, t in ipairs(order) do
@@ -639,8 +687,9 @@ local function finish(job, env, state, code, message)
 end
 M.finish = finish
 
--- Solos source `k`'s track (a master source wants none of Kumi's: the song as the producer has it, so any of Kumi's solo goes
--- first). Answers nothing; raises with the error to fail with.
+-- Solos source `k`'s track on its own (a master source wants none of Kumi's: the song as the producer has it, so any of Kumi's
+-- solo goes first). Every solo goes first: a track that reads soloed may be so along with others (a group's solo, a GUI solo of
+-- several), and the setter does nothing on it. Answers nothing; raises with the error to fail with.
 local function set_up(job, env, song, source)
   if source.what == "master" then
     if job.solo_at then
@@ -659,27 +708,18 @@ local function set_up(job, env, song, source)
   end
   note_others(job, song, env)
   local track = song:track(at)
-  if not (track.solo_state and job.only_solo(song, at)) then
-    env.quiet(function() track.solo_state = true end)
+  if job.solo_at ~= at then
+    local alone
+    env.quiet(function()
+      alone = unsolo_all(song)
+      if alone then track.solo_state = true end
+    end)
     job.changed = true
     job.solo_at = source.track
+    if not alone then fail("failed", "Renoise kept a solo on, so Kumi couldn't render " .. q(source.label) .. " on its own") end
   end
   -- what Kumi (and Renoise, for it) left, to tell another's change from it later
   job.after = snapshot(song)
-end
-
--- Whether track `t` is the only one soloed on its own (its group parents and send targets come with it).
-local function only_solo(song, t)
-  local probe = song:track(t)
-  if not probe.solo_state then return false end
-  -- (Renoise's solo of `t` turns every other track OFF but what `t` needs: any other ACTIVE track would play)
-  for u = 1, rows.track_count(song) do
-    local track = song:track(u)
-    if u ~= t and track.type ~= MASTER() and track.mute_state == renoise.Track.MUTE_STATE_ACTIVE and not track.solo_state then
-      return false
-    end
-  end
-  return true
 end
 
 local start_render
@@ -852,7 +892,6 @@ local function plan(params, env, kind)
     id = job_id, kind = "render", state = "running", sources = sources, order = render_order(sources), range = range,
     rate = rate, epoch = env.epoch(), layout = env.layout(), document = env.document(), notes = {}, done = 0, others = {},
     irregular = timeline.irregular, line_seconds = M.line_seconds(timeline, range.state.bpm, range.state.lpb), started_ms = now_ms(),
-    only_solo = only_solo,
   }
 end
 M.plan = plan
