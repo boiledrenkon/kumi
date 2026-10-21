@@ -89,6 +89,17 @@ test("actions: select shows a track, its device, an instrument, a slot that play
   H.no_dialogs()
 end)
 
+test("actions: project_save refuses a song whose own folder is gone, before Renoise stops at its error (#361 N-S15)", function()
+  local env, peer = K.setup()
+  local dir = T.temp_dir("save-gone")
+  mock.data.song_fields.file_name = dir .. "/moved/mine.xrns" -- its folder renamed or its drive gone since it was opened
+  local saves = #(mock.saves or {})
+  local refused = K.call(peer, "project_save", {})
+  K.failure(refused, "bad-params")
+  ok(refused.error.message:find("give path", 1, true), refused.error.message)
+  eq(#(mock.saves or {}), saves, "nothing saved")
+end)
+
 test("actions: project_save writes the song's own file, or saves it as a new .xrns; an unsaved song needs the path", function()
   local env, peer = K.setup()
   local dir = T.temp_dir("save")

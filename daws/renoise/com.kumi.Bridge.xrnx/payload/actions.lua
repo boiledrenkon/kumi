@@ -297,21 +297,26 @@ end
 -- write in (it stops at a modal error otherwise): measured in 3.5.4.
 local function folder_of(path) return path:match("^(.*)[/\\][^/\\]+$") end
 
-local function save_as(path)
-  local absolute = path:match("^/") or path:match("^%a:[/\\]")
-  if not absolute or not path:lower():match("%.xrns$") then bad("path is a whole path to a .xrns file") end
-  local folder = folder_of(path)
-  if not folder or folder == "" or not io.exists(folder) then bad("there is no folder " .. tostring(folder) .. " (Renoise would stop at a dialog)") end
-  if io.exists(path) then bad(path .. " is there already: Kumi doesn't save over another file") end
-  -- (a folder Renoise can't write in would show a dialog too: tried first)
+-- A folder Renoise can save into: there, and writable (else Renoise stops at a modal error, its timers with it): tried first.
+-- `why` ends the refusal (what to do instead).
+local function check_folder(folder, why)
+  if not folder or folder == "" or not io.exists(folder) then bad("there is no folder " .. tostring(folder) .. " (Renoise would stop at a dialog)" .. why) end
   local probe = folder .. "/.kumi-save-check"
   local file = io.open(probe, "wb")
   if file then
     file:close()
     os.remove(probe)
   else
-    bad("Renoise can't write in " .. folder)
+    bad("Renoise can't write in " .. folder .. why)
   end
+end
+
+local function save_as(path)
+  local absolute = path:match("^/") or path:match("^%a:[/\\]")
+  if not absolute or not path:lower():match("%.xrns$") then bad("path is a whole path to a .xrns file") end
+  local folder = folder_of(path)
+  check_folder(folder, "")
+  if io.exists(path) then bad(path .. " is there already: Kumi doesn't save over another file") end
   renoise.app():save_song_as(path)
 end
 
@@ -327,6 +332,8 @@ function M.project_save(params, env)
   if path ~= nil and (type(path) ~= "string" or path == "") then bad("path: a whole path to a .xrns file to save the song as") end
   if path == nil or path == own then
     if own == "" then bad("the song has never been saved: give path, a .xrns file to save it as") end
+    -- (its own folder may be gone, renamed or read-only since it was opened: checked as Save As checks a new one)
+    check_folder(folder_of(own), ": give path, a .xrns file to save the song as somewhere else")
     renoise.app():save_song()
     -- (`dirty`: whether the song has changes no file holds, as REAPER's save answers; none, just saved)
     return { epoch = env.epoch(), saved = own, dirty = false, display = { title = "Saved the song" } }
