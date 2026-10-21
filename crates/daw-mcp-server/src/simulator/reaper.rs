@@ -171,6 +171,13 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         }
         _ => return None,
     };
+    // (REAPER lists these three last on every FX)
+    let mut params = params;
+    params.extend([
+        ("Bypass".to_string(), 0., ParamShows::Plain { min: 0., max: 1. }),
+        ("Wet".to_string(), 1., ParamShows::Plain { min: 0., max: 1. }),
+        ("Delta".to_string(), 0., ParamShows::Plain { min: 0., max: 1. }),
+    ]);
     let name = match name {
         "ReaLimit" => "VST: ReaLimit (Cockos)",
         "Volume Adjustment" => "JS: Volume Adjustment",

@@ -407,6 +407,9 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
             assert_eq!(slots.len(), 1);
             assert_eq!(script.fx_names("r:track:{T0002}"), ["VST: ReaEQ (Cockos)", "VST: ReaLimit (Cockos)"], "a safety limiter last");
             assert!(slots[0].chain.contains("ReaEQ") && slots[0].knobs.iter().any(|knob| knob.name == "Gain-Band 2"), "{:?}", slots[0]);
+            // Never the safety limiter Kumi put last, nor REAPER's Bypass, Wet and Delta: they aren't the sound.
+            assert!(slots[0].knobs.iter().all(|knob| !knob.device.contains("ReaLimit")), "{:?}", slots[0].knobs);
+            assert!(slots[0].knobs.iter().all(|knob| !["Bypass", "Wet", "Delta"].contains(&knob.name.as_str())), "{:?}", slots[0].knobs);
             // A generation: the trial's values on the slot's copy, its copy rendered and scored.
             let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name == "Gain-Band 2").cloned().collect();
             let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![0.7], fresh: None };

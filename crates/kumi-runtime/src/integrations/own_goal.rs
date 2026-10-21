@@ -29,6 +29,10 @@ const KNOBS_PER_DEVICE: usize = 128;
 const KNOBS_PER_SLOT: usize = 512;
 /// The name the best goes by.
 const BEST: &str = "Kumi · Goal best";
+/// Knobs a search never moves in an own DAW, besides the shared ones: gain a plug-in adds after its sound (a louder trial
+/// would score closer), by name (exact) or by a word in it.
+const LEAVE_NAMES: [&str; 3] = ["global gain", "adjustment (db)", "output gain"];
+const LEAVE_WORDS: [&str; 1] = ["makeup"];
 
 /// One searched candidate: its track, and the scratch copy its trials are set on and heard from.
 struct Slot {
@@ -243,8 +247,9 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         let mut knobs = vec![];
         let mut places = IndexMap::new();
         for (at, device) in devices.iter().enumerate() {
-            // (Renoise's mixer is the track's fader and pan: the search leaves the producer's mix where it is)
-            if device.mixer {
+            // (Renoise's mixer is the track's fader and pan: the search leaves the producer's mix where it is; a limiter,
+            // the safety one Kumi put last included, would only make trials louder)
+            if device.mixer || r.table.limiters.iter().any(|(word, _, _)| device.name.contains(word)) {
                 continue;
             }
             // (a grid of two points: a stepped parameter answers its steps' texts)
@@ -252,8 +257,19 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
                 Ok(rows) => rows,
                 Err(why) => return Ok(Err(why)),
             };
-            for row in rows.iter().take(KNOBS_PER_DEVICE) {
+            // (REAPER lists Bypass, Wet and Delta last on every FX: not the sound's)
+            let pseudo = rows
+                .iter()
+                .rev()
+                .take(r.table.pseudo_params.len())
+                .filter(|row| text(row, "name").is_some_and(|name| r.table.pseudo_params.contains(&name.as_str())))
+                .count();
+            for row in rows[..rows.len() - pseudo].iter().take(KNOBS_PER_DEVICE) {
                 let (Some(reference), Some(name)) = (text(row, "ref"), text(row, "name")) else { continue };
+                let lower = name.to_lowercase();
+                if LEAVE_NAMES.contains(&lower.as_str()) || LEAVE_WORDS.iter().any(|word| lower.contains(word)) {
+                    continue;
+                }
                 let number = |key: &str| row.get(key).and_then(Value::as_f64);
                 let (min, max) = if r.table.normalized { (0., 1.) } else { (number("min").unwrap_or(0.), number("max").unwrap_or(1.)) };
                 let index =
