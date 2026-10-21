@@ -709,6 +709,21 @@ impl Harness {
     pub async fn wait_until_selection_clears(&self) {
         self.wait_for_screen("selection highlight to disappear", |_| !self.has_selection_highlight()).await;
     }
+    /// The style (style_key's "fg|bg|flags") of the cell just before where `text` shows: a dot or a light beside words.
+    pub fn style_before(&self, text: &str) -> Option<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars.iter().enumerate().find_map(|(row, cells)| {
+            let line: String = cells.concat();
+            let at = line.find(text)?;
+            let (mut bytes, mut cell) = (0, 0);
+            while bytes < at {
+                bytes += cells[cell].len();
+                cell += 1;
+            }
+            vt.styles[row].get(cell.checked_sub(1)?).cloned()
+        })
+    }
     pub fn has(&self, text: &str) {
         let lines = self.screen();
         assert!(has(&lines, text), "Missing {text:?}:\n{}", lines.join("\n"));
