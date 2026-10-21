@@ -323,6 +323,12 @@ local function folder_of(path) return path:match("^(.*)[/\\][^/\\]+$") end
 -- `why` ends the refusal (what to do instead).
 local function check_folder(folder, why)
   if not folder or folder == "" or not io.exists(folder) then bad("there is no folder " .. tostring(folder) .. " (Renoise would stop at a dialog)" .. why) end
+  -- (stock os.remove is ANSI on Windows: a probe in a folder named outside it would stay there, so there the folder's mode is read)
+  if folder:find("[\128-\255]") then
+    local stat = io.stat(folder)
+    if stat and type(stat.mode) == "number" and math.floor(stat.mode / 128) % 2 == 0 then bad("Renoise can't write in " .. folder .. why) end
+    return
+  end
   local probe = folder .. "/.kumi-save-check"
   local file = io.open(probe, "wb")
   if file then

@@ -107,6 +107,16 @@ test("actions: select shows a track, its device, an instrument, a slot that play
   H.no_dialogs()
 end)
 
+test("actions: saving into a folder named outside ASCII leaves no probe file there (#361 N-N9)", function()
+  local env, peer = K.setup()
+  local dir = T.temp_dir("save") .. "/S\195\182ngs"
+  os.execute("mkdir -p '" .. dir .. "'")
+  mock.data.song_fields.file_name = dir .. "/mine.xrns"
+  local saved = K.call(peer, "project_save", {}).result
+  ok(saved, "saved")
+  eq(io.exists(dir .. "/.kumi-save-check"), false, "no probe file written there")
+end)
+
 test("actions: project_save refuses a song whose own folder is gone, before Renoise stops at its error (#361 N-S15)", function()
   local env, peer = K.setup()
   local dir = T.temp_dir("save-gone")
