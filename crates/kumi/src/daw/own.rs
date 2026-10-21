@@ -499,10 +499,64 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
-    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, _run: Run, _repo: &'a str) -> LocalBoxFuture<'a, i32> {
+    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32> {
         async move {
-            if let (Some(_), Some(source)) = (self.receipt(&io.env), self.bundled_source()) {
-                let _ = self.follow(&io.env).and_then(|life| self.put(life, &source, false));
+            if self.receipt(&io.env).is_none() {
+                return 0;
+            }
+            let failed = |why: String| {
+                format!(
+                    "{} wasn't brought up to date: {why}. Run {} --daw {} bridge to try again.\n",
+                    self.bridge,
+                    *kumi_runtime::KUMI,
+                    self.id.as_str()
+                )
+            };
+            // The workspace's build leaves REAPER's extension out (a library, not a program): built here, in the profile
+            // this Kumi runs in, so what goes in REAPER is this checkout's and never an earlier build's.
+            if self.daw == Daw::Reaper {
+                let release = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.ends_with("release"))).unwrap_or(true);
+                let mut args: Vec<String> = ["build", "--locked", "-p", "reaper-kumi"].map(str::to_string).into();
+                if release {
+                    args.insert(1, "--release".into());
+                }
+                let built = crate::spinner::step(
+                    io.out.clone(),
+                    &io.env,
+                    "Building REAPER's extension…",
+                    run("cargo".into(), args, Some(repo.to_string())),
+                    true,
+                )
+                .await;
+                if built.code != 0 {
+                    let said = if built.stderr.trim().is_empty() { &built.stdout } else { &built.stderr };
+                    let why = said.trim().lines().next_back().unwrap_or("").chars().take(300).collect::<String>();
+                    io.out.write(&failed(format!("building it failed ({why})")));
+                    return 0;
+                }
+            }
+            let Some(source) = self.bundled_source() else {
+                io.out.write(&failed(format!("this checkout has no build of {} for {}", self.bridge, self.name())));
+                return 0;
+            };
+            let life = match self.follow(&io.env) {
+                Ok(life) => life,
+                Err(why) => {
+                    io.out.write(&format!("{why}.\n"));
+                    return 0;
+                }
+            };
+            match self.put(life, &source, false) {
+                Ok(put) if put.changed => io.out.write(&format!(
+                    "{} {} is in {} now: restart {} if it's open.\n{}",
+                    self.bridge,
+                    put.version,
+                    self.name(),
+                    self.name(),
+                    self.kept_words(&put)
+                )),
+                Ok(_) => {}
+                Err(why) => io.out.write(&failed(why)),
             }
             0
         }

@@ -3,6 +3,7 @@
 //! user has never used.
 #[path = "support/live_words.rs"]
 mod live_words;
+use futures::FutureExt;
 use kumi::daw::{chosen, own, DawProvider, RemovedBridge};
 use kumi_runtime::{core::daw::DawId, system::Env};
 use std::rc::Rc;
@@ -420,6 +421,47 @@ async fn a_kumi_an_earlier_updater_put_in_place_brings_its_bridge_as_it_starts()
     own::RENOISE.finish_transition(&io).await;
     assert!(!tools.join(folder).exists());
     assert_eq!(out.0.borrow().as_str(), "");
+}
+
+/// In a checkout, `kumi update` builds REAPER's extension before putting it in (the workspace's build leaves it out), and
+/// says when that fails rather than put in whatever an earlier build left.
+#[tokio::test(flavor = "current_thread")]
+async fn a_checkout_update_builds_reapers_extension_and_says_when_that_fails() {
+    use daw_bridge::daw::Daw;
+    let (dir, mut env) = renoise_home();
+    let resource = dir.path().join("REAPER");
+    std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
+    std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
+    env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
+    let plugins = resource.join("UserPlugins");
+    let target = daw_bridge::lifecycle::Target {
+        daw: Daw::Reaper,
+        dir: plugins.clone(),
+        name: daw_bridge::install::reaper_extension_name(daw_bridge::detect::Os::current()).into(),
+        folder: false,
+        reference: plugins.join("kumi-bridge-reference.json"),
+    };
+    let earlier = dir.path().join("earlier-build");
+    std::fs::write(&earlier, b"an earlier build").unwrap();
+    daw_bridge::lifecycle::Lifecycle::new(std::path::Path::new(&env["KUMI_HOME"]), target.clone()).install(&earlier, "0.1.0").unwrap();
+    let asked: Rc<std::cell::RefCell<Vec<(String, Vec<String>, Option<String>)>>> = Rc::default();
+    let run: kumi::process::Run = Rc::new({
+        let asked = asked.clone();
+        move |command, args, cwd| {
+            asked.borrow_mut().push((command, args, cwd));
+            async { kumi::process::Ran { code: 101, stdout: String::new(), stderr: "Compiling reaper-kumi\nerror: linking failed".into() } }
+                .boxed_local()
+        }
+    });
+    let out = Rc::new(Out::default());
+    let io = kumi::update::UpdateIo::new(out.clone(), env.clone());
+    assert_eq!(own::REAPER.after_checkout_update(&io, run, "/repo").await, 0);
+    let (command, args, cwd) = asked.borrow()[0].clone();
+    assert_eq!((command.as_str(), cwd.as_deref()), ("cargo", Some("/repo")));
+    assert!(args.windows(2).any(|pair| pair == ["-p", "reaper-kumi"]) && args[0] == "build", "{args:?}");
+    let said = out.0.borrow().clone();
+    assert!(said.contains("Kumi's extension wasn't brought up to date: building it failed (error: linking failed)."), "{said}");
+    assert_eq!(std::fs::read(target.path()).unwrap(), b"an earlier build", "nothing else went in");
 }
 
 fn receipt_of(env: &Env, daw: daw_bridge::daw::Daw) -> daw_bridge::lifecycle::Receipt {
