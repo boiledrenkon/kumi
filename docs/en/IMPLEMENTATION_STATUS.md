@@ -368,9 +368,10 @@ bridge, the version given is the one in the commit that added it.
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: the rest of M7 (knowledge probes and evals) and M8 (the
-  release); the goal search over Logic (a `GoalRig`); a region's notes past
-  the rows the Event List shows on its screen.
+- Logic Pro: M8 (the release); the goal search over Logic (a `GoalRig`); a
+  region's notes past the rows the Event List shows on its screen; a guard in
+  code against ending a way round with `final: true`, which the eval shows
+  words only nudge (`docs/evidence/logic-m7-evals-2026-10-21.md`).
 - Logic Pro, M6: catching up on a saved project as it opens or is switched to,
   and `watch_me`, run over the simulated Logic (the snapshot is kept in the
   project store under the project's place, `logic-<id>`, beside its
