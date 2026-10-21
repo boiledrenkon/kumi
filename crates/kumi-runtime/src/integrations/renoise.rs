@@ -250,7 +250,9 @@ pub struct RenoiseRefs;
 fn parts(reference: &str) -> Option<(&str, &str, Vec<usize>)> {
     let mut parts = reference.splitn(3, ':');
     let (epoch, kind, numbers) = (parts.next()?, parts.next()?, parts.next()?);
-    if epoch.is_empty() || kind.is_empty() {
+    // As `refs_in` finds them: a time ("00:01:30") or a position ("pos 1:16:0") a script prints is no ref.
+    let word = |text: &str, letter: fn(&char) -> bool| !text.is_empty() && text.chars().all(|c| letter(&c));
+    if !word(epoch, char::is_ascii_alphanumeric) || !word(kind, char::is_ascii_lowercase) {
         return None;
     }
     let numbers: Option<Vec<usize>> = numbers.split('.').map(|n| n.parse().ok()).collect();
@@ -362,6 +364,17 @@ pub fn create_renoise_integration(options: OwnOptions) -> Rc<dyn Integration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review K36: what a Lua script prints or returns that only looks like a ref (a time, a position) reaches the
+    /// model as it is; refs are those `refs_in` finds, with a kind in letters.
+    #[test]
+    fn a_time_or_a_position_a_script_prints_is_no_ref() {
+        for text in ["00:01:30", "pos 1:16:0", "12:30:45.5", "3:Track:1"] {
+            assert_eq!(RenoiseRefs.kind_of(text), None, "{text}");
+        }
+        assert_eq!(RenoiseRefs.kind_of("3:track:2"), Some("track"));
+        assert_eq!(RenoiseRefs.kind_of("a1:ptrack:2.4"), Some("ptrack"));
+    }
 
     /// U3: the producer rides the mixer's (post-FX) fader; watch_me drafts it as the step that moves that fader.
     #[test]
