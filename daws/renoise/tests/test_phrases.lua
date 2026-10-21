@@ -286,6 +286,22 @@ test("phrases: after Renoise's undo of a script Kumi wrote (its text back, uncom
   ok(undone.result.display.note:find("committed it", 1, true), undone.result.display.note)
 end)
 
+test("phrases: a script that fixes the old one's error is told fine even when Renoise compiles it after 200 ms (#361 N-S24)", function()
+  local env, peer = setup()
+  local function write(code, desc, compile_after)
+    local previewed, epoch, layout = preview(peer, "phrase-script", { ref = pref(place(peer), 2, 1), code = code })
+    local id = I.send(peer, "change_apply", { kind = "phrase-script", input = { ref = pref(epoch, 2, 1), code = code }, fence = previewed.fence, desc = desc, epoch = epoch, layout = layout })
+    mock.advance(compile_after)
+    mock.compile_scripts()
+    return I.wait(peer, id)
+  end
+  local broken = write("pattern { }", "Kumi: s (k650)", 60)
+  ok(type(broken.result.applied.compileError) == "string", json.encode(broken.result or broken.error))
+  local fixed = write("return cycle(\"c4\")", "Kumi: s (k651)", 350) -- Renoise compiles it late (the lab saw up to 0.5 s)
+  ok(fixed.result, json.encode(fixed.error or {}))
+  eq(fixed.result.applied.compileError, json.null, "the new script's (no) error, not the old one's")
+end)
+
 test("phrases: a script rendered to lines; Kumi's undo puts the lines it had back", function()
   local env, peer = setup()
   local p = mock.song:instrument(2):phrase(1)

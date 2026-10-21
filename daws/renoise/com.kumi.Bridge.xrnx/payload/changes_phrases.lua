@@ -1031,11 +1031,14 @@ base.register({
           local live = live_phrase()
           if not live then break end
           local script_now = live.script
-          if script_now.pending_changes == 0 and (script_now.compile_error ~= before.compile or script_now.runtime_error ~= before.runtime or env.now_ms() - started >= 200) then
+          -- (an error that changed is the new script's; errors that stay as they were are only trusted after the whole wait: the
+          -- lab saw a compile's errors within 0.5 s)
+          if script_now.pending_changes == 0 and (script_now.compile_error ~= before.compile or script_now.runtime_error ~= before.runtime) then
             waited = true
             break
           end
         end
+        if not waited and env.now_ms() - started >= M.COMPILE_WAIT_MS then waited = true end
         job.rebase()
         local live = live_phrase()
         if not live then
