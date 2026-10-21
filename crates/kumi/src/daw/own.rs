@@ -278,7 +278,7 @@ impl DawProvider for Own {
         .boxed_local()
     }
     fn running_now(&self) -> bool {
-        !detect::running(self.daw).is_empty()
+        super::processes().iter().any(|(_, name)| detect::process_is(self.daw, name))
     }
     fn app_open(&self, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let daw = self.daw;

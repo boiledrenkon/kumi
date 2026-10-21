@@ -18,7 +18,9 @@ use kumi_runtime::{
     },
     system::Env,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Each registered DAW's provider: Live's first, then the DAWs whose bridges are Kumi's own.
 pub fn providers() -> [&'static dyn DawProvider; 3] {
@@ -92,6 +94,43 @@ pub fn also_running_words(chosen: DawId, others: &[&'static dyn DawProvider], en
         many => (format!("{} are open too", many.join(" and ")), "/daw <name> switches".into()),
     };
     Some(format!("{open}: Kumi works with {chosen_name}{why}. {switch}."))
+}
+
+/// How long one process listing answers for every DAW: a start (choosing among several bridges, then saying which
+/// others are open) lists the processes once.
+const LISTING_MS: u64 = 2_000;
+
+thread_local! {
+    static LISTING: RefCell<Option<(Instant, Rc<Vec<(u32, String)>>)>> = const { RefCell::new(None) };
+    static LISTINGS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The processes running now (pid and name), from one listing (`ps`, `tasklist` on Windows) that every DAW's
+/// `running_now` matches against; a listing is reused for a moment, then made again.
+pub fn processes() -> Rc<Vec<(u32, String)>> {
+    if let Some((at, listed)) = LISTING.with(|listing| listing.borrow().clone()) {
+        if at.elapsed() < Duration::from_millis(LISTING_MS) {
+            return listed;
+        }
+    }
+    let output = if cfg!(windows) {
+        std::process::Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output()
+    } else {
+        std::process::Command::new("ps").args(["-axo", "pid=,comm="]).output()
+    };
+    LISTINGS.with(|count| count.set(count.get() + 1));
+    let listed = Rc::new(
+        output
+            .map(|output| daw_bridge::detect::parse_processes(&String::from_utf8_lossy(&output.stdout), cfg!(windows)))
+            .unwrap_or_default(),
+    );
+    LISTING.with(|listing| *listing.borrow_mut() = Some((Instant::now(), listed.clone())));
+    listed
+}
+
+/// How many process listings this Kumi has made (`processes`).
+pub fn process_listings() -> u64 {
+    LISTINGS.with(Cell::get)
 }
 
 /// A DAW as `/daw` takes it: "live", "reaper", "renoise".

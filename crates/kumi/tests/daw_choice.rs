@@ -155,3 +155,20 @@ fn a_bridge_configuration_given_is_lives_unless_daw_says_whose() {
     let asked = config(&["--daw", "reaper", "--bridge-config", &path], &env()).unwrap();
     assert!(asked.contains(r#""daw":"reaper""#), "{asked}");
 }
+
+/// A start with several bridges asks every DAW whether it runs (choosing, then saying which others are open) from one
+/// process listing, not one per DAW (review L11).
+#[test]
+fn every_daw_is_asked_whether_it_runs_from_one_process_listing() {
+    let before = kumi::daw::process_listings();
+    for provider in kumi::daw::providers() {
+        provider.running_now();
+    }
+    let env = env();
+    let chosen = kumi::daw::chosen_with(None, &env, &|provider| provider.running_now()).0.id();
+    kumi::daw::also_running(chosen, &env, &|provider| provider.running_now());
+    for provider in kumi::daw::providers() {
+        provider.running_now();
+    }
+    assert_eq!(kumi::daw::process_listings() - before, 1, "one listing for every DAW");
+}
