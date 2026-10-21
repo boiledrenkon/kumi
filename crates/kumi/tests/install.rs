@@ -1996,11 +1996,20 @@ async fn uninstall_as_root_spares_the_home_folder_the_account_database_names() {
 }
 /// A Kumi folder the producer also uses (KUMI_HOME=~/.local, so the launcher is ~/.local/bin/kumi): with or without
 /// --all, only Kumi's own entries go. Theirs in bin and downloads and beside them stay, Kumi's data stays (its names,
-/// such as projects, could be theirs there), and so does the folder.
+/// such as projects, could be theirs there), and so does the folder. In `bridges`, only the DAW folders Kumi's bridge
+/// lifecycle wrote go: another app's, and a `reaper` folder without the lifecycle's files, stay with their `logs`.
 #[cfg(not(windows))]
 #[tokio::test]
 async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
-    let theirs = ["bin/uv-tool", "downloads/mine.zip", "share/applications/x.desktop", "lib/python3/site.py", "state/history"];
+    let theirs = [
+        "bin/uv-tool",
+        "downloads/mine.zip",
+        "share/applications/x.desktop",
+        "lib/python3/site.py",
+        "state/history",
+        "bridges/sync/logs/today.log",
+        "bridges/reaper/discovery/peers.json",
+    ];
     let data = ["auth.json", "kumi.db", "projects/0123456789abcdef0123456789abcdef/conversations/a.json"];
     for all in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -2012,6 +2021,8 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         put(local.join("app.previous/kumi"), "Kumi's");
         put(local.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
         put(local.join("tools/ffmpeg/ffmpeg"), "Kumi's");
+        put(local.join("bridges/renoise/bridge.secret"), "Kumi's");
+        put(local.join("bridges/renoise/logs/bridge.log"), "Kumi's");
         for file in theirs {
             put(local.join(file), "theirs");
         }
@@ -2024,7 +2035,7 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         assert_eq!(uninstall_installed(dry, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 0);
         let said = out.0.borrow().clone();
         for words in [
-            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools.".to_string(),
+            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools, bridges/renoise.".to_string(),
             "~/.local/bin and ~/.local/downloads stay: they hold more than Kumi put there.".into(),
             if all {
                 format!("~/.local also holds what isn't Kumi's, so --all would leave your {kept} there too (auth.json, kumi.db and projects): delete them by hand.")
@@ -2047,7 +2058,7 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         for file in data {
             assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "Kumi's data", "{file}");
         }
-        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools"] {
+        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools", "bridges/renoise"] {
             assert!(!local.join(gone).exists(), "{gone}");
         }
         assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "alias ll='ls -l'\n");
