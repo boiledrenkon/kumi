@@ -126,6 +126,22 @@ test("sequence: the clone's undo leaves what the producer changed since: a copy 
   H.no_dialogs()
 end)
 
+test("sequence: a copy another pattern's track plays as an alias stays when Kumi's undo takes its slot away, and the answer says so (#361 N-S13)", function()
+  local _, peer = setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-clone", { ref = K.ref(E, "seq", 4) })
+  eq(seq(), "1,2,1,3,4")
+  mock.ops.alias(3, 1, 4) -- the producer: pattern 3's track 1 plays the copy
+  H.tick(2)
+  local undone = K.restore(peer, record)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(seq(), "1,2,1,3")
+  eq(#mock.data.patterns, 4, "the copy stays in the pool")
+  eq(mock.song:pattern(3):track(1).alias_pattern_index, 4, "and pattern 3's track still plays it")
+  ok((undone.result.display.note or ""):find("as an alias", 1, true), tostring(undone.result.display.note))
+  H.no_dialogs()
+end)
+
 test("sequence: a copy that patterns made later follow stays in the pool when its slot goes, and the answer says so", function()
   local _, peer = setup()
   local E = K.place(peer)

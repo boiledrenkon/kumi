@@ -156,6 +156,20 @@ local function pattern_changed(song, env, p, kept)
   return nil
 end
 
+-- Whether another pattern's track plays pattern `p` as an alias of it (then a copy Kumi made stays: clearing it would silence
+-- that track).
+local function aliased(song, p)
+  for q = 1, #song.patterns do
+    if q ~= p then
+      local pattern = song:pattern(q)
+      for t = 1, rows.track_count(song) do
+        if pattern:track(t).alias_pattern_index == p then return true end
+      end
+    end
+  end
+  return false
+end
+
 local function used_by_others(song, p, mine)
   for s, value in ipairs(song.sequencer.pattern_sequence) do
     if value == p and not mine[s] then return true end
@@ -273,12 +287,14 @@ local function clone_restore(song, env, restore, desc)
   song:describe_undo(desc)
   -- (the slot after the block: deleting a section's start passes it on, so it is put back as it is now)
   local after_block = first + count <= slot_count(song) and state_of(song, first + count) or nil
-  local kept_patterns = 0
+  local kept_patterns, played = 0, 0
   for i = count, 1, -1 do
     local s = first + i - 1
     local p = song.sequencer.pattern_sequence[s]
     local made = applied.made[i]
-    if made.pattern and p == #song.patterns and not used_by_others(song, p, { [s] = true }) then
+    if made.pattern and aliased(song, p) then
+      played = played + 1
+    elseif made.pattern and p == #song.patterns and not used_by_others(song, p, { [s] = true }) then
       -- (emptied first: Renoise then removes it from the pool as the slot lets go of it)
       song:pattern(p):clear()
     elseif made.pattern then
@@ -293,6 +309,11 @@ local function clone_restore(song, env, restore, desc)
     display.note = string.format("%s Renoise made for %s in the pool, unused: patterns were made after %s.",
       kept_patterns == 1 and "The pattern" or (kept_patterns .. " patterns"), kept_patterns == 1 and "it stays" or "them stay",
       kept_patterns == 1 and "it" or "them")
+  end
+  if played > 0 then
+    local said = string.format("%s Kumi made %s: another pattern's track plays %s as an alias.", played == 1 and "The copy" or (played .. " copies"),
+      played == 1 and "stays" or "stay", played == 1 and "it" or "them")
+    display.note = display.note and (display.note .. " " .. said) or said
   end
   return { restored = { done = true }, display = display, undo = { desc = desc, entry = true } }
 end
@@ -512,10 +533,12 @@ local function unique_restore(song, env, restore, desc)
   -- (the copies from the pool's end down: each removed as its slot lets go of it, which leaves the one before last)
   table.sort(todo, function(x, y) return x.copy > y.copy end)
   song:describe_undo(desc)
-  local kept_patterns = 0
+  local kept_patterns, played = 0, 0
   for _, item in ipairs(todo) do
     local mine = { [item.slot] = true }
-    if item.made and item.copy == #song.patterns and not used_by_others(song, item.copy, mine) then
+    if item.made and aliased(song, item.copy) then
+      played = played + 1
+    elseif item.made and item.copy == #song.patterns and not used_by_others(song, item.copy, mine) then
       song:pattern(item.copy):clear()
     elseif item.made then
       kept_patterns = kept_patterns + 1
@@ -526,6 +549,11 @@ local function unique_restore(song, env, restore, desc)
   local display = { title = title }
   if kept_patterns > 0 then
     display.note = string.format("%s stay in the pool, unused: patterns were made after them.", kept_patterns == 1 and "The copy" or (kept_patterns .. " copies"))
+  end
+  if played > 0 then
+    local said = string.format("%s Kumi made %s: another pattern's track plays %s as an alias.", played == 1 and "The copy" or (played .. " copies"),
+      played == 1 and "stays" or "stay", played == 1 and "it" or "them")
+    display.note = display.note and (display.note .. " " .. said) or said
   end
   return { restored = { done = true }, display = display, undo = { desc = desc, entry = true } }
 end
