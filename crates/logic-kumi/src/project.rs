@@ -25,6 +25,10 @@ use crate::rows::{self, Header, Marker, Note, Region, SignatureEvent, StripState
 pub const STRIPS_FOR: Duration = Duration::from_secs(5);
 /// How long a list editor's rows stay good for.
 pub const LISTS_FOR: Duration = Duration::from_secs(2);
+/// How long a setting read from Logic's preferences (middle C) stays good for.
+pub const PREFERENCES_FOR: Duration = Duration::from_secs(5);
+/// The preferences' key of "Display Middle C As" (on: C4, Roland; off or unset: C3, Yamaha).
+const MIDDLE_C: &str = "MiddleC";
 /// How long Logic gets to show a pane or a tab after the bridge asks.
 const SETTLE_MS: u64 = 250;
 
@@ -142,6 +146,9 @@ pub struct Needs {
     pub tempo: bool,
     /// A region's notes, by its place through the project.
     pub notes_of: Option<usize>,
+    /// The lists (markers, tempo, signatures) read in one showing of the List Editors, each tab in turn, as the bulk
+    /// read does; the paged reads show the pane once per list.
+    pub together: bool,
 }
 
 impl Needs {
@@ -159,6 +166,18 @@ impl Needs {
     /// What `snapshot` needs: the tracks with their kinds, and the markers.
     pub fn snapshot() -> Needs {
         Needs { strips: true, markers: true, ..Needs::default() }
+    }
+
+    /// What the bulk read of these kinds needs: the strips for tracks, plug-ins and sends, the lists for markers and
+    /// the tempo, all in one go.
+    pub fn for_kinds(kinds: &[&str]) -> Needs {
+        Needs {
+            strips: kinds.iter().any(|kind| matches!(*kind, "track" | "plugin" | "send")),
+            markers: kinds.contains(&"marker"),
+            tempo: kinds.contains(&"tempo"),
+            notes_of: None,
+            together: true,
+        }
     }
 
     /// What a body needs.
@@ -201,6 +220,8 @@ pub struct Project {
     pub sample_rate: Option<u32>,
     /// How many helper calls the last full-window walk took and how long: the lab's number.
     pub last_walk_ms: Option<u64>,
+    /// The octave of middle C as last read from Logic's preferences, with when.
+    middle_c: Option<(Instant, u8)>,
     /// Whether the playhead stands exactly on a beat (its division and tick 1), which the LCD can't show: false once
     /// Logic has played or stopped since, or the Mackie Control's timecode shows a division or tick past 1. Placing
     /// the playhead goes to the project's start first when it isn't, since the LCD's bar and beat sliders keep the
@@ -229,6 +250,7 @@ impl Project {
             key_signature: String::new(),
             sample_rate: None,
             last_walk_ms: None,
+            middle_c: None,
             playhead_exact: true,
         }
     }
@@ -480,6 +502,7 @@ impl Project {
                     inputs: vec![],
                     inserts: vec![],
                     sends: vec![],
+                    drawn: true,
                 }),
             }
         }
@@ -749,24 +772,32 @@ impl Project {
                 }
             }
         }
-        let markers = if needs.markers {
+        let together =
+            if needs.together && (needs.markers || needs.tempo) { Some(self.lists_together(ax, needs, beats_per_bar)?) } else { None };
+        let markers = if let Some((markers, _, _)) = &together {
+            markers.clone()
+        } else if needs.markers {
             self.cached_list(ax, "Marker", beats_per_bar)?
         } else {
             self.lists.get("Marker").map(|(_, rows)| rows.clone()).unwrap_or_default()
         };
-        let (bpm, signatures) = if needs.tempo {
+        let (bpm, tempo_events, signatures) = if let Some((_, tempo_events, signature_events)) = together.filter(|_| needs.tempo) {
+            let bpm = tempo_events.first().map_or(look.transport.tempo, |(_, bpm)| *bpm);
+            (bpm, tempo_events, rows::signatures(&signature_events, &look.transport.time_signature, &self.key_signature))
+        } else if needs.tempo {
             let tempo_events = self.read_tempo(ax)?;
             let signature_events = self.read_signatures(ax)?;
             let bpm = tempo_events.first().map_or(look.transport.tempo, |(_, bpm)| *bpm);
-            (bpm, rows::signatures(&signature_events, &look.transport.time_signature, &self.key_signature))
+            (bpm, tempo_events, rows::signatures(&signature_events, &look.transport.time_signature, &self.key_signature))
         } else {
-            (look.transport.tempo, rows::signatures(&[], &look.transport.time_signature, &self.key_signature))
+            (look.transport.tempo, vec![], rows::signatures(&[], &look.transport.time_signature, &self.key_signature))
         };
-        let tempo = rows::tempo_row(bpm, &signatures);
+        let tempo = rows::tempo_row(bpm, &tempo_events, &signatures);
         let mut notes = vec![];
         if let Some(place) = needs.notes_of {
             notes.push((place, self.notes_rows(ax, place, beats_per_bar)?));
         }
+        let middle_c = self.middle_c();
         let project = rows::project_row(
             self.id.as_deref(),
             &self.identity,
@@ -776,6 +807,7 @@ impl Project {
             &self.key_signature,
             self.sample_rate,
             headers.len(),
+            middle_c,
         );
         let marker_rows: Vec<Value> = markers
             .iter()
@@ -795,6 +827,77 @@ impl Project {
             selection: look.selection.to_json(epoch),
             transport: look.transport.to_json(),
         })
+    }
+
+    /// The octave Logic names middle C in (3 or 4), from its preferences unless read a moment ago: the producer can
+    /// change it in Logic's Settings while the project is open.
+    pub fn middle_c(&mut self) -> u8 {
+        if let Some((at, octave)) = self.middle_c {
+            if at.elapsed() < PREFERENCES_FOR {
+                return octave;
+            }
+        }
+        let octave = rows::middle_c_of(crate::disk::preference(MIDDLE_C).as_deref());
+        self.middle_c = Some((Instant::now(), octave));
+        octave
+    }
+
+    /// The lists a bulk read needs, in one showing of the List Editors: the Marker List (unless read a moment ago), the
+    /// Tempo List and the Signature List, each tab shown in turn, then the tab the pane had and the pane put back.
+    #[allow(clippy::type_complexity)]
+    fn lists_together(
+        &mut self,
+        ax: &mut Ax,
+        needs: &Needs,
+        beats_per_bar: u32,
+    ) -> Result<(Vec<Value>, Vec<(rows::Position, f64)>, Vec<SignatureEvent>), AxError> {
+        let cached = self.lists.get("Marker").filter(|(at, _)| at.elapsed() < LISTS_FOR).map(|(_, rows)| rows.clone());
+        let mut tabs: Vec<&'static str> = vec![];
+        if needs.markers && cached.is_none() {
+            tabs.push("Marker");
+        }
+        if needs.tempo {
+            tabs.extend(["Tempo", "Signature"]);
+        }
+        let mut tables = vec![];
+        let mut first: Option<ListOpen> = None;
+        let mut failure = None;
+        for tab in &tabs {
+            match self.show_list(ax, tab).and_then(|open| Ok((open, self.list_table(ax, tab)?))) {
+                Ok((open, table)) => {
+                    first.get_or_insert(open);
+                    tables.push((*tab, table));
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if let (Some(first), Some(last)) = (first, tabs.last()) {
+            // The tab the pane showed before the first was shown, pressed again unless it is the one showing now.
+            let original = first.was_on.unwrap_or(tabs[0]);
+            self.hide_list(ax, ListOpen { opened: first.opened, was_on: (original != *last).then_some(original) })?;
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let table = |name: &str| tables.iter().find(|(tab, _)| *tab == name).map(|(_, table)| table);
+        let markers = match (cached, table("Marker")) {
+            (Some(rows), _) => rows,
+            (None, Some((columns, table))) => {
+                let rows: Vec<Value> =
+                    paths::rows(table).iter().filter_map(|row| Marker::of(row, columns, beats_per_bar)).map(|m| m.to_row()).collect();
+                self.lists.insert("Marker", (Instant::now(), rows.clone()));
+                rows
+            }
+            (None, None) => vec![],
+        };
+        let tempo =
+            table("Tempo").map(|(columns, table)| paths::rows(table).iter().filter_map(|row| rows::tempo_of(row, columns)).collect());
+        let signatures = table("Signature")
+            .map(|(columns, table)| paths::rows(table).iter().filter_map(|row| rows::signature_of(row, columns, &self.strings)).collect());
+        Ok((markers, tempo.unwrap_or_default(), signatures.unwrap_or_default()))
     }
 
     /// The marker rows, read unless read a moment ago.

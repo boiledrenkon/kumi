@@ -1,4 +1,4 @@
-# Logic Pro bridge contract (M2, M3, M4, M5)
+# Logic Pro bridge contract (M2 to M6)
 
 What `logic-kumi` answers over `kumi-daw/1`, and which macOS channel each answer comes from. The
 wire, handshake, discovery files and lifecycle are daw-bridge's; this page is only Logic's shapes.
@@ -20,6 +20,8 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | Menu items | actions without a binding | activate Logic first; press by index after matching the title |
 | Mackie Control | selection, transport and level events; the LCD names; selecting a track; the timecode display followed while Logic plays (listening); the strips' solo buttons (a listening pass's solos) | answer only as a Mackie Control (device 0x14), and the version request; select from the Pan view, where the LCD names the strips; the timecode's digits are ASCII (0x31 is "1"), the first two controllers the assignment display ("PN") |
 | Panel service | open and save panels | post keys to `com.apple.appkit.xpc.openAndSavePanelService`; set the go-to-folder field by AX |
+| Spotlight | where a recent project is (`read {kind: "recent"}`) | `mdfind` by the project's file name, one query for every name; it finds only what macOS lets the bridge see |
+| Preferences | the octave of middle C (the project row's `middleC`) | `defaults read com.apple.logic10 <key>`, through the preferences daemon, so a setting just changed in Logic's Settings is seen at once; never written |
 | Process tap | hearing Logic (`hear`, `audition`) | the helper's `tap.*` on Logic's pid, into a 32-bit float WAV file under the request's folder; started and stopped around a run of passes, never left running; `mute` keeps Logic from the speakers meanwhile |
 
 ## Identity
@@ -33,8 +35,8 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 
 | Kind | Fields | Source |
 | --- | --- | --- |
-| `project` | id, identity, path, tempo, timeSignature, keySignature, sampleRate, trackCount | window document and the control bar's LCD; `MetaData.plist` for the sample rate when the package can be read (macOS keeps `~/Music/Logic` from a process without the Files and Folders permission: then `null`) |
-| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected, stack (only on a Track Stack's header: `true`) | track headers (name, mute, solo, armed, monitoring, volume, pan, selected; a stack's disclosure triangle); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
+| `project` | id, identity, path, tempo, timeSignature, keySignature, sampleRate, trackCount, middleC (3 or 4) | window document and the control bar's LCD; `MetaData.plist` for the sample rate when the package can be read (macOS keeps `~/Music/Logic` from a process without the Files and Folders permission: then `null`); Logic's preferences for `middleC`, the octave its editors name note 60 in ("Display Middle C As" in Settings > View > General: the key `MiddleC` on is C4, Roland; off, or never written, C3, Yamaha, Logic's default), read again at most every five seconds |
+| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected, stack (only on a Track Stack's header: `true`), stripUnread (only when the Mixer hadn't drawn the track's strip: `true`; see "Catch-up's questions") | track headers (name, mute, solo, armed, monitoring, volume, pan, selected; a stack's disclosure triangle); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
 | `region` | ref, trackRef, name, startBeats, endBeats, kind (audio, midi), selected, looped | the Tracks area's layout items and their help text ("Region starts at 1 bar  and ends at 5 bars , MIDI region…") |
 | `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel, selected? | the Event List of the region, which shows the selected region's events: a region not selected is selected first, through its item |
 | `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top; an output's plug-ins (the Stereo Out's) under `trackRef` `<epoch>:output:<n>` |
@@ -43,7 +45,13 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | `smart` | ref, trackRef, index, name, value (0 to 1), text | the Smart Controls pane (opened for the read and closed after) for the track, selected for the read and the selection put back; needs `parent` (the track); a track whose strip has nothing the pane maps (an audio track with only a Channel EQ on it) shows the pane's header over no controls and reads no rows, while a pane that hasn't drawn its header is `failed` |
 | `automation` | ref, trackRef, index, parameter, number, events (positionBeats, value) | the Track Automation Event List of the track (its key command, command 1032, Control-Command-E in the factory set, opens it as a window of its own for the selected track; closed after): its "Fader" rows grouped by parameter, the parameter's name from the Length/Info cell, its number from Num, each event's value (0 to 127) from Val; needs `parent` (the track) |
 | `marker` | ref, position, name, length (beats), text | the Marker List |
-| `tempo` | bpm, signatures (position, time, key) | the Tempo List and the Signature List |
+| `recent` | index (from 1, most recent first), name, path (`null` when not known), open | File > Open Recent's items (read without opening the menu: each is `_openRecentDocument:`, titled with the project's file name); `path` from the project's window for the one open, else Spotlight's when it finds one project of that name (see "Recent projects") |
+| `tempo` | bpm, tempos (position, bpm), signatures (position, time, key) | the Tempo List (`tempos` is every event of it, the first the project's tempo at its start, then each change of tempo by position) and the Signature List |
+
+What the bridge reads outside Logic's windows (the preferences, Spotlight, a file on disk) goes through one seam
+(`src/disk.rs`), so a recording keeps it beside the helper's replies and a replay answers the same: the M6 recording
+of Scratch's reads kept `MiddleC` as "0" (written `false` since the lab's toggle of the setting, which found the key:
+it appears as `true` once C4 is chosen and stays, as `false`, when C3 is chosen back).
 
 Logic's own words are kept: the key signature as the LCD shows it ("C Major"), an output as the
 slot names it ("Stereo Output"), a plug-in as its slot names it. Refs are positional with an epoch
@@ -60,6 +68,62 @@ don't move it. A ref, parent, around or cursor from an earlier epoch is refused 
 whatever it was for. Paging: `limit` (50, at most 200), `cursor` `<epoch>.<n>`, `nextCursor`,
 `total` and `epoch` in every answer; `ref` alone reads one row; `parent` filters; `note` needs its
 region as `parent`.
+
+### The bulk read (`snapshot {rows}`)
+
+`snapshot {rows: [kinds], limit?}` reads every row of the kinds named (of `project`, `track`, `region`, `plugin`,
+`send`, `marker`, `tempo`) in one request, from one look at the project in one epoch: `{epoch, rows: {<kind>: [rows]},
+totals: {<kind>: n}, truncated?: [kinds]}`, each kind's rows exactly what `read` pages for it (the same rows in the same
+order), cut at `limit` (10000, the most) with the kind named under `truncated` to page with `read`. Without `rows`,
+`snapshot` answers as before. It shows the Mixer once when tracks, plug-ins or sends are asked (their kinds, routing
+and slots are the Mixer's) and the List Editors once for the markers, the tempo and the signatures (each tab in turn,
+then the tab and the pane put back), where the paged reads show the List Editors once per list: on Scratch the six
+reads a catch-up makes (project, track, region, plugin, marker, tempo; 200 rows a page) took 4.4 to 4.5 s, the
+Mixer 0.7 s of it, the Marker List 1.2 s and the Tempo and Signature lists 2.4 s, and the bulk read of the same rows
+2.7 s. Both open what Logic doesn't show already: no read gives the strips without the Mixer, nor the lists without
+the List Editors; a pane the producer has open stays open. The answer is one frame (the wire takes 64 MB).
+
+### Recent projects
+
+Logic keeps its recent projects in macOS's shared file list, which macOS keeps from other processes ("Operation not
+permitted"), and its preferences hold no project path (518 keys on the lab's Mac; `DefaultDir1` to `4` are the open
+and save panels' last folders). File > Open Recent shows them, and Accessibility reads its items without opening the
+menu, but an item carries the project's file name alone (`AXTitle`; no URL, document or help). So `read {kind:
+"recent"}` answers the items in order with `path` where the bridge can know it: the project open now (its window's
+document), and a project Spotlight finds by that file name, once, outside any other package and the Trash. Spotlight
+answers only for folders the bridge's process may read, so a project under `~/Music` (Logic's own folder) is never
+found unless it is the one open: on the lab's Mac the eight recent projects read with Scratch's path from its window
+and the seven gate copies' from Spotlight (they sit in a shared folder outside the home), in 101 ms (66 ms for a
+second read).
+
+### Catch-up's questions (M6)
+
+Measured on a copy of Scratch with 38 audio tracks added below Vocal (40 tracks, Keys and its region last):
+
+- **Tracks and regions out of view are read**: the headers' group lists all 40 headers with their frames, in view or
+  not (header 1 at y -1420 while the Tracks area shows y 194 to 1117), and the contents list every region (Keys' on
+  track 40, below the view). **The Mixer draws only what it has shown**: it lists every strip, but the strips right of
+  its view (the 40th at x 1728, the pane's right edge, then the Stereo Out and the Master) have numbers for a
+  description ("224 40 4") and generic controls and slots ("output", "input", "audio plug-in", each bypassed), where
+  Keys holds Piano, Channel EQ, Compressor and ChromaVerb; a strip scrolled past on the left (Vocal at x -885) reads
+  right. `AXScrollToVisible` on such a strip is answered and moves nothing, and the Mixer shows Accessibility no scroll
+  bar. So the bridge takes no routing, plug-ins or sends from a strip it recognises as undrawn (its description bare
+  numbers, not its name), and the track row says `stripUnread: true`: a snapshot can tell an unread strip from an
+  empty one. The track's kind still follows its slots' shape (Keys read `instrument`).
+- **Reading 40 tracks**: the six paged reads took 6.5 s (project 0.3 s, track 1.4 s, region 0.3 s, plug-in 0.3 s,
+  marker 1.5 s, tempo 2.7 s) and the bulk read 3.3 s.
+- **A region's notes aren't shown**: a region's item in the Tracks area holds its name field and three handles (move
+  left border, move right border, loop) beside its help text and its size ("4 bars"); no count or fingerprint of its
+  notes, which only the Event List gives (about 0.7 s a region, the region selected).
+- **`looped` shows only in a region's width**: looped, Keys kept its help text ("starts at 1 bar and ends at 5 bars")
+  and its size ("4 bars") while its item's width ran with the loop to the project's end (13,421,293 px, against 192 px
+  unlooped). The region reads ask for the cheap attributes, which have no frame, so `looped` stays `false` from the
+  Tracks area; the Region inspector's Loop checkbox (`region-loop`) says it for the selected region.
+- **Project Alternatives** weren't switched: File > Project Alternatives fills its submenu only once the menu opens
+  (Accessibility lists one untitled item before) and no key command reaches it, and the bridge presses no menu bar item
+  (the M3 gate's wedge). The window's document is the package (`…/Scratch M6.logicx/`) and the alternatives are folders
+  inside it (`Alternatives/000`, …), so the id, the hash of the document's path, is the package's as long as the
+  document stays the package; a switch wasn't watched.
 
 ## Focus and bodies
 
@@ -217,6 +281,8 @@ Logic Pro 12.3.1; the host's simulated Logic (`simulator/logic.rs`) answers the 
 | `automation-add` | `automation_add` | the track selected, its Track Automation Event List (command 1032, Control-Command-E): the event type set to Fader, the playhead at each event's beat, Create new Event, the new row's Num stepped until its Length/Info cell names the parameter (or to the number asked), its Val stepped; the type, the playhead and the selection put back, the list closed | the list's rows | "Create Event"/"Value Change" |
 | `automation-change` | `automation_change` | the list: the event's row deleted and made again where and as asked | the list | "Delete", then as `automation-add` |
 | `automation-delete` | `automation_delete` | the list: the row's Delete action | the list | "Delete" |
+| `metronome-set` | `metronome_set` | the control bar's Metronome Click checkbox, pressed only when it differs from what is asked | the checkbox | none |
+| `sample-load` | `sample_load` | File > Import > Audio File… through the panel service onto an audio track at the playhead, then Track > Convert Regions to New Sampler Track… (its sheet: zones from Regions, Sampler, the name, OK) | the new header and its strip in the Inspector (the instrument slot's plug-in) | "Insert", then "Convert Regions to New Sampler Track" |
 
 A header's control (volume, pan, mute, solo, arm) and the Mixer slot's bypass take a write without
 the track selected or Logic in front; the mute, solo and arm checkboxes take no `AXPress` or set,
@@ -280,7 +346,8 @@ step of Logic's undo. `{saved, dirty}` answers.
   region's `{startBeats, endBeats, name, track, looped}` and the region count; `loop-range` the cycle
   `{on, startBeats, endBeats}`; `notes-quantize` the notes' count and hash; `midi-import` and
   `track-stack` `{tracks, names, regions}`; a tempo event or a signature its row (`exists`, `bpm` or
-  `timeSignature`) and the list's count; `key-command` the command's id and name.
+  `timeSignature`) and the list's count; `key-command` the command's id and name; `metronome-set` the click
+  `{on}`.
 - `key-command` answers like REAPER's `run_action` (the tool is `key_command`): `applied: {command, name, changed}`, with
   `display.unchanged` and `undo.entry: false` when the Undo title didn't move (Logic made no step
   of it); when it did, the step is kept under Logic's own name and its restore is `daw-only`
@@ -306,6 +373,19 @@ step of Logic's undo. `{saved, dirty}` answers.
   positionBeats?, value?}]` (`automation_change`) or `indexes: [...]` (`automation_delete`), an event named by its
   place among that parameter's events from 0 as the read lists them; they fence the track's whole automation
   `{events: [{positionBeats, value, number, parameter}]}` and answer `applied: {made, removed, events}`.
+- `sample-load` (`sample_load {kind: "sampler", file, ref?, positionBeats?, name?}`) takes the whole path of an
+  audio file (wav, aif, aiff, aifc, caf, mp3, m4a) Kumi can see, an audio track for it to come in on (`ref`; else the
+  selected track when it is an audio track, else the first audio track; `bad-params` for a track of another kind),
+  where (`positionBeats`, a whole beat; else the playhead) and the instrument's name (else the file's name without its
+  extension). It fences `{tracks, names, regions}` and answers `applied: {file, kind, track, name, instrument,
+  startBeats, endBeats, sourceTrack, answered}` (the new track's place, name and instrument as read back, its trigger
+  region's bounds, the audio track's place) and `created: {ref, kind: "track", region, source}` (the new track, its
+  trigger region and the muted audio region, in the new epoch). `kind: "quick-sampler"` is refused: Logic converts
+  audio regions into a Sampler, Alchemy or Drum Machine Designer track only (the sheet's three instruments), and Quick
+  Sampler takes a sample by a drag onto its window.
+- `metronome-set` (`metronome_set {on}`) previews, fences and answers the click as `{on}` with the target `{ref: null,
+  kind: "project"}`; a click already as asked is `display.unchanged` (no step, no row), and one the control bar
+  doesn't show (taken off it with Customize Control Bar and Display) is `failed`. Its restore presses it back by value.
 - `applied` carries the value Logic shows after the write. A write Logic doesn't show back is
   `uncertain` ("Logic Pro shows … after Kumi asked for …"), and leaves the step unnamed. The apply's
   `undo` is `{desc, entry}`, with `title` (the Edit menu's Undo title at apply time) and `entry: true`
@@ -377,7 +457,11 @@ titles.
 ### Where Logic forces a difference from REAPER
 
 - Logic keeps **no undo step** for a mixer-ish move (volume, pan, mute, solo, arm, tempo, bypass):
-  those answer `undo.entry: false` and are undone by value, never by Logic's own undo.
+  those answer `undo.entry: false` and are undone by value, never by Logic's own undo. Nor for the
+  **metronome** (`metronome-set`): with Logic's history empty, its Edit menu still said "Undo", greyed, after the
+  Metronome Click was pressed off and on again (each press validated by the refresh key). The click is a setting
+  Logic saves with the project, so turning it changes the project as the cycle does: Logic asks to save it on
+  close (as after a listening pass, which turns it off and on).
 - The tempo takes **whole BPM** from the slider; a fractional `bpm` is rounded, with a note.
 - A **marker can't be named** from outside (its name cell isn't a text field): `marker-add` refuses a
   `name`, and Logic numbers markers itself. `marker-rename` is not made.
@@ -460,6 +544,14 @@ titles.
 - A region's **edges move on whole beats** (`region-resize`: the playhead placed by the LCD's bar
   and beat, then Logic's Set Region Start/End to Playhead); a split and a delete need the region
   clicked (a key command acts on the keyboard focus, which a set of `AXSelected` doesn't give).
+- A **sample becomes a Sampler track by conversion**: Logic loads a sample into its Sampler from an audio region
+  (Track > Convert Regions to New Sampler Track…), so `sample-load` imports the file onto an audio track first and
+  converts the region Logic selected; Logic makes the software instrument track below that audio track, named after
+  the instrument, with one zone and a MIDI region of its trigger note, and leaves the audio region muted where it
+  was. Logic **copies the file into the project's package at once**, saved or not (`Media/Audio Files/<file>` for the
+  import, `Media/Samples/<instrument>/<file>` for the zone), and its undo leaves the copies: the kind was measured on a
+  copy of Scratch, never on Scratch, whose package would keep them. A restore is Logic's own undo of the conversion
+  while it is on top, then of the import right under it ("Insert"), which takes the new track and the audio region away.
 - A **MIDI import makes a track**: File > Import > MIDI File… lands the file on a new track below
   the one named ("Studio Grand"), so `created.trackAdded` is `true` and the import's undo takes the
   track away with the region.

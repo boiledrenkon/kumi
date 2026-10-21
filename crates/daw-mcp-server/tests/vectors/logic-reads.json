@@ -34,6 +34,7 @@
               "id": "e805ab87b3ca9d66f0f62d47b97caa29",
               "identity": "Scratch",
               "keySignature": "C Major",
+              "middleC": 3,
               "path": "/Users/me/Music/Logic/Scratch.logicx",
               "sampleRate": null,
               "tempo": 160.0,
@@ -409,6 +410,17 @@
                   },
                   "time": "4/4"
                 }
+              ],
+              "tempos": [
+                {
+                  "bpm": 160.0,
+                  "position": {
+                    "bar": 1,
+                    "beat": 1,
+                    "division": 1,
+                    "tick": 1
+                  }
+                }
               ]
             }
           ],
@@ -521,6 +533,7 @@
             "id": "e805ab87b3ca9d66f0f62d47b97caa29",
             "identity": "Scratch",
             "keySignature": "C Major",
+            "middleC": 3,
             "path": "/Users/me/Music/Logic/Scratch.logicx",
             "sampleRate": null,
             "tempo": 160.0,

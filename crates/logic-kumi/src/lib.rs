@@ -25,6 +25,7 @@ pub mod mcu;
 pub mod project;
 pub mod queue;
 pub mod read;
+pub mod recent;
 pub mod refs;
 pub mod rows;
 pub mod scenes;

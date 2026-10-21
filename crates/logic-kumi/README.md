@@ -257,6 +257,36 @@ listening step with `"onsets"`, measures the notes in the real audio before
 deleting it) and replayed by `tests/listen.rs`, which writes a synthesized file
 where a recorded part was cut, since a recording keeps no audio.
 
+## What M6 adds
+
+- `metronome-set` (`changes/metronome.rs`): the control bar's Metronome Click
+  pressed only when it differs from what is asked, read back, put back by
+  value; no step of Logic's undo.
+- `sample-load` (`changes/sample.rs`): a sample on a new Sampler track, the
+  file imported through the panel service onto an audio track and the region
+  converted with Logic's Convert Regions to New Sampler Track; Logic's own undo
+  of both steps takes it back. Logic copies the file into the project's
+  package at once, so it is recorded on a copy of Scratch.
+- `read {kind: "recent"}` (`recent.rs`): File > Open Recent's items, read
+  without opening the menu, with a path where one is known (the open project's
+  window, else Spotlight by the file name).
+- The project row's `middleC` (Logic's "Display Middle C As", from its
+  preferences through `defaults`) and the tempo row's `tempos` (the Tempo
+  List's events).
+- `snapshot {rows: [kinds]}`: every row of the kinds a catch-up reads, in one
+  request that shows the Mixer and the List Editors once each.
+- A Mixer strip Logic hasn't drawn (right of the Mixer's view, in a project
+  wider than the pane) gives no routing, plug-ins or sends, and its track row
+  says `stripUnread: true`.
+
+What the bridge looks at outside Logic's windows (its preferences, Spotlight, a
+file on disk) goes through `disk.rs`, so both recorders keep it in the scene
+(`logic.disk`) and the replays answer it. The scenes `change-metronome-set`,
+`change-sample-load`, `read-recent`, `read-paged` and `read-bulk` are recorded
+by `record_changes` and replayed by `tests/changes.rs`; `scratch` was recorded
+again for the new fields, and `KUMI_BLESS=1` on `tests/changes.rs` lets a
+recorded answer take the fields a replay adds over the same recorded replies.
+
 ## Arguments
 
 ```sh

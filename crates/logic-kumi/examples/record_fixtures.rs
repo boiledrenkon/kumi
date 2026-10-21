@@ -20,6 +20,7 @@ use std::time::Duration;
 use logic_kumi::ax::paths;
 use logic_kumi::ax::strings::{self, Strings};
 use logic_kumi::ax::{Ax, Root};
+use logic_kumi::disk;
 use logic_kumi::fixtures::{Recorder, Scene, SCENE_FILE};
 use logic_kumi::helper::{ChildLauncher, Helper, Launch};
 use logic_kumi::logic::{self, Model, BUNDLES};
@@ -129,16 +130,22 @@ fn main() {
     let strings = Strings::load(&bundle, &language);
 
     let requests = if set_m4b { scenes::m4b_requests() } else { scenes::fixed_requests() };
+    // What the readers look at outside Logic (its preferences, Spotlight), kept for the replay as the change recorder keeps it.
+    let looked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    disk::set_hook(Some(disk::recording(looked.clone())));
     let cases = scenes::run_set(helper.as_mut(), app.pid, strings, status, (id.as_deref(), path.as_deref(), &pname), &requests);
+    disk::set_hook(None);
     // The events that came meanwhile (none expected: the Mackie ports aren't opened here).
     while helper.event(Duration::from_millis(50)).is_some() {}
     helper.quit();
     {
         let mut scene = scene.lock().unwrap();
-        scene.logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project})
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project});
+        let looked = looked.borrow().clone();
+        if !looked.is_empty() {
+            logic["disk"] = serde_json::Value::Array(looked);
+        }
+        scene.logic = logic.as_object().cloned().unwrap_or_default();
     }
     let scene = scene.lock().unwrap().clone();
     scene.save(&out).expect("write the scene");

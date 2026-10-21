@@ -450,6 +450,17 @@ pub struct StripState {
     pub inserts: Vec<(String, bool, &'static str)>,
     /// The sends in slot order: destination and level in dB.
     pub sends: Vec<(String, Option<f64>)>,
+    /// Whether the Mixer drew the strip for Accessibility. A strip it hasn't drawn (right of the Mixer's view, in a
+    /// project wider than the pane) is listed with numbers for its description ("224 40 4") and generic slots ("input",
+    /// "audio plug-in", each bypassed): its routing, plug-ins and sends aren't taken from it.
+    pub drawn: bool,
+}
+
+/// Whether a strip's description is the Mixer's placeholder for a strip it hasn't drawn: numbers alone ("224 40 4"),
+/// where a drawn strip's is its name.
+pub fn undrawn(description: &str, name: &str) -> bool {
+    let tokens: Vec<&str> = description.split_whitespace().collect();
+    description != name && tokens.len() >= 2 && tokens.iter().all(|token| token.parse::<u32>().is_ok())
 }
 
 impl StripState {
@@ -484,8 +495,26 @@ impl StripState {
             .filter(|(send, _)| paths::occupied(send) || !(strings.is(&send.desc, "send button") || send.desc.is_empty()))
             .map(|(send, knob)| (clip(&send.desc), knob.and_then(|k| db_of(&k.value_desc)).or_else(|| db_of(&send.value_desc))))
             .collect();
+        let name = parts.name.map(Node::value_text).unwrap_or_else(|| strip.desc.clone());
+        if undrawn(&strip.desc, &name) {
+            return StripState {
+                name,
+                kind,
+                mute: on(parts.mute),
+                solo: on(parts.solo),
+                armed: on(parts.record),
+                monitoring: on(parts.monitoring),
+                volume_db: None,
+                pan: 0,
+                output: String::new(),
+                inputs: vec![],
+                inserts: vec![],
+                sends: vec![],
+                drawn: false,
+            };
+        }
         StripState {
-            name: parts.name.map(Node::value_text).unwrap_or_else(|| strip.desc.clone()),
+            name,
             kind,
             mute: on(parts.mute),
             solo: on(parts.solo),
@@ -497,6 +526,7 @@ impl StripState {
             inputs: parts.inputs.iter().map(|i| clip(&i.desc)).filter(|i| !i.is_empty()).collect(),
             inserts,
             sends,
+            drawn: true,
         }
     }
 }
@@ -556,6 +586,11 @@ pub fn track_row(reference: &str, header: &Header, strip: Option<&StripState>) -
     if header.stack {
         row["stack"] = true.into();
     }
+    // Only a track whose Mixer strip wasn't drawn says so: its kind is the strip's, its routing, plug-ins and sends
+    // unread.
+    if strip.is_some_and(|s| !s.drawn) {
+        row["stripUnread"] = true.into();
+    }
     row
 }
 
@@ -600,9 +635,14 @@ pub fn marker_row(reference: &str, marker: &Marker) -> Value {
     json!({"ref": reference, "position": marker.position.to_json(), "name": marker.name, "length": marker.length_beats, "text": marker.text})
 }
 
-/// The tempo row: the project's tempo and its signatures (time and key, each at a position).
-pub fn tempo_row(bpm: f64, signatures: &[Value]) -> Value {
-    json!({"bpm": bpm, "signatures": signatures})
+/// The tempo row: the project's tempo, the Tempo List's events (`tempos`, the first the project's tempo at its start,
+/// then each change of tempo after it, by position) and its signatures (time and key, each at a position).
+pub fn tempo_row(bpm: f64, tempos: &[(Position, f64)], signatures: &[Value]) -> Value {
+    let mut events: Vec<Value> = tempos.iter().map(|(position, bpm)| json!({"position": position.to_json(), "bpm": bpm})).collect();
+    if events.is_empty() {
+        events.push(json!({"position": Position::START.to_json(), "bpm": bpm}));
+    }
+    json!({"bpm": bpm, "tempos": events, "signatures": signatures})
 }
 
 /// The signatures as the tempo row lists them: one entry per position, with the time and key in force there.
@@ -643,6 +683,7 @@ pub fn project_row(
     key_signature: &str,
     sample_rate: Option<u32>,
     track_count: usize,
+    middle_c: u8,
 ) -> Value {
     json!({
         "id": id,
@@ -653,7 +694,17 @@ pub fn project_row(
         "keySignature": key_signature,
         "sampleRate": sample_rate,
         "trackCount": track_count,
+        "middleC": middle_c,
     })
+}
+
+/// The octave Logic names middle C (note 60) in, from its "Display Middle C As" setting (Settings > View > General):
+/// the preferences' `MiddleC` switch on is C4 (Roland), off or never set C3 (Yamaha), Logic's default.
+pub fn middle_c_of(preference: Option<&str>) -> u8 {
+    match preference.map(str::trim) {
+        Some("1") | Some("true") | Some("YES") => 4,
+        _ => 3,
+    }
 }
 
 /// A list editor's rows of one kind, with the table's columns resolved once.
@@ -852,8 +903,58 @@ mod tests {
         let listed = signatures(&events, "4/4", "C Major");
         assert_eq!(listed, vec![json!({"position": Position::START.to_json(), "time": "4/4", "key": "C Major"})]);
         assert_eq!(signatures(&[], "3/4", "A minor")[0]["time"], "3/4");
-        let row = tempo_row(160.0, &listed);
+        let row = tempo_row(160.0, &[], &listed);
         assert_eq!(row["bpm"], 160.0);
+        assert_eq!(
+            row["tempos"],
+            json!([{"position": Position::START.to_json(), "bpm": 160.0}]),
+            "the project's tempo when no list was read"
+        );
+        let later = Position { bar: 9, ..Position::START };
+        let row = tempo_row(160.0, &[(Position::START, 160.0), (later, 120.0)], &listed);
+        assert_eq!(row["tempos"][1], json!({"position": later.to_json(), "bpm": 120.0}));
+    }
+
+    #[test]
+    fn a_strip_the_mixer_hasnt_drawn_gives_no_routing_plug_ins_or_sends() {
+        // Recorded over 40 tracks: Keys' strip, right of the Mixer's view, as Accessibility listed it (Piano, Channel
+        // EQ, Compressor and ChromaVerb on it read as "input" and "audio plug-in", bypassed).
+        let strings = Strings::english();
+        let bypassed = |desc: &str| json!({"role": "AXGroup", "desc": desc, "c": [{"role": "AXCheckBox", "desc": "bypass", "value": true}, {"role": "AXButton", "desc": "open"}, {"role": "AXButton", "desc": "list"}]});
+        let strip = node(json!({"role": "AXLayoutItem", "desc": "224 40 4", "c": [
+            {"role": "AXTextField", "desc": "name", "value": "Keys"},
+            {"role": "AXButton", "subrole": "AXSwitch", "desc": "mute", "value": "off"},
+            {"role": "AXButton", "subrole": "AXSwitch", "desc": "solo", "value": "off"},
+            {"role": "AXSlider", "desc": "volume fader", "value": 173, "valueDesc": "0.0 dB"},
+            {"role": "AXSlider", "desc": "pan", "value": 0, "valueDesc": "0"},
+            {"role": "AXButton", "desc": "output", "help": "Output slot. Click and hold to choose the channel strip output."},
+            {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal to an aux channel strip."},
+            {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."},
+            {"role": "AXButton", "desc": "insert bar"}, bypassed("audio plug-in"),
+            {"role": "AXButton", "desc": "insert bar"}, bypassed("audio plug-in"),
+            {"role": "AXButton", "desc": "insert bar"}, bypassed("audio plug-in"),
+            bypassed("input"),
+            {"role": "AXButton", "desc": "MIDI plug-in", "help": "MIDI Effect slot. Insert a MIDI effect."}
+        ]}));
+        let state = StripState::of(&strip, &strings);
+        assert!(!state.drawn);
+        assert_eq!((state.name.as_str(), state.kind), ("Keys", "instrument"), "its kind follows its slots' shape");
+        assert!(state.inserts.is_empty() && state.sends.is_empty() && state.output.is_empty());
+        let header = Header {
+            index: 40,
+            name: "Keys".into(),
+            mute: false,
+            solo: false,
+            armed: false,
+            monitoring: false,
+            volume_db: Some(0.0),
+            pan: 0,
+            selected: false,
+            stack: false,
+        };
+        assert_eq!(track_row("1:track:40", &header, Some(&state))["stripUnread"], true);
+        assert!(track_row("1:track:40", &header, None).get("stripUnread").is_none());
+        assert!(undrawn("84 44 8", "Master") && !undrawn("Audio 1", "Vocal") && !undrawn("12 34", "12 34"));
     }
 
     #[test]
@@ -931,8 +1032,10 @@ mod tests {
         assert_eq!(StripState::of(&aux, &strings).kind, "aux");
         assert_eq!(plugin_row("1:plugin:1.1", "1:track:1", 1, &("Channel EQ".into(), false, "effect"))["kind"], "effect");
         assert_eq!(send_row("1:send:1.1", "1:track:1", 1, &("Bus 1".into(), Some(-6.0)))["level"], -6.0);
-        let project = project_row(Some("abc"), "Scratch", Some("/m/Scratch.logicx"), 160.0, "4/4", "C Major", None, 2);
+        let project = project_row(Some("abc"), "Scratch", Some("/m/Scratch.logicx"), 160.0, "4/4", "C Major", None, 2, 3);
         assert_eq!(project["sampleRate"], Value::Null);
-        assert_eq!(project["trackCount"], 2);
+        assert_eq!((project["trackCount"].as_u64(), project["middleC"].as_u64()), (Some(2), Some(3)));
+        // "Display Middle C As": the preferences' switch on is C4 (Roland); off, or never set, C3 (Yamaha).
+        assert_eq!((middle_c_of(Some("1")), middle_c_of(Some("0")), middle_c_of(None)), (4, 3, 3));
     }
 }

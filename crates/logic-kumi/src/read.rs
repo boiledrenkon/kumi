@@ -10,7 +10,8 @@ use crate::refs::{self, bad, check_epoch, Fault, Ref};
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
-pub const KINDS: [&str; 11] = ["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"];
+pub const KINDS: [&str; 12] =
+    ["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation", "recent"];
 /// The kinds read only under a parent, and what the parent is: a region's notes, a plug-in's parameters (from its
 /// window's Controls View), a track's Smart Controls and automation (from their panes).
 const NEED_PARENT: [(&str, &str); 4] = [("note", "region"), ("param", "plug-in"), ("smart", "track"), ("automation", "track")];
@@ -158,6 +159,56 @@ pub fn read(catalog: &Catalog, params: &Value) -> Result<Value, Fault> {
     }
 }
 
+/// The kinds a bulk read answers: the rows that need no parent and no window of their own.
+pub const BULK_KINDS: [&str; 7] = ["project", "track", "region", "plugin", "send", "marker", "tempo"];
+/// The most rows of a kind a bulk read answers: past them the kind is named under `truncated`, to page with `read`.
+pub const BULK_MOST: usize = 10000;
+
+/// The kinds a bulk read asks for (`rows`), checked: some of [`BULK_KINDS`], each once, in the order asked.
+pub fn bulk_kinds(rows: &Value) -> Result<Vec<&'static str>, Fault> {
+    let asked = rows
+        .as_array()
+        .filter(|asked| !asked.is_empty())
+        .ok_or_else(|| bad(format!("rows: a list of the kinds to read whole, of {}", BULK_KINDS.join(", "))))?;
+    let mut kinds: Vec<&'static str> = vec![];
+    for kind in asked {
+        let name = kind.as_str().unwrap_or_default();
+        let Some(known) = BULK_KINDS.iter().find(|known| **known == name) else {
+            return Err(bad(format!(
+                "rows: Logic Pro's bulk read takes {}; {} is read with read{}",
+                BULK_KINDS.join(", "),
+                if name.is_empty() { kind.to_string() } else { name.to_string() },
+                if NEED_PARENT.iter().any(|(needs, _)| *needs == name) { ", under its parent" } else { "" }
+            )));
+        };
+        if !kinds.contains(known) {
+            kinds.push(known);
+        }
+    }
+    Ok(kinds)
+}
+
+/// The bulk read, `snapshot {rows}`: every row of each kind asked, as `read` pages them (the same rows, in the same
+/// order, from one catalog of one epoch), with each kind's `totals` and the kinds cut at `limit` (at most
+/// [`BULK_MOST`]) under `truncated`.
+pub fn bulk(catalog: &Catalog, kinds: &[&str], params: &Value) -> Value {
+    let most = params.get("limit").and_then(Value::as_u64).map_or(BULK_MOST, |n| (n as usize).clamp(1, BULK_MOST));
+    let (mut rows, mut totals, mut truncated) = (serde_json::Map::new(), serde_json::Map::new(), vec![]);
+    for kind in kinds {
+        let all = catalog.rows(kind);
+        totals.insert(kind.to_string(), all.len().into());
+        if all.len() > most {
+            truncated.push(Value::from(*kind));
+        }
+        rows.insert(kind.to_string(), Value::Array(all.into_iter().take(most).collect()));
+    }
+    let mut answer = json!({"epoch": catalog.epoch_text(), "rows": rows, "totals": totals});
+    if !truncated.is_empty() {
+        answer["truncated"] = Value::Array(truncated);
+    }
+    answer
+}
+
 /// `snapshot`: the project, the transport, the tracks, the selection and the markers, in one answer.
 pub fn snapshot(catalog: &Catalog) -> Value {
     json!({
@@ -183,7 +234,7 @@ pub mod tests {
         let r = |kind: &str, n: &str| format!("{epoch}:{kind}:{n}");
         Catalog {
             epoch,
-            project: Some(json!({"id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8", "identity": "Scratch", "path": "/lab/Scratch.logicx", "tempo": 160.0, "timeSignature": "4/4", "keySignature": "C major", "sampleRate": 48000, "trackCount": 2})),
+            project: Some(json!({"id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8", "identity": "Scratch", "path": "/lab/Scratch.logicx", "tempo": 160.0, "timeSignature": "4/4", "keySignature": "C major", "sampleRate": 48000, "trackCount": 2, "middleC": 3})),
             tracks: vec![
                 json!({"ref": r("track", "1"), "index": 1, "name": "Vocal", "kind": "audio", "mute": false, "solo": false, "armed": false, "monitoring": false, "volumeDb": 0.0, "pan": 0, "color": "#5b8def", "output": "Stereo Out", "inputs": ["Input 1"], "selected": true}),
                 json!({"ref": r("track", "2"), "index": 2, "name": "Keys", "kind": "instrument", "mute": false, "solo": false, "armed": false, "monitoring": false, "volumeDb": -3.0, "pan": 0, "color": null, "output": "Stereo Out", "inputs": [], "selected": false}),
@@ -193,7 +244,7 @@ pub mod tests {
             plugins: vec![json!({"ref": r("plugin", "1.1"), "trackRef": r("track", "1"), "slot": 1, "name": "Channel EQ", "bypassed": false, "kind": "effect"})],
             sends: vec![json!({"ref": r("send", "1.1"), "trackRef": r("track", "1"), "slot": 1, "destination": "Bus 1", "level": -6.0})],
             markers: vec![json!({"ref": r("marker", "1"), "position": position(9, 1, 1, 1), "name": "Chorus", "length": 8.0, "text": ""})],
-            tempo: Some(json!({"bpm": 160.0, "signatures": [{"position": position(1, 1, 1, 1), "time": "4/4", "key": "C major"}]})),
+            tempo: Some(json!({"bpm": 160.0, "tempos": [{"position": position(1, 1, 1, 1), "bpm": 160.0}], "signatures": [{"position": position(1, 1, 1, 1), "time": "4/4", "key": "C major"}]})),
             selection: json!({"trackRef": r("track", "1"), "regionRef": r("region", "1")}),
             transport: json!({"playing": false, "recording": false, "cycle": false, "playhead": {"bar": 1, "beat": 1}, "tempo": 160.0, "timeSignature": "4/4"}),
         }
@@ -248,6 +299,21 @@ pub mod tests {
             snapshot.as_object().unwrap().keys().collect::<Vec<_>>(),
             ["epoch", "project", "transport", "tracks", "selection", "markers"]
         );
+        // The bulk read: every row of each kind asked, as the pages give them, from one catalog.
+        let kinds = bulk_kinds(&json!(["project", "track", "region", "plugin", "marker", "tempo", "track"])).unwrap();
+        assert_eq!(kinds, ["project", "track", "region", "plugin", "marker", "tempo"]);
+        let all = bulk(&catalog, &kinds, &json!({}));
+        assert_eq!(all["epoch"], "1");
+        for kind in &kinds {
+            let paged = read(&catalog, &json!({"kind": kind, "limit": 200})).unwrap();
+            assert_eq!(all["rows"][*kind], paged["items"], "{kind}");
+            assert_eq!(all["totals"][*kind], paged["total"], "{kind}");
+        }
+        assert!(all.get("truncated").is_none());
+        let cut = bulk(&catalog, &["track"], &json!({"limit": 1}));
+        assert_eq!((cut["rows"]["track"].as_array().unwrap().len(), &cut["truncated"]), (1, &json!(["track"])));
+        assert_eq!(bulk_kinds(&json!(["note"])).unwrap_err().1, "rows: Logic Pro's bulk read takes project, track, region, plugin, send, marker, tempo; note is read with read, under its parent");
+        assert_eq!(bulk_kinds(&json!([])).unwrap_err().0, "bad-params");
         assert_eq!(
             want(&json!({"kind": "note", "parent": "1:region:1"}), 1),
             Ok(Want::Kind { kind: "note".into(), parent: Some(Ref::new(1, "region", &[1])) })

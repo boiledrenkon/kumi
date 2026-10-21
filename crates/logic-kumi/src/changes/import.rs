@@ -134,7 +134,7 @@ fn question(ctx: &mut Ctx) -> Done<Option<Node>> {
 
 /// Answers Logic's question after the import: No to a tempo (the file carries none), else the dialog is cancelled
 /// and the import refused with its words. What was pressed, if anything.
-fn answer_questions(ctx: &mut Ctx) -> Done<Vec<String>> {
+pub(super) fn answer_questions(ctx: &mut Ctx) -> Done<Vec<String>> {
     let mut pressed = Vec::new();
     for _ in 0..QUESTION_POLLS {
         super::pause(QUESTION_POLL);

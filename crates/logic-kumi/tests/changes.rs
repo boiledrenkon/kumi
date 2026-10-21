@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 55] = [
+const SCENES: [&str; 60] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -81,6 +81,11 @@ const SCENES: [&str; 55] = [
     "change-fx-param-exact",
     "change-bounce-undo",
     "change-playhead-exact",
+    "change-metronome-set",
+    "read-recent",
+    "read-paged",
+    "read-bulk",
+    "change-sample-load",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -168,7 +173,46 @@ fn replay_scene(scene: &Scene) -> Replayed {
     Replayed { steps, unrecorded: hands.unrecorded(), events }
 }
 
+/// Whether `recorded` is all in `replayed`: every field it has answered the same, an array as long; `replayed` may add
+/// fields.
+fn within(recorded: &Value, replayed: &Value) -> bool {
+    match (recorded, replayed) {
+        (Value::Object(was), Value::Object(now)) => was.iter().all(|(key, value)| now.get(key).is_some_and(|got| within(value, got))),
+        (Value::Array(was), Value::Array(now)) => was.len() == now.len() && was.iter().zip(now).all(|(a, b)| within(a, b)),
+        (was, now) => was == now,
+    }
+}
+
+/// `KUMI_BLESS=1`: a scene's recorded answers take what the replay adds to them, a field the bridge answers now that it
+/// didn't when the scene was recorded (derived from the same recorded replies of Logic: the tempo row's `tempos` from
+/// the Tempo List), and only where every recorded field is answered as it was; anything else stays a failure. As the
+/// vectors are blessed, and run one test at a time (`-- --test-threads=1`).
+fn bless_additions(name: &str) {
+    let replayed = replay_scene(&load(name));
+    let dir = fixtures().join(name);
+    let mut raw: Value = serde_json::from_str(&logic_kumi::fixtures::scene_text(&dir).unwrap()).unwrap();
+    let mut blessed = 0;
+    let steps = raw["logic"]["steps"].as_array_mut().unwrap();
+    let mut kept = steps.iter_mut().filter(|record| record["step"].get("method").is_some() || record["step"].get("poll").is_some());
+    for step in &replayed.steps {
+        let record = kept.next().unwrap();
+        if step.replayed != step.recorded && within(&step.recorded, &step.replayed) {
+            record["answer"] = step.replayed.clone();
+            blessed += 1;
+        }
+    }
+    if blessed > 0 {
+        let mut text = serde_json::to_string(&raw).unwrap();
+        text.push('\n');
+        logic_kumi::fixtures::write_scene_text(&dir, &text).unwrap();
+        eprintln!("{name}: {blessed} recorded answers took the fields the replay adds");
+    }
+}
+
 fn replay(name: &str) -> Replayed {
+    if std::env::var("KUMI_BLESS").is_ok_and(|v| v == "1") {
+        bless_additions(name);
+    }
     let replayed = replay_scene(&load(name));
     assert!(
         replayed.unrecorded.is_empty(),
@@ -1144,4 +1188,125 @@ fn a_split_after_logic_played_lands_exactly_on_the_bar_asked() {
     let reads = of(&replayed, "read");
     assert_eq!(reads[0].result()["items"][1]["startBeats"], 8.0);
     assert_eq!(reads[1].result()["items"].as_array().unwrap().len(), 1, "the region whole again");
+}
+
+#[test]
+fn the_metronome_is_turned_off_and_on_by_the_control_bars_metronome_click_and_makes_no_step_of_logics_undo() {
+    let replayed = replay("change-metronome-set");
+    let previews = of(&replayed, "change_preview");
+    // Scratch's click is on: the preview fences it as read, and writes nothing.
+    assert_eq!((&previews[0].result()["prior"], &previews[0].result()["fence"]), (&json!({"on": true}), &json!({"on": true})));
+    assert_eq!(previews[0].result()["target"], json!({"ref": null, "kind": "project"}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"on": false}));
+    assert_eq!((applied["display"]["title"].as_str(), applied["undo"]["entry"].as_bool()), (Some("Metronome off"), Some(false)));
+    let presses: Vec<(i64, i64)> = load("change-metronome-set")
+        .calls
+        .iter()
+        .filter(|call| call.op == "action")
+        .filter_map(|call| Some((call.reply.get("before")?.as_i64()?, call.reply.get("after")?.as_i64()?)))
+        .collect();
+    assert_eq!(presses, [(1, 0), (0, 1)], "one press off, one press back on, each read back");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((&restored["restored"], restored["undo"]["entry"].as_bool()), (&json!({"on": true}), Some(false)));
+    // On asked of an on click: nothing to do, so no step for the history either.
+    assert_eq!(previews[1].result()["display"]["unchanged"], true);
+    assert_eq!(previews[2].replayed["error"]["code"], "bad-params");
+}
+
+#[test]
+fn the_recent_projects_are_logics_open_recent_menu_read_without_opening_it_with_a_path_where_one_is_known() {
+    let replayed = replay("read-recent");
+    let reads = of(&replayed, "read");
+    let items = reads[0].result()["items"].as_array().unwrap().clone();
+    assert_eq!(reads[0].result()["total"], 8);
+    // The open project first, its path from its window; the others' from Spotlight, which finds the gate's copies
+    // outside the Music folder.
+    assert_eq!(items[0], json!({"index": 1, "name": "Scratch", "path": "/Users/me/Music/Logic/Scratch.logicx", "open": true}));
+    assert_eq!(items[1]["name"], "Scratch Kumi M4 20261021-142756");
+    assert!(items[1]["path"].as_str().unwrap().ends_with("/Scratch Kumi M4 20261021-142756.logicx"));
+    assert!(items[1..].iter().all(|item| item["open"] == false && item["path"].is_string()));
+    assert_eq!((reads[1].result()["items"].as_array().unwrap().len(), reads[1].result()["nextCursor"].as_str()), (2, Some("1.2")));
+    // Only reads of the menu bar: no menu was opened.
+    let scene = load("read-recent");
+    assert!(scene.calls.iter().all(|call| call.op != "action" && call.op != "menu" && call.op != "keys"));
+}
+
+#[test]
+fn the_bulk_read_answers_the_paged_reads_rows_in_one_request_showing_each_pane_once() {
+    let paged = replay("read-paged");
+    let bulk = replay("read-bulk");
+    let answer = of(&bulk, "snapshot")[0].result().clone();
+    let pages = of(&paged, "read");
+    for (at, kind) in ["project", "track", "region", "plugin", "marker", "tempo"].iter().enumerate() {
+        assert_eq!(answer["rows"][*kind], pages[at].result()["items"], "{kind}: the bulk read's rows are the page's");
+        assert_eq!(answer["totals"][*kind], pages[at].result()["total"], "{kind}");
+    }
+    assert_eq!((answer["epoch"].as_str(), answer.get("truncated")), (Some("1"), None));
+    assert_eq!(answer["rows"]["tempo"][0]["tempos"][0]["bpm"], 160.0);
+    // The List Editors shown once for the three lists (their button pressed to open and to close), against once per
+    // list for the pages; the Mixer once in each.
+    let presses = |name: &str, label: &str| -> usize {
+        let scene = load(name);
+        let buttons: Vec<String> = scene
+            .calls
+            .iter()
+            .filter(|call| call.op == "tree")
+            .flat_map(|call| {
+                let mut found = vec![];
+                collect_buttons(&call.reply["node"], label, &mut found);
+                found
+            })
+            .collect();
+        scene.calls.iter().filter(|call| call.op == "action" && buttons.iter().any(|b| call.params["path"] == b.as_str())).count()
+    };
+    assert_eq!((presses("read-bulk", "List Editors"), presses("read-paged", "List Editors")), (2, 6));
+    assert_eq!((presses("read-bulk", "Mixer"), presses("read-paged", "Mixer")), (2, 2));
+    // Measured on Scratch: the six pages took 4.4 to 4.5 s, the bulk read 2.7 s.
+    let ms = |name: &str| -> u64 { load(name).logic["steps"].as_array().unwrap().iter().filter_map(|step| step["ms"].as_u64()).sum() };
+    assert!(ms("read-bulk") < ms("read-paged"), "{} ms against {} ms", ms("read-bulk"), ms("read-paged"));
+}
+
+/// The paths of the control bar's view buttons of a label in a recorded tree.
+fn collect_buttons(node: &Value, label: &str, found: &mut Vec<String>) {
+    if node["role"] == "AXCheckBox" && (node["desc"] == label || node["title"] == label) {
+        if let Some(path) = node["i"].as_str() {
+            found.push(path.to_string());
+        }
+    }
+    for child in node["c"].as_array().into_iter().flatten() {
+        collect_buttons(child, label, found);
+    }
+}
+
+#[test]
+fn a_sample_comes_in_on_an_audio_track_and_logic_converts_it_into_a_new_sampler_track_and_its_undo_takes_both_back() {
+    // Recorded on a copy of Scratch: Logic copies the file into the project's package at once.
+    let replayed = replay("change-sample-load");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[0].replayed["error"]["code"], "bad-params", "Quick Sampler takes a sample by a drag only");
+    assert!(previews[0].replayed["error"]["message"].as_str().unwrap().contains("Quick Sampler"));
+    assert_eq!(previews[1].replayed["error"]["code"], "bad-params", "a file that isn't there");
+    assert_eq!(previews[2].replayed["error"]["code"], "bad-params", "Keys is an instrument track");
+    let preview = previews[3].result();
+    assert_eq!(preview["fence"], json!({"tracks": 2, "names": ["Vocal", "Keys"], "regions": 1}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(
+        (applied["applied"]["name"].as_str(), applied["applied"]["instrument"].as_str(), applied["applied"]["track"].as_u64()),
+        (Some("kumi-tone"), Some("Sampler"), Some(2))
+    );
+    // The new track's trigger region where the audio region came in (bar 3), and the audio region left muted on Vocal.
+    assert_eq!(applied["applied"]["startBeats"], 8.0);
+    assert_eq!(applied["created"]["ref"], format!("{}:track:2", applied["epoch"].as_str().unwrap()));
+    assert!(applied["created"]["region"].is_string() && applied["created"]["source"].is_string());
+    assert_eq!(applied["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    let names: Vec<&str> = reads[0].result()["items"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Vocal", "kumi-tone", "Keys"]);
+    assert_eq!(reads[0].result()["items"][1]["kind"], "instrument");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(restored["restored"]["pressed"], json!(["Undo Convert Regions to New Sampler Track", "Undo Insert"]));
+    assert_eq!(reads[2].result()["total"], 2, "the Sampler track gone");
+    assert_eq!(reads[3].result()["total"], 1, "the audio region gone too");
 }

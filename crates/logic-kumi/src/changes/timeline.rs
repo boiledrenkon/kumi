@@ -275,6 +275,11 @@ pub(crate) fn metronome_on(bar: &Node, strings: &crate::ax::strings::Strings) ->
     paths::transport_button(bar, strings, METRONOME).is_some_and(Node::is_on)
 }
 
+/// Whether the control bar shows its Metronome Click button at all.
+pub(crate) fn shows_metronome(bar: &Node, strings: &crate::ax::strings::Strings) -> bool {
+    paths::transport_button(bar, strings, METRONOME).is_some()
+}
+
 const METRONOME: &str = "Metronome Click";
 
 // ----- the transport -----

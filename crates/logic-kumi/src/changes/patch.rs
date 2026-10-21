@@ -39,7 +39,7 @@ fn patch_of(input: &Value) -> Done<(Vec<String>, String)> {
 }
 
 /// The selected track's strip as the Inspector shows it: its patch (the setting button's name) and its plug-ins.
-fn strip_now(ctx: &mut Ctx) -> Done<(String, Vec<String>)> {
+pub(super) fn strip_now(ctx: &mut Ctx) -> Done<(String, Vec<String>)> {
     let inspector = nudge::read(ctx.project.inspector(ctx.ax))?;
     let parts = Inspector::of(&inspector, &ctx.project.strings);
     let strip = parts.strips.first().ok_or_else(|| failed("Logic Pro's Inspector shows no channel strip"))?;
