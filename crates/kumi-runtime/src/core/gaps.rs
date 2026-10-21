@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 pub const GAP_TOOL: &str = "note_gap";
 crate::daw_text!(
     pub GAP_GUIDANCE, gap_guidance:
-    "When a request needs something ", gap_offer, " don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it, cleanup included; then note the gap with note_gap beside your answer (final: true once nothing is left to do), and say in a sentence what you did instead."
+    "When a request needs something ", gap_offer, " don't offer, take the way round first (another tool, a plan of several, a recording, ", gap_way, ") and do it, cleanup included; then note the gap with note_gap beside your answer (final: true once nothing is left to do), and say in a sentence what you did instead."
 );
 const MAX_BYTES: u64 = 256 * 1024;
 const KEEP_LINES: usize = 500;
