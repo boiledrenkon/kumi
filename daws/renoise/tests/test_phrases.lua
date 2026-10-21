@@ -95,6 +95,14 @@ test("phrases: Kumi's undo of a phrase delete writes back the 0Z commands Renois
   eq(bass.phrase_program, 2, "the program plays it again")
 end)
 
+test("phrases: a new phrase's loop is checked against the 32 lines Renoise makes it with (#361 N-N4)", function()
+  local env, peer = setup()
+  local record, done = change(peer, "phrase-add", { ref = iref(place(peer), 2), loopEnd = 24 })
+  ok(done, "a loop to line 24 fits a new phrase")
+  eq(mock.song:instrument(2):phrase(#mock.song:instrument(2).phrases).loop_end, 25)
+  failure(call(peer, "change_preview", { kind = "phrase-add", input = { ref = iref(place(peer), 2), loopEnd = 40 }, epoch = place(peer) }), "bad-params")
+end)
+
 test("phrases: settings change and go back (lines, LPB, loop, shuffle, key tracking, base note, columns); a loop past its lines is bad-params", function()
   local env, peer = setup()
   local record = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), lines = 32, lpb = 16, loopStart = 16, loopEnd = 31, shuffle = 0.5, keyTracking = "offset", baseNote = 36, noteColumns = 4, delayColumn = true })
@@ -350,6 +358,36 @@ test("phrases: a script rendered to lines; Kumi's undo puts the lines it had bac
   eq(cell(2, 1, 2).note_string, "F-4")
   eq(phrase(2, 1).playback_mode, 2, "it plays its script again")
   failure(call(peer, "change_preview", { kind = "phrase-render", input = { ref = pref(place(peer), 1, 1) }, epoch = place(peer) }), "gone")
+end)
+
+test("phrases: a render Renoise refuses at once fails with its words; after Renoise's own undo of a render Kumi's undo finds it back already (#361 N-N5)", function()
+  local env, peer = setup()
+  local p = mock.song:instrument(2):phrase(1)
+  p.playback_mode = 2
+  p.script.paragraphs = { "return cycle(\"c4 e4\")" }
+  p.script:commit()
+  mock.compile_scripts()
+  mock.data.undo.stack = {}
+  local function render(desc)
+    local previewed, epoch, layout = preview(peer, "phrase-render", { ref = pref(place(peer), 2, 1), lpb = 4 })
+    local id = I.send(peer, "change_apply", { kind = "phrase-render", input = { ref = pref(epoch, 2, 1), lpb = 4 }, fence = previewed.fence, desc = desc, epoch = epoch, layout = layout })
+    mock.advance(30)
+    mock.finish_renders()
+    return I.wait(peer, id, 100), previewed
+  end
+  mock.render_refuses = "the script has no pattern to render"
+  local refused = render("Kumi: render (k630)")
+  mock.render_refuses = nil
+  failure(refused, "failed")
+  ok(refused.error.message:find("no pattern to render", 1, true), refused.error.message)
+  local done, previewed = render("Kumi: render (k631)")
+  ok(done.result, json.encode(done.error or {}))
+  mock.song:undo() -- the producer's Cmd-Z of the render
+  H.tick(2)
+  local undone = restore(peer, "phrase-render", { target = done.result.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material,
+    epoch = done.result.epoch, layout = done.result.layout })
+  ok(undone.result, json.encode(undone.error or {}))
+  ok(undone.result.display.title:find("back already", 1, true), undone.result.display.title)
 end)
 
 test("phrases: Renoise's own undo and redo of a render are told (real Renoise: the row said applied after its undo)", function()

@@ -262,12 +262,15 @@ local function add_plan(song, env, input)
       settings[key] = value
     end
   end
-  -- (a new phrase has 16 lines unless given: its loop must fit what it will have)
-  local lines = settings.lines or 16
+  -- (a new phrase has 32 lines unless given, lab 3.5.4: its loop must fit what it will have)
+  local lines = settings.lines or M.NEW_PHRASE_LINES
   if (settings.loopStart or 0) >= lines or (settings.loopEnd or 0) >= lines then bad("the loop must be within the phrase's lines") end
   if settings.loopStart and settings.loopEnd and settings.loopStart > settings.loopEnd then bad("loopStart must not be after loopEnd") end
   return { n = n, label = label, count = count, index = index, settings = settings }
 end
+
+-- What Renoise makes a new phrase with (lab 3.5.4): 32 lines, 4 note columns, key tracking transpose, autoseek on.
+M.NEW_PHRASE_LINES = 32
 
 local function phrase_print(phrase)
   return { name = phrase.name, lines = phrase.number_of_lines, empty = phrase.is_empty, mode = phrase.playback_mode, print = lines_print(phrase) }
@@ -1234,12 +1237,14 @@ base.register({
         -- (the render switches the phrase to play its lines: Renoise's undo of it switches it back, which the journal hears)
         if env.watch_undo then env.watch_undo(phrase.playback_mode_observable) env.watch_undo(phrase.number_of_lines_observable) end
         now_song:describe_undo(desc)
-        local started, err = pcall(function()
-          phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
+        local started, accepted, why = pcall(function()
+          return phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
             result = { error = error_text, rendered = rendered, skipped = skipped }
           end)
         end)
-        if not started then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(type(err) == "table" and err.message or err) }, 0) end
+        if not started then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(type(accepted) == "table" and accepted.message or accepted) }, 0) end
+        -- (Renoise refusing at once answers false and why: nothing was rendered, and nothing waits)
+        if accepted == false and not result then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(why or "it refused") }, 0) end
         job.wrote = "The render of " .. plan.label
         local from = env.now_ms()
         while not result do
@@ -1262,7 +1267,7 @@ base.register({
         local applied = { print = lines_print(phrase), mode = phrase.playback_mode, rendered = result.rendered, skipped = result.skipped }
         return {
           applied = applied,
-          material = { at = places_.place_of(env, "phrase", n), lines = plan.lines, settings = plan.settings },
+          material = { at = places_.place_of(env, "phrase", n), lines = plan.lines, settings = plan.settings, print = fence.print, mode = fence.mode },
           target = places_.target_of(env, "phrase", n), display = display, undo = { desc = desc, entry = true },
           -- (the journal compares the phrase's lines and playback mode with what they were and what the render left)
           prior = { lines = plan.lines, settings = plan.settings, print = fence.print, mode = fence.mode },
@@ -1279,6 +1284,11 @@ base.register({
     local objects = places_.resolve(song, "phrase", n)
     local phrase, label = objects.phrase, places_.label_of("phrase", n, objects)
     local now = lines_print(phrase)
+    -- (Renoise's own undo of the render brought its lines and mode back already)
+    if material.print ~= nil and now == material.print and phrase.playback_mode == material.mode then
+      base.note_restored(env.journal, "phrase-render", places_.journal_place("phrase", n), { print = applied.print, mode = applied.mode }, base.KINDS["phrase-render"])
+      return { restored = { done = true }, display = { title = label .. "'s lines are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    end
     if not restore.discard and (now ~= applied.print or phrase.playback_mode ~= applied.mode) then fail("changed", label .. " changed in Renoise since Kumi rendered it") end
     song:describe_undo(desc)
     phrase:clear()

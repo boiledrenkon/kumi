@@ -703,6 +703,8 @@ local function script_object(phrase)
     end,
     render_to_pattern = function(_, options, done)
       if type(options) == "function" then done, options = options, {} end
+      -- (a render Renoise refuses at once answers false and why, and calls nothing back: M.render_refuses sets the why)
+      if M.render_refuses then return false, M.render_refuses end
       M.pending_renders = M.pending_renders or {}
       M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done, lines = phrase.lines }
       -- (Renoise rewrites the phrase's length by itself before the tool's next callback, well before it answers: lab 2026-10-19)
