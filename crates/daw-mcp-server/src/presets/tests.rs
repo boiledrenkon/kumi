@@ -479,3 +479,46 @@ fn a_plug_in_inside_a_doofer_reads_by_the_name_renoise_gives_it() {
     let (_, unnamed) = super::inside(&with_au, false).unwrap();
     assert_eq!(unnamed["devices"].as_array().unwrap().last().unwrap()["name"], "AudioPlugin");
 }
+
+/// The first mapping of a container's macro 1: its device index.
+fn first_mapping(container: &Element) -> Option<String> {
+    container.child("Macro0")?.child("Mappings")?.element(0)?.child_text("DestDeviceIndex")
+}
+
+#[test]
+fn a_device_moved_into_or_out_of_a_doofer_inside_moves_the_other_mappings_and_aims_of_both_lanes() {
+    // Macro 1 drives the Gainer (place 2); an LFO at the end aims at it; a Doofer at place 3 holds a Gainer its own
+    // macro 1 drives.
+    let mapped = ok("doofer-macro", json!({"macro": 1, "mappings": [{"device": 2, "param": 1}]}), DOOFER, "Doofer").document.to_xml();
+    let nested = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), &mapped, "Doofer").document.to_xml();
+    let inner = ok("doofer-device-add", json!({"path": "Gainer", "at": [3, 1]}), &nested, "Doofer").document.to_xml();
+    let lfo = "        <LfoDevice type=\"LfoDevice\">\n          <DestEffect>\n            <Value>1</Value>\n          </DestEffect>\n          <DestParameter>\n            <Value>1</Value>\n          </DestParameter>\n        </LfoDevice>\n";
+    let end = inner.rfind("      </Devices>").unwrap();
+    let with_lfo = format!("{}{lfo}{}", &inner[..end], &inner[end..]);
+    // (the inner Doofer is the only <DooferDevice> element: the outer one is the slot)
+    let open = with_lfo.find("<DooferDevice type=\"DooferDevice\">").unwrap() + "<DooferDevice type=\"DooferDevice\">".len();
+    let macro_ = "<Macro0><Value>50</Value><Name>Macro 1</Name><Mappings><Mapping><DestChainIndex>0</DestChainIndex><DestDeviceIndex>0</DestDeviceIndex><DestParameterIndex>1</DestParameterIndex><Min>0.0</Min><Max>1.0</Max><Scaling>Linear</Scaling></Mapping></Mappings></Macro0>";
+    let before = xml::parse(&format!("{}{macro_}{}", &with_lfo[..open], &with_lfo[open..])).unwrap().to_xml();
+    // The EQ into the Doofer, before its Gainer.
+    let moved = ok("doofer-device-move", json!({"at": [1], "to": [2, 1]}), &before, "Doofer");
+    let text = moved.document.to_xml();
+    let document = xml::parse(&text).unwrap();
+    let top = slot(&document).unwrap();
+    let list = devices_in(top, DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["GainerDevice", "DooferDevice", "LfoDevice"]);
+    assert_eq!(first_mapping(top).as_deref(), Some("0"), "macro 1 still drives the Gainer, now place 1");
+    assert_eq!(value_of(list[2], "DestEffect"), Some(0.0), "the LFO still aims at the Gainer");
+    assert_eq!(devices_in(list[1], DOOFER_TYPE, 0).iter().map(|d| d.name()).collect::<Vec<_>>(), ["Eq5Device", "GainerDevice"]);
+    assert_eq!(first_mapping(list[1]).as_deref(), Some("1"), "the inner macro still drives the inner Gainer, now place 2");
+    // Kumi's undo moves it back out to the first place (the top's make room, the inner ones close up): as it was.
+    assert_eq!(written(undone("doofer-device-move", &moved, &text, "Doofer", false)), before);
+    // Out of the Doofer to after it: the inner mapping closes up; the top's, before the new place, stay.
+    let out = ok("doofer-device-move", json!({"at": [2, 1], "to": [3]}), &text, "Doofer");
+    let document = xml::parse(&out.document.to_xml()).unwrap();
+    let top = slot(&document).unwrap();
+    let list = devices_in(top, DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["GainerDevice", "DooferDevice", "Eq5Device", "LfoDevice"]);
+    assert_eq!(first_mapping(top).as_deref(), Some("0"));
+    assert_eq!(value_of(list[3], "DestEffect"), Some(0.0));
+    assert_eq!(first_mapping(list[1]).as_deref(), Some("0"), "the inner Gainer is place 1 again");
+}

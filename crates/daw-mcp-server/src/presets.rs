@@ -1151,18 +1151,33 @@ fn device_move(mut document: xml::Document, input: &Value, device: &Device) -> R
 }
 
 /// Moves the device from one place to another (in its container: its mappings follow; to another container: nothing aims
-/// at it, as checked).
+/// at it, as checked, and what aims at the others in both lanes follows them).
 fn move_device(slot_: &mut Element, from: &Locus, to: &Locus, element: Element) {
     let list = list_mut(slot_, &from.container, from.lane);
     list.remove_element(from.place);
-    let list = list_mut(slot_, &to.container, to.lane);
-    list.insert_element(to.place, element);
+    let (a, b) = (from.place, to.place);
     if from.container != to.container {
+        // Into or out of a Doofer inside: the mappings and meta devices aimed at the devices after it in its lane close up,
+        // and those aimed at the devices at or after its new place make room. (The source lane first: the new place may be
+        // in a list that holds the source's container, which the insert would move.)
+        let source = element_at_mut(slot_, &from.container).expect("resolved");
+        let kind = type_of(source, from.container.is_empty()).to_string();
+        let close = move |n: usize| Some(if n > a { n - 1 } else { n });
+        remap(source, &kind, from.lane, &close);
+        reaim(source, &kind, from.lane, &close);
+        let list = list_mut(slot_, &to.container, to.lane);
+        list.insert_element(to.place, element);
+        let target = element_at_mut(slot_, &to.container).expect("resolved");
+        let kind = type_of(target, to.container.is_empty()).to_string();
+        let open = move |n: usize| Some(if n >= b { n + 1 } else { n });
+        remap(target, &kind, to.lane, &open);
+        reaim(target, &kind, to.lane, &open);
         return;
     }
+    let list = list_mut(slot_, &to.container, to.lane);
+    list.insert_element(to.place, element);
     let container = element_at_mut(slot_, &from.container).expect("resolved");
     let kind = type_of(container, from.container.is_empty()).to_string();
-    let (a, b) = (from.place, to.place);
     if from.lane == to.lane {
         let follow = move |n: usize| {
             Some(if n == a {
