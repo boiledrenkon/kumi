@@ -1037,10 +1037,8 @@ case!(tab_enters_a_takes_fx_and_a_device_without_a_ref_pins_its_container, async
     let row = lines.iter().find(|line| line.contains("◇  Compressor")).unwrap_or_else(|| panic!("{}", lines.join("\n")));
     assert!(row.contains("pinned"), "the row pinned is marked:\n{}", lines.join("\n"));
     h.type_text("what is this\r").await;
-    let pins = c.pins.borrow();
-    let pin = pins.last().cloned().flatten().expect("the pin went with the turn");
+    let pin = c.pins.borrow().last().cloned().flatten().expect("the pin went with the turn");
     assert_eq!((pin.r#ref.as_str(), pin.name.as_str()), ("e1:device:2.3", "Compressor"));
-    drop(pins);
     h.close().await;
 });
 // (review K35) A big take says every note it has, not the count of the first ones the body lists.

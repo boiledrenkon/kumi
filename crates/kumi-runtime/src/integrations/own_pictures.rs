@@ -367,9 +367,7 @@ pub fn midi(answers: &Answers) -> Option<ChangePicture> {
     let display = answers.preview.get("display").unwrap_or(&Value::Null);
     let (before, after) = (list(display, "before"), list(display, "after"));
     let rows = || before.iter().chain(after);
-    if rows().next().is_none() {
-        return None;
-    }
+    rows().next()?;
     if rows().all(|row| row.get("pitch").is_some() && row.get("length").is_some()) {
         let first = rows().filter_map(|row| number(row, "start")).fold(f64::INFINITY, f64::min);
         let first = (first / 4.).floor() * 4.;
