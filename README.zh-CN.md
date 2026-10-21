@@ -55,7 +55,7 @@ irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | i
 - **显示你在哪里：** FOCUS 跟随你在 Live 中触碰的对象，显示为设备树、钢琴卷帘，或 Session、Arrangement 视图的条带。点击某个设备即可指向它：“这个 Saturator 太刺耳了”。
 - **记住：** 关于你和每个工程的笔记、从你保留的内容中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
 - **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。`/share` 可把对话存为网页发给别人，密钥和路径会被去除。
-- **也能在 REAPER 和 Renoise 中工作：** 在 REAPER 中是轨道、对象（item）与 take、FX 及其参数、包络和路由；在 Renoise 中是模式及其行、序列、乐器、采样、乐句和 DSP 链。每项修改都有撤销，它在那里也会聆听和判定，FOCUS 跟随该 DAW 自己的视图（[能修改什么](docs/zh-CN/KUMI_CHANGES.md#reaper-与-renoise)）。
+- **也能在 REAPER 和 Renoise 中工作：** 在 REAPER 中是轨道、对象（item）与 take、FX 及其参数、包络和路由；在 Renoise 中是模式及其行、序列、乐器、采样、乐句和 DSP 链。每项修改都有撤销，它在那里也会聆听和判定，FOCUS 跟随该 DAW 自己的视图（[在每个 DAW 中能做什么](docs/zh-CN/DAWS.md)、[能修改什么](docs/zh-CN/KUMI_CHANGES.md#reaper-与-renoise)）。
 - **用你的模型：** 使用 ChatGPT 登录，或使用 OpenAI、Anthropic、OpenCode 的 API 密钥。
 
 ## 当前状态

@@ -55,7 +55,7 @@ irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | i
 - **いまいる場所を表示：** FOCUS は Live で触れたものを追い、デバイスツリー、ピアノロール、セッションやアレンジメントの帯として表示します。デバイスをクリックして指し示せます。「この Saturator、きつすぎる」のように。
 - **覚える：** あなたと各 Set についてのメモ、残した音から学んだテクニック、再実行できるレシピ。保存したものはすべて表示され、クリック一つで忘れさせられます。
 - **会話を保存：** Set ごとに会話を保存し、どこからでも ID で再開でき（`kumi -r`）、閉じていた間に変わったことも伝えます。`/share` で会話を送れる Web ページにします（キーやパスは取り除かれます）。
-- **REAPER と Renoise でも：** REAPER ではトラック、アイテムとテイク、FX とそのパラメーター、エンベロープ、ルーティング。Renoise ではパターンとその行、シーケンス、インストゥルメント、サンプル、フレーズ、DSP チェーン。どの変更にも取り消しがあり、そこでも聴いて判定し、FOCUS は DAW 自身のビューを追います（[変更できるもの](docs/ja/KUMI_CHANGES.md#reaper-と-renoise)）。
+- **REAPER と Renoise でも：** REAPER ではトラック、アイテムとテイク、FX とそのパラメーター、エンベロープ、ルーティング。Renoise ではパターンとその行、シーケンス、インストゥルメント、サンプル、フレーズ、DSP チェーン。どの変更にも取り消しがあり、そこでも聴いて判定し、FOCUS は DAW 自身のビューを追います（[DAW ごとにできること](docs/ja/DAWS.md)、[変更できるもの](docs/ja/KUMI_CHANGES.md#reaper-と-renoise)）。
 - **好きなモデルで：** ChatGPT でサインインするか、OpenAI・Anthropic・OpenCode の API キーを使います。
 
 ## 現状
