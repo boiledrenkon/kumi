@@ -19,21 +19,25 @@ M.MAX_SAMPLE_BYTES = 64 * 1024 * 1024
 -- The most slice markers one change inserts, deletes or moves.
 M.MAX_SLICE_OPS = 64
 
--- A sample's buffer in brief: its shape and a few of its values, enough to tell it is the one Kumi left.
+-- A sample's buffer in brief: its shape and some of its values (256 points through it and its last frame, every channel), enough
+-- to tell it is the one Kumi left: an edit in the sample editor (a fade at its end, a short cut) moves one of them.
+M.BUFFER_PROBES = 256
 function M.buffer_print(buffer)
   if not buffer.has_sample_data then return { frames = 0 } end
   local frames, channels = buffer.number_of_frames, buffer.number_of_channels
   local a, b = 5381, 0
-  for k = 0, 15 do
-    local frame = math.max(1, math.floor(frames * k / 16) + 1)
+  for k = 0, M.BUFFER_PROBES do
+    local frame = k == M.BUFFER_PROBES and frames or math.max(1, math.floor(frames * k / M.BUFFER_PROBES) + 1)
     -- (the definitions say a list, the guide a number: either is read)
-    local value = buffer:sample_data(1, math.min(frame, frames))
-    local x = type(value) == "table" and value[1] or value
-    local text = string.format("%.6f|", tonumber(x) or 0)
-    for i = 1, #text do
-      local byte = text:byte(i)
-      a = (a * 33 + byte) % 4294967296
-      b = (b * 65599 + byte) % 4294967296
+    for channel = 1, channels do
+      local value = buffer:sample_data(channel, math.min(frame, frames))
+      local x = type(value) == "table" and value[1] or value
+      local text = string.format("%.6f|", tonumber(x) or 0)
+      for i = 1, #text do
+        local byte = text:byte(i)
+        a = (a * 33 + byte) % 4294967296
+        b = (b * 65599 + byte) % 4294967296
+      end
     end
   end
   return { frames = frames, channels = channels, rate = buffer.sample_rate, bits = buffer.bit_depth, values = string.format("%08x%08x", a, b) }

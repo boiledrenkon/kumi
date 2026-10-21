@@ -287,6 +287,15 @@ test("samples: after Renoise's own undo and redo of a sample Kumi loaded, Kumi's
   end
 end)
 
+test("samples: Kumi's undo of a replaced sample refuses once the producer edited its end in the sample editor (#361 N-N10)", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-load", { ref = sref(place(peer), 1, 1), path = wav_file("Kick2", 4000) })
+  local buffer = sample(1, 1).buffer
+  buffer.edits = { [buffer.frames] = 0 } -- a fade on its last frames: between the probe points that were
+  failure(restore(peer, "sample-load", record), "changed")
+  eq(sample(1, 1).buffer.frames, 4000, "their edit stays")
+end)
+
 test("samples: a sample's audio replaced by a file is kept and put back by the undo, its name and loop too", function()
   local env, peer = setup()
   local before = json.encode(sample(1, 1).buffer, { sort_keys = true })

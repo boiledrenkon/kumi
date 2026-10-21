@@ -487,6 +487,8 @@ local function buffer_object(sample)
     sample_data = function(_, channel, frame)
       local buffer = need()
       if frame < 1 or frame > buffer.frames or channel < 1 or channel > buffer.channels then error("frame or channel out of range", 2) end
+      -- (an edit a test makes at a few frames, as the sample editor would: buffer.edits[frame] = value)
+      if buffer.edits and buffer.edits[frame] then return buffer.edits[frame] end
       local h = 7
       for i = 1, #buffer.content do h = (h * 31 + buffer.content:byte(i)) % 1000003 end
       return math.sin(h + frame * 0.001 + channel)
