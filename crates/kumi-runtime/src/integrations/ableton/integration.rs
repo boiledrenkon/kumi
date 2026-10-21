@@ -28,6 +28,7 @@ use crate::{
         timing,
     },
     devices::tool::{device_tool, DeviceToolOptions, Made},
+    integrations::shared::steps,
     mcp::allowed_tools::CallOptions,
 };
 use async_trait::async_trait;
@@ -427,15 +428,7 @@ impl KernelTool for LiveTool {
             "make_changes" => owner.mutations.make_changes(input, signal).await,
             "watch_me" => owner.watch.execute(input, signal).await,
             "arrange" => arrange::arrange(input, &owner.mutations.arrange_host(), owner.combined(signal)).await,
-            "undo_change" => {
-                let outcome = owner.history.undo(input.get("change").and_then(Value::as_str).unwrap_or("last"), signal, false).await?;
-                let reply = if input.get("final") == Some(&json!(true)) && !outcome.is_error {
-                    outcome.record.as_ref().filter(|r| !r.title.is_empty()).map(|r| format!("Undone: {}.", r.title))
-                } else {
-                    None
-                };
-                Ok(ToolResult { text: outcome.for_model(), is_error: outcome.is_error, reply, ..Default::default() })
-            }
+            "undo_change" => crate::integrations::shared::undo::undo_change(&owner.history, &input, signal).await,
             "audition" | "judge" | "tune" | "groove" | "form" | "sound" | "render" => {
                 match owner.rendering.call(&self.name, input, signal).await {
                     Some(result) => result,
@@ -621,20 +614,10 @@ impl ObservationHost for Ableton {
             offered.push(self.step_tool(&kind.tool, &kind.description, schema, planned));
         }
         if planned && !edits.is_empty() {
-            let mut schema = DATA["make_changes"]["schema"].clone();
             edits.extend(actions);
-            edits.push("wait".into());
-            schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"] = json!(edits);
-            let base = DATA["make_changes"]["description"].as_str().unwrap();
-            let description = if steps.is_empty() {
-                base.to_string()
-            } else {
-                format!(
-                    "{base} Steps that aren't tools of your own take these inputs (`?`: may be left out; find_tools gives a step's whole input): {}.",
-                    steps.join("; ")
-                )
-            };
-            offered.push(self.tool("make_changes", &description, object(&schema).unwrap()));
+            let base = &DATA["make_changes"];
+            let (description, schema) = steps::plan_tool(base["description"].as_str().unwrap(), &base["schema"], edits, &steps);
+            offered.push(self.tool("make_changes", &description, schema));
         }
         if ["live_undo", "live_clip_duplicate_preview", "live_clip_duplicate_apply"].iter().all(|n| tools.has(n)) {
             offered.push(self.tool(arrange::ARRANGE_TOOL, &arrange::ARRANGE_DESCRIPTION, arrange::ARRANGE_SCHEMA.clone()));
@@ -769,6 +752,9 @@ impl Integration for Ableton {
     fn open_set(&self) -> Option<String> {
         let set = self.history.remember.current()?;
         set.path.clone().filter(|path| !set.unsaved && !path.is_empty() && !project::template_location(path))
+    }
+    fn has_open_place(&self) -> bool {
+        true
     }
     /// The Set where Kumi last saw the project, through the system as a double-click would open it: Live asks about the
     /// open Set in its own dialog. Live drops Kumi while the Set loads, which reads as a Set Kumi asked for (#188).

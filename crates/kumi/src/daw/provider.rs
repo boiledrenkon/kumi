@@ -27,22 +27,27 @@ use crate::tui::tty::TtyOutput;
 use crate::update::UpdateIo;
 use kumi_runtime::RuntimeError;
 
+/// How a DAW whose bridge is Kumi's own reaches Kumi's host, by DAW: a test's host in place of `daw-mcp-server`.
+pub type OwnHostFactory = Rc<dyn Fn(DawId) -> kumi_runtime::integrations::own_bridge::Connect>;
+
 /// Makes each registered DAW's integration from its options: the app's own, or a test's stand-in.
 #[derive(Clone)]
 pub struct DawFactory {
     pub ableton: AbletonFactory,
+    /// REAPER's and Renoise's host: none in production (Kumi starts `daw-mcp-server`).
+    pub own_host: Option<OwnHostFactory>,
 }
 
 impl DawFactory {
     /// Each DAW's production integration.
     pub fn native() -> Self {
-        DawFactory { ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration) }
+        DawFactory { ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration), own_host: None }
     }
 }
 
 impl From<AbletonFactory> for DawFactory {
     fn from(ableton: AbletonFactory) -> Self {
-        DawFactory { ableton }
+        DawFactory { ableton, own_host: None }
     }
 }
 
@@ -55,6 +60,17 @@ pub struct DawSession {
     /// Where saved projects' ids and baselines are kept.
     pub project_store: Rc<dyn ProjectStore>,
     pub factory: DawFactory,
+}
+
+/// Whether `version` ("11.3.21", "3.4.4", "6.83") is older than `min` ("12", "3.5"), number by number; a version that
+/// doesn't start with a number isn't.
+pub fn older_than(version: &str, min: &str) -> bool {
+    let numbers = |text: &str| -> Vec<u32> {
+        let word = text.split_whitespace().next().unwrap_or("");
+        word.split('.').map_while(|part| part.parse().ok()).collect()
+    };
+    let version = numbers(version);
+    !version.is_empty() && version < numbers(min)
 }
 
 /// What of the DAW is on this computer, read from its files without opening it: whether it can take Kumi's bridge yet.
@@ -162,20 +178,30 @@ pub trait DawProvider {
     /// The version of the bridge this Kumi brings for the DAW.
     fn bundled_bridge_version(&self) -> Option<String>;
     /// The version of the bridge installed where a configuration says.
-    fn installed_bridge_version(&self, bridge_config: &str) -> Option<String>;
+    fn installed_bridge_version(&self, bridge_config: &str, env: &Env) -> Option<String>;
     /// Whether the DAW's bridge answers now.
-    fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool>;
+    fn bridge_answers(&self, bridge_config: &str, env: &Env) -> LocalBoxFuture<'static, bool>;
     /// Whether the DAW is open.
     fn app_open(&self, env: &Env) -> LocalBoxFuture<'static, bool>;
+    /// Whether the DAW runs now, from one process listing: for choosing among several DAWs whose bridges are installed.
+    fn running_now(&self) -> bool {
+        false
+    }
+    /// Whether the DAW is on this computer, from files alone (installed, or opened once): with no bridge installed yet,
+    /// the DAW a first run sets up.
+    fn here(&self, env: &Env) -> bool {
+        let _ = env;
+        false
+    }
     fn watch_words(&self) -> WatchWords;
     /// The step setup shows for the producer to tell the DAW to use Kumi's bridge; None when it needs none.
     fn enable_step(&self) -> Option<EnableStep>;
-    /// The oldest major version of the DAW Kumi works with.
-    fn min_major(&self) -> u32;
+    /// The oldest version of the DAW Kumi works with, as people write it ("12", "3.5").
+    fn min_version(&self) -> &'static str;
     /// The session's integration with the DAW: the app's neutral context, and what the DAW finds for itself.
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration>;
     /// For the doctor: whether Kumi reaches the DAW through a bridge configuration, and what it says.
-    fn probe(&self, bridge_config: String, factory: &DawFactory) -> LocalBoxFuture<'static, crate::doctor::LiveProbe>;
+    fn probe(&self, bridge_config: String, factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, crate::doctor::LiveProbe>;
     /// What the session says of the DAW's bridge: `missing` when it isn't installed; `found` when a configuration was,
     /// which may be older than this Kumi's (`bundled`); `command` starts Kumi in the way by hand.
     fn bridge_state(&self, env: &Env, found: bool, missing: bool, bundled: Option<&str>, command: &str) -> BridgeState;

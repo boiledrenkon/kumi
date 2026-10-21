@@ -1,4 +1,6 @@
 //! `kumi report`, with full redaction oracle results.
+#[path = "support/live_words.rs"]
+mod live_words;
 use futures::FutureExt;
 use kumi::{
     doctor::{DoctorIo, InstallationIo, TerminalInfo, VideoPrograms},
@@ -153,6 +155,8 @@ async fn report_contains_versions_doctor_latest_conversation_gaps_live_log_witho
     }
     assert!(out.0.borrow().contains(&format!("Kumi's report is in ~{}kumi-report-2026-09-29T20-00-00.txt", std::path::MAIN_SEPARATOR)));
     let text = fs::read_to_string(file).unwrap();
+    // A Live producer's report has no sections for DAWs they never set up.
+    assert!(!text.contains("REAPER's bridge log") && !text.contains("Renoise's bridge log"), "{text}");
     for heading in [
         "## Versions",
         "## Doctor",
@@ -237,4 +241,52 @@ async fn the_gap_log_comes_from_kumis_database_with_what_an_older_kumi_logged_si
         1,
         "and the report read the file's gap without writing it to the database"
     );
+}
+
+/// A producer with REAPER's bridge alone: the report (and what Kumi says of it) speaks of REAPER, never of Live.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_only_report_never_speaks_lives_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().display().to_string();
+    let kumi = dir.path().join(".kumi");
+    let resource = dir.path().join("REAPER");
+    fs::create_dir_all(resource.join("UserPlugins")).unwrap();
+    let env = Env::from([
+        ("KUMI_HOME".into(), kumi.display().to_string()),
+        ("HOME".into(), home.clone()),
+        ("KUMI_REAPER_RESOURCE_DIR".into(), resource.display().to_string()),
+        ("KUMI_RENOISE_PREFS_DIR".into(), dir.path().join("Renoise").display().to_string()),
+    ]);
+    let paths = daw_bridge::paths::BridgePaths::new(&kumi, daw_bridge::daw::Daw::Reaper);
+    fs::create_dir_all(&paths.root).unwrap();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: resource.join("UserPlugins/reaper_kumi.dylib").display().to_string(),
+        reference: resource.join("UserPlugins/kumi-bridge-reference.json").display().to_string(),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        copies: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    kumi::daw::work_with(kumi::daw::chosen(None, &env).0.id());
+    let out = Rc::new(Out::default());
+    let mut io = ReportIo::new(doctor(out.clone(), env));
+    io.home = Some(home.clone());
+    io.folder = Some(home);
+    io.user = Some("fixtureuser".into());
+    io.now = Some(Rc::new(|| "2026-10-05T20:00:00Z".parse().unwrap()));
+    io.live_logs = Some(Rc::new(|| async { Ok(vec![]) }.boxed_local()));
+    assert_eq!(write_report(io).await.unwrap(), 0);
+    let text = fs::read_to_string(dir.path().join("kumi-report-2026-10-05T20-00-00.txt")).unwrap();
+    let said = format!("{}\n{text}", out.0.borrow());
+    let leaks = live_words::leaks(&said);
+    assert!(leaks.is_empty(), "the report says Live's words:\n{}\n\nin:\n{said}", leaks.join("\n"));
+    assert!(said.contains("REAPER"), "{said}");
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
 }

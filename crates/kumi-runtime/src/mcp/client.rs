@@ -119,6 +119,24 @@ impl BridgeDescriptor {
         daw: "Live",
     };
 
+    /// REAPER's bridge: Kumi's host, `daw-mcp-server --daw reaper`.
+    pub const REAPER: BridgeDescriptor = BridgeDescriptor {
+        program: "daw-mcp-server",
+        policy_variable: "KUMI_DAW_TOOL_POLICY",
+        allow_variable: "KUMI_DAW_TOOL_ALLOW",
+        events: "notifications/daw_event",
+        daw: "REAPER",
+    };
+
+    /// Renoise's bridge: Kumi's host, `daw-mcp-server --daw renoise`.
+    pub const RENOISE: BridgeDescriptor = BridgeDescriptor {
+        program: "daw-mcp-server",
+        policy_variable: "KUMI_DAW_TOOL_POLICY",
+        allow_variable: "KUMI_DAW_TOOL_ALLOW",
+        events: "notifications/daw_event",
+        daw: "Renoise",
+    };
+
     /// Its program beside Kumi's own.
     pub fn entry(&self) -> PathBuf {
         let name = if cfg!(windows) { format!("{}.exe", self.program) } else { self.program.to_string() };

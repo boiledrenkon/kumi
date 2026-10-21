@@ -19,8 +19,11 @@ if [ "${KUMI_NEXTEST:-}" = 1 ]; then
     only="$(awk -v p="[profile.$KUMI_NEXTEST_BUILD_PROFILE]" '$0 == p { on = 1; next } /^\[/ { on = 0 } on' .config/nextest.toml \
       | grep -o 'binary([a-z0-9_]*)' | sed 's/^binary(\(.*\))$/--test \1/' | tr '\n' ' ')"
   fi
+  # The whole workspace, or the crates named (-p): CI's Linux parts each take some (--exclude works with the workspace).
+  scope=--workspace
+  for arg in "$@"; do case "$arg" in -p | -p* | --package | --package=*) scope= ;; esac; done
   # shellcheck disable=SC2086
-  cargo nextest run --workspace --locked $only "$@"
+  cargo nextest run $scope --locked $only "$@"
 else
   cargo test --workspace --locked "$@"
 fi

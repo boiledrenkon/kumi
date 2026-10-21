@@ -1,0 +1,26 @@
+[package]
+name = "reaper-kumi"
+version = "0.1.0"
+description = "Kumi's REAPER extension: the bridge REAPER loads from UserPlugins."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+name = "reaper_kumi"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+daw-bridge = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+tempfile = { workspace = true }
+
+[build-dependencies]
+cc = "1"

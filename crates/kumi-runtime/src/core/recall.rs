@@ -289,7 +289,9 @@ impl KernelTool for Recall {
         techniques.sort_by(|a, b| b.0.cmp(&a.0));
         let mut recipes = vec![];
         if let Some(store) = &self.0.recipes {
-            for recipe in store.list().await? {
+            // (only this DAW's: another's steps are its own tools')
+            let daw = self.1.id.unwrap_or(crate::core::daw::DawId::Ableton);
+            for recipe in store.list().await?.into_iter().filter(|recipe| recipe.daw() == daw) {
                 let params: Vec<_> = recipe.params.iter().map(|p| format!("{} {}", p.name, p.about)).collect();
                 let steps: Vec<_> = recipe.steps.iter().map(|s| stringify(&Value::Object(s.clone()))).collect();
                 let score = matched(&words, &format!("{}\n{}\n{}\n{}", recipe.name, recipe.about, params.join("\n"), steps.join("\n")));

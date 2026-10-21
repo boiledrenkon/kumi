@@ -2,8 +2,8 @@
 
 English · [简体中文](../zh-CN/SUPPORT_MATRIX.md) · [日本語](../ja/SUPPORT_MATRIX.md)
 
-What Kumi and its bridge run on, which versions of Live they work with, and
-what has been tested where. [Implementation status](IMPLEMENTATION_STATUS.md)
+What Kumi and its bridges run on, which versions of Live, REAPER and Renoise
+they work with, and what has been tested where. [Implementation status](IMPLEMENTATION_STATUS.md)
 lists the evidence behind each "tested".
 
 ## Kumi
@@ -12,7 +12,7 @@ lists the evidence behind each "tested".
 | --- | --- | --- | --- |
 | macOS | 13 (Ventura) or later | Apple silicon, Intel | Native build/install CI; earlier TypeScript releases tested with Live on Apple silicon |
 | Windows | 10 or 11 | x64, ARM64 | Native build/install CI; earlier TypeScript releases tested with Live on Windows 10; see [Windows](#windows) |
-| Linux | glibc 2.35 or later (Ubuntu 22.04, Debian 12 or newer; not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux |
+| Linux | glibc 2.35 or later (Ubuntu 22.04, Debian 12 or newer; not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux, but REAPER and Renoise run there |
 
 - Kumi and the standalone bridge run as native Rust programs. Fresh installs do not download or require Node.
 - Existing Kumi 1.7.4 and 1.7.5 installations using Node 24 move to native through `kumi update`, keeping the same settings, sign-in and data. The retained Node supports rollback and optional YouTube challenges. On Windows, the first native start replaces the old launcher, so later starts don't go through Node. Older Node majors may need the installer rerun with the same `KUMI_HOME`; see [updating](KUMI_GUIDE.md).
@@ -38,6 +38,19 @@ zones on b5 only) and Windows x64 Live 12.4.15b5; see
 [Willington](WILLINGTON_INTEGRATION.md).
 
 Native editing (groups, Arrangement automation, scene/global Follow Actions and per-note MPE) requires the installed validated `WillingtonEditing` component, a passing exact-library self-test and explicit opt-in. It supports only Live 12.4.15b5 macOS ARM64; not b4, Intel macOS or Windows. See [the self-test procedure](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
+
+## REAPER and Renoise
+
+| DAW | Versions | Systems | Status |
+| --- | --- | --- | --- |
+| REAPER | 7 or later | macOS (one extension for Apple silicon and Intel), Windows x64 (the same extension for REAPER on Windows on Arm, which loads x64), Linux x64 and ARM64 (glibc 2.35 or later) | Tested with REAPER 7.82 (evaluation, portable) on macOS. CI builds the extension on each system, checks it and loads it with the system's own loader. Not yet tried with REAPER on Windows or Linux; Windows on Arm untested |
+| Renoise | 3.5 or later | macOS, Windows, Linux | Tested with Renoise 3.5.4 on macOS. CI runs the tool's tests against a mock of Renoise's API and checks it against Renoise's own API definitions. Not yet tried with Renoise on Windows or Linux |
+
+- Linux is a DAW platform for both: setup connects REAPER and Renoise there as on
+  macOS and Windows.
+- On every system, CI puts both bridges into scratch DAW folders, updates them,
+  rolls back twice and uninstalls them, through Kumi's own commands.
+- Renoise's demo can't render, so Kumi can't listen to a song there.
 
 ## Windows
 
@@ -98,6 +111,7 @@ makers decide.
 ## What CI covers
 
 CI runs on GitHub's hosted macOS, Ubuntu and Windows runners: Rust builds and
-tests, the Remote Script's and the Live extension's tests, six target bundles,
-and installation and migration tests. None has Live. [Testing](TESTING.md#ci)
+tests, the Remote Script's and the Live extension's tests, REAPER's extension
+loaded on each system, Renoise's tool's tests, six target bundles, and
+installation and migration tests. None has Live, REAPER or Renoise. [Testing](TESTING.md#ci)
 lists every job.

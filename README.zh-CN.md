@@ -6,6 +6,8 @@
   <a href="https://github.com/user1303836/kumi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
   <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
+  <img alt="REAPER 7" src="https://img.shields.io/badge/REAPER-7-111111">
+  <img alt="Renoise 3.5" src="https://img.shields.io/badge/Renoise-3.5-111111">
   <img alt="Native Rust runtime" src="https://img.shields.io/badge/runtime-native%20Rust-555555">
   <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
@@ -14,15 +16,15 @@
   <a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a>
 </p>
 
-**为 Ableton Live 打造、会学习你工作方式的录音室制作人代理。** 用平常的话告诉 Kumi 你想要什么，它就直接在你的工程里动手，从繁琐的杂活，到你一直没时间做的事：照着 YouTube 教程重建一个声音、让你的混音贴近参考曲、编写你描述的 Max for Live 设备，或者改造你指着的那个机架。每项修改都会出现在 HISTORY 中，大多数都有各自的撤销；整个计划在 Live 中只算一次撤销（Cmd-Z，Windows 上为 Ctrl-Z）。Kumi 会记住你保留下来的技巧，所以每次使用都更贴合你。对其他 DAW 的支持已在计划中。
+**为 Ableton Live、REAPER 和 Renoise 打造、会学习你工作方式的录音室制作人代理。** 用平常的话告诉 Kumi 你想要什么，它就直接在你的工程里动手，从繁琐的杂活，到你一直没时间做的事：照着 YouTube 教程重建一个声音、让你的混音贴近参考曲、编写你描述的 Max for Live 设备，或者改造你指着的那个机架。每项修改都会出现在 HISTORY 中，大多数都有各自的撤销；整个计划在 Live 中只算一次撤销（Cmd-Z，Windows 上为 Ctrl-Z）。Kumi 会记住你保留下来的技巧，所以每次使用都更贴合你。在 REAPER 和 Renoise 中，它通过 Kumi 自己的扩展和工具工作，用的是各个 DAW 自己的说法。
 
 https://github.com/user-attachments/assets/f53fe0be-c9a9-476e-a1d5-efe3dc429526
 
 ## 快速开始
 
-需要 Ableton Live 12，运行在 macOS 13 或更高版本，或 Windows 10、11 上。
+需要 Ableton Live 12，运行在 macOS 13 或更高版本，或 Windows 10、11 上；或者 REAPER 7 及更高版本、Renoise 3.5 及更高版本，运行在 macOS、Windows 或 Linux 上。
 
-**macOS**（终端）：
+**macOS 或 Linux**（终端）：
 
 ```sh
 curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh
@@ -34,7 +36,7 @@ curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.
 irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex
 ```
 
-安装完成后 Kumi 会自动启动，引导你登录并连接 Live。之后只需运行 `kumi`。遇到问题？`kumi doctor` 会告诉你该怎么修。
+安装完成后 Kumi 会自动启动，引导你登录并连接 Live。之后只需运行 `kumi`。使用 REAPER 或 Renoise 时，运行 `kumi --daw reaper` 或 `kumi --daw renoise`：Kumi 会装入它的扩展或工具，并打开这个 DAW（[详情](docs/zh-CN/KUMI_GUIDE.md#连接-reaper-或-renoise)）。遇到问题？`kumi doctor` 会告诉你该怎么修。
 
 [指南](docs/zh-CN/KUMI_GUIDE.md) · [命令、按键与界面](docs/zh-CN/KUMI_TUI.md) · [Kumi 如何修改你的工程](docs/zh-CN/KUMI_CHANGES.md) · [更新日志（英文）](CHANGELOG.md)
 
@@ -53,13 +55,15 @@ irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | i
 - **显示你在哪里：** FOCUS 跟随你在 Live 中触碰的对象，显示为设备树、钢琴卷帘，或 Session、Arrangement 视图的条带。点击某个设备即可指向它：“这个 Saturator 太刺耳了”。
 - **记住：** 关于你和每个工程的笔记、从你保留的内容中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
 - **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。`/share` 可把对话存为网页发给别人，密钥和路径会被去除。
+- **也能在 REAPER 和 Renoise 中工作：** 在 REAPER 中是轨道、对象（item）与 take、FX 及其参数、包络和路由；在 Renoise 中是模式及其行、序列、乐器、采样、乐句和 DSP 链。每项修改都有撤销，它在那里也会聆听和判定，FOCUS 跟随该 DAW 自己的视图（[在每个 DAW 中能做什么](docs/zh-CN/DAWS.md)、[能修改什么](docs/zh-CN/KUMI_CHANGES.md#reaper-与-renoise)）。
 - **用你的模型：** 使用 ChatGPT 登录，或使用 OpenAI、Anthropic、OpenCode 的 API 密钥。
 
 ## 当前状态
 
 Kumi 1.19.3 已在 macOS 的 Ableton Live 12.4（测试版）中验证。
 在 Windows 上，安装和升级已经过验证，但与 Live 一起使用还是新的。
-出问题时请发送 `kumi report`。接下来将支持 Renoise 和 Reaper。
+出问题时请发送 `kumi report`。
+REAPER 7.82 和 Renoise 3.5.4 已在 macOS 上验证。在 Windows 和 Linux 上，CI 验证了装入 Kumi 的扩展和工具以及加载该扩展，但在那里配合 REAPER 和 Renoise 使用还是新的。
 
 ## 开发
 
@@ -79,14 +83,17 @@ sh scripts/test-isolated.sh                        # 无需 Live 或登录
 | 文件夹 | 内容 |
 | --- | --- |
 | `crates/kumi` | 终端应用和 `kumi` 命令 |
-| `crates/kumi-runtime` | Kumi 的代理核心：模型提供方、记忆、音频分析、视频、网络，以及与 Live 的集成 |
+| `crates/kumi-runtime` | Kumi 的代理核心：模型提供方、记忆、音频分析、视频、网络，以及与 Live、REAPER 和 Renoise 的集成 |
 | `crates/ableton-mcp-server` | 桥接：由 Kumi 启动的本地 MCP 服务器，也可单独与其他 MCP 客户端配合使用（[桥接指南（英文）](crates/ableton-mcp-server/README.md)） |
 | `remote-script` | 桥接的 Remote Script，运行在 Live 内部 |
 | `apps/live-extension` | Kumi 的 Live 扩展（Live 12.4 及更高版本） |
 | `protocol` | 桥接与 Remote Script 共用的操作列表 |
+| `crates/daw-mcp-server` | Kumi 为 REAPER 和 Renoise 准备的宿主程序，由 Kumi 启动；其他 MCP 客户端也能使用 |
+| `crates/reaper-kumi` | Kumi 的 REAPER 扩展 |
+| `daws/renoise` | Kumi 的 Renoise 工具 |
 
 [开发者指南](docs/zh-CN/DEVELOPER_GUIDE.md)介绍构建、测试与发布。
 
 ## 许可证
 
-[MIT](LICENSE.md)。来自他人成果的部分，以及 Kumi 下载的模型，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Ableton Live 是 Ableton AG 的商标；Kumi 与 Ableton 没有关联，也未获其认可。
+[MIT](LICENSE.md)。来自他人成果的部分，以及 Kumi 下载的模型，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Ableton Live 是 Ableton AG 的商标；Kumi 与 Ableton、Cockos（REAPER）和 Renoise 没有关联，也未获它们认可。

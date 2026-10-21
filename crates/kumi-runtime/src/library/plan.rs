@@ -74,7 +74,7 @@ pub async fn plan_learning(options: PlanOptions) -> LearnPlan {
     let sources = crate::integrations::library_sources(&source_options);
     let others: Vec<_> = sources
         .iter()
-        .filter(|s| matches!(s.kind, SourceKind::Pack | SourceKind::Core | SourceKind::Splice))
+        .filter(|s| matches!(s.kind, SourceKind::Pack | SourceKind::Core | SourceKind::Splice | SourceKind::Reaper | SourceKind::Renoise))
         .map(|s| s.path.clone())
         .collect();
     let find_sets = options.find_sets != Some(false);

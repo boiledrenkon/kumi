@@ -5,6 +5,7 @@ use crate::core::{
 };
 use async_trait::async_trait;
 use kumi_common::abort::Signal;
+use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
 
 pub struct FallbackIntegration {
@@ -90,6 +91,12 @@ impl Integration for FallbackIntegration {
         }
         current.undo(id, signal).await
     }
+    fn fingerprint(&self) -> Option<Value> {
+        self.current().fingerprint()
+    }
+    fn first_heard(&self, since: i64) -> Option<i64> {
+        self.current().first_heard(since)
+    }
     fn has_audio_file(&self) -> bool {
         true
     }
@@ -117,6 +124,11 @@ impl Integration for FallbackIntegration {
     }
     fn words(&self) -> (&'static str, &'static str) {
         self.primary.words()
+    }
+    /// The DAW's own answer, as its question and wire are its own: Live's stays Live's while it's closed and the session
+    /// falls back to chat (opening then goes to what's current, which says why it can't).
+    fn has_open_place(&self) -> bool {
+        self.primary.has_open_place()
     }
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
         self.current().open_place(place, signal).await
@@ -189,6 +201,12 @@ impl Integration for FallbackIntegration {
         } else {
             Ok(None)
         }
+    }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        self.current().can_show(kind)
+    }
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        self.current().pin_for_recipe(pin)
     }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         let c = self.current();

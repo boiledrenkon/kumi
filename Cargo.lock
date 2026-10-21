@@ -470,6 +470,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "daw-bridge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hmac",
+ "home",
+ "libc",
+ "memchr",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+]
+
+[[package]]
+name = "daw-mcp-server"
+version = "1.19.3"
+dependencies = [
+ "daw-bridge",
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "der-parser"
 version = "10.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,6 +1244,8 @@ dependencies = [
  "bytes",
  "chrono",
  "crossterm",
+ "daw-bridge",
+ "daw-mcp-server",
  "fancy-regex",
  "flate2",
  "futures",
@@ -1264,6 +1297,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "daw-bridge",
+ "daw-mcp-server",
  "encoding_rs",
  "fancy-regex",
  "flate2",
@@ -1844,6 +1879,17 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "reaper-kumi"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "daw-bridge",
+ "hex",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -199,8 +199,8 @@ impl Mutations {
                 connection.version().as_deref().unwrap_or("older")
             )));
         }
-        if history.changes_this_turn.get() >= 5_000 {
-            return Err(observation("That's 5000 changes in one answer; carry on in the next one"));
+        if history.changes_this_turn.get() >= crate::core::plan::MAX_CHANGES {
+            return Err(observation(&crate::core::plan::too_many_changes()));
         }
         if let Err(stale) = connection.references.borrow().require_fresh_references(&input) {
             return Ok(ChangeOutcome::error(stale.0));

@@ -21,6 +21,7 @@ path = "src/main.rs"
 kumi-common.workspace = true
 kumi-runtime.workspace = true
 ableton-mcp-server.workspace = true
+daw-bridge.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -54,3 +55,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+daw-mcp-server = { path = "../daw-mcp-server" }

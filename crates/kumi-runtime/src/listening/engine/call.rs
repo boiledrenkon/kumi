@@ -81,7 +81,7 @@ impl Listening {
     }
 
     async fn groove_call(self: &Rc<Self>, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match groove_request(&input) {
+        let request = match groove_request(self.host.profile(), &input) {
             Ok(request) => request,
             Err(why) => return Ok(ToolResult::error(why)),
         };
@@ -152,9 +152,12 @@ impl Listening {
         match self.host.render(track, from, beats, signal).await? {
             Err(why) => Ok(ToolResult::error(why)),
             Ok(mut reply) => {
+                let clips = self.host.profile().vocab.clips;
                 reply.insert(
                     "note".into(),
-                    json!("The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to."),
+                    json!(format!(
+                        "The track's own {clips}, before its devices. Hear it with listen (file), against a reference with compare_to."
+                    )),
                 );
                 Ok(ToolResult::text(stringify(&json!(reply))))
             }

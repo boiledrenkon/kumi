@@ -33,7 +33,12 @@ use std::{
 };
 use tokio::sync::Notify;
 
-const MAX_CHANGES: usize = 5_000;
+/// The most changes one answer makes, however they come (a plan's steps, change tools; Live's and the other DAWs').
+pub const MAX_CHANGES: usize = 5_000;
+/// What a change past [`MAX_CHANGES`] in one answer says.
+pub fn too_many_changes() -> String {
+    format!("That's {MAX_CHANGES} changes in one answer; carry on in the next one")
+}
 const STEP_COUNT: &str = "Give 1 to 5000 steps in all.";
 crate::daw_text!(
     /// Said with a plan's refused steps.
@@ -142,6 +147,11 @@ pub trait PlanHost: 'static {
     async fn act(&self, action: &'static Self::Action, input: JsonObject, signal: Signal) -> ActionOutcome;
     /// A copy of the project as last saved, next to it: its path, when one was made.
     async fn safety_copy(&self, signal: Signal) -> Result<Option<String>, RuntimeError>;
+    /// Whether a plan past its second step keeps that copy first whatever the step (Live's rule); else only before a
+    /// step that can lose material.
+    fn copies_long_plans(&self) -> bool {
+        true
+    }
     /// Tells the producer what a plan did to the transport.
     fn emit_action(&self, done: &ActionSummary);
 }
@@ -576,7 +586,7 @@ impl<H: PlanHost> Plan<H> {
             let tool = js_string(item.get("tool"));
             // Before a step that can lose the producer's material: a delete, a cleared range, or a move,
             // which replaces what's in its new place.
-            if !state.copy_checked && (index >= 2 || self.host.may_lose_material(&tool)) {
+            if !state.copy_checked && ((index >= 2 && self.host.copies_long_plans()) || self.host.may_lose_material(&tool)) {
                 state.copy_checked = true;
                 state.copy = self.host.safety_copy(self.signal.clone()).await?;
             }
@@ -730,8 +740,8 @@ impl<H: PlanHost> Plan<H> {
                 done.insert("lines".into(), lines.clone());
             }
             // What Kumi read for itself in the step's notation, or left to the DAW (a sidechain's channel, an audio
-            // clip's looping): the model says it.
-            for key in ["notation", "channel", "looping"] {
+            // clip's looping): the model says it. And what Lua or a call through the DAW's API answered.
+            for key in ["notation", "channel", "looping", "result", "printed", "out", "failed"] {
                 if let Some(said) = reply.get(key) {
                     done.insert(key.into(), said.clone());
                 }
@@ -948,5 +958,14 @@ impl<H: PlanHost> StreamingCall for StreamingPlan<H> {
         }
         self.plan.close();
         self.plan.result(input.as_ref().and_then(|v| v.get("final")) == Some(&json!(true))).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review K40: one cap for every DAW's changes, in the words Live's always said.
+    #[test]
+    fn the_cap_on_an_answers_changes_says_what_it_always_said() {
+        assert_eq!(super::too_many_changes(), "That's 5000 changes in one answer; carry on in the next one");
     }
 }

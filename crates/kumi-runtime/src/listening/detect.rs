@@ -275,10 +275,16 @@ fn peak_q(frames: &Frames, hit: &[(usize, f64)], first: usize, last: usize) -> f
 
 /// A fix as the DAW says it: the devices these texts name by Live's words go by the DAW's. Live's are what they were.
 pub fn fix_in_words(fix: &str, profile: &DawProfile) -> String {
-    fix.replace(
+    let fix = fix.replace(
         "mono below about 120 Hz (Utility's Bass Mono)",
         &format!("mono below about 120 Hz{}", parenthetical(profile.vocab.bass_mono)),
-    )
+    );
+    // (a DAW whose parts aren't clips hears "clips" as one of them: the overload is said another way)
+    if profile.vocab.clips == crate::live_word!(clips) {
+        fix
+    } else {
+        fix.replace("lower the level into whatever clips (", "lower the level into whatever overloads (")
+    }
 }
 
 /// The low end: stereo below 120 Hz, rumble under 30 Hz, a DC offset, one bass note louder than the rest.

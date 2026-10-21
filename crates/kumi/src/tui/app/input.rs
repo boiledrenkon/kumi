@@ -190,7 +190,11 @@ impl TuiApp {
         if name == "tab" && menu.is_empty() && !ctrl && !alt {
             let eligible = {
                 let state = self.0.state.borrow();
-                state.tree.as_ref().is_some_and(|t| state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&t.track_ref))
+                // (the chain FOCUS shows: a take's FX chain where one is open, else the track's)
+                state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|t| state.focus.as_ref().and_then(|f| f.chain_ref.as_ref().or(f.track_ref.as_ref())) == Some(&t.track_ref))
             };
             if eligible {
                 self.0.state.borrow_mut().tree_cursor = Some(0);
@@ -395,6 +399,7 @@ impl TuiApp {
                         "/reconnect" => c.has_reconnect(),
                         "/stop" => c.has_stop_live(),
                         "/update" => self.0.options.updates.is_some(),
+                        "/daw" => self.0.options.switch_daw.is_some(),
                         "/btw" => c.has_aside(),
                         "/voice" => self.0.voice.is_some(),
                         "/willington" => self.willington().is_some(),
@@ -444,7 +449,7 @@ impl TuiApp {
         }
         if command == "/help" {
             self.clear_editor();
-            self.notice(HELP, NoticeTone::Info);
+            self.notice(&help(self.0.options.switch_daw.is_some()), NoticeTone::Info);
             return Ok(());
         }
         if command == "/changelog" {
@@ -638,7 +643,10 @@ impl TuiApp {
         if command == "/stop" && controller.has_stop_live() {
             self.clear_editor();
             if self.0.state.borrow().connection != ConnectionState::Connected {
-                self.notice("Live isn't connected, so there's nothing for Kumi to stop.", NoticeTone::Info);
+                self.notice(
+                    &format!("{} isn't connected, so there's nothing for Kumi to stop.", crate::daw::words().app),
+                    NoticeTone::Info,
+                );
                 return Ok(());
             }
             if self.busy() {
@@ -646,6 +654,21 @@ impl TuiApp {
             }
             if !controller.stop_live().await? {
                 self.notice("Kumi couldn't stop Live just now; press space in Live to stop it.", NoticeTone::Warn);
+            }
+            return Ok(());
+        }
+        if let Some(switch) = self.0.options.switch_daw.clone().filter(|_| command == "/daw" || command.starts_with("/daw ")) {
+            self.clear_editor();
+            match crate::daw::daw_command(&command["/daw".len()..]) {
+                crate::daw::DawCommand::Say(words) => self.notice(&words, NoticeTone::Info),
+                crate::daw::DawCommand::Switch(_, _) if self.busy() => {
+                    self.notice("Kumi is working; /daw once it's done (esc stops it).", NoticeTone::Info);
+                }
+                crate::daw::DawCommand::Switch(daw, words) => {
+                    self.notice(&words, NoticeTone::Info);
+                    switch(daw);
+                    self.finish(0, None).await;
+                }
             }
             return Ok(());
         }
@@ -703,8 +726,11 @@ impl TuiApp {
             };
             self.notice(
                 &format!(
-                    "{state} · Live {} · {} · {turns}{}{}{}",
-                    enum_name(&status.connection),
+                    "{state} · {} · {} · {turns}{}{}{}",
+                    match self.0.state.borrow().focus.as_ref().and_then(|focus| focus.busy.clone()) {
+                        Some(why) => format!("{} is busy: {why}", crate::daw::words().app),
+                        None => format!("{} {}", crate::daw::words().app, enum_name(&status.connection)),
+                    },
                     self.model_label().unwrap_or_else(|| "no model".into()),
                     status.observation.as_ref().filter(|s| !s.is_empty()).map(|s| format!(" · {s}")).unwrap_or_default(),
                     library.map(|l| format!(" · {l}")).unwrap_or_default(),
@@ -712,6 +738,20 @@ impl TuiApp {
                 ),
                 NoticeTone::Info,
             );
+            // Where Kumi's lines reach a producer working in the DAW (Live's say so in its own settings): its status bar, or
+            // none to write to.
+            let profile = crate::daw::profile();
+            if !matches!(profile.id, Some(kumi_runtime::core::daw::DawId::Ableton) | None) {
+                let app = profile.words.app;
+                self.notice(
+                    &if profile.caps.status_line {
+                        format!("While you work in {app}, Kumi's lines show in its status bar too.")
+                    } else {
+                        format!("{app} has no status bar Kumi can write to: while you work there, Kumi tells you by notification.")
+                    },
+                    NoticeTone::Info,
+                );
+            }
             if let Some(now) = controller.conversation_now().await {
                 self.notice(&conversation_line(&now, |text| self.clean(text, 60)), NoticeTone::Info);
             }
@@ -898,9 +938,10 @@ impl TuiApp {
             }
             started
         } else if command == "/reconnect" && controller.has_reconnect() {
-            self.0.state.borrow_mut().activity = "connecting to Live".into();
+            self.0.state.borrow_mut().activity = format!("connecting to {}", crate::daw::words().app);
             let result = controller.reconnect().await;
-            if result.is_ok() {
+            // REAPER's and Renoise's integrations retire their rows as they close, each in its DAW's words.
+            if result.is_ok() && crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
                 for change in self.0.state.borrow_mut().records.changes_mut() {
                     if matches!(change.state, ChangeState::Applied | ChangeState::Unsure) {
                         change.state = ChangeState::Expired;
@@ -1198,8 +1239,36 @@ pub(super) struct Command {
     pub name: &'static str,
     pub about: &'static str,
 }
+impl Command {
+    /// What the menu says the command does, in the DAW's words (Live's as written, for Live).
+    pub(super) fn about(&self) -> String {
+        let words = crate::daw::words();
+        let live = crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton;
+        match self.name {
+            "/resume" => format!("Go back to a kept conversation, this {0}'s or any {0}'s: /resume <id or name>", words.place),
+            "/reconnect" => format!("Connect to {} again, keeping the conversation", words.app),
+            "/stop" if !live => format!("Stop {}: the transport and recording", words.app),
+            "/refresh" => format!("Read your {} {} again", words.app, words.place),
+            _ => self.about.to_string(),
+        }
+    }
+}
 
-pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use Live (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, /resume goes back to one kept (this Set's, or any Set's by its id or name), /rename names this one, and /fork carries on in a copy · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer, /export copies or saves the whole conversation, and /share saves it as a web page to send; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
+/// Keys and commands, in the DAW's words (Live's, as it always said them, for Live).
+pub(super) fn help(daw: bool) -> String {
+    let words = crate::daw::words();
+    let daw = if daw { " · /daw says which DAW Kumi works with, and /daw <name> opens Kumi again with another" } else { "" };
+    let (app, place, places) = (words.app, words.place, words.places);
+    // Willington's bindings are Live's.
+    let willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
+        " /willington turns Willington's bindings (macro mapping and more) on or off;"
+    } else {
+        ""
+    };
+    format!(
+        "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use {app} (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, /resume goes back to one kept (this {place}'s, or any {place}'s by its id or name), /rename names this one, and /fork carries on in a copy · /reconnect connects to {app} again, keeping the conversation{daw} · /copy copies the last answer, /export copies or saves the whole conversation, and /share saves it as a web page to send; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one;{willington} /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your {places}), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands"
+    )
+}
 pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/new", about: "Start a fresh conversation (the last one is kept); /new <name> names it" },
     Command { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
@@ -1209,6 +1278,7 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/rename", about: "Name this conversation: /rename <name>" },
     Command { name: "/fork", about: "Carry on in a copy of this conversation; the original stays" },
     Command { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
+    Command { name: "/daw", about: "Which DAW Kumi works with; /daw <name> opens Kumi again with another" },
     Command { name: "/undo", about: "Undo Kumi's last change" },
     Command { name: "/stop", about: "Stop Live: clips, the transport and recording" },
     Command { name: "/refresh", about: "Read your Live Set again" },

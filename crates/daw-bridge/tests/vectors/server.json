@@ -1,0 +1,816 @@
+{
+  "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex at the clock's time (first moving the clock to atMs when given), or move the clock to tickMs and run the timer, and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close. overCapacity: what a bridge sends, before reading, to a connection over its limits, then closes.",
+  "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz",
+  "serverNonce": "fedcba9876543210fedcba9876543210",
+  "session": "5e55105e55105e55105e55105e55105e",
+  "welcomeIdentity": {
+    "daw": "reaper",
+    "bridge": "0.1.0",
+    "dawVersion": "7.82/macOS-arm64",
+    "pid": 4242,
+    "resource": "/Users/kumi/Library/Application Support/REAPER",
+    "project": {
+      "name": "Song.rpp",
+      "path": "/Users/kumi/Music/Song.rpp"
+    }
+  },
+  "overCapacity": {
+    "type": "refused",
+    "reason": "connections"
+  },
+  "cases": [
+    {
+      "name": "the full handshake, then a request, an unknown frame and a ping",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "welcome",
+                "session": "5e55105e55105e55105e55105e55105e",
+                "daw": "reaper",
+                "bridge": "0.1.0",
+                "dawVersion": "7.82/macOS-arm64",
+                "pid": 4242,
+                "resource": "/Users/kumi/Library/Application Support/REAPER",
+                "project": {
+                  "name": "Song.rpp",
+                  "path": "/Users/kumi/Music/Song.rpp"
+                },
+                "maxFrameBytes": 67108864,
+                "heartbeatMs": 1000,
+                "methods": [
+                  "ping",
+                  "status"
+                ],
+                "events": []
+              }
+            },
+            {
+              "authenticated": true
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2272657175657374222c226964223a312c226d6574686f64223a22737461747573222c22706172616d73223a7b7d7d0a7b2274797065223a226c61746572227d0a7b2274797065223a2272657175657374222c226964223a322c226d6574686f64223a2270696e67227d0a",
+          "expect": [
+            {
+              "request": {
+                "id": 1,
+                "method": "status",
+                "params": {}
+              }
+            },
+            {
+              "request": {
+                "id": 2,
+                "method": "ping",
+                "params": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the hello split across reads",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268",
+          "expect": []
+        },
+        {
+          "inHex": "656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an HTTP request is closed without a reply",
+      "steps": [
+        {
+          "inHex": "474554202f20485454502f312e310d0a486f73743a203132372e302e302e313a393737300d0a0d0a",
+          "expect": [
+            {
+              "close": "silent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a WebSocket upgrade is closed without a reply",
+      "steps": [
+        {
+          "inHex": "474554202f777320485454502f312e310d0a557067726164653a20776562736f636b65740d0a0d0a",
+          "expect": [
+            {
+              "close": "silent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the HTTP/2 preface is closed without a reply",
+      "steps": [
+        {
+          "inHex": "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a",
+          "expect": [
+            {
+              "close": "silent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a byte order mark first is closed without a reply",
+      "steps": [
+        {
+          "inHex": "efbbbf7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "close": "silent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "whitespace first is closed without a reply",
+      "steps": [
+        {
+          "inHex": "207b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "close": "silent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a line over 1024 bytes before auth",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c22706164223a2278787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "limit"
+              }
+            },
+            {
+              "close": "refused:limit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1025 bytes before auth without a newline",
+      "steps": [
+        {
+          "inHex": "7b78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "limit"
+              }
+            },
+            {
+              "close": "refused:limit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "another protocol",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f32222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "protocol",
+                "protocol": "kumi-daw/1"
+              }
+            },
+            {
+              "close": "refused:protocol"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an uppercase nonce",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383941424344454630313233343536373839414243444546222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a short nonce",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a2231323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "not JSON after the first byte",
+      "steps": [
+        {
+          "inHex": "7b68656c6c6f7d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a JSON object without a type",
+      "steps": [
+        {
+          "inHex": "7b2270726f746f636f6c223a226b756d692d6461772f31227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a request before auth",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2272657175657374222c226964223a312c226d6574686f64223a22737461747573227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a second hello instead of auth",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "handshake"
+              }
+            },
+            {
+              "close": "refused:handshake"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a wrong proof",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2236643238303731646332653639643338313065393933306131373732373464663963313761626232616461333332333131343130373939393533303037646632227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "auth"
+              }
+            },
+            {
+              "close": "refused:auth"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the server's own proof sent back",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2264613164623536633263633435613838646263313937616238316339333737306131383264326533383531353631393536613636346136353638653136383562227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "auth"
+              }
+            },
+            {
+              "close": "refused:auth"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an uppercase proof",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238423637443744454639304131463039393345373144373034304344393941394643364431443737463630354636333433343935363031394442463432314146227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "auth"
+              }
+            },
+            {
+              "close": "refused:auth"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the handshake timeout",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "tickMs": 2999,
+          "expect": []
+        },
+        {
+          "tickMs": 3000,
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "timeout"
+              }
+            },
+            {
+              "close": "refused:timeout"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bytes that keep coming don't stretch the handshake",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "0a",
+          "atMs": 1000,
+          "expect": []
+        },
+        {
+          "inHex": "0a",
+          "atMs": 2000,
+          "expect": []
+        },
+        {
+          "inHex": "0a",
+          "atMs": 2999,
+          "expect": []
+        },
+        {
+          "inHex": "0a",
+          "atMs": 3000,
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "timeout"
+              }
+            },
+            {
+              "close": "refused:timeout"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "blank lines before auth count toward the line limit",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "expect": []
+        },
+        {
+          "inHex": "0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "limit"
+              }
+            },
+            {
+              "close": "refused:limit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "blank lines and the auth after them over the line limit",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a0d0a7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "refused",
+                "reason": "limit"
+              }
+            },
+            {
+              "close": "refused:limit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "after auth a line that isn't JSON closes without a reply",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "welcome",
+                "session": "5e55105e55105e55105e55105e55105e",
+                "daw": "reaper",
+                "bridge": "0.1.0",
+                "dawVersion": "7.82/macOS-arm64",
+                "pid": 4242,
+                "resource": "/Users/kumi/Library/Application Support/REAPER",
+                "project": {
+                  "name": "Song.rpp",
+                  "path": "/Users/kumi/Music/Song.rpp"
+                },
+                "maxFrameBytes": 67108864,
+                "heartbeatMs": 1000,
+                "methods": [
+                  "ping",
+                  "status"
+                ],
+                "events": []
+              }
+            },
+            {
+              "authenticated": true
+            }
+          ]
+        },
+        {
+          "inHex": "6e6f70650a",
+          "expect": [
+            {
+              "close": "protocol"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "after auth invalid UTF-8 closes without a reply",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "welcome",
+                "session": "5e55105e55105e55105e55105e55105e",
+                "daw": "reaper",
+                "bridge": "0.1.0",
+                "dawVersion": "7.82/macOS-arm64",
+                "pid": 4242,
+                "resource": "/Users/kumi/Library/Application Support/REAPER",
+                "project": {
+                  "name": "Song.rpp",
+                  "path": "/Users/kumi/Music/Song.rpp"
+                },
+                "maxFrameBytes": 67108864,
+                "heartbeatMs": 1000,
+                "methods": [
+                  "ping",
+                  "status"
+                ],
+                "events": []
+              }
+            },
+            {
+              "authenticated": true
+            }
+          ]
+        },
+        {
+          "inHex": "7b2261223a22ff227d0a",
+          "expect": [
+            {
+              "close": "protocol"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "after auth a request with id 0 closes",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "welcome",
+                "session": "5e55105e55105e55105e55105e55105e",
+                "daw": "reaper",
+                "bridge": "0.1.0",
+                "dawVersion": "7.82/macOS-arm64",
+                "pid": 4242,
+                "resource": "/Users/kumi/Library/Application Support/REAPER",
+                "project": {
+                  "name": "Song.rpp",
+                  "path": "/Users/kumi/Music/Song.rpp"
+                },
+                "maxFrameBytes": 67108864,
+                "heartbeatMs": 1000,
+                "methods": [
+                  "ping",
+                  "status"
+                ],
+                "events": []
+              }
+            },
+            {
+              "authenticated": true
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2272657175657374222c226964223a302c226d6574686f64223a2270696e67227d0a",
+          "expect": [
+            {
+              "close": "protocol"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "after auth no timeout",
+      "steps": [
+        {
+          "inHex": "7b2274797065223a2268656c6c6f222c2270726f746f636f6c223a226b756d692d6461772f31222c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22636c69656e74223a226461772d6d63702d7365727665722f302e312e30227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "challenge",
+                "nonce": "fedcba9876543210fedcba9876543210",
+                "proof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b"
+              }
+            }
+          ]
+        },
+        {
+          "inHex": "7b2274797065223a2261757468222c2270726f6f66223a2238623637643764656639306131663039393365373164373034306364393961396663366431643737663630356636333433343935363031396462663432316166227d0a",
+          "expect": [
+            {
+              "send": {
+                "type": "welcome",
+                "session": "5e55105e55105e55105e55105e55105e",
+                "daw": "reaper",
+                "bridge": "0.1.0",
+                "dawVersion": "7.82/macOS-arm64",
+                "pid": 4242,
+                "resource": "/Users/kumi/Library/Application Support/REAPER",
+                "project": {
+                  "name": "Song.rpp",
+                  "path": "/Users/kumi/Music/Song.rpp"
+                },
+                "maxFrameBytes": 67108864,
+                "heartbeatMs": 1000,
+                "methods": [
+                  "ping",
+                  "status"
+                ],
+                "events": []
+              }
+            },
+            {
+              "authenticated": true
+            }
+          ]
+        },
+        {
+          "tickMs": 60000,
+          "expect": []
+        }
+      ]
+    }
+  ]
+}

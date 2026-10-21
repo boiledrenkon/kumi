@@ -276,6 +276,7 @@ fn changes() -> Vec<ChangeRecord> {
                 max: 20000.0,
                 before: vec![],
                 after: vec![[0.0, 200.0], [16.0, 8000.0], [32.0, 200.0]],
+                words: None,
             }),
             ..change("c10", ChangeFamily::Parameter, "Filter sweep on Bass", ChangeState::Applied, AT + 10_000)
         },

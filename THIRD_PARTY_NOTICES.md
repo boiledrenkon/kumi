@@ -62,6 +62,71 @@ Attribution 4.0 International. The dataset can be found at:
 https://zenodo.org/record/5578807#.YnRm5vPMKDU
 ```
 
+## REAPER extension SDK (Cockos), zlib License
+
+REAPER's extension (`reaper_kumi`, in each bundle's `daws/reaper/`) is built against two headers from Cockos' REAPER
+extension SDK, vendored unmodified in `crates/reaper-kumi/sdk/`: `reaper_plugin.h` and `reaper_plugin_functions.h`
+from https://github.com/justinfrankel/reaper-sdk at commit c0eafe87863b2bf69c5c822760f1b32a753b211b ("sdk 7.82").
+Copyright (C) 2006-2015, Cockos Incorporated (`reaper_plugin.h`), and Copyright 2006 and later, Cockos Incorporated
+(`reaper_plugin_functions.h`). The extension's table of REAPER's functions is generated from them when it's built
+(`crates/reaper-kumi/build.rs`); `crates/reaper-kumi/shim/csurf.cpp` repeats the SDK's `IReaperControlSurface`
+declaration, and `crates/reaper-kumi/shim/preview.cpp` its `preview_register_t`.
+
+The extension was written with reaper-rs (https://github.com/helgoboss/reaper-rs, MIT License) as a reference; it
+carries none of reaper-rs's code.
+
+The SDK's license (`crates/reaper-kumi/sdk/LICENSE`):
+
+```text
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
+## Renoise's Lua API definitions (the renoise authors), MIT License
+
+The Renoise tool's tests check each member name their mock of Renoise's API offers against
+`daws/renoise/tests/renoise_api.lua`, the class and member names generated (by `daws/renoise/tests/gen_api.lua`) from
+Renoise's Lua API definitions, API 6.2, at https://github.com/renoise/definitions commit
+08faaea744156f2f7eddc898eb46fd972453a1af. That file is in this repository only: no bundle carries it, and the tool
+itself (`daws/renoise/com.kumi.Bridge.xrnx`) is Kumi's own code.
+
+```text
+MIT License
+
+Copyright (c) 2024-2025 by the renoise authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Apache License, Version 2.0
 
 ```text

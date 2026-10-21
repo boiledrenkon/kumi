@@ -474,13 +474,13 @@ async fn list_facts(server: &LocalServer, options: &Transport) -> Result<Vec<Fac
         LocalKind::OpenaiCompatible => compatible_list(server, options).await,
     }
 }
-fn info_of(server: &LocalServer, facts: Facts) -> ModelInfo {
+fn info_of(server: &LocalServer, facts: Facts, place: &str) -> ModelInfo {
     let mut description = facts.details;
     if facts.in_memory {
         description.push("loaded".into());
     }
     if facts.tools == Some(false) {
-        description.push("can't change the Set".into());
+        description.push(format!("can't change the {place}"));
     }
     let description = description.join(" · ");
     ModelInfo {
@@ -499,14 +499,19 @@ fn info_of(server: &LocalServer, facts: Facts) -> ModelInfo {
     }
 }
 pub async fn list_local_models(server: &LocalServer, options: Transport) -> Result<Vec<ModelInfo>, RuntimeError> {
+    list_local_models_in(server, options, &DawProfile::ABLETON).await
+}
+/// The server's models, described in the DAW's words ("can't change the project" in REAPER).
+pub async fn list_local_models_in(server: &LocalServer, options: Transport, profile: &DawProfile) -> Result<Vec<ModelInfo>, RuntimeError> {
     let timeout = abort::timeout(LIST_MS);
     let transport = Transport { fetch: options.fetch, signal: Some(abort::any(options.signal.into_iter().chain([timeout.clone()]))) };
+    let place = profile.words.place;
     match list_facts(server, &transport).await {
-        Ok(facts) => Ok(facts.into_iter().map(|f| info_of(server, f)).collect()),
+        Ok(facts) => Ok(facts.into_iter().map(|f| info_of(server, f, place)).collect()),
         Err(error) => {
             let error = if timeout.is_cancelled() { LanguageModelError::other("TimeoutError") } else { error };
             if unanswered(&error) || matches!(error,LanguageModelError::ApiCall(ref e)if matches!(e.status_code,Some(401|403))) {
-                return Err(failure(server, error, FailurePhase::Request, None, None, None).into());
+                return Err(failure(server, error, FailurePhase::Request, None, None, None, place).into());
             }
             let status = error.api_call().and_then(|e| e.status_code).map(|s| format!(" (HTTP {s})")).unwrap_or_default();
             Err(KumiError::with_provider(
@@ -768,6 +773,7 @@ impl LocalState {
     }
     fn fail(&self, error: LanguageModelError, phase: FailurePhase) -> KumiError {
         let model = self.facts.borrow().as_ref().map(|f| f.name.clone()).unwrap_or_else(|| self.model.clone());
+        let place = self.profile.get().words.place;
         failure(
             &self.server,
             error,
@@ -784,6 +790,7 @@ impl LocalState {
                 self.squeezed.set(self.squeezed.get() * 0.8);
                 None
             }),
+            place,
         )
     }
     fn effort_of(&self) -> Option<Effort> {
@@ -999,6 +1006,7 @@ fn failure(
     model: Option<&str>,
     window: Option<f64>,
     outgrown: Option<&dyn Fn(f64) -> Option<String>>,
+    place: &str,
 ) -> KumiError {
     if let LanguageModelError::Kumi(error) = error {
         return error;
@@ -1076,7 +1084,7 @@ fn failure(
             if said.contains("--jinja") {
                 format!("{name} needs --jinja to use tools: start it with --jinja, or choose another model with /model.")
             } else {
-                format!("{model} can't use tools, so Kumi can't change your Set with it: choose another model with /model.")
+                format!("{model} can't use tools, so Kumi can't change your {place} with it: choose another model with /model.")
             },
         );
     }

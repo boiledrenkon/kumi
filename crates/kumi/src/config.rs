@@ -41,6 +41,9 @@ pub enum AppConfig {
     Bridge {
         yes: bool,
         allow_dirty: bool,
+        /// The DAW whose bridge is set up, asked for with --daw or KUMI_DAW, when it isn't Live (never written for Live).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
     Auth {
         auth_file: String,
@@ -64,8 +67,15 @@ pub enum AppConfig {
     },
     Doctor {
         json: bool,
+        /// The DAW asked for with --daw or KUMI_DAW, whose words the doctor speaks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
-    Report,
+    Report {
+        /// As the doctor's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
+    },
     Update {
         rollback: bool,
         check: bool,
@@ -136,13 +146,29 @@ pub enum Resume {
     /// `-r` alone: the producer chooses.
     Pick,
 }
-/// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
-/// conversation to take up.
-/// The DAW asked for with `--daw <id>` (or `--daw=<id>`), else KUMI_DAW: one this Kumi integrates, None for Live.
-pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Option<DawId>), RuntimeError> {
-    let registered =
-        || kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ");
-    let known = |text: &str| DawId::parse(text).filter(|daw| kumi_runtime::integrations::profile(*daw).is_some());
+/// What's wrong with KUMI_DAW, when it names no DAW Kumi knows.
+pub(crate) fn daw_env_problem(env: &Env) -> Option<String> {
+    env.get("KUMI_DAW").filter(|s| !s.is_empty())?;
+    take_daw(&[], env).err().map(|error| error.message())
+}
+
+/// The DAWs this Kumi integrates, by the names `--daw` and KUMI_DAW take.
+fn registered_daws() -> String {
+    kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ")
+}
+
+/// A DAW this Kumi integrates, by its name in any case: "live" is another name for Live's ("ableton", the one written), as
+/// /daw takes it.
+fn known_daw(text: &str) -> Option<DawId> {
+    let text = text.trim().to_ascii_lowercase();
+    let daw = if text == "live" { Some(DawId::Ableton) } else { DawId::parse(&text) };
+    daw.filter(|daw| kumi_runtime::integrations::profile(*daw).is_some())
+}
+
+/// The DAW asked for with `--daw <id>` (or `--daw=<id>`) alone, and the arguments left: what `bridge` and
+/// `--bridge-config` take, so KUMI_DAW never sends Live's bridge or Live's configuration to another DAW (`kumi bridge` is
+/// Live's in every message Kumi gives for Live, and in an update's last step).
+pub(crate) fn take_daw_flag(args: &[String]) -> Result<(Vec<String>, Option<DawId>), RuntimeError> {
     let (mut rest, mut asked) = (vec![], None);
     let mut at = 0;
     while at < args.len() {
@@ -155,20 +181,30 @@ pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Optio
         };
         match word {
             Some(word) => {
-                let daw = known(word).ok_or_else(|| RuntimeError::plain(format!("Use: --daw <daw>, with daw one of {}.", registered())))?;
+                let daw = known_daw(word)
+                    .ok_or_else(|| RuntimeError::plain(format!("Use: --daw <daw>, with daw one of {}.", registered_daws())))?;
                 asked = Some(daw);
             }
             None => rest.push(args[at].clone()),
         }
         at += 1;
     }
+    Ok((rest, asked))
+}
+
+/// The DAW asked for with `--daw <id>` (or `--daw=<id>`), else KUMI_DAW: one this Kumi integrates, None for none asked.
+pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Option<DawId>), RuntimeError> {
+    let (rest, mut asked) = take_daw_flag(args)?;
     if asked.is_none() {
         if let Some(word) = env.get("KUMI_DAW").filter(|s| !s.is_empty()) {
-            asked = Some(known(word).ok_or_else(|| RuntimeError::plain(format!("KUMI_DAW must be one of: {}.", registered())))?);
+            asked = Some(known_daw(word).ok_or_else(|| RuntimeError::plain(format!("KUMI_DAW must be one of: {}.", registered_daws())))?);
         }
     }
-    Ok((rest, asked.filter(|daw| *daw != DawId::Ableton)))
+    // Live asked for is kept: among several bridges it decides; the configuration never writes it (as before).
+    Ok((rest, asked))
 }
+/// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
+/// conversation to take up.
 pub(crate) fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
     let both = || {
         RuntimeError::plain(format!(
@@ -704,8 +740,22 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         match first {
             Some("--version" | "-v" | "-V" | "version") => return Ok(AppConfig::Version),
             Some("auth") => return Ok(AppConfig::Auth { auth_file: load_auth_file(env)?, settings_file: load_settings_file(env)? }),
-            Some("doctor") => return Ok(AppConfig::Doctor { json: false }),
-            Some("report") => return Ok(AppConfig::Report),
+            _ => {}
+        }
+    }
+    // The doctor and the report speak of the DAW asked for (`--daw reaper doctor`, KUMI_DAW), else of the one a session
+    // would work with.
+    if args.iter().any(|arg| arg == "doctor" || arg == "report") {
+        // A KUMI_DAW Kumi doesn't know never stops them: the doctor says what's wrong with it.
+        let mut known = env.clone();
+        if daw_env_problem(env).is_some() {
+            known.remove("KUMI_DAW");
+        }
+        let (rest, daw) = take_daw(args, &known)?;
+        match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["doctor"] => return Ok(AppConfig::Doctor { json: false, daw }),
+            ["doctor", "--json"] => return Ok(AppConfig::Doctor { json: true, daw }),
+            ["report"] => return Ok(AppConfig::Report { daw }),
             _ => {}
         }
     }
@@ -723,9 +773,6 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             [file] if !file.is_empty() && !file.starts_with('-') && !controls(file, true) => Ok(AppConfig::Import { file: file.clone() }),
             _ => Err(RuntimeError::plain("Use: import <file> (a conversation saved with: export --json).")),
         };
-    }
-    if first == Some("doctor") && args.len() == 2 && at(1) == Some("--json") {
-        return Ok(AppConfig::Doctor { json: true });
     }
     if first == Some("update") {
         if at(1) == Some("--version") {
@@ -746,13 +793,18 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         let has = |flag: &str| args[1..].iter().any(|s| s == flag);
         return Ok(AppConfig::Uninstall { all: has("--all"), yes: has("--yes"), dry_run: has("--dry-run") });
     }
-    if first == Some("bridge") {
+    // `bridge` sets up Live's bridge, or the bridge of the DAW asked for with --daw (`--daw reaper bridge`); KUMI_DAW never
+    // moves it, so Live's messages and an update's last step mean Live's.
+    let (bridge_args, bridge_daw) = if args.iter().any(|arg| arg == "bridge") { take_daw_flag(args)? } else { (vec![], None) };
+    if bridge_args.first().map(String::as_str) == Some("bridge") {
+        let args = &bridge_args;
         if args[1..].iter().any(|s| s != "--yes" && s != "--allow-dirty") {
             return Err(RuntimeError::plain("Use: bridge [--yes] [--allow-dirty]."));
         }
         return Ok(AppConfig::Bridge {
             yes: args[1..].iter().any(|s| s == "--yes"),
             allow_dirty: args[1..].iter().any(|s| s == "--allow-dirty"),
+            daw: bridge_daw.filter(|daw| *daw != DawId::Ableton),
         });
     }
     if first == Some("model") && args.len() <= 2 {
@@ -818,11 +870,20 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         });
     }
     let (args, resume) = take_resume(args)?;
-    let (args, daw) = take_daw(&args, env)?;
+    let (args, flagged) = take_daw_flag(&args)?;
+    let daw = match flagged {
+        Some(daw) => Some(daw),
+        None => take_daw(&[], env)?.1,
+    };
     let at = |i: usize| args.get(i).map(String::as_str);
     let first = at(0);
     if args.len() == 1 && first == Some("--inference-only") {
-        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume, daw });
+        return Ok(AppConfig::InferenceOnly {
+            inference: load_inference_config(env)?,
+            bridge_missing: None,
+            resume,
+            daw: daw.filter(|daw| *daw != DawId::Ableton),
+        });
     }
     if args.is_empty() {
         // The DAW asked for, else the first whose bridge is installed; without one, chat without a DAW.
@@ -852,6 +913,8 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             "Bridge configuration must be an existing readable file; its contents are validated by the MCP server.",
         ));
     }
+    // A bridge configuration given is Live's unless --daw says whose: KUMI_DAW doesn't move it to another DAW.
+    let daw = flagged;
     Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into(), resume, daw })
 }
 /// Node's stripVTControlCharacters expression, for the same diagnostic and terminal input treatment.

@@ -130,8 +130,15 @@ fn fake_release(dir: &Path, version: &str) -> Vec<u8> {
 }
 /// A release bundle whose `kumi --version` says `version`, carrying `bridge` when given.
 fn fake_release_with(dir: &Path, version: &str, bridge: Option<&str>) -> Vec<u8> {
+    fake_release_carrying(dir, version, bridge, &[])
+}
+/// The same, with more files in it (`daws/…`).
+fn fake_release_carrying(dir: &Path, version: &str, bridge: Option<&str>, files: &[(&str, &str)]) -> Vec<u8> {
     let stage = dir.join(format!("stage-{version}"));
     fs::create_dir_all(&stage).unwrap();
+    for (path, text) in files {
+        put(stage.join(path), text);
+    }
     let code = dir.join("main.rs");
     put(&code, format!("fn main() {{ println!(\"Kumi {version}\"); }}"));
     let built = std::process::Command::new("rustc")
@@ -441,6 +448,40 @@ async fn bridge_files_stay_while_live_uses_them() {
             assert!(out.0.borrow().contains("while Live uses it."));
         }
     }
+}
+/// Live's bridge is out but Kumi's Ears device won't come out of the User Library: that's said with where the device
+/// is, and the rest goes on as for a bridge that's out (its files go too).
+#[tokio::test]
+#[cfg(unix)]
+async fn an_ears_device_that_wont_come_out_is_said_with_where_it_is() {
+    // SAFETY: geteuid has no preconditions. Root can delete from a read-only folder.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let env = with_bridge(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let library = dir.path().join("Kumi");
+    put(library.join("Kumi Ears.amxd"), "device");
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o555)).unwrap();
+    let (mut io, out) = io(&env);
+    io.confirm = Some(Rc::new(|_| async { true }.boxed_local()));
+    io.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+    io.run = Some(Rc::new(|_, _, _| async { Ran { code: 0, stdout: "".into(), stderr: "".into() } }.boxed_local()));
+    let code = uninstall_installed(io, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "Kumi's Ears device couldn't be taken out of Live's User Library (Permission denied (os error 13)): delete {} by hand.",
+            library.join("Kumi Ears.amxd").display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("couldn't take its bridge out") && said.contains("The bridge and Kumi's extension are out of Live."), "{said}");
+    assert!(!home.join("bridge").exists() && !home.join("app").exists(), "{said}");
 }
 #[tokio::test]
 #[cfg(not(windows))]
@@ -1207,6 +1248,14 @@ fn an_updates_bridge_step_asks_nothing_more_and_waits_for_no_live() {
     for (key, value) in [("KUMI_BRIDGE_WAIT_SECONDS", "0"), ("KUMI_BRIDGE_AFTER", "1"), ("KUMI_INSTALLED", "1"), ("KUMI_HOME", "/kumi")] {
         assert_eq!(envs.get(key).cloned().flatten().as_deref(), Some(value), "{key}");
     }
+}
+/// Live's update ends with `kumi bridge` in a child Kumi: KUMI_DAW, which chooses the DAW sessions work with, is taken
+/// out of its environment, so the child sets up Live's bridge whatever the producer exported (review L1).
+#[test]
+fn an_updates_bridge_step_is_lives_whatever_kumi_daw_says() {
+    let command = kumi::install::bridge_command("/kumi/app", "/kumi");
+    let removed = command.as_std().get_envs().find(|(name, _)| *name == "KUMI_DAW").map(|(_, value)| value);
+    assert_eq!(removed, Some(None), "KUMI_DAW taken out of the child's environment");
 }
 /// After an update, with no bridge in Live: how to connect it where Live runs, and on Linux nothing about Live at all.
 fn says_no_bridge_yet(said: &str) {
@@ -1981,11 +2030,20 @@ async fn uninstall_as_root_spares_the_home_folder_the_account_database_names() {
 }
 /// A Kumi folder the producer also uses (KUMI_HOME=~/.local, so the launcher is ~/.local/bin/kumi): with or without
 /// --all, only Kumi's own entries go. Theirs in bin and downloads and beside them stay, Kumi's data stays (its names,
-/// such as projects, could be theirs there), and so does the folder.
+/// such as projects, could be theirs there), and so does the folder. In `bridges`, only the DAW folders Kumi's bridge
+/// lifecycle wrote go: another app's, and a `reaper` folder without the lifecycle's files, stay with their `logs`.
 #[cfg(not(windows))]
 #[tokio::test]
 async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
-    let theirs = ["bin/uv-tool", "downloads/mine.zip", "share/applications/x.desktop", "lib/python3/site.py", "state/history"];
+    let theirs = [
+        "bin/uv-tool",
+        "downloads/mine.zip",
+        "share/applications/x.desktop",
+        "lib/python3/site.py",
+        "state/history",
+        "bridges/sync/logs/today.log",
+        "bridges/reaper/discovery/peers.json",
+    ];
     let data = ["auth.json", "kumi.db", "projects/0123456789abcdef0123456789abcdef/conversations/a.json"];
     for all in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -1997,6 +2055,8 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         put(local.join("app.previous/kumi"), "Kumi's");
         put(local.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
         put(local.join("tools/ffmpeg/ffmpeg"), "Kumi's");
+        put(local.join("bridges/renoise/bridge.secret"), "Kumi's");
+        put(local.join("bridges/renoise/logs/bridge.log"), "Kumi's");
         for file in theirs {
             put(local.join(file), "theirs");
         }
@@ -2009,7 +2069,7 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         assert_eq!(uninstall_installed(dry, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 0);
         let said = out.0.borrow().clone();
         for words in [
-            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools.".to_string(),
+            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools, bridges/renoise.".to_string(),
             "~/.local/bin and ~/.local/downloads stay: they hold more than Kumi put there.".into(),
             if all {
                 format!("~/.local also holds what isn't Kumi's, so --all would leave your {kept} there too (auth.json, kumi.db and projects): delete them by hand.")
@@ -2032,7 +2092,7 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         for file in data {
             assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "Kumi's data", "{file}");
         }
-        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools"] {
+        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools", "bridges/renoise"] {
             assert!(!local.join(gone).exists(), "{gone}");
         }
         assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "alias ll='ls -l'\n");
@@ -2318,4 +2378,188 @@ async fn uninstall_all_says_a_folder_of_only_kumis_isnt_named_kumi() {
         "{said}"
     );
     assert!(!said.contains("what isn't Kumi's") && home.join("auth.json").exists() && !home.join("app").exists(), "{said}");
+}
+
+/// The DAW used last (`last-daw`) and REAPER's and Renoise's bridges' files (`bridges/`) are Kumi's: `--all` takes a
+/// folder holding them whole, as it always took a Live-only producer's. (On Windows a detached cmd removes them once
+/// Kumi has exited; the dry run below says the same there.)
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_takes_the_daw_used_last_and_the_other_daws_bridge_files_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    for part in ["app", "bin"] {
+        fs::create_dir_all(home.join(part)).unwrap();
+    }
+    installed_kumi(home);
+    put(home.join("last-daw"), "reaper");
+    put(home.join("bridges/reaper/bridge.secret"), "secret");
+    put(home.join("bridges/reaper/logs/reaper-1.log"), "log");
+    let (io, out) = io(&env);
+    assert_eq!(uninstall_installed(io, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    assert!(!home.exists(), "{}", out.0.borrow());
+    assert!(!out.0.borrow().contains("isn't Kumi's"), "{}", out.0.borrow());
+}
+
+/// A DAW whose folder is gone (Renoise's preferences deleted) doesn't stop the uninstall halfway: Kumi's tool comes out
+/// as its receipt says, and Kumi goes; nobody is asked to open Renoise to uninstall Kumi.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_carries_on_when_a_daws_folder_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]).to_path_buf();
+    for part in ["app", "bin"] {
+        fs::create_dir_all(home.join(part)).unwrap();
+    }
+    installed_kumi(&home);
+    // Kumi's tool was in Renoise, and Renoise's preferences folder has since been deleted.
+    let tools = dir.path().join("Renoise/V3.5.4/Scripts/Tools");
+    env.insert("KUMI_RENOISE_PREFS_DIR".into(), dir.path().join("Renoise").display().to_string());
+    let paths = daw_bridge::paths::BridgePaths::new(&home, daw_bridge::daw::Daw::Renoise);
+    fs::create_dir_all(&paths.root).unwrap();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "renoise".into(),
+        status: "installed".into(),
+        target: tools.join("com.kumi.Bridge.xrnx").display().to_string(),
+        reference: tools.join("com.kumi.Bridge.xrnx/bridge-reference.json").display().to_string(),
+        generation: Some("g1".into()),
+        version: Some("1.0.0".into()),
+        sha256: None,
+        previous: vec![],
+        copies: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    put(paths.receipt(), serde_json::to_string(&receipt).unwrap());
+    let (io, out) = io(&env);
+    assert_eq!(
+        uninstall_installed(io, UninstallOptions { all: false, yes: true, ..Default::default() }).await.unwrap(),
+        0,
+        "{}",
+        out.0.borrow()
+    );
+    for part in ["app", "bin"] {
+        assert!(!home.join(part).exists(), "{part}: {}", out.0.borrow());
+    }
+    assert!(!out.0.borrow().contains("open Renoise"), "{}", out.0.borrow());
+}
+
+/// On every system, `last-daw` and `bridges/` count as Kumi's: `--all` would take the whole folder (said by the dry run,
+/// which removes nothing, so it runs on Windows too).
+#[tokio::test]
+async fn the_daw_used_last_and_the_other_daws_bridge_files_count_as_kumis() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    for part in ["app", "bin"] {
+        fs::create_dir_all(home.join(part)).unwrap();
+    }
+    installed_kumi(home);
+    put(home.join("last-daw"), "reaper");
+    put(home.join("bridges/renoise/bridge.secret"), "secret");
+    let (io, out) = io(&env);
+    assert_eq!(uninstall_installed(io, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("kumi uninstall --all would remove ") && !said.contains("isn't Kumi's"), "{said}");
+    assert!(home.join("last-daw").exists() && home.join("bridges").exists(), "a dry run removes nothing");
+}
+
+/// Uninstalling takes out what's Kumi's in REAPER's and Renoise's bridge folders and keeps what the lifecycle promised:
+/// the copies of Kumi's bridge the producer had changed (`changed`) always, and catch-up's baselines (`snapshots`) until
+/// --all. A DAW's folder with nothing else in it goes whole.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_keeps_the_changed_copies_and_until_all_the_baselines_in_the_daws_bridge_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let reaper = home.join("bridges/reaper");
+    let setup = || {
+        installed_kumi(home);
+        for part in ["generations/0.1.0-1/reaper_kumi.dylib", "discovery/a.json", "logs/bridge.log", "listening/j-s.wav"] {
+            put(reaper.join(part), "kumi's");
+        }
+        for file in ["bridge.secret", "lifecycle.lock", ".install-receipt.json.tmp-0123456789ab"] {
+            put(reaper.join(file), "kumi's");
+        }
+        put(reaper.join("changed/reaper_kumi.dylib-1700000000000"), "the producer's own build");
+        put(reaper.join("snapshots/reaper-0123/last-seen.json"), "{}");
+        put(home.join("bridges/renoise/bridge.secret"), "kumi's");
+        put(home.join("bridges/renoise/logs/bridge.log"), "kumi's");
+    };
+    setup();
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for part in
+        ["generations", "discovery", "logs", "listening", "bridge.secret", "lifecycle.lock", ".install-receipt.json.tmp-0123456789ab"]
+    {
+        assert!(!reaper.join(part).exists(), "{part}: {said}");
+    }
+    assert!(!home.join("bridges/renoise").exists(), "nothing else in it: it goes whole. {said}");
+    assert_eq!(fs::read_to_string(reaper.join("changed/reaper_kumi.dylib-1700000000000")).unwrap(), "the producer's own build");
+    assert!(reaper.join("snapshots/reaper-0123/last-seen.json").exists(), "the baselines stay without --all: {said}");
+    assert!(said.contains("The copies of Kumi's bridges you had changed stay in ") && said.contains("changed"), "{said}");
+    // --all takes the baselines too, never the producer's copies.
+    setup();
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(!reaper.join("snapshots").exists(), "{said}");
+    assert!(reaper.join("changed/reaper_kumi.dylib-1700000000000").exists(), "{said}");
+    assert!(home.exists(), "the producer's copies keep Kumi's folder: {said}");
+}
+
+/// `kumi update` brings Renoise's tool from the new Kumi's own folder, not from the Kumi that runs the update; going back
+/// to a Kumi that doesn't carry it says the tool stays, where, and how to take it out.
+#[tokio::test]
+async fn an_update_brings_renoises_tool_from_the_new_kumi_and_going_back_says_it_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]).to_path_buf();
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    // One component at a time, as Kumi builds the paths it shows: Windows shows `\` throughout.
+    let prefs = dir.path().join("Renoise").join("V3.5.4");
+    let tools = prefs.join("Scripts").join("Tools");
+    fs::create_dir_all(&tools).unwrap();
+    env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
+    let tool = |version: &str| format!("return \"{version}\"\n");
+    let folder = daw_bridge::install::RENOISE_TOOL_FOLDER;
+    // The tool the Kumi before the update put in Renoise.
+    let before = dir.path().join("before").join(folder);
+    put(before.join("payload/version.lua"), tool("1.0.0"));
+    let target = daw_bridge::lifecycle::Target {
+        daw: daw_bridge::daw::Daw::Renoise,
+        dir: tools.clone(),
+        name: folder.into(),
+        folder: true,
+        reference: tools.join(folder).join(daw_bridge::install::RENOISE_REFERENCE),
+    };
+    daw_bridge::lifecycle::Lifecycle::new(&home, target).install(&before, "1.0.0").unwrap();
+    let version_lua = format!("daws/renoise/{folder}/payload/version.lua");
+    let bytes = fake_release_carrying(dir.path(), "99.0.0", None, &[(&version_lua, &tool("2.0.0"))]);
+    let mut good = manifest("99.0.0");
+    good["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let (mut updated, out) = io(&env);
+    updated.fetcher = Some(Rc::new(Serve { manifest: good, bytes, status: 200, offline: false, calls: RefCell::new(vec![]) }));
+    updated.others = Some(Rc::new(|| async { 0 }.boxed_local()));
+    updated.run = Some(Rc::new(|command, args, cwd| async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local()));
+    assert_eq!(update_installed(updated).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(tools.join(folder).join("payload/version.lua")).unwrap(), tool("2.0.0"), "{}", out.0.borrow());
+    let (rollback, out) = io(&env);
+    assert_eq!(rollback_installed(rollback).await.unwrap(), 0, "{}", out.0.borrow());
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!(
+            "Kumi's tool stays in Renoise ({}): Kumi {KUMI_VERSION} doesn't know Renoise",
+            tools.join(folder).display()
+        )),
+        "{said}"
+    );
+    assert!(said.contains("Delete that folder to take it out."), "{said}");
+    assert!(tools.join(folder).exists(), "going back leaves the tool where it is");
 }

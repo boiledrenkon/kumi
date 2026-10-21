@@ -50,6 +50,8 @@ pub struct TerminalOptions {
     pub close_timeout_ms: Option<u64>,
     pub history: Option<Rc<RefCell<InputHistory>>>,
     pub updates: Option<UpdateControl>,
+    /// /daw <name>: Kumi closes and opens again with that DAW. None where the producer works with Live alone.
+    pub switch_daw: Option<Rc<dyn Fn(kumi_runtime::core::daw::DawId)>>,
     /// /willington, where Kumi's bridge can carry Willington.
     pub willington: Option<crate::daw::Toggle>,
     /// What's new since the producer last opened Kumi, said once as it starts.
@@ -87,6 +89,7 @@ impl TerminalOptions {
             close_timeout_ms: None,
             history: None,
             updates: None,
+            switch_daw: None,
             willington: None,
             whats_new: None,
             instant: true,
@@ -98,8 +101,33 @@ impl TerminalOptions {
         }
     }
 }
-fn help() -> String {
-    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {} login <provider>.",*KUMI)
+/// The commands `PlainTerminal::command` answers (those before it, /help to /status, are answered first).
+const COMMANDS: [&str; 22] = [
+    "/model",
+    "/effort",
+    "/fast",
+    "/memory",
+    "/recipes",
+    "/resume",
+    "/conversations",
+    "/rename",
+    "/export",
+    "/share",
+    "/fork",
+    "/note",
+    "/pin",
+    "/unpin",
+    "/forget",
+    "/willington",
+    "/login",
+    "/logout",
+    "/undo",
+    "/refresh",
+    "/reconnect",
+    "/new",
+];
+fn help(daw: bool) -> String {
+    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to {app} again, keeping the conversation){daw} · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes{willington} · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {kumi} login <provider>.", app = crate::daw::words().app, daw = if daw { " · /daw [name] (which DAW Kumi works with, or open Kumi again with another)" } else { "" }, kumi = *KUMI, willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton { " · /willington (Willington's bindings on or off)" } else { "" })
 }
 fn head(text: &str, limit: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(limit).collect::<Vec<_>>())
@@ -292,6 +320,8 @@ struct State {
     said: std::collections::HashMap<String, String>,
     /// Kumi's question about another Set's conversation, open until a line says 1, 2 or 3 (or Kumi withdraws it).
     asking: Option<String>,
+    /// Why the DAW answers late, while it does (a dialog is open), as its focus says.
+    busy: Option<String>,
 }
 struct Inner {
     options: TerminalOptions,
@@ -334,6 +364,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             carry: vec![],
             said: std::collections::HashMap::new(),
             asking: None,
+            busy: None,
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -432,14 +463,11 @@ impl PlainTerminal {
                 if !state.output_failed {
                     let text = match result {
                         Ok(()) => {
-                            let lines: Vec<String> = [
-                                Some("Kumi closed. Each Set's conversation continues next time.".to_string()),
-                                crate::tui::app::continue_hint(hint),
-                                this.0.options.next_time.clone(),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .collect();
+                            let lines: Vec<String> =
+                                [Some(crate::tui::app::farewell()), crate::tui::app::continue_hint(hint), this.0.options.next_time.clone()]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect();
                             lines.join("\n")
                         }
                         Err(error) => {
@@ -601,7 +629,21 @@ impl PlainTerminal {
             return Ok(());
         }
         if command == "/help" {
-            self.notice(&help());
+            self.notice(&help(self.0.options.switch_daw.is_some()));
+            return Ok(());
+        }
+        if let Some(switch) = self.0.options.switch_daw.clone().filter(|_| command == "/daw" || command.starts_with("/daw ")) {
+            match crate::daw::daw_command(&command["/daw".len()..]) {
+                crate::daw::DawCommand::Say(words) => self.notice(&format!("[daw] {words}")),
+                crate::daw::DawCommand::Switch(_, _) if self.busy() => {
+                    self.notice("[daw] Kumi is working; /daw once it's done (Ctrl-C stops it).");
+                }
+                crate::daw::DawCommand::Switch(daw, words) => {
+                    self.notice(&format!("[daw] {words}"));
+                    switch(daw);
+                    self.finish(0).await;
+                }
+            }
             return Ok(());
         }
         if command == "/changelog" {
@@ -645,14 +687,14 @@ impl PlainTerminal {
         }
         if command == "/stop" {
             if !controller.has_stop_live() {
-                self.notice("[stop] Kumi can't stop Live here.");
+                self.notice(&format!("[stop] Kumi can't stop {} here.", crate::daw::words().app));
                 return Ok(());
             }
             if self.busy() {
                 let _ = controller.cancel().await;
             }
             if !controller.stop_live().await? {
-                self.notice("[stop] Kumi couldn't stop Live just now; press space in Live.");
+                self.notice(&format!("[stop] Kumi couldn't stop {0} just now; press space in {0}.", crate::daw::words().app));
             }
             return Ok(());
         }
@@ -660,12 +702,13 @@ impl PlainTerminal {
             let status = controller.status();
             let library = library_line(controller.library().as_ref());
             self.notice(&format!(
-                "[status] {}; MCP/Live: {}; turns {}{}; {}{}",
+                "[status] {}; MCP/{}: {}; turns {}{}; {}{}",
                 enum_name(status.state),
-                enum_name(status.connection),
+                crate::daw::words().app,
+                self.0.state.borrow().busy.as_ref().map_or_else(|| enum_name(status.connection), |why| format!("busy ({why})")),
                 status.turns,
                 status.max_turns.filter(|n| *n != 0).map(|n| format!("/{n}")).unwrap_or_default(),
-                status.observation.as_deref().unwrap_or("No current Live observation"),
+                status.observation.clone().unwrap_or_else(|| format!("No current {} observation", crate::daw::words().app)),
                 library.map(|s| format!("; {s}")).unwrap_or_default()
             ));
             // Its second line comes before Kumi's goodbye, should /quit come while it works out the conversation.
@@ -687,6 +730,12 @@ impl PlainTerminal {
             return Ok(());
         }
         if self.busy() {
+            // A command Kumi doesn't have is no turn: it's said so at once, as when Kumi isn't working.
+            let verb = command.split(|c: char| c.is_whitespace() || c == '\u{feff}').find(|s| !s.is_empty()).unwrap_or("");
+            if command.starts_with('/') && !COMMANDS.contains(&verb) {
+                self.notice("Unknown command. Use /help.");
+                return Ok(());
+            }
             let mut state = self.0.state.borrow_mut();
             if !state.answering && !command.starts_with('/') && state.queued.is_none() {
                 state.queued = Some(input.into());
@@ -710,6 +759,7 @@ impl PlainTerminal {
         }
         Ok(())
     }
+    /// Answers `verb`, one of [`COMMANDS`] (any other slash command is unknown), or sends a turn.
     async fn command(&self, verb: &str, argument: Option<&str>, command: &str, input: &str) -> Result<(), RuntimeError> {
         let controller = &self.0.options.controller;
         let models = &self.0.options.models;
@@ -717,8 +767,8 @@ impl PlainTerminal {
  "/model"=>{self.model_command(argument).await?;},
  "/effort"=>{let choices=EFFORTS.map(|e|e.as_str()).join(", ");if let Some(argument)=argument{let effort=Effort::parse(argument);if argument!="default"&&effort.is_none(){self.notice(&format!("[effort] Choose one of {choices} or default."));}else{models.set_effort(effort).await?;self.notice(&format!("[effort] {argument}."));}}else{self.notice(&format!("[effort] {}. Choose one of {choices} or default.",models.current().effort.map(|e|e.as_str()).unwrap_or("the model's default")));}},
  "/fast"=>{let current=models.current();let on=!models.fast_enabled();match models.set_fast(on).await?{Some(tier)=>self.notice(&format!("[fast] {} is on{}.",tier.name,tier.description.map(|d|format!(": {d}")).unwrap_or_default())),None if on=>self.notice(&format!("[fast] {} has no faster tier.",current.name.or(current.model).unwrap_or_else(||"This model".into()))),None=>self.notice("[fast] Back to the standard tier."),}},
- "/memory"=>{let Some(memory)=controller.memory().await?else{self.notice("[memory] Kumi keeps no notes here.");return Ok(());};let list=|notes:&[kumi_runtime::core::contracts::MemoryNote]|{if notes.is_empty(){"none".into()}else{notes.iter().map(|n|format!("{}{} {}",n.id,if n.pinned{" (pinned)"}else{""},n.text)).collect::<Vec<_>>().join(" · ")}};self.notice(&format!("[memory] About you: {}",list(&memory.memory.producer)));self.notice(&if memory.saved{format!("[memory] About {}: {}",memory.set_name.as_deref().unwrap_or("this Set"),list(&memory.memory.set))}else{"[memory] This Set isn't saved yet; notes about it are kept once it is.".into()});if controller.has_techniques(){let techniques=controller.techniques().await?;self.notice(&format!("[memory] Techniques: {}",if techniques.is_empty(){"none yet".into()}else{techniques.iter().map(|t|format!("{} {} (for {})",t.id,t.name,t.fits)).collect::<Vec<_>>().join(" · ")}));}if controller.has_taste(){let taste=controller.taste().await?;self.notice(&format!("[memory] From your Sets: {}",if taste.is_empty(){"nothing yet".into()}else{taste.iter().enumerate().map(|(i,l)|format!("u{} {}",i+1,l.line)).collect::<Vec<_>>().join(" · ")}));self.0.state.borrow_mut().taste=taste;}},
- "/recipes"=>{let recipes=controller.recipes().await?;self.notice(&if recipes.is_empty(){"[recipes] None yet. Ask Kumi to save a way of working, or say \"watch me\" and do it in Live.".into()}else{format!("[recipes] {}",recipes.iter().map(|r|format!("{}{}: {}",r.name,if r.params.is_empty(){String::new()}else{format!(" (needs {})",r.params.iter().map(|p|p.name.as_str()).collect::<Vec<_>>().join(", "))},r.about)).collect::<Vec<_>>().join(" · "))});},
+ "/memory"=>{let Some(memory)=controller.memory().await?else{self.notice("[memory] Kumi keeps no notes here.");return Ok(());};let list=|notes:&[kumi_runtime::core::contracts::MemoryNote]|{if notes.is_empty(){"none".into()}else{notes.iter().map(|n|format!("{}{} {}",n.id,if n.pinned{" (pinned)"}else{""},n.text)).collect::<Vec<_>>().join(" · ")}};self.notice(&format!("[memory] About you: {}",list(&memory.memory.producer)));self.notice(&if memory.saved{format!("[memory] About {}: {}",memory.set_name.clone().unwrap_or_else(||format!("this {}",crate::daw::words().place)),list(&memory.memory.set))}else{format!("[memory] This {} isn't saved yet; notes about it are kept once it is.",crate::daw::words().place)});if controller.has_techniques(){let techniques=controller.techniques().await?;self.notice(&format!("[memory] Techniques: {}",if techniques.is_empty(){"none yet".into()}else{techniques.iter().map(|t|format!("{} {} (for {})",t.id,t.name,t.fits)).collect::<Vec<_>>().join(" · ")}));}if controller.has_taste(){let taste=controller.taste().await?;self.notice(&format!("[memory] From your {}: {}",crate::daw::words().places,if taste.is_empty(){"nothing yet".into()}else{taste.iter().enumerate().map(|(i,l)|format!("u{} {}",i+1,l.line)).collect::<Vec<_>>().join(" · ")}));self.0.state.borrow_mut().taste=taste;}},
+ "/recipes"=>{let recipes=controller.recipes().await?;self.notice(&if recipes.is_empty(){format!("[recipes] None yet. Ask Kumi to save a way of working, or say \"watch me\" and do it in {}.",crate::daw::words().app)}else{format!("[recipes] {}",recipes.iter().map(|r|format!("{}{}: {}",r.name,if r.params.is_empty(){String::new()}else{format!(" (needs {})",r.params.iter().map(|p|p.name.as_str()).collect::<Vec<_>>().join(", "))},r.about)).collect::<Vec<_>>().join(" · "))});},
  "/resume"|"/conversations"|"/rename"|"/fork" if !controller.has_conversations()=>self.notice(&format!("[conversations] {}",crate::tui::app::not_kept())),
  "/resume"|"/conversations"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.resume_command(&words).await?;},
  "/rename"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.rename_command(&words).await?;},
@@ -727,7 +777,7 @@ impl PlainTerminal {
  "/fork"=>{let name=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();if controller.fork_conversation((!name.is_empty()).then_some(name.as_str())).await?.is_none(){self.notice("[fork] Nothing to fork yet: ask something first.");}},
  "/note"=>{let usage="[memory] Use: /note <id> <new words>, with an id from /memory.";let words=argument.and_then(|id|command.split_once(id)).map(|(_,words)|words.trim()).unwrap_or("");match argument.filter(|_|!words.is_empty()&&controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Text(words.into())).await{Ok(Some(_))=>self.notice(&format!("[memory] Changed note {id}.")),Ok(None)=>self.notice(usage),Err(error)=>self.notice(&format!("[memory] {}",error.message()))},None=>self.notice(usage)}},
  "/pin"|"/unpin"=>{let pin=verb=="/pin";let usage=format!("[memory] Use: {verb} <id>, with a note's id from /memory.");match argument.filter(|_|controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Pinned(pin)).await?{Some(_)=>self.notice(&if pin{format!("[memory] Pinned {id}: Kumi keeps it even when its memory is full.")}else{format!("[memory] Unpinned {id}.")}),None=>self.notice(&usage)},None=>self.notice(&usage)}},
- "/forget"=>{let invalid="[memory] Use: /forget <id>, with an id from /memory.";if argument.is_some_and(|a|a.starts_with('u'))&&controller.has_forget_taste(){if self.0.state.borrow().taste.is_empty(){let taste=controller.taste().await?;self.0.state.borrow_mut().taste=taste;}let n=number::parse(&argument.unwrap()[1..]).unwrap_or(f64::NAN)-1.;let line=if n>=0.&&n.fract()==0.{self.0.state.borrow().taste.get(n as usize).cloned()}else{None};if let Some(line)=line{if controller.forget_taste(&line.id).await?{self.notice(&format!("[memory] Forgot, from your Sets: {}",line.line));}else{self.notice(invalid);}}else{self.notice(invalid);}}else if argument.is_some_and(|a|a.starts_with('t'))&&controller.has_forget_technique(){if !controller.forget_technique(argument.unwrap()).await?{self.notice(invalid);}}else if let Some(argument)=argument{if controller.forget(argument).await?.is_none(){self.notice(invalid);}}else{self.notice(invalid);}},
+ "/forget"=>{let invalid="[memory] Use: /forget <id>, with an id from /memory.";if argument.is_some_and(|a|a.starts_with('u'))&&controller.has_forget_taste(){if self.0.state.borrow().taste.is_empty(){let taste=controller.taste().await?;self.0.state.borrow_mut().taste=taste;}let n=number::parse(&argument.unwrap()[1..]).unwrap_or(f64::NAN)-1.;let line=if n>=0.&&n.fract()==0.{self.0.state.borrow().taste.get(n as usize).cloned()}else{None};if let Some(line)=line{if controller.forget_taste(&line.id).await?{self.notice(&format!("[memory] Forgot, from your {}: {}",crate::daw::words().places,line.line));}else{self.notice(invalid);}}else{self.notice(invalid);}}else if argument.is_some_and(|a|a.starts_with('t'))&&controller.has_forget_technique(){if !controller.forget_technique(argument.unwrap()).await?{self.notice(invalid);}}else if let Some(argument)=argument{if controller.forget(argument).await?.is_none(){self.notice(invalid);}}else{self.notice(invalid);}},
  "/willington"=>{match self.0.options.willington.clone().and_then(|w|(w.on)().map(|on|(w,on))){Some((willington,on))=>match (willington.set)(!on).await{Ok(said)=>{self.notice(&format!("[willington] {said}"));controller.reconfigure().await?;},Err(error)=>self.notice(&format!("[willington] Kumi couldn't turn Willington's bindings {}: {error}",if on{"off"}else{"on"})),},None=>self.notice("Unknown command. Use /help."),}},
  "/login"=>self.notice(&format!("[login] Sign in from a shell: {} login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here.",*KUMI)),
  "/logout"=>{if let Some(provider)=argument.and_then(ProviderId::parse){self.notice(&if models.sign_out(provider).await?{format!("[logout] Signed out of {}.",provider.as_str())}else{format!("[logout] There was no sign-in for {} to remove.",provider.as_str())});}else{self.notice(&format!("[logout] Use: /logout <provider> ({}).",PROVIDERS.map(|p|p.as_str()).join(", ")));}},
@@ -791,7 +841,7 @@ impl PlainTerminal {
                 if row.place == kumi_runtime::IMPORTED {
                     "imported".into()
                 } else {
-                    "a Set".into()
+                    format!("a {}", crate::daw::words().place)
                 }
             });
             format!(
@@ -813,7 +863,12 @@ impl PlainTerminal {
                 .iter()
                 .enumerate()
                 .map(|(at, row)| {
-                    format!("{}{}. {}", if at == here && at > 0 { "Other Sets: " } else { "" }, at + 1, mention(row, at >= here))
+                    let other = if at == here && at > 0 {
+                        format!("Other {}: ", crate::daw::capitalized(crate::daw::words().places))
+                    } else {
+                        String::new()
+                    };
+                    format!("{other}{}. {}", at + 1, mention(row, at >= here))
                 })
                 .collect();
             self.notice(&format!("[conversations] {}. /resume <number, id or name> goes back to one.", rows.join(" · ")));
@@ -985,9 +1040,16 @@ impl Terminal for PlainTerminal {
         self.notice(&format!(
             "Kumi · {} · {}",
             self.0.options.models.current().model.as_deref().unwrap_or("no model chosen yet"),
-            if self.0.options.mode == "inference-only" { "MCP disconnected / No Live access" } else { "MCP connecting / Live unverified" }
+            if self.0.options.mode == "inference-only" {
+                format!("MCP disconnected / No {} access", crate::daw::words().app)
+            } else {
+                format!("MCP connecting / {} unverified", crate::daw::words().app)
+            }
         ));
-        self.notice("Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.");
+        self.notice(&format!(
+            "Each {0}'s conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any {0}'s, by number, id or name). /help for commands.",
+            crate::daw::words().place
+        ));
         if let Some(notice) = self.0.options.startup_notice.as_ref().filter(|s| !s.is_empty()) {
             self.notice(notice);
         }
@@ -1111,11 +1173,27 @@ impl Terminal for PlainTerminal {
             }
             "carry-on" => self.notice(&format!("[job {}] Kumi carries on with its result", n("job"))),
             "connection" => self.notice(&format!(
-                "[connection] MCP/Live: {}{}",
+                "[connection] MCP/{}: {}{}",
+                crate::daw::words().app,
                 get("state"),
-                if get("state") != "connected" { "; no verified current Live observation" } else { "" }
+                if get("state") != "connected" {
+                    format!("; no verified current {} observation", crate::daw::words().app)
+                } else {
+                    String::new()
+                }
             )),
             "observation" => self.notice(&format!("[observation] {}", get("label"))),
+            // A busy DAW (a dialog is open) is said as it starts and ends; Live's focus never says it.
+            "focus" => {
+                let busy = value["focus"]["busy"].as_str().map(str::to_owned);
+                let before = std::mem::replace(&mut self.0.state.borrow_mut().busy, busy.clone());
+                let app = crate::daw::words().app;
+                match (before, busy) {
+                    (None, Some(why)) => self.notice(&format!("[connection] MCP/{app}: busy ({why})")),
+                    (Some(_), None) => self.notice(&format!("[connection] MCP/{app}: answering again")),
+                    _ => {}
+                }
+            }
             "library" => {
                 let mut state = self.0.state.borrow_mut();
                 if !state.told_library
@@ -1161,8 +1239,13 @@ impl Terminal for PlainTerminal {
                         .map(|set| format!("“{}”", clean(set)))
                         .unwrap_or_else(|| format!("a {} not saved yet", ask.noun));
                     let title = if ask.title.is_empty() { "This conversation".into() } else { format!("“{}”", clean(&ask.title)) };
+                    let first = if ask.by_hand {
+                        format!("Open {theirs} in {daw} yourself (this conversation carries on once it's open)", daw = ask.daw)
+                    } else {
+                        format!("Open {theirs} in {daw} ({daw} may ask whether to save {open} first)", daw = ask.daw)
+                    };
                     let question = format!(
-                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. Open {theirs} in {daw} ({daw} may ask whether to save {open} first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
+                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. {first} · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
                         daw = ask.daw
                     );
                     self.0.state.borrow_mut().asking = Some(question.clone());
@@ -1204,7 +1287,13 @@ impl Terminal for PlainTerminal {
                 let note = str_(&c["note"]);
                 let text = match str_(&c["state"]) {
                     "applied" => Some(format!("[change] {title} (/undo takes it back)")),
-                    "unsure" => Some(format!("[change] Check Live: {title}. {}", c["note"].as_str().unwrap_or("Live didn't confirm it."))),
+                    "unsure" => {
+                        let app = crate::daw::words().app;
+                        Some(format!(
+                            "[change] Check {app}: {title}. {}",
+                            c["note"].as_str().map_or(format!("{app} didn't confirm it."), str::to_owned)
+                        ))
+                    }
                     "kept" => Some(string::trim(&format!("[change] Kept: {title}. {note}")).into()),
                     // Those that end together for one reason (all of a Set's, when Live opens another): the first as it
                     // comes, the rest in one line after it.
@@ -1333,16 +1422,23 @@ impl Terminal for PlainTerminal {
             "remembered" => self.notice(&format!(
                 "[memory] {} {}: {}{}",
                 if value.get("replaced").is_some_and(|v| !v.is_null()) { "Updated a note" } else { "Noted" },
-                if get("scope") == "producer" { "about you" } else { "about this Set" },
+                if get("scope") == "producer" { "about you".to_string() } else { format!("about this {}", crate::daw::words().place) },
                 str_(&value["note"]["text"]),
-                if value["pending"] == true { " (kept once the Set is saved)" } else { "" }
+                if value["pending"] == true { format!(" (kept once the {} is saved)", crate::daw::words().place) } else { String::new() }
             )),
             "forgot" => self.notice(&format!("[memory] Forgot: {}", str_(&value["note"]["text"]))),
-            "action" => self.notice(&format!("[live] {}", get("title"))),
-            "watching" => self.notice(if value["on"] == true {
-                "[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done."
+            // (tagged with the DAW's name as /daw takes it: [live] in Live, as always)
+            "action" => self.notice(&format!("[{}] {}", crate::daw::command_name(crate::daw::current().id()), get("title"))),
+            "watching" => self.notice(&if value["on"] == true {
+                let words = crate::daw::words();
+                format!(
+                    "[{}] Kumi is watching the {}; do it in {}, then tell Kumi you're done.",
+                    crate::daw::command_name(crate::daw::current().id()),
+                    words.place,
+                    words.app
+                )
             } else {
-                "[live] Kumi stopped watching."
+                format!("[{}] Kumi stopped watching.", crate::daw::command_name(crate::daw::current().id()))
             }),
             "recipe" => self.notice(&format!(
                 "[recipe] {} “{}” ({} steps)",

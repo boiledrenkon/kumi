@@ -1,4 +1,5 @@
 pub mod classify;
+pub mod daw_sources;
 pub mod features;
 pub mod learn;
 pub mod learner;
@@ -16,7 +17,7 @@ pub mod taste;
 pub mod tools;
 pub mod xml;
 
-use crate::core::daw::DawProfile;
+use crate::core::daw::{DawId, DawProfile};
 use crate::{
     core::{
         contracts::{KernelTool, LibraryState as StatusState, LibraryStatus},
@@ -484,6 +485,10 @@ impl Library {
         result.map(Some)
     }
     pub async fn sound_index(&self) -> Result<Rc<SoundIndex>, RuntimeError> {
+        self.sound_index_in(None).await
+    }
+    /// The sounds offered in a session with this DAW: a DAW's own library only in that DAW (Live's when none is known).
+    pub async fn sound_index_in(&self, daw: Option<DawId>) -> Result<Rc<SoundIndex>, RuntimeError> {
         self.remembering().await;
         // One check and build at a time. The model's first searches come together (a kick, a snare, a hat, a perc),
         // and each used to find no index and build its own from the whole log: four at once took four times one.
@@ -494,14 +499,24 @@ impl Library {
         }
         let (_, presets, sets) = self.counts.get();
         self.counts.set((reader.entries.len(), presets, sets));
-        let current = self.sources().await;
-        let key = current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n");
+        let (current, hidden): (Vec<Source>, Vec<Source>) = self.sources().await.into_iter().partition(|s| s.offered_in(daw));
+        // Another DAW's library is never offered here, even where a folder offered here holds it (a Live Place around
+        // Renoise's User Library): what that library's own walk reads stays out of this index.
+        let hidden: Vec<Source> = hidden.into_iter().filter(Source::is_daw_library).collect();
+        // Live's when none is known, as `offered_in` reads it: the warm-up's index (built with none) is Live's own.
+        let key =
+            format!("{:?}\n{}", daw.unwrap_or(DawId::Ableton), current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n"));
         let rebuild =
             self.held.borrow().as_ref().is_none_or(|held| {
                 held.key != key || (self.stale.get() && (self.progress.borrow().is_none() || now_ms() - held.at >= 3000))
             });
         if rebuild {
-            let entries = reader.entries.values().cloned().collect::<Vec<_>>();
+            let entries = reader
+                .entries
+                .values()
+                .filter(|entry| !hidden.iter().any(|library| daw_sources::owns(library, &entry.path)))
+                .cloned()
+                .collect::<Vec<_>>();
             drop(reader);
             let index = Rc::new(SoundIndex::build(entries, &current).await);
             *self.held.borrow_mut() = Some(HeldIndex { index, key, at: now_ms() });
@@ -648,6 +663,12 @@ impl LibraryAccess for Library {
     }
     async fn folders(&self) -> Vec<String> {
         self.sources().await.into_iter().map(|s| s.path).collect()
+    }
+    async fn sounds_in(&self, daw: Option<DawId>) -> Result<Rc<SoundIndex>, RuntimeError> {
+        self.sound_index_in(daw).await
+    }
+    async fn folders_in(&self, daw: Option<DawId>) -> Vec<String> {
+        self.sources().await.into_iter().filter(|s| s.offered_in(daw)).map(|s| s.path).collect()
     }
     async fn measure(&self, path: String, options: features::MeasureOptions) -> Result<SoundEntry, RuntimeError> {
         let relative = path.split(['\\', '/']).next_back().unwrap_or("").to_owned();

@@ -1,4 +1,6 @@
 //! `kumi doctor`, and voice readiness checks.
+#[path = "support/live_words.rs"]
+mod live_words;
 use futures::FutureExt;
 use kumi::{doctor::*, live_app::InstalledLive, live_extension::install_extension, tui::tty::TtyOutput};
 use kumi_common::time::now_ms;
@@ -665,4 +667,135 @@ fn a_missing_bridge_is_to_fix_only_where_a_live_12_can_take_it() {
         assert_eq!(check.status, CheckStatus::Fix);
         assert_eq!(check.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
     }
+}
+
+/// A producer with REAPER's bridge alone (and no Live): the doctor speaks of REAPER, never of Live, and finds nothing
+/// to fix for a DAW they don't use.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_only_doctor_never_speaks_lives_words() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |p: &str| root.path().join(p).display().to_string();
+    let env = Env::from([
+        ("KUMI_MODEL".into(), "openai/gpt-fixture".into()),
+        ("OPENAI_API_KEY".into(), "sk-fixture-never-printed".into()),
+        ("KUMI_AUTH_FILE".into(), path("auth.json")),
+        ("KUMI_SETTINGS_FILE".into(), path("settings.json")),
+        ("KUMI_PROJECTS_DIR".into(), path("projects")),
+        ("KUMI_LIBRARY_DIR".into(), path("library")),
+        ("KUMI_LIVE_EXTENSIONS_DIR".into(), path("Ableton/Extensions")),
+        ("KUMI_REAPER_RESOURCE_DIR".into(), path("REAPER")),
+        ("KUMI_RENOISE_PREFS_DIR".into(), path("Renoise")),
+        ("KUMI_HOME".into(), path(".kumi")),
+        ("HOME".into(), root.path().display().to_string()),
+    ]);
+    // Kumi's extension in REAPER, as its receipt says.
+    let paths = daw_bridge::paths::BridgePaths::new(&root.path().join(".kumi"), daw_bridge::daw::Daw::Reaper);
+    fs::create_dir_all(&paths.root).unwrap();
+    fs::create_dir_all(root.path().join("REAPER/UserPlugins")).unwrap();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: path("REAPER/UserPlugins/reaper_kumi.dylib"),
+        reference: path("REAPER/UserPlugins/kumi-bridge-reference.json"),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        copies: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    daw_bridge::files::ensure_secret(&paths.secret()).unwrap();
+    fs::write(root.path().join("REAPER/UserPlugins/reaper_kumi.dylib"), b"extension").unwrap();
+    fs::write(root.path().join("REAPER/UserPlugins/kumi-bridge-reference.json"), "{}").unwrap();
+    kumi::daw::work_with(kumi::daw::chosen(None, &env).0.id());
+    let mut io = DoctorIo::new(Rc::new(Out::default()), env.clone());
+    io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(120), rows: Some(36) });
+    io.video_programs = Some(Rc::new(|| {
+        async { Ok(VideoPrograms { ffmpeg: Some("/usr/bin/ffmpeg".into()), whisper: Some("/usr/bin/whisper-cli".into()) }) }.boxed_local()
+    }));
+    io.hands = Some(Rc::new(|| async { Ok(None) }.boxed_local()));
+    io.voice = Some(Rc::new(|| async { Ok(ready()) }.boxed_local()));
+    io.model_servers = Some(Rc::new(|| async { Ok(vec![]) }.boxed_local()));
+    let mut installation = quiet_installation();
+    installation.lives = Some(Rc::new(Vec::new));
+    io.installation = installation;
+    let sections = doctor_sections(&io).await.unwrap();
+    let text = sections
+        .iter()
+        .flat_map(|section| {
+            std::iter::once(section.title.clone())
+                .chain(section.checks.iter().map(|c| format!("{} {}", c.text, c.next.clone().unwrap_or_default())))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let leaks = live_words::leaks(&text);
+    assert!(leaks.is_empty(), "the doctor says Live's words:\n{}\n\nin:\n{text}", leaks.join("\n"));
+    assert!(text.contains("REAPER"), "{text}");
+    let fixes: Vec<&Check> = sections.iter().flat_map(|s| &s.checks).filter(|c| c.status == CheckStatus::Fix).collect();
+    assert!(fixes.iter().all(|c| c.text.contains("REAPER")), "nothing to fix for a DAW this producer doesn't use: {fixes:?}");
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
+}
+
+/// A Live producer who has opened Renoise once (its preferences folder is there) but never put Kumi's tool in sees the
+/// doctor as before REAPER and Renoise (review L7); `kumi --daw renoise doctor` gets a note about it, never a fix.
+#[tokio::test(flavor = "current_thread")]
+async fn a_live_producer_who_opened_renoise_once_gets_a_note_not_a_fix() {
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
+    let s = Setup::new();
+    let mut io = s.io();
+    io.env.insert("KUMI_REAPER_RESOURCE_DIR".into(), s.root.path().join("no-reaper").display().to_string());
+    io.env.insert("KUMI_RENOISE_PREFS_DIR".into(), s.root.path().join("no-renoise").display().to_string());
+    let fixes = |checks: &[Check]| checks.iter().filter(|c| c.status == CheckStatus::Fix).map(|c| c.text.clone()).collect::<Vec<_>>();
+    let before = doctor_checks(&io).await.unwrap();
+    let prefs = s.root.path().join("Renoise");
+    fs::create_dir_all(prefs.join("V3.5.4")).unwrap();
+    io.env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
+    let after = doctor_checks(&io).await.unwrap();
+    let texts = |checks: &[Check]| checks.iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+    assert_eq!(texts(&before), texts(&after), "Live's doctor as before: no rows for a DAW never set up");
+    assert!(!texts(&after).iter().any(|text| text.contains("Renoise")), "{:?}", texts(&after));
+    // Asked about Renoise (`--daw renoise doctor`): a note, never a fix.
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Renoise);
+    let asked = doctor_checks(&io).await.unwrap();
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
+    assert_eq!(fixes(&before), fixes(&asked), "no fix for a DAW never set up");
+    let note = find(&asked, "Kumi's tool isn't in Renoise");
+    assert_eq!(note.status, CheckStatus::Note);
+    assert!(note.next.as_deref().is_some_and(|next| next.contains("--daw renoise bridge")), "{note:?}");
+}
+
+/// A KUMI_DAW Kumi doesn't know: the doctor still runs, and says that's why Kumi won't start.
+#[tokio::test(flavor = "current_thread")]
+async fn a_kumi_daw_kumi_doesnt_know_is_a_fix_the_doctor_names() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |p: &str| root.path().join(p).display().to_string();
+    let env = Env::from([
+        ("KUMI_DAW".into(), "bitwig".into()),
+        ("KUMI_MODEL".into(), "openai/gpt-fixture".into()),
+        ("OPENAI_API_KEY".into(), "sk-fixture-never-printed".into()),
+        ("KUMI_AUTH_FILE".into(), path("auth.json")),
+        ("KUMI_SETTINGS_FILE".into(), path("settings.json")),
+        ("KUMI_PROJECTS_DIR".into(), path("projects")),
+        ("KUMI_LIBRARY_DIR".into(), path("library")),
+        ("KUMI_LIVE_EXTENSIONS_DIR".into(), path("Ableton/Extensions")),
+        ("KUMI_HOME".into(), path(".kumi")),
+        ("HOME".into(), root.path().display().to_string()),
+    ]);
+    let mut io = DoctorIo::new(Rc::new(Out::default()), env.clone());
+    io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(120), rows: Some(36) });
+    io.video_programs = Some(Rc::new(|| {
+        async { Ok(VideoPrograms { ffmpeg: Some("/usr/bin/ffmpeg".into()), whisper: Some("/usr/bin/whisper-cli".into()) }) }.boxed_local()
+    }));
+    io.hands = Some(Rc::new(|| async { Ok(None) }.boxed_local()));
+    io.voice = Some(Rc::new(|| async { Ok(ready()) }.boxed_local()));
+    io.model_servers = Some(Rc::new(|| async { Ok(vec![]) }.boxed_local()));
+    io.installation = quiet_installation();
+    let sections = doctor_sections(&io).await.unwrap();
+    let fix = sections.iter().flat_map(|s| &s.checks).find(|c| c.text.contains("KUMI_DAW")).expect("the doctor names KUMI_DAW");
+    assert_eq!(fix.status, CheckStatus::Fix);
+    assert_eq!(fix.text, "Kumi won't start: KUMI_DAW must be one of: ableton, reaper, renoise.");
+    assert_eq!(fix.next.as_deref(), Some("Set KUMI_DAW to one of those, or unset it"));
 }

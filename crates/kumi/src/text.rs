@@ -262,7 +262,7 @@ pub fn library_line(status: Option<&LibraryStatus>) -> Option<String> {
     let count = |value: usize| locale_count(value as i64);
     if status.learned_at.is_none_or(|at| at == 0) {
         if status.state == LibraryState::Paused {
-            return Some("Learning your library · paused while Live plays".to_string());
+            return Some(format!("Learning your library · paused while {} plays", crate::daw::words().app));
         }
         let progress = match status.todo {
             Some(todo) if todo != 0 => format!(" · {} of {} sounds", count(status.done.unwrap_or(0)), count(todo)),
@@ -270,7 +270,13 @@ pub fn library_line(status: Option<&LibraryStatus>) -> Option<String> {
         };
         return Some(format!("Learning your library in the background{progress}"));
     }
-    let known = format!("Your library: {} sounds · {} presets · {} Sets", count(status.sounds), count(status.presets), count(status.sets));
+    // Sets are Live's own files: another DAW's projects aren't learned yet.
+    let sets = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
+        format!(" · {} Sets", count(status.sets))
+    } else {
+        String::new()
+    };
+    let known = format!("Your library: {} sounds · {} presets{sets}", count(status.sounds), count(status.presets));
     Some(match status.todo {
         Some(todo) if status.state == LibraryState::Learning && todo != 0 => {
             format!("{known} · learning {} new", locale_count(todo as i64 - status.done.unwrap_or(0) as i64))

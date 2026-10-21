@@ -71,7 +71,7 @@ pub fn reference_tools_for(
     if profile == DawProfile::ABLETON {
         return vec![Rc::new(tool)];
     }
-    vec![Rc::new(InDaw { tool, description: description(&profile), place: profile.words.place })]
+    vec![Rc::new(InDaw { tool, description: description(&profile), profile })]
 }
 
 /// Live's description, as the reference tool gives it.
@@ -81,7 +81,18 @@ static LIVE_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(
 struct InDaw {
     tool: ReferenceTool,
     description: String,
-    place: &'static str,
+    profile: DawProfile,
+}
+
+/// Whether the reference names something in the project by its ref (REAPER's `item:3`, Renoise's `sample:2`), not a
+/// file, a link, plain words or a question's answer.
+fn names_a_ref(what: &str) -> bool {
+    let Some((kind, rest)) = what.split_once(':') else { return false };
+    !what.contains(char::is_whitespace)
+        && !rest.starts_with("//")
+        && !matches!(kind, "artist" | "album")
+        && !kind.is_empty()
+        && kind.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 #[async_trait(?Send)]
@@ -93,7 +104,7 @@ impl KernelTool for InDaw {
         &self.description
     }
     fn input_schema(&self) -> JsonObject {
-        what_schema(self.place)
+        what_schema(&self.profile)
     }
     fn reach(&self) -> crate::core::contracts::Reach {
         self.tool.reach()
@@ -101,7 +112,19 @@ impl KernelTool for InDaw {
     fn deferred(&self) -> bool {
         self.tool.deferred()
     }
-    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+    async fn execute(&self, mut input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        // Something in the project by its ref (an item, a sample): its audio file, as the DAW gives it.
+        let what = input.get("what").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if let Some(resolve) = self.tool.resolve.as_ref().filter(|_| names_a_ref(&what)) {
+            match resolve(what.clone(), signal.clone()).await {
+                Ok(Some(file)) => {
+                    input.insert("what".into(), file.into());
+                }
+                Err(error) if !error.is_aborted() => return Ok(ToolResult::error(error.to_string())),
+                Err(error) => return Err(error),
+                Ok(None) => {}
+            }
+        }
         self.tool.execute(input, signal).await
     }
     fn role(&self) -> Option<crate::core::contracts::ToolRole> {
@@ -112,13 +135,14 @@ impl KernelTool for InDaw {
     }
 }
 
-fn what_schema(place: &str) -> JsonObject {
+fn what_schema(profile: &DawProfile) -> JsonObject {
+    let (place, clip, clip_ref) = (profile.words.place, crate::core::daw::with_article(profile.vocab.clip), profile.vocab.clip_ref);
     json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["what"],
         "properties": {
-            "what": {"type": "string", "minLength": 1, "maxLength": 1024, "description": format!("The reference: a file or folder path, a clip in the {place} (its clipRef), a YouTube or Spotify link, an artist, album or genre in plain words, or a question's answer (its option's what: artist:<id> or album:<id>)")},
+            "what": {"type": "string", "minLength": 1, "maxLength": 1024, "description": format!("The reference: a file or folder path, {clip} in the {place} (its {clip_ref}), a YouTube or Spotify link, an artist, album or genre in plain words, or a question's answer (its option's what: artist:<id> or album:<id>)")},
             "tracks": {"type": "integer", "minimum": 3, "maximum": 10, "description": "How many example tracks to measure (6 when left out)"},
             "again": {"type": "boolean", "description": "Measure it again even though it's kept"}
         }
@@ -141,7 +165,7 @@ impl KernelTool for ReferenceTool {
         true
     }
     fn input_schema(&self) -> JsonObject {
-        what_schema(DawProfile::ABLETON.words.place)
+        what_schema(&DawProfile::ABLETON)
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let mut what = input.get("what").and_then(Value::as_str).unwrap_or("").trim().to_string();

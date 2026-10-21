@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/kumi-common", "crates/kumi-store", "crates/kumi-genexpr", "crates/kumi-runtime", "crates/ableton-mcp-server", "crates/kumi"]
+members = [
+    "crates/kumi-common",
+    "crates/kumi-store",
+    "crates/kumi-genexpr",
+    "crates/kumi-runtime",
+    "crates/ableton-mcp-server",
+    "crates/kumi",
+    "crates/daw-bridge",
+    "crates/daw-mcp-server",
+    "crates/reaper-kumi",
+]
 
 [workspace.package]
 edition = "2021"
@@ -14,6 +24,7 @@ kumi-store = { path = "crates/kumi-store" }
 kumi-genexpr = { path = "crates/kumi-genexpr" }
 kumi-runtime = { path = "crates/kumi-runtime" }
 ableton-mcp-server = { path = "crates/ableton-mcp-server" }
+daw-bridge = { path = "crates/daw-bridge" }
 
 async-trait = "0.1"
 base64 = "0.22"
@@ -97,6 +108,15 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# REAPER's extension is never stripped by rustc: on macOS 27 (ld-27037) a rustc strip can leave the library's LINKEDIT
+# string pool misaligned, depending on its symbol count, and dyld then refuses to load it. It's stripped after the
+# build with the platform's own strip instead, which leaves it loadable.
+[profile.dev.package.reaper-kumi]
+strip = "none"
+
+[profile.release.package.reaper-kumi]
+strip = "none"
+
 # The Installer's builds on pull requests and main, which are installed and checked but never published: the
 # release build without whole-program optimization and with parallel code generation, to build faster. Tags, the
 # builds that are published, use `release`.
@@ -106,3 +126,6 @@ lto = "off"
 codegen-units = 16
 # Installed and checked, never timed or published: less optimizing, for a build in half the time.
 opt-level = 1
+
+[profile.ci-release.package.reaper-kumi]
+strip = "none"

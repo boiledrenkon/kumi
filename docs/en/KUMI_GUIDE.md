@@ -6,7 +6,10 @@ Kumi is a producer agent for the Ableton Live Set you have open, in your
 terminal. It reads the Set, makes the changes you ask for and shows each one in
 HISTORY. It plays, records and renders, listens to audio and compares it with a
 reference, watches video tutorials, makes Max for Live devices, looks things up
-on the web, and remembers how you work.
+on the web, and remembers how you work. It works in REAPER projects and Renoise
+songs too: most of this guide speaks of Live, and
+[Connect to REAPER or Renoise](#connect-to-reaper-or-renoise) says what differs
+there.
 
 To install Kumi and connect it to Live, follow [Quickstart](../../README.md#quickstart).
 This guide covers everything after that. For the keys and the screen, see
@@ -191,6 +194,79 @@ Then Kumi can also map rack macros, set
 chain zones and, with a passing self-test, edit Follow Actions, on the Live versions Willington has
 bindings for: Live 12.4.15b4 and b5 on macOS ARM64 (chain zones on b5 only) and
 Live 12.4.15b5 on Windows x64. See [Willington](WILLINGTON_INTEGRATION.md).
+
+## Connect to REAPER or Renoise
+
+Kumi works in REAPER 7 or later and Renoise 3.5 or later, on macOS, Windows and
+Linux. Each has a bridge of Kumi's own: an extension REAPER loads from its
+`UserPlugins` folder (`reaper_kumi`), and a tool Renoise loads from
+`Scripts/Tools` in its preferences (`com.kumi.Bridge.xrnx`). Kumi reaches it
+through its host (`daw-mcp-server`, installed beside Kumi), on your computer
+only: the bridge listens on 127.0.0.1 and answers only Kumi, with a secret kept
+in `~/.kumi`. There's no Control Surface to choose.
+
+**Setting up.** Run `kumi --daw reaper` or `kumi --daw renoise` (or set
+`KUMI_DAW` to `reaper` or `renoise`). Setup signs you in, then runs **Connect to
+REAPER** (or **Connect to Renoise**), on Linux too: Kumi puts its extension (or
+tool) in place and opens the DAW.
+
+- **The DAW is open:** it loads Kumi's bridge only as it starts, and Kumi never
+  quits it for you. Choose **I'll quit it** and quit it yourself (it asks to
+  save first); Kumi puts the bridge in and opens it again. A project or song
+  you saved is in the DAW's list of recent ones.
+- **It isn't installed:** Kumi says where to get it (reaper.fm, renoise.com);
+  **Look again** checks once it's there. An older REAPER or Renoise that's open
+  is named, and stays open.
+- **It was never opened:** Kumi opens it once, so it makes its own folders;
+  quit it when Kumi asks, and Kumi opens it again with the bridge.
+- **Esc** leaves the step for later, as with Live: Kumi chats without the DAW.
+
+`kumi --daw reaper bridge` (or `renoise`) does the same from a shell: it asks
+before writing into the DAW's folder (`--yes` answers beforehand), puts the
+bridge in or brings it up to date, and says to restart the DAW if it's open.
+
+**Which DAW.** After that, `kumi` alone works with the DAW whose bridge is in.
+With several, it takes the one running now, else the one you used last, else
+Live, and says when another is open too ("Renoise is open too: Kumi works with
+REAPER. /daw renoise switches to Renoise."). `/daw` says which DAW Kumi works
+with, and `/daw <name>` (`live`, `reaper` or `renoise`) closes Kumi and opens it
+again with that one. `--daw` and `KUMI_DAW` always decide.
+
+**Where Kumi looks.**
+
+- **REAPER:** its resource folder (`~/Library/Application Support/REAPER` on a
+  Mac, `%APPDATA%\REAPER` on Windows, `~/.config/REAPER` or `~/.reaper` on
+  Linux), each portable REAPER in the usual app folders (a `reaper.ini` beside
+  the app), the one Kumi's extension went in, or only the folder
+  `KUMI_REAPER_RESOURCE_DIR` names. A portable REAPER elsewhere (on another
+  drive, say) needs `KUMI_REAPER_RESOURCE_DIR` the first time.
+- **Renoise:** the newest preferences folder for 3.5 or later (such as
+  `V3.5.4` in `~/Library/Preferences/Renoise`, `%APPDATA%\Renoise`, or
+  `~/.config/Renoise` or `~/.renoise` on Linux), or the one
+  `KUMI_RENOISE_PREFS_DIR` names: a `V<x.y.z>` folder, or the folder that holds
+  them.
+
+**Connected.** Once the DAW runs with the bridge, Kumi connects by itself, and
+again whenever the DAW comes back. While the DAW is busy (a dialog, a render),
+Kumi says so and changes nothing until it answers.
+
+**What works there.** Kumi reads the project or song, changes it with undo
+([REAPER and Renoise](KUMI_CHANGES.md#reaper-and-renoise) lists what it can
+change and what undo does there), and FOCUS, NOW and HISTORY follow the DAW's
+own views ([commands, keys and screens](KUMI_TUI.md#reaper-and-renoise)). It
+listens, judges its changes, works with `/loop` and `/goal`, matches
+references, takes instant phrases, catches up on what changed while it was
+closed, turns what you do by hand into recipes, and uses your library, notes
+and conversations, all in the DAW's words ([what Kumi does in Live, REAPER and
+Renoise](DAWS.md) compares them). In REAPER it can also run REAPER's
+actions, its API and Lua (ReaScript); in Renoise, Lua. These stay Live's: Max
+for Live devices, Kumi Ears, Willington, Kumi's Live extension (with **Ask
+Kumi about this**), Live's own commands and Live's manual.
+
+**Versions.** Each Kumi release ships with an extension and a tool, which
+`kumi update` brings up to date ([updating](#updating-reporting-and-uninstalling)).
+Kumi 1.20.0 with REAPER extension 0.1.0.
+Kumi 1.20.0 with Renoise tool 1.0.0.
 
 ## Working with Kumi
 
@@ -418,6 +494,23 @@ up:
   its candidates back and puts its best on "Kumi · Goal best" when it pauses or
   ends. Without Max for Live, Kumi records to listen instead, and the candidates
   play together.
+
+**Hearing a REAPER project or a Renoise song.** Kumi renders the part offline
+(faster than it plays, with a bar before it), hears that, then plays it out
+loud for you (up to a minute). A track is rendered on its own: REAPER's
+pre-fader stem, or Renoise's track solo.
+
+- **While REAPER plays**, Kumi can hear the master output as it plays (8
+  seconds by default); a track on its own is rendered.
+- **While Renoise plays**, a render would stop its playback, and Renoise's
+  scripts can't hear what it plays: Kumi renders only a part you name.
+- **Judged changes** keep their level with the last ReaLimit, else a JS: Volume
+  Adjustment Kumi adds (REAPER), or the last Maximizer, else a Gainer (Renoise).
+  Goals and the sound-match search try their candidates on scratch copies of the
+  track ("Kumi · try …"), which Kumi takes away after; the best stays on
+  "Kumi · Goal best".
+- Renoise's demo can't render, so Kumi can't listen there; `kumi doctor` says
+  so.
 
 ## Judging changes and the loop
 
@@ -808,13 +901,16 @@ choose an item to forget it, or a note to change its words or pin it.
   over a question Kumi itself just asked, and at most once every three answers.
   A tutorial, reference or steps you give always come first: Kumi reaches for a
   technique only when you leave the approach open, and says when it does. Up to
-  40, in `~/.kumi/techniques.json`.
+  40, in `~/.kumi/techniques.json`. Techniques aren't kept per DAW: one learned
+  in Live is offered in REAPER or Renoise as an idea to adapt.
 - **Recipes** (↻): ways of working you can replay in any Set, such as a vocal
   chain or a resampling loop. Ask Kumi to keep what it just did, describe a
   routine, or say "watch me", do it by hand in Live and say when you're done:
   Kumi turns what changed into a recipe with blanks for what differs each time.
   Ask for a recipe by name to run it, or use `/recipes`. Kept in
-  `~/.kumi/recipes`, one file each.
+  `~/.kumi/recipes`, one file each. REAPER's and Renoise's are kept apart
+  (`~/.kumi/recipes/reaper`, `~/.kumi/recipes/renoise`), made of that DAW's
+  changes, and offered and run only there.
 - **Lessons** (✦): what Kumi learned matching sounds, used by the next match.
   Up to 60, in `~/.kumi/playbook.json`.
 
@@ -892,6 +988,25 @@ knows a Set by an id it keeps inside it, so a Set moved, or saved under another
 name in the same Live Project folder, carries on; a copy saved elsewhere starts
 afresh.
 
+**In REAPER and Renoise** the same holds for each saved project or song:
+
+- Its conversations, notes and catch-up are its own. An unsaved one keeps them
+  in the DAW's unsaved place until its first save; then they go on in the saved
+  one's.
+- Kumi writes an id into a saved REAPER project (REAPER keeps it with your next
+  save), so a project moved, or saved under another name in the same folder,
+  carries on; a copy saved in another folder while the original is still there
+  starts afresh.
+- Another project's conversation: Kumi asks you to open that project yourself
+  (it can't open one there), and the conversation carries on once it's open.
+- Catch-up also tells what changed while REAPER or Renoise was closed or
+  restarted, in the DAW's words: REAPER's tracks, FX, items, markers and
+  regions, tempo and time signature; Renoise's tracks, devices, patterns,
+  instruments, tempo, lines per beat and pattern sequence.
+- The state it compares with is in `~/.kumi/bridges/reaper/snapshots` (or
+  `renoise`), readable only by you. Deleting it only makes the next catch-up
+  start afresh.
+
 ## When Live goes away
 
 Kumi notices within a second when Live closes or crashes, says so and keeps the
@@ -912,6 +1027,13 @@ Set yourself.
 Kumi's undo lasts as long as its connection to Live: after Live restarts, a
 reconnect or a Kumi restart, earlier changes read **no undo** and can be undone
 only with Live's own undo. `/new` keeps the connection, so undo still works.
+
+**REAPER and Renoise** going away is said the same way: Kumi chats without the
+DAW and connects again by itself once it answers ("REAPER answered, so Kumi is
+connected to it now."). Kumi's undo there keeps its newest 400 changes, as long
+as Kumi's link to the DAW lasts: after a `/reconnect` or a Kumi restart, earlier
+changes read **no undo**, and each says whether the DAW's own undo may still
+take it back.
 
 ## Updating, reporting and uninstalling
 
@@ -955,6 +1077,21 @@ terminal, it offers to wait while you quit Live (Kumi never quits Live itself). 
 bridge stays, which works with the earlier Kumi: to put back its bridge as well, quit Live and run
 `kumi update --rollback` twice.
 
+**REAPER's extension and Renoise's tool** follow Kumi, wherever Kumi's bridge is in:
+
+- `kumi update` puts in the copy the new Kumi carries and says to restart the DAW if it's open
+  ("Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."). Each goes where Kumi
+  put it, and a copy a newer Renoise made of the tool in its own version folder is brought along. One
+  you took out isn't put back ("Kumi's tool isn't in Renoise any more"), and an extension whose
+  REAPER folder is gone never moves into another REAPER: `kumi --daw reaper bridge` puts it in.
+- `--rollback` puts back the copies the earlier Kumi carried. A Kumi that doesn't know REAPER or
+  Renoise (1.19.3 and earlier) leaves them where they are, unused, and Kumi names the file or folder
+  to delete to take them out. That Kumi won't start while `KUMI_DAW` is `reaper` or `renoise`: unset
+  it to use it.
+- A copy that changed since Kumi put it in the DAW's folder is first kept in
+  `~/.kumi/bridges/reaper/changed` (or `renoise`), and Kumi says where.
+- Neither needs Live closed, nor the DAW: a running DAW loads the new copy when it restarts.
+
 For the current 1.7.5 installer (bundled Node 24):
 
 1. Close Live and run `kumi update` (or `/update` inside Kumi).
@@ -991,6 +1128,20 @@ nothing when there's none or no network. `"updateCheck": false` in
 Each problem names one next step. `doctor` exits with 1 when something needs
 fixing; notes (no Live on this computer, a newer Kumi) don't count.
 
+Where REAPER or Renoise has been used, `doctor` checks it too, in its words
+(`kumi --daw reaper doctor` speaks of that one):
+
+- the DAW, its version and where it is, and whether it has been opened;
+- Kumi's bridge in it: its version and checksum, whether it changed or went
+  since Kumi put it there, an older one than this Kumi's, its reference file and
+  secret, macOS's download mark on it, and the extension's architecture;
+- whether the DAW runs and its bridge answers (with the project or song open),
+  a DAW still running an older bridge (restart it), and another program on its
+  ports (REAPER 9770–9779, Renoise 9780–9789);
+- for Renoise: its demo (it can't render, so Kumi can't listen offline), its OSC
+  server (when on, it takes commands from the network without a password), and
+  Kumi's tool turned off in Tools › Tool Browser.
+
 `--json` prints the same checks for sharing, with keys, tokens, your home folder
 and account name taken out, as in a report. Its wording can change between
 versions, so it isn't meant for scripts to match:
@@ -1002,16 +1153,20 @@ versions, so it isn't meant for scripts to match:
 
 `report` writes `~/kumi-report-<date and time>.txt`: Kumi's and the bridge's
 versions, the doctor's checks, your settings, what Kumi did in your last
-conversation, the gap log, and the bridge's lines from Live's own log. Keys and
-tokens are taken out, your home folder shows as `~` and your account name as
-`<user>`. Read it before sending.
+conversation, the gap log, and the bridge's lines from Live's own log (for
+REAPER and Renoise, the last lines of Kumi's bridge logs in
+`~/.kumi/bridges/<daw>/logs`). Keys and tokens are taken out, your home folder
+shows as `~` and your account name as `<user>`. Read it before sending.
 
 `uninstall` removes Kumi, the one kept for `--rollback`, what updates leave
 behind, any retained legacy Node runtime, its launcher, the PATH entry it added
 and what Kumi fetched (programs, models and watched videos, fetched again when
 needed), and says how much space that frees. It offers to take the bridge and
-the extension out of Live (only while Live is closed). Your conversations,
-notes, recipes, sign-ins, library and references stay unless you add `--all`.
+the extension out of Live (only while Live is closed), Kumi's extension out of
+REAPER and its tool out of Renoise. Your conversations,
+notes, recipes, sign-ins, library and references stay unless you add `--all`,
+and so does catch-up's state for REAPER and Renoise; copies of their bridges you
+had changed (in `~/.kumi/bridges/<daw>/changed`) always stay.
 `--dry-run` says what it would remove, and removes nothing.
 
 - It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a
@@ -1047,8 +1202,9 @@ notes, recipes, sign-ins, library and references stay unless you add `--all`.
 | Free disk space checked first | 100 MB to record (on the Set's disk, or your home folder's for an unsaved Set), 100 MB to make a device (on the User Library's disk), twice a model's size and 200 MB more to fetch one of Kumi's own, a slot link's size and 200 MB more (in Kumi's folder) |
 
 **Listening** hears files, recordings and the Set's tracks and mix (the Set
-through Kumi Ears, which needs Max for Live). It measures, compares and judges
-changes against a goal; taste stays yours.
+through Kumi Ears, which needs Max for Live; a REAPER project or Renoise song by
+rendering it). It measures, compares and judges changes against a goal; taste
+stays yours.
 
 **Live's own commands** need Accessibility for your terminal on a Mac. Clip
 commands work on a Session clip or the clip you've selected.
@@ -1143,7 +1299,7 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `updateCheck` | `false` turns off the check for a newer version at start |
 | `whatsNew` | `false` turns off What's new as Kumi first starts after an update |
 | `notifications` | `"off"`: no desktop notification (or bell) while Kumi's window is behind another; `"auto"` otherwise |
-| `liveStatusBar` | `false`: no line in Live's status bar when Kumi finishes or needs you |
+| `liveStatusBar` | `false`: no line in Live's (or Renoise's) status bar when Kumi finishes or needs you |
 | `keepAwake` | `false`: the computer may sleep while Kumi works |
 | `answerAfter` | Seconds before Kumi takes its recommended answer when nobody's there (60); `0` never does |
 | `instantPhrases` | `false`: fixed phrases ("tempo 124", "mute drums") go to the model like any other message ([instant phrases](KUMI_TUI.md#instant-phrases)) |
@@ -1158,6 +1314,12 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 `~/.kumi/probes` what each knob was heard to do, by device and track, and
 `~/.kumi/models` the model runtime and Kumi's own models. All three follow
 `KUMI_HOME`.
+
+`~/.kumi/bridges/reaper` and `~/.kumi/bridges/renoise` hold what Kumi keeps for
+each DAW's bridge: its secret (`bridge.secret`), the files the running bridge
+announces itself in (`discovery`), its log (`logs`), its install receipt
+(`install-receipt.json`), the copies kept for rollback (`generations`), copies
+you changed (`changed`), and catch-up's state (`snapshots`). `~/.kumi/last-daw` is the DAW you used last.
 
 Environment variables (paths must be absolute):
 
@@ -1177,6 +1339,9 @@ Environment variables (paths must be absolute):
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | A Gemini API key for the listening model (Gemini's newest Flash model, from its own list) |
 | `KUMI_FAST=0` | Set device parameters through the bridge's preview and apply, the slower way ([how a change works](KUMI_CHANGES.md#how-a-change-works)) |
 | `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER`, `KUMI_WHISPER_MODEL` | Your own yt-dlp, ffmpeg, whisper.cpp (`whisper-cli`) or speech model (`ggml-*.bin`), by path |
+| `KUMI_DAW` | `reaper` or `renoise` to work in that DAW (`ableton` for Live), as `--daw` does |
+| `KUMI_REAPER_RESOURCE_DIR` | REAPER's resource folder, the only one Kumi then uses, when it isn't where REAPER keeps it by default |
+| `KUMI_RENOISE_PREFS_DIR` | Renoise's preferences: a `V<x.y.z>` folder, or the folder that holds them |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, when Kumi doesn't find it |
 | `KUMI_LIVE_EXTENSIONS_DIR` | Where `kumi bridge` puts Kumi's extension and `kumi doctor` looks for it, when Kumi doesn't find Live's Extensions folder |
 | `KUMI_BRIDGE_WAIT_SECONDS` | How long `kumi bridge` waits for Live to connect; `0` doesn't wait |

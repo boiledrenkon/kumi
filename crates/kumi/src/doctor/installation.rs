@@ -184,8 +184,8 @@ pub async fn installation_checks(env: &Env, io: &InstallationIo) -> Vec<Check> {
         None => free_bytes(Path::new(&home)).await,
     };
     checks.extend(space_check(free, &home));
-    // What each DAW needs from this computer.
-    for provider in crate::daw::providers() {
+    // What each DAW the producer uses needs from this computer.
+    for provider in crate::daw::providers().into_iter().filter(|provider| crate::daw::in_use(*provider, env)) {
         checks.extend(provider.installation_checks(env, io, &platform).await);
     }
     checks

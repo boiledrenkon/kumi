@@ -6,6 +6,7 @@ use super::{
     file_sync::FileSync,
     gaps::{gap_guidance, gap_tools_for},
     memory::{memory_instructions_for, memory_tools_for, MemoryTools, MemoryToolsOptions},
+    place::{kept_for, Place},
     recall::{recall_tool_for, RecallOptions},
     recipes::{recipe_instructions, recipe_tools_for, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
     store_client::StoreClient,
@@ -1172,6 +1173,21 @@ impl Session {
         }
         Ok(Some(kept.conversation))
     }
+    /// What Kumi says of a conversation kept in another DAW's place: whose it is, and how to carry it on there. None for
+    /// this DAW's (or an imported one).
+    fn elsewhere(&self, place: &str) -> Option<String> {
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
+        if kept_for(place, daw) {
+            return None;
+        }
+        let other = Place::parse(place).and_then(|place| place.daw()).and_then(crate::integrations::profile)?;
+        let (app, noun) = other.word_pair();
+        Some(format!(
+            "That conversation is about {} {app} {noun}: open Kumi with {app} (/daw {}) to carry it on there.",
+            if app.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" },
+            app.to_lowercase()
+        ))
+    }
     /// Rows as the app shows them: `current` is the conversation going on now (a store marks each place's own latest).
     fn mark_going(&self, rows: Vec<ConversationSummary>) -> Vec<ConversationSummary> {
         let (place, id) = {
@@ -1329,6 +1345,7 @@ impl Session {
         }
         let row = self.wanted_row(&wanted).await;
         let (daw, noun) = self.words();
+        let by_hand = !self.0.state.borrow().integration.as_ref().is_some_and(|integration| integration.has_open_place());
         self.emit(SessionEvent::SetAsked {
             ask: Some(SetAsk {
                 id: wanted.id.clone(),
@@ -1337,6 +1354,7 @@ impl Session {
                 open,
                 daw: daw.into(),
                 noun: noun.into(),
+                by_hand,
             }),
         });
     }
@@ -2501,6 +2519,10 @@ impl SessionController for Session {
             ConversationMatch::One(row) if row.id == id => row.place,
             _ => here.clone(),
         };
+        // Another DAW's conversation goes on only in that DAW: Kumi says whose it is, and how to open it there.
+        if let Some(words) = self.elsewhere(&place) {
+            return Err(KumiError::new(FailureKind::Request, words).into());
+        }
         let same = {
             let s = self.0.state.borrow();
             s.conversation_id == id && s.place.as_deref() == Some(&place)
@@ -2541,13 +2563,24 @@ impl SessionController for Session {
     }
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let Some(store) = &self.0.options.conversations else { return Ok(vec![]) };
-        Ok(self.mark_going(store.all().await?))
+        // This DAW's conversations (and imported ones): another DAW's go on in that DAW.
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
+        Ok(self.mark_going(store.all().await?.into_iter().filter(|row| kept_for(&row.place, daw)).collect()))
     }
     async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
         let Some(store) = &self.0.options.conversations else { return Ok(ConversationMatch::None) };
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
         Ok(match store.find(word).await? {
+            // (one of another DAW's is still found, so taking it up says whose it is)
             ConversationMatch::One(row) => ConversationMatch::One(self.mark_going(vec![row]).remove(0)),
-            ConversationMatch::Several(rows) => ConversationMatch::Several(self.mark_going(rows)),
+            ConversationMatch::Several(rows) => {
+                let ours: Vec<ConversationSummary> = rows.iter().filter(|row| kept_for(&row.place, daw)).cloned().collect();
+                match ours.len() {
+                    0 => ConversationMatch::Several(self.mark_going(rows)),
+                    1 => ConversationMatch::One(self.mark_going(ours).remove(0)),
+                    _ => ConversationMatch::Several(self.mark_going(ours)),
+                }
+            }
             other => other,
         })
     }
@@ -2669,6 +2702,11 @@ impl SessionController for Session {
             SetChoice::Open => {
                 let integration = self.0.state.borrow().integration.clone();
                 let opened = match integration {
+                    // The producer opens it (they were asked to): nothing to say Kumi couldn't.
+                    Some(integration) if !integration.has_open_place() => {
+                        self.notice(format!("Open {set} in {daw}, and this conversation carries on there."));
+                        return Ok(());
+                    }
                     Some(integration) => integration.open_place(&wanted.place, abort::timeout(30_000)).await?,
                     None => Err(format!("Kumi isn't connected to {daw}.")),
                 };
@@ -2997,10 +3035,13 @@ impl SessionController for Session {
         let Some(store) = &self.0.options.recipes else {
             return Ok(vec![]);
         };
+        // Only this DAW's recipes: another's steps are its own tools'.
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
         Ok(store
             .list()
             .await?
             .into_iter()
+            .filter(|r| r.daw() == daw)
             .map(|r| RecipeSummary {
                 name: r.name,
                 about: r.about,
@@ -3011,6 +3052,10 @@ impl SessionController for Session {
                 last_used: r.last_used.filter(|n| *n != 0.0),
             })
             .collect())
+    }
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        let integration = self.0.state.borrow().integration.clone();
+        integration.map_or_else(|| Some(pin.clone()), |integration| integration.pin_for_recipe(pin))
     }
     fn has_run_recipe(&self) -> bool {
         true
@@ -3090,10 +3135,12 @@ impl SessionController for Session {
         let Some(store) = &self.0.options.recipes else {
             return Ok(false);
         };
-        let Some(recipe) = store.get(name).await? else {
+        // (this DAW's: the panel lists only its recipes)
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
+        let Some(recipe) = store.get_in(name, daw).await? else {
             return Ok(false);
         };
-        if !store.remove(&recipe.name).await? {
+        if !store.remove_in(&recipe.name, daw).await? {
             return Ok(false);
         }
         self.changed_system(true);
@@ -3361,6 +3408,14 @@ impl SessionController for Session {
     }
     fn has_arrangement_strip(&self) -> bool {
         true
+    }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            // Live's four, as the session always offered them.
+            BodyKind::Tree | BodyKind::Notes | BodyKind::Grid | BodyKind::Timeline => true,
+            // Another DAW's own (a tracker's pattern, its matrix, keyzones, a track's routing), when its integration draws them.
+            _ => self.0.state.borrow().integration.as_ref().is_some_and(|i| i.can_show(kind)),
+        }
     }
     async fn arrangement_strip(&self) -> Result<Option<ArrangementStrip>, RuntimeError> {
         let i = {

@@ -943,3 +943,93 @@ case!(the_control_surface_step_says_where_settings_are_after_a_while, async {
     assert!(said(&h).contains("set a Control Surface to AbletonMcpBridge. Kumi notices by itself."));
     h.close().await;
 });
+
+case!(a_first_run_with_several_daws_here_asks_which_one_and_opens_again_with_it, async {
+    // Live and REAPER here, no bridge yet, none chosen before (review L2): setup asks before Live's step, and the DAW
+    // chosen is remembered and Kumi opens again with it; Live's step never starts.
+    use kumi_runtime::core::daw::DawId;
+    let live = FakeLive::new(false);
+    let picked: Rc<RefCell<Vec<DawId>>> = Rc::default();
+    let into = picked.clone();
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), move |o| {
+        o.ask_daw = vec![DawId::Ableton, DawId::Reaper];
+        o.pick_daw = Some(Rc::new(move |daw| into.borrow_mut().push(daw)));
+    });
+    h.start().await;
+    h.wait_for("Which DAW do you work in?").await;
+    h.has("› Live");
+    h.has("REAPER");
+    h.type_text("\x1b[B\r").await;
+    for _ in 0..200 {
+        if h.calls().contains(&"close".into()) {
+            break;
+        }
+        delay(10).await;
+    }
+    assert_eq!(*picked.borrow(), [DawId::Reaper]);
+    assert!(h.calls().contains(&"close".into()), "Kumi closes to open again with REAPER");
+    assert!(live.calls().is_empty(), "Live's step never started: {:?}", live.calls());
+    h.close().await;
+});
+
+case!(a_first_run_whose_daw_is_chosen_here_goes_on_with_its_setup, async {
+    // Live chosen among them: remembered, and Live's step goes on in this run.
+    use kumi_runtime::core::daw::DawId;
+    let live = FakeLive::new(false);
+    let picked: Rc<RefCell<Vec<DawId>>> = Rc::default();
+    let into = picked.clone();
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), move |o| {
+        o.ask_daw = vec![DawId::Ableton, DawId::Renoise];
+        o.pick_daw = Some(Rc::new(move |daw| into.borrow_mut().push(daw)));
+    });
+    h.start().await;
+    h.wait_for("Which DAW do you work in?").await;
+    h.type_text("\r").await;
+    h.wait_for("waiting for Live").await;
+    assert_eq!(*picked.borrow(), [DawId::Ableton]);
+    assert_eq!(live.calls(), ["open?", "install", "start", "connect"]);
+    h.close().await;
+});
+
+case!(an_own_daws_setup_hands_the_session_its_bridge_and_reconnects_it, async {
+    // Review K1: once setup has put REAPER's extension in (its receipt is written), connecting hands the session the
+    // bridge's reference and reconnects it, as Live's setup does, so the session connects without a restart.
+    use kumi::daw::DawProvider;
+    use kumi_runtime::core::contracts::SessionController;
+    let home = tempfile::tempdir().unwrap();
+    let kumi_home = home.path().join(".kumi");
+    let env = kumi_runtime::system::Env::from([
+        ("HOME".into(), home.path().display().to_string()),
+        ("KUMI_HOME".into(), kumi_home.display().to_string()),
+        ("KUMI_REAPER_RESOURCE_DIR".into(), home.path().join("REAPER").display().to_string()),
+    ]);
+    let bridge: Rc<RefCell<Option<String>>> = Rc::default();
+    let control = Rc::new(Control::default());
+    let controller: Rc<RefCell<Option<std::rc::Weak<dyn SessionController>>>> = Rc::default();
+    let as_controller: Rc<dyn SessionController> = control.clone();
+    *controller.borrow_mut() = Some(Rc::downgrade(&as_controller));
+    let setup = kumi::daw::own::REAPER.setup(&env, bridge.clone(), false, controller.clone());
+    // The extension in place: its receipt says where its reference is.
+    let paths = daw_bridge::paths::BridgePaths::new(&kumi_home, daw_bridge::Daw::Reaper);
+    std::fs::create_dir_all(paths.receipt().parent().unwrap()).unwrap();
+    let reference = home.path().join("REAPER/UserPlugins/kumi-bridge-reference.json").display().to_string();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: home.path().join("REAPER/UserPlugins/reaper_kumi.dylib").display().to_string(),
+        reference: reference.clone(),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        copies: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    std::fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    setup.connect().await;
+    assert_eq!(bridge.borrow().as_deref(), Some(reference.as_str()), "the session finds REAPER through the bridge now");
+    assert!(control.calls.borrow().contains(&"reconnect".to_string()), "and reconnects: {:?}", control.calls.borrow());
+    drop(as_controller);
+});

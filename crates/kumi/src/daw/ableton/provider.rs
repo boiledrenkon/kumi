@@ -50,10 +50,10 @@ impl DawProvider for Ableton {
     fn bundled_bridge_version(&self) -> Option<String> {
         bridge_setup::bundled_bridge_version()
     }
-    fn installed_bridge_version(&self, bridge_config: &str) -> Option<String> {
+    fn installed_bridge_version(&self, bridge_config: &str, _env: &Env) -> Option<String> {
         crate::doctor::read_bridge_server(bridge_config).ok().and_then(|s| s.version)
     }
-    fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool> {
+    fn bridge_answers(&self, bridge_config: &str, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let config = bridge_config.to_string();
         async move { bridge_setup::remote_script_answers(&config).await }.boxed_local()
     }
@@ -61,6 +61,15 @@ impl DawProvider for Ableton {
         let env = env.clone();
         async move { live_app::open_live(&bridge_setup::default_run(), kumi_runtime::system::platform(), &env).await.is_some() }
             .boxed_local()
+    }
+    fn here(&self, env: &Env) -> bool {
+        live_here() && live_app::installed(env, kumi_runtime::system::platform()) != crate::daw::provider::Installed::Missing
+    }
+    fn running_now(&self) -> bool {
+        crate::daw::processes().iter().any(|(_, name)| {
+            let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+            name == "Live" || (name.starts_with("Ableton Live") && name.ends_with(".exe"))
+        })
     }
     fn watch_words(&self) -> WatchWords {
         WatchWords { starting: LIVE_STARTING, unreachable: NO_LIVE, answered: "Live answered, so Kumi is connected to it now." }
@@ -74,8 +83,8 @@ impl DawProvider for Ableton {
             put_off: "Kumi connects to Live by itself once Live answers: in Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge.",
         })
     }
-    fn min_major(&self) -> u32 {
-        live_app::MIN_LIVE_MAJOR
+    fn min_version(&self) -> &'static str {
+        "12"
     }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let env = session.env.clone();
@@ -98,7 +107,7 @@ impl DawProvider for Ableton {
         options.willington = Some(Rc::new(move || Willington::find(&env).map(|willington| willington.switch())));
         (session.factory.ableton)(options)
     }
-    fn probe(&self, bridge_config: String, factory: &DawFactory) -> LocalBoxFuture<'static, LiveProbe> {
+    fn probe(&self, bridge_config: String, factory: &DawFactory, _env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         probe_live(bridge_config, factory.ableton.clone()).boxed_local()
     }
     fn bridge_state(&self, env: &Env, found: bool, missing: bool, bundled: Option<&str>, command: &str) -> BridgeState {

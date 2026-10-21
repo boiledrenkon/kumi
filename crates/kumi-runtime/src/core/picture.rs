@@ -1,5 +1,6 @@
 //! What a change looks like, before and after, for the producer to check by eye: the values that moved, an
-//! equaliser's curve, a compressor's curve, a clip's notes, an automation lane or a channel's levels. Plain,
+//! equaliser's curve, a compressor's curve, a clip's notes, an automation lane, a channel's levels, a tracker's lines,
+//! routes between tracks, an instrument's keyzones or items on the timeline. Plain,
 //! DAW-neutral data: an integration fills it from its own records, and the terminal draws it knowing nothing of
 //! the DAW. Kept small (at most [`MAX_BYTES`] as JSON), since saved conversations keep thousands of changes.
 
@@ -21,6 +22,11 @@ const MAX_POINTS: usize = 128;
 const MAX_SENDS: usize = 12;
 const MAX_NAME: usize = 64;
 const MAX_TEXT: usize = 32;
+const MAX_LINES: usize = 16;
+const MAX_LINE: usize = 120;
+const MAX_ROUTES: usize = 8;
+const MAX_ZONES: usize = 32;
+const MAX_ITEMS: usize = 32;
 
 /// A change's picture, by kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,9 +67,96 @@ pub enum ChangePicture {
         max: f64,
         before: Vec<[f64; 2]>,
         after: Vec<[f64; 2]>,
+        /// What it moves between and where, in the DAW's words ("−18 to 0 dB over bars 5–9"), for words in its place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        words: Option<String>,
     },
     /// A channel's fader, pan and sends, before and after.
     Mix { before: MixLevels, after: MixLevels },
+    /// A tracker's lines (a pattern's or a phrase's) before and after, each in the DAW's own notation; `more` lines
+    /// changed past those kept.
+    Lines {
+        lines: Vec<PictureLine>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        more: usize,
+    },
+    /// Routes made, taken away or changed (sends, receives, outputs), each from one end to the other with the values
+    /// that moved.
+    Routes { routes: Vec<PictureRoute> },
+    /// An instrument's keyzones before and after: each zone's notes (across) and velocities (up), with the values that
+    /// moved.
+    Zones {
+        before: Vec<PictureZone>,
+        after: Vec<PictureZone>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        values: Vec<PictureValue>,
+    },
+    /// Items on the timeline before and after (in seconds from the project's start), with the values that moved.
+    Items {
+        before: Vec<PictureItem>,
+        after: Vec<PictureItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        values: Vec<PictureValue>,
+    },
+}
+
+/// One line of a tracker before and after (its number as the DAW shows it: Renoise's from 0); an empty side is a line
+/// that had nothing (or has nothing now).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PictureLine {
+    pub line: u32,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
+}
+
+/// What became of a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteChange {
+    Made,
+    Removed,
+    Changed,
+}
+
+/// A route from one end (a track) to the other (a track, or an output), and what moved on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PictureRoute {
+    pub from: String,
+    pub to: String,
+    pub change: RouteChange,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<PictureValue>,
+}
+
+/// One keyzone: the sample it plays (or none), its notes and velocities as `[low, high]`, and its base note. Velocities
+/// a change didn't touch may be unknown: the zone is then drawn by its keys alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PictureZone {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub notes: [u8; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocities: Option<[u8; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<u8>,
+}
+
+/// One item on the timeline: where it starts and how long it is, its fades, and whether it's muted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureItem {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub start: f64,
+    pub length: f64,
+    #[serde(default, skip_serializing_if = "is_nothing")]
+    pub fade_in: f64,
+    #[serde(default, skip_serializing_if = "is_nothing")]
+    pub fade_out: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
 }
 
 /// One value that moved, as numbers in its range and as the DAW shows it, and what was asked when the DAW set
@@ -212,7 +305,7 @@ impl ChangePicture {
                     partial: partial || cut,
                 }
             }
-            ChangePicture::Automation { parameter, min, max, before, after } => {
+            ChangePicture::Automation { parameter, min, max, before, after, words } => {
                 let points = |points: Vec<[f64; 2]>| {
                     let mut points: Vec<[f64; 2]> = points.into_iter().filter(|[at, value]| at.is_finite() && value.is_finite()).collect();
                     points.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -221,9 +314,49 @@ impl ChangePicture {
                 if !min.is_finite() || !max.is_finite() || max <= min {
                     return None;
                 }
-                ChangePicture::Automation { parameter: cut(&parameter, MAX_NAME), min, max, before: points(before), after: points(after) }
+                ChangePicture::Automation {
+                    parameter: cut(&parameter, MAX_NAME),
+                    min,
+                    max,
+                    before: points(before),
+                    after: points(after),
+                    words: words.map(|words| cut(&words, MAX_LINE)),
+                }
             }
             ChangePicture::Mix { before, after } => ChangePicture::Mix { before: before.bounded(), after: after.bounded() },
+            ChangePicture::Lines { lines, more } => {
+                let mut lines: Vec<PictureLine> = lines
+                    .into_iter()
+                    .map(|line| PictureLine { line: line.line, before: cut(&line.before, MAX_LINE), after: cut(&line.after, MAX_LINE) })
+                    .filter(|line| line.before != line.after)
+                    .collect();
+                lines.sort_by_key(|line| line.line);
+                let past = lines.len().saturating_sub(MAX_LINES);
+                lines.truncate(MAX_LINES);
+                ChangePicture::Lines { lines, more: more + past }
+            }
+            ChangePicture::Routes { routes } => ChangePicture::Routes {
+                routes: routes
+                    .into_iter()
+                    .take(MAX_ROUTES)
+                    .map(|route| PictureRoute {
+                        from: cut(&route.from, MAX_NAME),
+                        to: cut(&route.to, MAX_NAME),
+                        change: route.change,
+                        values: values(route.values),
+                    })
+                    .filter(|route| !route.from.is_empty() || !route.to.is_empty())
+                    .collect(),
+            },
+            ChangePicture::Zones { before, after, values: list } => {
+                let zones = |zones: Vec<PictureZone>| zones.into_iter().take(MAX_ZONES).map(PictureZone::bounded).collect::<Vec<_>>();
+                ChangePicture::Zones { before: zones(before), after: zones(after), values: values(list) }
+            }
+            ChangePicture::Items { before, after, values: list } => {
+                let items =
+                    |items: Vec<PictureItem>| items.into_iter().filter_map(PictureItem::bounded).take(MAX_ITEMS).collect::<Vec<_>>();
+                ChangePicture::Items { before: items(before), after: items(after), values: values(list) }
+            }
         };
         (!picture.is_empty()).then_some(picture)
     }
@@ -244,14 +377,30 @@ impl ChangePicture {
                 let (before, after, _) = whole_bars(before, after, most);
                 ChangePicture::Notes { length, before, after, partial: true }
             }
-            ChangePicture::Automation { parameter, min, max, before, after } => ChangePicture::Automation {
+            ChangePicture::Automation { parameter, min, max, before, after, words } => ChangePicture::Automation {
                 parameter,
                 min,
                 max,
                 before: thin(before.clone(), half(before.len())),
                 after: thin(after.clone(), half(after.len())),
+                words,
             },
             ChangePicture::Mix { .. } => return None,
+            ChangePicture::Lines { lines, more } => {
+                let kept = half(lines.len());
+                ChangePicture::Lines { more: more + lines.len() - kept, lines: lines.into_iter().take(kept).collect() }
+            }
+            ChangePicture::Routes { routes } => ChangePicture::Routes { routes: routes.iter().take(half(routes.len())).cloned().collect() },
+            ChangePicture::Zones { before, after, values } => ChangePicture::Zones {
+                before: before.iter().take(half(before.len())).cloned().collect(),
+                after: after.iter().take(half(after.len())).cloned().collect(),
+                values: values.iter().take(values.len() / 2).cloned().collect(),
+            },
+            ChangePicture::Items { before, after, values } => ChangePicture::Items {
+                before: before.iter().take(half(before.len())).cloned().collect(),
+                after: after.iter().take(half(after.len())).cloned().collect(),
+                values: values.iter().take(values.len() / 2).cloned().collect(),
+            },
         };
         (!picture.is_empty()).then_some(picture)
     }
@@ -264,6 +413,10 @@ impl ChangePicture {
             ChangePicture::Notes { before, after, .. } => before.is_empty() && after.is_empty(),
             ChangePicture::Automation { before, after, .. } => before.is_empty() && after.is_empty(),
             ChangePicture::Mix { before, after } => before == &MixLevels::default() && after == &MixLevels::default(),
+            ChangePicture::Lines { lines, .. } => lines.is_empty(),
+            ChangePicture::Routes { routes } => routes.is_empty(),
+            ChangePicture::Zones { before, after, .. } => before.is_empty() && after.is_empty(),
+            ChangePicture::Items { before, after, .. } => before.is_empty() && after.is_empty(),
         }
     }
 }
@@ -283,6 +436,32 @@ impl PictureValue {
             asked: text(self.asked),
         };
         (!value.name.is_empty() && (value.to.is_some() || value.to_text.is_some())).then_some(value)
+    }
+}
+
+impl PictureZone {
+    fn bounded(self) -> PictureZone {
+        let range = |[a, b]: [u8; 2]| [a.min(b).min(127), a.max(b).min(127)];
+        PictureZone {
+            name: cut(&self.name, MAX_NAME),
+            notes: range(self.notes),
+            velocities: self.velocities.map(range),
+            base: self.base.map(|n| n.min(127)),
+        }
+    }
+}
+
+impl PictureItem {
+    fn bounded(self) -> Option<PictureItem> {
+        let fade = |n: f64| if n.is_finite() { n.clamp(0., self.length) } else { 0. };
+        (self.start.is_finite() && self.length.is_finite() && self.length > 0.).then(|| PictureItem {
+            name: cut(&self.name, MAX_NAME),
+            start: self.start,
+            length: self.length,
+            fade_in: fade(self.fade_in),
+            fade_out: fade(self.fade_out),
+            muted: self.muted,
+        })
     }
 }
 
@@ -343,6 +522,14 @@ fn whole_bars(before: Vec<ClipNote>, after: Vec<ClipNote>, most: usize) -> (Vec<
 
 fn is_false(flag: &bool) -> bool {
     !*flag
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+fn is_nothing(n: &f64) -> bool {
+    *n == 0.
 }
 
 /// Notes as `[start, pitch, duration, velocity]`, to 3 decimals (about a third of their size as objects); objects
@@ -538,7 +725,7 @@ fn unit(text: &str) -> String {
 /// Names an automation lane's parameter and draws the lane to the parameter's range, as discovery read them; a lane
 /// with a point outside that range keeps its own.
 pub fn name_lane(picture: &mut ChangePicture, name: &str, low: f64, high: f64) {
-    if let ChangePicture::Automation { parameter, min, max, before, after } = picture {
+    if let ChangePicture::Automation { parameter, min, max, before, after, .. } = picture {
         name.clone_into(parameter);
         if before.iter().chain(after.iter()).all(|point| (low..=high).contains(&point[1])) {
             (*min, *max) = (low, high);
@@ -579,9 +766,49 @@ mod tests {
             max: 1.,
             before: vec![],
             after: (0..1000).map(|i| [i as f64, 0.5]).collect(),
+            words: None,
         };
         let ChangePicture::Automation { after, .. } = points.bounded().unwrap() else { panic!() };
         assert!(after.len() <= MAX_POINTS);
+    }
+
+    #[test]
+    fn lines_routes_zones_and_items_stay_within_their_bounds() {
+        let many = ChangePicture::Lines {
+            lines: (1..=40)
+                .rev()
+                .map(|n| PictureLine { line: n, before: "--- .. .. .. ..".into(), after: format!("C-4 {n:02} .. .. ..") })
+                .collect(),
+            more: 0,
+        };
+        let ChangePicture::Lines { lines, more } = many.bounded().unwrap() else { panic!() };
+        assert_eq!((lines.len(), more), (MAX_LINES, 40 - MAX_LINES), "the first lines, and how many more");
+        assert_eq!((lines[0].line, lines[15].line), (1, 16), "in order");
+        let same = ChangePicture::Lines { lines: vec![PictureLine { line: 3, before: "OFF".into(), after: "OFF".into() }], more: 0 };
+        assert_eq!(same.bounded(), None, "a line written as it was draws nothing");
+        let first = ChangePicture::Lines { lines: vec![PictureLine { line: 0, before: "---".into(), after: "C-4".into() }], more: 0 };
+        assert_eq!(first.clone().bounded(), Some(first), "a tracker's first line is its 00");
+        let item = |length: f64, fade_out: f64| PictureItem { name: "Vox".into(), start: 1., length, fade_in: 0., fade_out, muted: false };
+        let items = ChangePicture::Items { before: vec![item(f64::NAN, 0.)], after: vec![item(2., 9.)], values: vec![] };
+        let ChangePicture::Items { before, after, .. } = items.bounded().unwrap() else { panic!() };
+        assert!(before.is_empty(), "no length, no item");
+        assert_eq!(after[0].fade_out, 2., "a fade is at most the item");
+        let zone = PictureZone { name: String::new(), notes: [60, 48], velocities: Some([200, 0]), base: Some(130) };
+        let ChangePicture::Zones { after, .. } =
+            (ChangePicture::Zones { before: vec![], after: vec![zone], values: vec![] }).bounded().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((after[0].notes, after[0].velocities, after[0].base), ([48, 60], Some([0, 127]), Some(127)));
+        let route = |from: &str| PictureRoute { from: from.into(), to: "Reverb".into(), change: RouteChange::Changed, values: vec![] };
+        let ChangePicture::Routes { routes } =
+            (ChangePicture::Routes { routes: (0..20).map(|_| route("Bass")).collect() }).bounded().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(routes.len(), MAX_ROUTES);
+        let json = serde_json::to_value(ChangePicture::Routes { routes: vec![route("Bass")] }).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "routes", "routes": [{"from": "Bass", "to": "Reverb", "change": "changed"}]}));
     }
 
     #[test]
@@ -590,7 +817,8 @@ mod tests {
         let picture = ChangePicture::Values { values: vec![value("Gain", Some(f64::NAN)), value("", Some(1.)), value("Drive", Some(0.5))] };
         assert_eq!(picture.bounded(), Some(ChangePicture::Values { values: vec![value("Drive", Some(0.5))] }));
         assert_eq!(ChangePicture::Values { values: vec![value("Gain", None)] }.bounded(), None);
-        let automation = ChangePicture::Automation { parameter: String::new(), min: 1., max: 1., before: vec![[0., 1.]], after: vec![] };
+        let automation =
+            ChangePicture::Automation { parameter: String::new(), min: 1., max: 1., before: vec![[0., 1.]], after: vec![], words: None };
         assert_eq!(automation.bounded(), None, "an empty range draws nothing");
         let silly = Dynamics { threshold_db: -20., ratio: 0.5, knee_db: 0., makeup_db: 0. };
         assert_eq!(ChangePicture::Dynamics { before: silly.clone(), after: silly, values: vec![] }.bounded(), None);

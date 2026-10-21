@@ -40,7 +40,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 | `cargo fmt --all --check` | 按 CI 的方式检查格式 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint 检查；目前在 CI 中仅供参考 |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | 跨 await 持有的 `RefCell` 借用；会使 Lint CI 任务失败 |
-| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | 用 cargo-nextest 运行 `Rust / Linux` 运行的测试（`--profile ci-os`：macOS 和 Windows 运行的测试；`--profile extended`：全部测试） |
+| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | 用 cargo-nextest 运行 `Rust / Linux` 各部分运行的测试（单个部分的用 `-p <crate>` 或 `--exclude <crate>`；`--profile ci-os`：macOS 和 Windows 运行的测试；`--profile extended`：全部测试） |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | 桥接的性能预算；见[开发者指南](DEVELOPER_GUIDE.md#构建测试与测量) |
 
 隔离运行器为测试提供独立的主目录：`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME` 和 `KUMI_HOME` 都指向一个全新的临时文件夹，`KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 则被移除，因此任何测试都无法触及你的 Live 文件夹或 `~/.kumi`。
@@ -97,7 +97,7 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 python3 -m unittest discover -s scripts/tests -p test_native_release.py
 ```
 
-它们检查桥接随附的指南中的每个链接：桥接的 README，以及 `scripts/build-native-release.py` 的 `DOCUMENTS` 中列出的十四篇 `docs/en` 页面。没有任何检查会核对三种语言是否一致，请手动保持同步。
+它们检查桥接随附的指南中的每个链接：桥接的 README，以及 `scripts/build-native-release.py` 的 `DOCUMENTS` 中列出的十四篇 `docs/en` 页面。没有任何检查会核对三种语言是否一致，请手动保持同步。发布脚本的测试（`test_release.py`）会检查 REAPER 扩展和 Renoise 工具在每种语言的文档（`KUMI_GUIDE.md`）中各有一行 ships-with 说明，并且写的是这个检出所带的版本。
 
 ## CI
 
@@ -105,26 +105,30 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 | 工作流 | 作业 | 运行内容 |
 | --- | --- | --- |
-| **CI** | `Rust / Linux` | 通过隔离运行器运行 `.config/nextest.toml` 的 `ci` 集合，只构建一次：除 Extended 工作流运行的长测试（配置文件中列出并说明原因）之外的全部测试。运行超过 30 秒的测试会按名称失败。然后运行 `git diff --check` |
+| **CI** | `Rust / Linux`、`Rust / Linux (Live's bridge)`、`Rust / Linux (DAW bridges)` | 通过隔离运行器运行 `.config/nextest.toml` 的 `ci` 集合，按 crate 分成三个部分同时运行（Kumi 及其运行时；`ableton-mcp-server`；`daw-bridge`、`daw-mcp-server` 和 `reaper-kumi`），所以没有哪个运行器要构建全部测试二进制：除 Extended 工作流运行的长测试（其中包括 REAPER 和 Renoise 的完整流程模拟，配置文件中列出并说明原因）之外的全部测试。运行超过 30 秒的测试会按名称失败。然后运行 `git diff --check` |
 | | `Rust / macOS`、`Rust / Windows` | `ci-os` 集合：因平台而异的测试（安装、启动和更新；终端、stdin 和 Windows 控制台；Hands；路径、文件和子进程；存储），也只构建这些测试 |
 | | `Rust / Lint`（Ubuntu） | `cargo fmt --check`、示例的构建和 Clippy（仅供参考，但跨 await 持有 `RefCell` 借用会使该任务失败） |
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script 的测试；编译该包 |
 | | `Live extension`（Ubuntu，Node 24） | 针对已提交的构建运行扩展的测试 |
 | | `Release scripts`（Ubuntu） | 检查本次修改的空白字符，然后运行打包测试、发布脚本的测试和 `scripts/check-installers.sh`（install.sh 是 POSIX sh；install.ps1 能被解析且只含 ASCII）。推送到 `main` 时，还会检查 `main` 的 raw 安装程序和最新版本中的安装程序 |
+| | `REAPER extension loads / macos-15`、`ubuntu-22.04`、`windows-2025` | 按发布时的样子检查 REAPER 扩展：发布构建和平台自己的 strip，发布脚本对发行包可携带内容的检查（REAPER 的入口点；macOS 上的签名和自身名称；Windows 上静态链接的 C 运行库；Linux 上不需要比 Kumi 更新的 glibc），用系统的加载器加载，以及 REAPER 经由 C++ 垫片（shim）的调用 |
+| | `Renoise tool`（Ubuntu） | 在固定版本的 LuaJIT 上针对 Renoise API 的模拟运行工具的 Lua 测试，以及对照 Renoise API 6.2 定义的 `lua-language-server --check` |
 | | `Required CI` | 只有以上全部通过时才通过 |
 | **Extended** | `Extended / Linux (1/3)` 至 `(3/3)`、`Extended / macOS (1/2)`、`(2/2)`、`Extended / Windows (1/3)` 至 `(3/3)`、`Extended / documentation tests` | 在装好官方 SDK 的情况下运行全部测试（`extended` 集合）：`ci` 省去的内容（录制源的预言测试，长时间的聆听、曲式和渲染模拟，使用 ffmpeg 的视频测试，基准测试，与官方 MCP 和模型 SDK 并排运行的互操作测试，从 Kumi 1.7.5 的迁移，计时构件的长时间扫描）以及每个平台的全部测试；然后是文档测试。每周、手动以及在带有 `full-tests` 标签的拉取请求上运行，不阻塞任何合并 |
+| | `Extended / REAPER SDK, newest header` | 用 Cockos 发布的最新 SDK 头文件构建 REAPER 扩展，检查生成的函数表，并列出改用它们会新增的函数 |
 | **Willington files** | `Willington files`（Ubuntu） | 只有仓库所有者从本仓库 `willington/` 分支发出的拉取请求才能修改 `vendor/willington/`，而这样的拉取请求不修改其他任何内容。运行的是 `main` 上的这项检查，它读取拉取请求的文件列表，从不读取其代码 |
-| **Installer** | `Native bundle / <target>`、`Aggregate native and existing-installer releases`，然后是 `Install / <system>` 和 `Existing installer transition / <system>`；`Installer edges / <system>`（三个）不需要发行包 | 每次推送到 `main`，以及修改安装的拉取请求，会为 x64 的 Linux 和 Windows、Apple Silicon 的 macOS 构建发行包，并在每个系统上按下文安装、检查和卸载。标签、手动运行和带有 `full-tests` 标签的拉取请求运行全部内容：为 macOS、Linux 和 Windows 的 Intel 与 ARM 构建原生发行包（Mac 发行包带有 Kumi 在 Mac 上使用 Live 菜单的辅助程序，通用、临时签名；Intel 的发行包在 Apple Silicon 上交叉构建），再构建现有安装用来更新的兼容版本，并连同安装程序一起，按 GitHub 提供发布文件的方式在本地提供它们。在每个系统上：像制作人那样用一行安装命令从这里安装（在 Windows 上使用 Windows PowerShell 5.1，`KUMI_HOME` 位于名称含非 ASCII 字符的文件夹中），检查版本、`doctor`、桥接及其分析工作进程，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，运行 `kumi update`、`kumi update --rollback` 和 `kumi uninstall`。随后每个系统上的一个安装（macOS arm64、Linux x64、Windows x64）在含空格和非 ASCII 字符的主目录中：用本次构建的安装程序安装 GitHub 的最新版本，再用 `KUMI_VERSION` 安装本次构建之前的那个版本；装入该版本的桥接；更新到本次构建并回滚两次，每次都检查 Kumi 和桥接；最后卸载。PATH 那一行在 macOS 上写入 zsh 的 `ZDOTDIR`，在 Linux 上写入 fish 的 `conf.d`，由该 shell 找到 `kumi`，卸载时被移除；Windows 在 PowerShell 7 中运行这些：本次构建的安装、桥接、回滚和卸载在名称含非 ASCII 字符的文件夹中的 `KUMI_HOME` 下进行，从之前那个版本的更新则在只含空格的主目录中进行（由该版本自己的更新程序解包）。过渡作业用 Kumi 1.7.5 和新的发行包运行迁移测试。edges 作业针对替代版本运行 install.sh 和 install.ps1：版本不存在、无应答、返回登录页面、校验和不匹配、Kumi 无法启动、Ctrl-C。推送 `v*` 标签时，在这些都通过之后，`publish` 把发行包和安装程序附加到发布版本上，并在说明由 `scripts/release.py` 撰写时发布该版本。 |
+| **Installer** | `Native bundle / <target>`、`Aggregate native and existing-installer releases`，然后是 `Install / <system>` 和 `Existing installer transition / <system>`；`Installer edges / <system>`（三个）不需要发行包 | 每次推送到 `main`，以及修改安装的拉取请求，会为 x64 的 Linux 和 Windows、Apple Silicon 的 macOS 构建发行包，并在每个系统上按下文安装、检查和卸载。标签、手动运行和带有 `full-tests` 标签的拉取请求运行全部内容：为 macOS、Linux 和 Windows 的 Intel 与 ARM 构建原生发行包（Mac 发行包带有 Kumi 在 Mac 上使用 Live 菜单的辅助程序，通用、临时签名；Intel 的发行包在 Apple Silicon 上交叉构建），再构建现有安装用来更新的兼容版本，并连同安装程序一起，按 GitHub 提供发布文件的方式在本地提供它们。在每个系统上：像制作人那样用一行安装命令从这里安装（在 Windows 上使用 Windows PowerShell 5.1，`KUMI_HOME` 位于名称含非 ASCII 字符的文件夹中），检查版本、`doctor`、桥接及其分析工作进程，再次安装作为修复，运行 `kumi bridge --yes` 安装到一个临时的 Remote Scripts 文件夹，把 REAPER 的扩展和 Renoise 的工具装进各放有一个制作人自己文件的临时 DAW 文件夹（`kumi --daw reaper|renoise bridge --yes`），检查每个都是发行包中的副本并带有参考文件、回执和保留的版本，用 REAPER 的入口点加载扩展，并启动 Kumi 为它们准备的宿主程序，然后运行 `kumi update`（两个桥接保持原样）、两次 `kumi update --rollback`（两者都回到之前 Kumi 的副本，再回来）和 `kumi uninstall`（两者都移除，保留制作人改动过的工具副本，制作人自己的文件不动）。随后每个系统上的一个安装（macOS arm64、Linux x64、Windows x64）在含空格和非 ASCII 字符的主目录中：用本次构建的安装程序安装 GitHub 的最新版本，再用 `KUMI_VERSION` 安装本次构建之前的那个版本；装入该版本的桥接；更新到本次构建并回滚两次，每次都检查 Kumi 和桥接（同时装有 REAPER 和 Renoise 的桥接，那个版本两者都不认识，会原样留下）；最后卸载。PATH 那一行在 macOS 上写入 zsh 的 `ZDOTDIR`，在 Linux 上写入 fish 的 `conf.d`，由该 shell 找到 `kumi`，卸载时被移除；Windows 在 PowerShell 7 中运行这些：本次构建的安装、桥接、回滚和卸载在名称含非 ASCII 字符的文件夹中的 `KUMI_HOME` 下进行，从之前那个版本的更新则在只含空格的主目录中进行（由该版本自己的更新程序解包）。过渡作业用 Kumi 1.7.5 和新的发行包运行迁移测试。edges 作业针对替代版本运行 install.sh 和 install.ps1：版本不存在、无应答、返回登录页面、校验和不匹配、Kumi 无法启动、Ctrl-C。推送 `v*` 标签时，在这些都通过之后，`publish` 把发行包和安装程序附加到发布版本上，并在说明由 `scripts/release.py` 撰写时发布该版本。 |
 
 在拉取请求上，运行的内容更少：
 
 - `Python Remote Script` 跳过 macOS。
 - Rust 的构建缓存只从 `main` 保存：拉取请求恢复 `main` 的缓存，不保存任何缓存。
-- 只有修改安装、更新、发布、Willington 的文件、Mac 辅助程序、Kumi 使用的 `tar` 和 PowerShell、下载方式（HTTP 客户端和网络设置）和路径的拼接、Kumi 把扩展放进 Live 的方式或依赖项的变更，Installer 才会在每个系统的一台机器上构建并安装；全部六个、从 GitHub 版本的更新、edges 和迁移在 `full-tests` 标签下运行。修改桥接（Remote Script、协议、Live 扩展）或版本号的变更会构建、安装并检查 Linux 的发行包；其他变更只构建 Linux 的发行包。
+- 每个部分的作业只在它测试的内容改变时运行：只改 Renoise 工具的 Lua 时 Rust 的作业会跳过；`REAPER extension loads` 在扩展的 crate、它链接的 `daw-bridge` 部分、锁文件和发布脚本改变时运行；`Renoise tool` 在 `daws/renoise` 改变时运行。
+- 只有修改安装、更新、发布、Willington 的文件、Mac 辅助程序、Kumi 使用的 `tar` 和 PowerShell、下载方式（HTTP 客户端和网络设置）和路径的拼接、Kumi 把扩展放进 Live 的方式、REAPER 和 Renoise 桥接的构建与装入方式（不包括 REAPER 的修改类型或宿主程序的工具）或依赖项的变更，Installer 才会在每个系统的一台机器上构建并安装；全部六个、从 GitHub 版本的更新、edges 和迁移在 `full-tests` 标签下运行。修改桥接（Remote Script、协议、Live 扩展）或版本号的变更会构建、安装并检查 Linux 的发行包；其他变更只构建 Linux 的发行包。
 - 修改 Kumi 保存其所保留内容的方式（`crates/kumi-store`、设置和登录信息、记忆、技巧、playbook、gaps、旧版 Kumi 的文件）的变更，也会运行 Linux 的安装检查，在已有数据上进行更新和回滚。
 - 在拉取请求和推送到 `main` 时，Installer 的发行包用 `ci-release` 配置构建，它省去 release 配置的全程序优化，优化程度也更低。标签用 `release` 构建。
 
-每次推送到 `main` 运行与修改安装的拉取请求相同的内容，每个标签运行 Installer 的全部内容。Extended 工作流每周运行全部测试。Installer 每晚会用 `release` 配置构建全部六个发行包，从而为下一个标签保持该配置的构建缓存。
+每次推送到 `main` 运行与修改安装的拉取请求相同的内容，每个标签运行 Installer 的全部内容。Extended 工作流每周运行全部测试。Installer 每晚会用 `release` 配置构建全部六个发行包（失败时会开一个 issue：“The nightly Installer build failed”），从而为下一个标签保持该配置的构建缓存。
 
 要合并到 `main`，`Required CI` 和 `Willington files` 必须通过。Installer 不是必需的。其余规则见[发布与分发](DISTRIBUTION_POLICY.md#合并门禁)。
 

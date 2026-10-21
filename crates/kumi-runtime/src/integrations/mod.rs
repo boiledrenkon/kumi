@@ -1,8 +1,27 @@
 //! The DAWs Kumi integrates, and what their integrations share. Outside Live's own integration, only this registry
 //! and the crate root name it: the crate root's constructors for Live come through here.
 pub mod ableton;
+#[cfg(test)]
+mod daws_doc;
 pub mod fallback;
 pub mod none;
+pub mod own_bridge;
+pub mod own_catchup;
+pub mod own_changes;
+mod own_goal;
+mod own_groove;
+pub mod own_listening;
+pub mod own_phrases;
+pub mod own_pictures;
+pub mod own_views;
+#[cfg(test)]
+mod pack_tests;
+pub mod reaper;
+pub mod reaper_changes;
+pub mod renoise;
+pub mod renoise_changes;
+mod renoise_lines;
+mod renoise_variations;
 pub mod shared;
 
 use crate::core::daw::{DawId, DawProfile};
@@ -18,8 +37,11 @@ pub use ableton::rendering::main_chain as live_main_chain;
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use ableton::{ears, hands};
 
-/// The DAWs this build integrates, by profile: Live only, for now.
-pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON];
+/// The DAWs this build integrates, by profile: Live, and the DAWs whose bridges are Kumi's own.
+pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON, &DawProfile::REAPER, &DawProfile::RENOISE];
+
+/// The places a store takes: every registered DAW's.
+pub const PLACES: crate::core::place::Places = crate::core::place::Places(&[DawId::Ableton, DawId::Reaper, DawId::Renoise]);
 
 /// A registered DAW's profile; None for one this build doesn't integrate.
 pub fn profile(id: DawId) -> Option<&'static DawProfile> {
@@ -30,7 +52,8 @@ pub fn profile(id: DawId) -> Option<&'static DawProfile> {
 pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::PRESENTATION),
-        _ => None,
+        DawId::Reaper => Some(&reaper::PRESENTATION),
+        DawId::Renoise => Some(&renoise::PRESENTATION),
     }
 }
 
@@ -38,7 +61,8 @@ pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
 pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::VIEW),
-        _ => None,
+        DawId::Reaper => Some(&reaper::VIEW),
+        DawId::Renoise => Some(&renoise::VIEW),
     }
 }
 
@@ -62,4 +86,16 @@ pub fn library_sources(options: &crate::library::sources::SourceOptions) -> Vec<
 pub fn recent_projects(options: &crate::library::sources::SourceOptions) -> Vec<String> {
     debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's projects");
     crate::library::sources::recent_sets(options)
+}
+
+/// REAPER's and Renoise's instructions, packs included, keep within the budget Live's instructions keep. (Here, because
+/// only the registry may name Live's integration outside it.)
+#[cfg(test)]
+#[test]
+fn each_own_daws_instructions_keep_within_lives() {
+    let live = ableton::context::INSTRUCTIONS.len();
+    for daw in [&reaper::DAW, &renoise::DAW] {
+        let text = own_bridge::instructions_of(daw);
+        assert!(text.len() <= live, "{}'s instructions are {} bytes, over Live's {live}", daw.profile.words.app, text.len());
+    }
 }

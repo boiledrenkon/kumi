@@ -63,6 +63,10 @@ pub trait DawSetup {
     fn settings_menu(&self) -> Option<String> {
         None
     }
+    /// Whether Kumi can ask the DAW to quit (Live's own menu, through macOS): when it can't, the producer quits it.
+    fn can_ask_to_quit(&self) -> bool {
+        true
+    }
     /// How long Live gets to quit once asked, before Kumi says it's still open (its save dialog
     /// cancelled, say) and offers to ask again.
     fn quit_wait(&self) -> Duration {
@@ -212,11 +216,13 @@ const CODE_HINT: &str = "c copies the code · b uses the browser · esc back";
 /// How often the sign-in step looks again for models on this computer while the producer chooses.
 const LOCAL_LOOK: Duration = Duration::from_secs(3);
 /// Where the Set is that Kumi's restart closed, when Kumi didn't know it to open it again.
-const OPEN_RECENT: &str = "If you saved your Set, it's in Live's File › Open Recent Set.";
-
-/// "12" from a Live version ("12.4", "11.3.21").
-fn major_of(version: &str) -> Option<u32> {
-    version.split('.').next()?.trim().parse().ok()
+fn open_recent() -> String {
+    let words = crate::daw::words();
+    if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
+        "If you saved your Set, it's in Live's File › Open Recent Set.".into()
+    } else {
+        format!("If you saved your {}, {} lists it with its recent {}.", words.place, words.app, words.places)
+    }
 }
 
 /// Open Live again, with the Set it had open when Kumi knows it. A Set that won't open (moved, or on a drive that's
@@ -310,6 +316,14 @@ impl TuiApp {
         } else if !self.setup_sign_in().await {
             return self.end_setup(Some(Step::Sign), None).await;
         }
+        // Several DAWs here and none set up or chosen yet: the producer says which one Kumi works with.
+        if let Some(daw) = self.ask_daw().await {
+            if daw != crate::daw::current().id() {
+                // Chosen and remembered: Kumi opens again with it, and its own setup goes on there.
+                self.setup_show(|s| s.quit = Some((0, None)));
+                return self.end_setup(None, None).await;
+            }
+        }
         let live = self.0.options.connect_live.as_ref().map(|l| (l.live.clone(), l.why.clone()));
         if let Some((live, Some(why))) = live {
             let app = match self.setup_live(live.clone(), why).await {
@@ -326,10 +340,29 @@ impl TuiApp {
             // The bridge was already in place: Live connects as it stands, and later runs need nothing more.
             if self.connected() {
                 let version = live.version(None).await;
-                self.setup_show(|s| s.live = Some(version.map(|v| format!("Live {v}")).unwrap_or_else(|| "Live".into())));
+                self.setup_show(|s| {
+                    s.live =
+                        Some(version.map(|v| format!("{} {v}", crate::daw::words().app)).unwrap_or_else(|| crate::daw::words().app.into()))
+                });
             }
         }
         self.end_setup(None, None).await;
+    }
+
+    /// "Which DAW do you work in?", among the DAWs here (`ask_daw`): the one chosen, given to `pick_daw`; None when
+    /// there's nothing to ask, or the producer put it off (this run's DAW goes on).
+    async fn ask_daw(&self) -> Option<kumi_runtime::core::daw::DawId> {
+        let (asked, pick) = (self.0.options.ask_daw.clone(), self.0.options.pick_daw.clone()?);
+        if asked.len() < 2 {
+            return None;
+        }
+        let app = |daw| crate::daw::provider(daw).map(|provider| provider.profile().words.app).unwrap_or_default();
+        let choices = asked.iter().map(|daw| choice(app(*daw), "", daw.as_str())).collect();
+        let said = vec!["Which DAW do you work in? Kumi sets itself up for it.".to_string()];
+        let picked = self.setup_choose("now", said, choices).await?;
+        let daw = kumi_runtime::core::daw::DawId::parse(&picked)?;
+        pick(daw);
+        Some(daw)
     }
 
     /// No model yet, but signed in somewhere: the provider's own first choice, as Kumi always chose.
@@ -559,7 +592,9 @@ impl TuiApp {
     /// quit, or waits for the producer to quit it, every way out of this step leaves Live open again. A Live
     /// that isn't open is looked for first: Live 12 has to be here, and opened once, to take the bridge.
     async fn setup_live(&self, live: Rc<dyn DawSetup>, why: String) -> LiveStep {
-        let min_major = crate::daw::current().min_major();
+        let min = crate::daw::current().min_version();
+        let (app, site) = (crate::daw::words().app, crate::daw::site());
+        let later = || choice("Later", &format!("chat without {app} for now"), "later");
         self.setup_show(|s| {
             s.step = Step::Live;
             s.problem = None;
@@ -570,7 +605,7 @@ impl TuiApp {
         loop {
             let said = why.clone();
             self.setup_show(move |s| {
-                s.status = "checking Live…".into();
+                s.status = format!("checking {app}…");
                 s.say = vec![said];
                 s.choices.clear();
                 s.hint.clear();
@@ -583,26 +618,28 @@ impl TuiApp {
                 // Open (again): nothing is held until the producer says how it closes.
                 self.setup_show(|s| s.holding = false);
                 // A Live older than 12 can't take Kumi's bridge: said before it's asked to quit, and it stays open.
-                let older = live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < min_major));
+                let older = live.version(open.clone()).await.filter(|version| crate::daw::older_than(version, min));
                 if let Some(version) = older {
                     let say = vec![format!(
-                        "Kumi works with Live {min_major}: the Live that's open is {version}. Open Live {min_major} instead (ableton.com has it), then choose Look again."
+                        "Kumi works with {app} {min}: the {app} that's open is {version}. Open {app} {min} instead ({site} has it), then choose Look again."
                     )];
-                    let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                    if self.setup_choose(&format!("Live {min_major} needed"), say, again).await.as_deref() != Some("again") {
+                    let again = vec![choice("Look again", "", "again"), later()];
+                    if self.setup_choose(&format!("{app} {min} needed"), say, again).await.as_deref() != Some("again") {
                         return LiveStep::Later(None);
                     }
                     continue;
                 }
-                let mut say = vec!["Live loads the bridge when it starts.".to_string(), "Live will ask to save first.".to_string()];
+                let mut say = vec![format!("{app} loads the bridge when it starts."), format!("{app} will ask to save first.")];
                 // Asking Live to quit is an Apple Event: the first time, macOS asks whether this terminal may send it.
                 let permission = live.asks_permission();
                 if let Some(terminal) = &permission {
-                    say.push(format!("If macOS asks whether {terminal} can control Live, choose OK."));
+                    say.push(format!("If macOS asks whether {terminal} can control {app}, choose OK."));
                 }
+                let wait = choice("I'll quit it", &format!("Kumi waits, then opens {app} again"), "wait");
+                // A DAW Kumi can't ask to quit is quit by the producer.
                 let restart =
-                    vec![choice("Restart Live now", "", "restart"), choice("I'll quit it", "Kumi waits, then opens Live again", "wait")];
-                let Some(answer) = self.setup_choose("Live is open · restart needed", say, restart).await else {
+                    if live.can_ask_to_quit() { vec![choice(&format!("Restart {app} now"), "", "restart"), wait] } else { vec![wait] };
+                let Some(answer) = self.setup_choose(&format!("{app} is open · restart needed"), say, restart).await else {
                     return self.leave_live(&live, None, None, false).await;
                 };
                 held = open.clone();
@@ -611,7 +648,7 @@ impl TuiApp {
                 self.setup_show(|s| s.holding = true);
                 let mut refused = None;
                 if asked {
-                    self.setup_show(|s| s.status = "asking Live to quit…".into());
+                    self.setup_show(|s| s.status = format!("asking {app} to quit…"));
                     if !live.ask_to_quit().await {
                         // Turned down: asking again can't help, so the producer quits Live.
                         asked = false;
@@ -636,14 +673,14 @@ impl TuiApp {
                     missing => {
                         let say = vec![match missing {
                             LiveInstalled::Older(version) => format!(
-                                "Kumi works with Live {min_major}: this computer has Live {version}. Install Live {min_major} (ableton.com) and open it once, then choose Look again."
+                                "Kumi works with {app} {min}: this computer has {app} {version}. Install {app} {min} ({site}) and open it once, then choose Look again."
                             ),
                             _ => format!(
-                                "Kumi works with Live {min_major}: install it (ableton.com), or open it once if it's here, then choose Look again."
+                                "Kumi works with {app} {min}: install it ({site}), or open it once if it's here, then choose Look again."
                             ),
                         }];
-                        let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                        if self.setup_choose(&format!("Live {min_major} not found"), say, again).await.as_deref() != Some("again") {
+                        let again = vec![choice("Look again", "", "again"), later()];
+                        if self.setup_choose(&format!("{app} {min} not found"), say, again).await.as_deref() != Some("again") {
                             return LiveStep::Later(None);
                         }
                         continue;
@@ -667,7 +704,7 @@ impl TuiApp {
                 Ok(version) => {
                     self.setup_show(|s| {
                         s.bridge = Some(format!("bridge {version}"));
-                        s.status = "opening Live…".into();
+                        s.status = format!("opening {app}…");
                         s.say.clear();
                     });
                     // The Live Kumi closed opens again, with its Set when Kumi knows it (else the producer finds it in
@@ -676,19 +713,19 @@ impl TuiApp {
                     let app = open.or(held);
                     let (opened, with_set) = reopen(&live, app.clone(), set).await;
                     if closed_by_kumi && !with_set {
-                        self.setup_show(|s| s.set_note = Some(OPEN_RECENT.into()));
+                        self.setup_show(|s| s.set_note = Some(open_recent()));
                     }
                     self.setup_show(|s| s.holding = false);
                     let connecting = live.clone();
                     tokio::task::spawn_local(async move { connecting.connect().await });
                     if !opened {
-                        self.setup_failed("Kumi couldn't open Live; open it yourself.");
+                        self.setup_failed(&format!("Kumi couldn't open {}; open it yourself.", crate::daw::words().app));
                     }
                     self.setup_show(|s| s.waiting = false);
                     return LiveStep::Done(app);
                 }
                 Err(problem) => {
-                    let again = vec![choice("Try again", "", "again"), choice("Later", "chat without Live for now", "later")];
+                    let again = vec![choice("Try again", "", "again"), later()];
                     self.setup_show(|s| s.warn = true);
                     let answer = self.setup_choose("didn't finish", vec![problem], again).await;
                     self.setup_show(|s| s.warn = false);
@@ -703,23 +740,34 @@ impl TuiApp {
     /// Live 12 (`app`) is here but has never been opened, so it has no User Library for the bridge yet: Kumi opens it
     /// once and waits for it to make one. True once it has: Live is open then, and the step restarts it with the bridge.
     async fn first_open(&self, live: &Rc<dyn DawSetup>, app: String) -> bool {
-        let min_major = crate::daw::current().min_major();
+        let min = crate::daw::current().min_version();
+        let daw = crate::daw::words().app;
+        // Live keeps the bridge in its User Library; another DAW in a folder of its own it makes on its first run.
+        let (folder, made) = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
+            ("no User Library for the bridge", "Live makes its User Library as it starts.")
+        } else {
+            ("no folder for Kumi's bridge yet", "")
+        };
         let say = vec![format!(
-            "Live {min_major} hasn't been opened here yet, so it has no User Library for the bridge. Kumi opens it once, then restarts it with the bridge."
+            "{daw} {min} hasn't been opened here yet, so it has {folder}. Kumi opens it once, then restarts it with the bridge."
         )];
-        let open = vec![choice("Open Live", "", "open"), choice("Later", "chat without Live for now", "later")];
-        if self.setup_choose("Live hasn't been opened yet", say, open).await.as_deref() != Some("open") {
+        let open = vec![choice(&format!("Open {daw}"), "", "open"), choice("Later", &format!("chat without {daw} for now"), "later")];
+        if self.setup_choose(&format!("{daw} hasn't been opened yet"), say, open).await.as_deref() != Some("open") {
             return false;
         }
         let stop = self.setup_wait();
         self.setup_show(|s| {
-            s.status = "opening Live…".into();
-            s.say = vec!["Live makes its User Library as it starts. If it shows a dialog, answer it.".into()];
+            s.status = format!("opening {daw}…");
+            s.say = vec![if made.is_empty() {
+                "If it shows a dialog, answer it.".into()
+            } else {
+                format!("{made} If it shows a dialog, answer it.")
+            }];
             s.hint = "esc later".into();
             s.waiting = true;
         });
         if !live.start(Some(app), None).await {
-            self.setup_failed("Kumi couldn't open Live; open it yourself.");
+            self.setup_failed(&format!("Kumi couldn't open {daw}; open it yourself."));
         }
         loop {
             if live.installed().await == LiveInstalled::Ready {
@@ -738,13 +786,14 @@ impl TuiApp {
     /// let Kumi ask, said in place of the usual words while the producer quits Live.
     async fn wait_closed(&self, live: &Rc<dyn DawSetup>, mut asked: bool, mut refused: Option<String>) -> bool {
         let stop = self.setup_wait();
+        let app = crate::daw::words().app;
         loop {
             let yourself = refused
                 .clone()
-                .unwrap_or_else(|| "Quit Live when you're ready. Kumi then puts its bridge in place and opens Live again.".into());
+                .unwrap_or_else(|| format!("Quit {app} when you're ready. Kumi then puts its bridge in place and opens {app} again."));
             self.setup_show(move |s| {
-                s.status = if asked { "waiting for Live to close" } else { "waiting for you to quit Live" }.into();
-                s.say = vec![if asked { "Answer Live if it asks about saving.".into() } else { yourself }];
+                s.status = if asked { format!("waiting for {app} to close") } else { format!("waiting for you to quit {app}") };
+                s.say = vec![if asked { format!("Answer {app} if it asks about saving.") } else { yourself }];
                 s.choices.clear();
                 s.hint = "esc later".into();
                 s.waiting = true;
@@ -756,9 +805,12 @@ impl TuiApp {
                 closed = live.closed(&stop) => return closed,
                 _ = tokio::time::sleep(live.quit_wait()) => {}
             }
-            let say = vec!["Live hasn't quit. If it asked about saving and you chose Cancel, it stays open.".to_string()];
-            let again =
-                vec![choice("Ask again", "Live asks to save first", "again"), choice("Later", "chat without Live for now", "later")];
+            let say = vec![format!("{app} hasn't quit. If it asked about saving and you chose Cancel, it stays open.")];
+            let again = vec![
+                choice("Ask again", &format!("{app} asks to save first"), "again"),
+                choice("Later", &format!("chat without {app} for now"), "later"),
+            ];
+            let still_open = format!("{app} is still open");
             let answer = tokio::select! {
                 closed = live.closed(&stop) => {
                     // It closed after all, or esc: the question no longer applies.
@@ -768,7 +820,7 @@ impl TuiApp {
                     });
                     return closed;
                 }
-                answer = self.setup_choose("Live is still open", say, again) => answer,
+                answer = self.setup_choose(&still_open, say, again) => answer,
             };
             if answer.as_deref() != Some("again") {
                 return false;
@@ -791,11 +843,12 @@ impl TuiApp {
         let Some(app) = held else { return LiveStep::Later(None) };
         if live.open_live().await.is_none() {
             let (opened, with_set) = reopen(live, Some(app), set).await;
-            let recent = if with_set { String::new() } else { format!(" {OPEN_RECENT}") };
+            let recent = if with_set { String::new() } else { format!(" {}", open_recent()) };
+            let app = crate::daw::words().app;
             return LiveStep::Later(Some(if opened {
-                format!("Live is opening again.{recent}")
+                format!("{app} is opening again.{recent}")
             } else {
-                format!("Kumi couldn't open Live again; open it yourself.{recent}")
+                format!("Kumi couldn't open {app} again; open it yourself.{recent}")
             }));
         }
         if !asked {
@@ -807,7 +860,10 @@ impl TuiApp {
                 reopen(&watching, Some(app), set).await;
             }
         });
-        LiveStep::Later(Some("If Live still asks about saving, Cancel keeps it open; if it quits, Kumi opens it again.".into()))
+        LiveStep::Later(Some(format!(
+            "If {} still asks about saving, Cancel keeps it open; if it quits, Kumi opens it again.",
+            crate::daw::words().app
+        )))
     }
 
     /// Live connects through the bridge once it has it as a Control Surface: Kumi watches for that. Still not
@@ -823,7 +879,7 @@ impl TuiApp {
             s.hint = "esc later".into();
             s.waiting = true;
         });
-        let mut more = live.settings_menu().map(|menu| format!("{menu} If Live shows a dialog, answer it first."));
+        let mut more = live.settings_menu().map(|menu| format!("{menu} If {} shows a dialog, answer it first.", crate::daw::words().app));
         let more_at = std::time::Instant::now() + live.surface_wait();
         while !self.connected() {
             if self.closing() {
@@ -840,7 +896,7 @@ impl TuiApp {
         let version = live.version(app).await;
         self.setup_show(|s| {
             s.problem = None;
-            s.live = Some(version.map(|v| format!("Live {v}")).unwrap_or_else(|| "Live".into()));
+            s.live = Some(version.map(|v| format!("{} {v}", crate::daw::words().app)).unwrap_or_else(|| crate::daw::words().app.into()));
         });
         true
     }
@@ -893,7 +949,8 @@ impl TuiApp {
             ),
             Some(Step::Live) => self.notice(
                 &format!(
-                    "Kumi chats without Live for now, and offers to connect it next time.{}",
+                    "Kumi chats without {} for now, and offers to connect it next time.{}",
+                    crate::daw::words().app,
                     also.map(|also| format!(" {also}")).unwrap_or_default()
                 ),
                 NoticeTone::Info,

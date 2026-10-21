@@ -46,6 +46,7 @@ fn samples() -> Vec<(String, ChangePicture)> {
                 max: 1.,
                 before: vec![[0., 0.3], [8., 0.3]],
                 after: vec![[0., 0.3], [2., 0.9], [4., 0.2], [6., 0.7], [8., 0.3]],
+                words: None,
             },
         ),
     ]

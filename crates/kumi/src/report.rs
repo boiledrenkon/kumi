@@ -303,7 +303,7 @@ fn summarize_timings(lines: &[&str]) -> String {
     first.sort_by(f64::total_cmp);
     let seconds = |ms: f64| format!("{:.1} s", ms / 1000.);
     let mut summary = format!(
-        "{} turns. Medians: {} an answer · model {} · tools {} · {} model calls · first part {} · {} Live requests · {} KB sent",
+        "{} turns. Medians: {} an answer · model {} · tools {} · {} model calls · first part {} · {} {} requests · {} KB sent",
         turns.len(),
         seconds(median("ms")),
         seconds(median("modelMs")),
@@ -311,15 +311,17 @@ fn summarize_timings(lines: &[&str]) -> String {
         median("modelCalls"),
         seconds(first.get(first.len() / 2).copied().unwrap_or(0.)),
         median("liveRequests"),
+        crate::daw::words().app,
         (median("sentBytes") / 1024.).round(),
     );
     let count = |n: f64, what: &str| format!("{n} {what}{}", if n == 1. { "" } else { "s" });
     // Each turn's look at the Set before the model is asked, where it was timed (#191).
     if turns.iter().any(|turn| turn["lookMs"].is_number()) {
         summary.push_str(&format!(
-            "\nLooking at the Set before each answer (medians): {} · {} · {} KB",
+            "\nLooking at the {} before each answer (medians): {} · {} · {} KB",
+            crate::daw::words().place,
             seconds(median("lookMs")),
-            count(median("lookRequests"), "Live request"),
+            count(median("lookRequests"), &format!("{} request", crate::daw::words().app)),
             (median("lookBytes") / 1024.).round(),
         ));
     }
@@ -425,7 +427,7 @@ pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
     let now = io.now.as_ref().map(|now| now()).unwrap_or_else(Utc::now);
     let redact = redactor(&known_secrets(env).await, &home, &user);
     let file = step(io.doctor.out.clone(), env, "Writing Kumi's report…", compose(&io, &redact, &home, now), false).await?;
-    io.doctor.out.write(&format!("Kumi's report is in {}\nIt has Kumi's versions, the doctor's checks, what Kumi did in your last conversation, and the bridge's lines from Live's log. Keys and tokens are taken out. Send it with a few words about what happened.\n",redact(&file)));
+    io.doctor.out.write(&format!("Kumi's report is in {}\nIt has Kumi's versions, the doctor's checks, what Kumi did in your last conversation, and the bridge's lines from {}'s log. Keys and tokens are taken out. Send it with a few words about what happened.\n",redact(&file),crate::daw::words().app));
     Ok(0)
 }
 async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now: DateTime<Utc>) -> Result<String, RuntimeError> {
@@ -533,8 +535,14 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
         },
     );
     // Each DAW's log: its bridge's lines and errors.
-    for provider in crate::daw::providers() {
-        let (heading, body) = provider.report_log(env, home, io.live_logs.as_ref()).await;
+    // Each DAW's log the producer has: Live's as always, another DAW's once its bridge is in (none for a Live-only
+    // producer). Live's logs (a test's stand-in for them) are Live's alone.
+    let has_log = |provider: &&dyn crate::daw::DawProvider| {
+        crate::daw::in_use(*provider, env) && (provider.id() == kumi_runtime::core::daw::DawId::Ableton || provider.bridge_installed(env))
+    };
+    for provider in crate::daw::providers().into_iter().filter(has_log) {
+        let logs = if provider.id() == kumi_runtime::core::daw::DawId::Ableton { io.live_logs.as_ref() } else { None };
+        let (heading, body) = provider.report_log(env, home, logs).await;
         section(&heading, body);
     }
     let text=redact(&format!("# Kumi report\n\nSend this file with a few words about what happened. Keys and tokens are taken out; your home folder shows as ~.\n\n{}\n",sections.join("\n\n")));

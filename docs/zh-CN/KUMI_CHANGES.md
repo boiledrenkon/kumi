@@ -2,7 +2,7 @@
 
 [English](../en/KUMI_CHANGES.md) · 简体中文 · [日本語](../ja/KUMI_CHANGES.md)
 
-Kumi 读取打开的工程，并做出你要求的修改。每项修改都以平常的话显示在 HISTORY 中，大多数修改都有各自的撤销。没有审批步骤：撤销就是安全网，所以它必须可靠。本页说明它如何运作，并列出 Kumi 能做的每一种修改。
+Kumi 读取打开的工程，并做出你要求的修改。每项修改都以平常的话显示在 HISTORY 中，大多数修改都有各自的撤销。没有审批步骤：撤销就是安全网，所以它必须可靠。本页说明它如何运作，并列出 Kumi 能做的每一种修改。REAPER 与 Renoise 请见 [REAPER 与 Renoise](#reaper-与-renoise)。
 
 ## 一项修改如何进行
 
@@ -207,3 +207,75 @@ Kumi 在连接时读取桥接的版本，不会提供桥接版本过旧而无法
 只要桥接提供 Willington 工具，它们就会出现：也就是 Willington 的绑定开启（`/willington`）且 Live 构建版本受其覆盖时。
 
 每个 Kumi 版本都附带一个桥接：Kumi 1.19.2 至 1.19.3 附带桥接 1.0.93，1.13.0 至 1.19.1 附带 1.0.92，1.11.3 至 1.12.1 附带 1.0.91，1.11.0 至 1.11.2 附带 1.0.90，1.10.0 至 1.10.1 附带 1.0.89，1.9.7 附带 1.0.88，1.9.6 附带 1.0.87，1.9.4 至 1.9.5 附带 1.0.86，1.9.0 至 1.9.3 附带 1.0.85，1.8.11 附带 1.0.84，1.8.10 附带 1.0.83，1.8.9 附带 1.0.82，1.8.7 至 1.8.8 附带 1.0.81，1.8.6 附带 1.0.80，1.8.5 附带 1.0.79，1.8.4 附带 1.0.78，1.8.3 附带 1.0.77，1.8.2 附带 1.0.76，1.7.5 至 1.8.1 附带 1.0.74，1.7.0 至 1.7.4 附带 1.0.73，1.6.1 附带 1.0.72，1.6.0 附带 1.0.71，1.5 附带 1.0.70，1.4 附带 1.0.69，1.3 附带 1.0.68，1.2 附带 1.0.66，1.1 附带 1.0.53，1.0 附带 1.0.52。
+
+## REAPER 与 Renoise
+
+在 REAPER 和 Renoise 中，Kumi 通过各自的专用桥接修改工程或歌曲（[如何连接](KUMI_GUIDE.md#连接-reaper-或-renoise)）。修改的流程与 Live 相同：先预览、再应用、检查之后进入 HISTORY，带有用该 DAW 的说法写的标题（"Moved “vox.wav” to bar 6"、"Wrote 4 lines in “Drop” on “Bass”"）和图示。不同之处如下：
+
+- **引用指向对象，而不是位置。** REAPER 的引用是 REAPER 自己的 ID（GUID；发送没有 GUID，Kumi 会给它加上一个并保留），所以轨道移动或重新载入后仍然有效。Renoise 的引用会在插入、删除和移动之间一路跟踪每条轨道、每个设备、乐器和槽位；Kumi 无法确定时，会拒绝这项修改、不碰任何东西，由模型重新读取。
+- **不会只做一半。** 应用时会重新读取预览看到的内容；如果你在这期间改动过，就什么都不写并拒绝。DAW 忙于对话框或渲染时，修改会被立即拒绝。
+- **DAW 自己的撤销历史**中，每项修改都是一个有名字的步骤（"Kumi: Bass volume −6 dB"）。在 REAPER 中整个计划是一步；在 Renoise 中每项修改各是一步。
+
+### REAPER 与 Renoise 中的撤销
+
+- **Kumi 的撤销**会精确恢复修改所设置的内容，作为 DAW 撤销历史中的新一步（"Kumi: undo …"）。它从不按 DAW 自己的撤销，所以你之后做的操作会保留。如果你之后改动过同一处，或对象已经不在，它会被拒绝（显示 **kept** 和原因）；如果已经恢复原样，它什么都不做。与 Live 不同，它也能撤回删除：被删除的轨道、对象（item）、take、FX、发送、硬件输出、标记、槽位、设备、乐器、采样或乐句，会从 Kumi 保留的内容中恢复。
+- **DAW 自己的撤销**（Cmd-Z，Windows 和 Linux 上为 Ctrl-Z）在 REAPER 中撤回一个计划，在 Renoise 中撤回一项修改。HISTORY 会跟着更新："Undone with REAPER's own undo"、"Put back with REAPER" 或 "REAPER may have redone it; Kumi can't tell"。
+- **DAW 的撤销会跳过的内容**只有 Kumi 的撤销能撤回，该行会注明。REAPER：循环播放开关、节拍器开关、ReaEQ 频段的类型或开关、自动化覆盖、工程的备注、标题、作者、网格和时基，以及没有任何调制开启的参数调制。Renoise：静音、独奏、循环、模式循环、节拍器开关、编辑设置，以及插件的自动休眠。
+- **只有 DAW 的撤销能撤回的内容：** Lua（`run_lua`）、REAPER 的 API（`api_call`）和 REAPER 的动作（`run_action`，在 REAPER 为它建立撤销点时）。保存工程、歌曲、模板、FX 链、乐器或预设只是写文件，没有 HISTORY 行。
+- **能保留多久：** Kumi 为撤销保留最新的 400 项修改，只在它与 DAW 的连接持续期间有效（[当 Live 断开时](KUMI_GUIDE.md#当-live-断开时)）。
+- **删除之前的副本。** 在删除或覆盖内容的修改之前，Kumi 会把最后一次保存的工程或歌曲复制到同一文件夹中它的旁边（`Song (Kumi copy 2026-10-20 14.05.31 +0900).rpp`，这样 REAPER 工程的媒体也能从副本找到），每个保存的版本只复制一次，每个工程保留最新的 5 份。保存的文件超过 512 MB，或者无法复制（文件夹不可写、磁盘已满）时不复制，并会在修改中说明；未保存的工程或歌曲没有副本。
+
+### Kumi 能在 REAPER 中修改什么
+
+| 工具 | 修改的内容 |
+| --- | --- |
+| `track_add`, `track_move`, `track_delete`, `track_rename`, `track_color`, `track_visible`, `track_folder_state`, `track_lock` | 轨道的添加（也可作为相邻几条轨道的文件夹轨道）、移动、删除、改名和着色；在编排视图和混音器中显示或隐藏；文件夹展开或折叠；锁定控件 |
+| `track_volume`, `track_pan`, `track_width`, `track_pan_mode`, `track_dual_pan`, `track_pan_law`, `track_mute`, `track_solo`, `track_solo_defeat`, `track_phase`, `track_channels`, `track_main_send`, `track_fx_enabled` | 混音器：音量、声像（模式、宽度、双声像、声像定律）、静音、独奏与独奏豁免（solo defeat）、极性、声道数、送往上级文件夹或主控的发送、整条 FX 链的开关；在 REAPER 允许的范围内也包括主控轨道 |
+| `track_arm`, `track_record_input`, `track_monitoring`, `track_record_mode` | 录音预备（arm）、录音输入、监听和录音模式 |
+| `track_group`, `track_group_name`, `track_template_insert`, `track_lanes`, `lane_plays`, `lane_name`, `lane_comp`, `razor_set` | 轨道编组及其名称；插入轨道模板；固定轨道层（fixed lanes）、播放哪一层、层的名称和拼接（comping）；剃刀区域（razor） |
+| `send_add`, `receive_add`, `send_remove`, `send_volume`, `send_pan`, `send_mute`, `send_mode`, `send_channels`, `send_phase`, `send_mono`, `send_automation_mode` | 发送与接收：添加（3/4 声道上的侧链、只有 MIDI 的发送）、移除、电平、声像、静音、从轨道的哪个位置取信号、声道和 MIDI、极性、单声道、自动化模式 |
+| `hw_out_add`, `hw_out_remove`, `hw_out_volume`, `hw_out_pan`, `hw_out_mute`, `hw_out_mode`, `hw_out_channels`, `hw_out_phase`, `hw_out_mono`, `track_midi_out` | 硬件输出，以及把轨道的 MIDI 送往硬件 MIDI 输出 |
+| `fx_add`, `fx_delete`, `fx_move`, `fx_copy`, `fx_bypass`, `fx_offline`, `fx_wet`, `fx_pins`, `fx_preset`, `fx_state`, `fx_chain_load` | FX（用 REAPER 的 FX 浏览器中显示的名称）：在轨道的 FX 链、输入 FX、take 的 FX 链或容器中添加、删除、移动、复制、旁通、离线、湿声与差值（delta）、引脚映射、预设、插件的完整状态、FX 链文件 |
+| `fx_container_add`, `fx_container_move`, `fx_parallel`, `fx_container_map`, `fx_container_unmap` | FX 容器：添加、把 FX 移入或移出、让 FX 与它前面的 FX 并联、映射和取消容器的宏 |
+| `fx_param`, `fx_params`, `fx_eq_band` | 一个参数，或一次设置同一个 FX 的最多 256 个参数；ReaEQ 某个频段的类型或开关 |
+| `fx_param_mod`, `fx_param_lfo`, `fx_param_acs`, `fx_param_link`, `fx_param_learn` | 参数调制：开关与基准值、LFO、音频控制信号（ACS）、链接到另一个参数、MIDI 或 OSC 学习 |
+| `envelope_show`, `envelope_points_add`, `envelope_points_change`, `envelope_points_delete`, `envelope_range_clear`, `automation_item_add`, `automation_item_set`, `automation_item_delete`, `track_automation_mode`, `automation_override` | 显示并启用包络；添加、修改、删除包络点，清除一段区域；自动化对象（automation item）；轨道的自动化模式；全局自动化覆盖 |
+| `item_add`, `item_import`, `item_move`, `item_split`, `item_trim`, `item_fade`, `item_props`, `item_group`, `item_delete`, `item_duplicate`, `items_glue`, `items_render` | 对象（item）：空的 MIDI 对象、导入媒体文件、移动（也可移到另一条轨道）、分割、修剪、淡入淡出、属性、编组、删除、复制；只在你要求时才粘合（glue）或渲染为新的 take |
+| `take_add`, `take_delete`, `take_active`, `take_props`, `stretch_markers_add`, `stretch_markers_change`, `stretch_markers_delete`, `take_markers_add`, `take_markers_change`, `take_markers_delete` | take 的添加、删除、设为活动 take、属性；伸缩标记；take 标记 |
+| `notes_add`, `notes_change`, `notes_delete`, `notes_quantize`, `notes_humanize`, `midi_events_add`, `midi_events_change`, `midi_events_delete` | take 中 MIDI 音符的添加、修改、删除、量化、人性化；其他 MIDI 事件（CC、弯音、音色切换、压力、文本、SysEx） |
+| `marker_add`, `region_add`, `marker_move`, `marker_rename`, `marker_color`, `marker_delete`, `marker_lane`, `ruler_lane`, `ruler_lane_add`, `region_render`, `time_selection`, `loop_range`, `loop_repeat` | 标记与区域；标尺层；区域渲染矩阵；时间选区；循环区间与循环播放 |
+| `tempo_set`, `tempo_marker_set`, `tempo_marker_delete`, `metronome_switch`, `project_grid`, `project_timebase`, `project_notes`, `project_info` | 速度、速度标记（拍号、渐变）、节拍器；网格与时基；工程的备注、标题和作者 |
+| `drum_kit`, `scratch_keep` | 用声音文件制作 ReaSamplOmatic5000 鼓组（每个打击垫一条轨道的文件夹，或一个容器；踩镲互相切断）；保留目标的最佳临时副本 |
+| `run_action`, `api_call`, `run_lua` | REAPER 的动作（action，绝不用会打开对话框、退出、打开/关闭/保存工程或渲染的动作）、会修改工程的 API 函数、Lua（ReaScript）。这些只有 REAPER 的撤销能撤回 |
+
+没有 HISTORY 行的：`play`、`stop`、`set_cursor`、`save_project`（保存在原处，或另存为 REAPER 的下一个版本）、`save_track_template` 和 `fx_chain_save`。`reaper_read` 读取工程：轨道、对象、take、FX、参数、发送、标记、区域、音符、MIDI 事件、包络和自动化对象，以及只读取的 REAPER API 函数。
+
+### Kumi 能在 Renoise 中修改什么
+
+| 工具 | 修改的内容 |
+| --- | --- |
+| `song_bpm`, `song_lpb`, `song_tpl`, `song_groove`, `song_metronome`, `metronome_switch`, `edit_settings`, `song_info`, `song_headroom` | 速度、每拍行数（LPB）、每行 tick 数（TPL）、律动（groove）、节拍器（每小节拍数、预备拍）及其开关、编辑设置（Follow Player、Edit Step、八度、录音量化等）、歌曲的名称、艺术家和注释、轨道余量（headroom） |
+| `track_add`, `track_move`, `track_group`, `track_delete`, `track_rename`, `track_color`, `track_collapse`, `track_columns`, `track_column` | 音序器轨道、发送轨道和编组轨道的添加、移动、编组、删除、改名、着色和折叠；显示或隐藏音符列和效果列，以及为音符列命名 |
+| `track_volume`, `track_pan`, `track_width`, `track_mute`, `track_solo`, `track_output`, `track_delay` | 混音器：音量、声像、宽度、静音、独奏、输出路由、输出延迟 |
+| `slot_insert`, `slot_delete`, `slot_move`, `slot_clone`, `slot_unique`, `slot_pattern`, `slot_section`, `slot_mute`, `slot_color`, `loop_range`, `loop_pattern` | 模式序列和模式矩阵：插入、删除、移动、克隆槽位，让槽位独立（unique）或改播另一个模式；段落（section）；某条轨道在某个槽位中静音；矩阵颜色；序列循环与模式循环 |
+| `notes_write`, `notes_clear`, `notes_transpose`, `notes_humanize`, `lines_copy`, `pattern_name`, `pattern_length`, `pattern_alias`, `automation_write` | 用 Renoise 的记法（音符、乐器、音量、声像、延迟和效果列）写入、清除、移调、人性化或复制模式轨道的行；模式的名称、长度和别名（alias）；设备参数的自动化 |
+| `device_add`, `device_delete`, `device_move`, `device_bypass`, `device_set`, `device_param`, `device_params`, `device_preset`, `device_preset_data`, `device_chain_load` | 轨道 DSP 设备（原生或插件）的添加、删除、移动、旁通、改名；一个参数，或一次设置同一个设备的最多 256 个参数；预设和预设数据；设备链文件（.xrnt） |
+| `doofer_make`, `doofer_macro`, `doofer_device_add`, `doofer_device_delete`, `doofer_device_move`, `doofer_device_set`, `splitter_set`, `notepad_write`, `meta_destination` | 用设备制作 Doofer 和 Splitter，及其宏和内部的设备；Splitter 的分频方式；Notepad 的文本；元设备（*LFO、*Key Tracker 等）指向哪里 |
+| `instrument_add`, `instrument_delete`, `instrument_duplicate`, `instrument_move`, `instrument_load`, `instrument_kit`, `instrument_rename`, `instrument_set`, `instrument_macro`, `instrument_macro_map` | 乐器的添加、删除、复制、移动、载入（.xrni、.sfz 或采样），用采样文件制作乐器（带静音组的鼓组，或带力度分层的键盘乐器）；改名、设置、宏及其映射 |
+| `sample_load`, `sample_delete`, `sample_set`, `sample_slices`, `keyzone_set`, `keyzone_overlap`, `keyzone_drumkit` | 采样的载入、删除、设置和切片；键区（keyzone）、键区重叠处播放什么、鼓组布局 |
+| `modset_add`, `modset_delete`, `modset_set`, `modset_load`, `moddevice_add`, `moddevice_delete`, `moddevice_move`, `moddevice_set`, `moddevice_param`, `chain_add`, `chain_delete`, `chain_set`, `chaindevice_add`, `chaindevice_delete`, `chaindevice_move`, `chaindevice_bypass`, `chaindevice_param` | 调制组及其设备（也可从 .xrno 文件载入）；采样 FX 链及其设备 |
+| `phrase_add`, `phrase_delete`, `phrase_set`, `phrase_map`, `phrase_playback`, `phrase_write`, `phrase_clear`, `phrase_script`, `phrase_render`, `phrase_load` | 乐句（phrase）的添加、删除、设置、映射到琴键、乐器如何播放乐句；写入或清除乐句的行；编写并渲染乐句脚本；载入乐句文件（.xrnz） |
+| `plugin_load`, `plugin_param`, `plugin_preset`, `plugin_set`, `plugin_suspend`, `midi_set` | 插件乐器的载入、参数、音色（program）、设置和自动休眠；MIDI 乐器的输出 |
+| `scratch_keep`, `run_lua` | 保留目标的最佳临时副本；可使用整个 renoise API 的 Lua（只有 Renoise 的撤销能撤回） |
+
+没有 HISTORY 行的：`play`、`stop`、`audition_note`（把一个音符播放给你听）、`select`（在 Renoise 中显示某样东西）、`plugin_editor`、`save_song`、`save_instrument` 和 `save_device_preset`。`renoise_read` 读取歌曲：轨道、模式序列、模式及其行、自动化、乐器、采样、乐句、设备与参数、调制组和采样 FX 链。
+
+### 已知限制
+
+每种情况下 HISTORY 都如实记录：Kumi 会拒绝，或说明它做不到什么。
+
+- **Renoise：** 对行的编辑（`notes_write`、`notes_clear`、`notes_transpose`、`notes_humanize`、`lines_copy`、`phrase_write`、`phrase_clear`）用 Renoise 自己的撤销再重做之后，Kumi 对它们的撤销会被拒绝：Kumi 分不清是 Renoise 的重做，还是你自己写下的相同的行。该行会显示 "Renoise may have redone it"；Renoise 的撤销可以撤回它。
+- **Renoise：** 在长时间的使用中，载入并移除 AU 插件乐器之后，它的撤销历史有时会变空（原因尚不清楚）；这时 Renoise 的撤销无法撤回 `plugin_load`、`plugin_param` 或 `plugin_set`。`plugin_preset` 尚未在有多个音色（program）的插件上测试过。
+- **REAPER：** 所有轨道一次全部被替换的工程（例如删除所有轨道再插入其他轨道的动作）会被当作另一个工程，因此 Kumi 对它的引用会失效，由模型重新读取。
+- **REAPER：** Kumi 撤销参数调制时会关闭它的开关，但会保留调制设置，因为 REAPER 一旦建立就会保留它们；该行会注明。
+- **REAPER：** `track_midi_out` 需要在 REAPER 的偏好设置中有一个 MIDI 输出设备。

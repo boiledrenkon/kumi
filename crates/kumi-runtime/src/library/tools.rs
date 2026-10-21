@@ -1,3 +1,4 @@
+use super::presets::{preset_daws, PresetCategory};
 use super::{
     classify::{SoundClass, SoundKind},
     features::MeasureOptions,
@@ -6,7 +7,7 @@ use super::{
     sources::basename,
     store::unpack_vector,
 };
-use crate::core::daw::{asset_in_words, AssetPhrase, DawProfile, DawWords};
+use crate::core::daw::{asset_in_words, AssetPhrase, DawId, DawProfile, DawWords};
 use crate::{
     audio::audio_path,
     core::{
@@ -48,6 +49,14 @@ pub trait LibraryAccess {
     fn remember(&self, folders: Vec<String>);
     async fn folders(&self) -> Vec<String>;
     async fn measure(&self, path: String, options: MeasureOptions) -> Result<SoundEntry, RuntimeError>;
+    /// The sounds offered in a session with this DAW (a DAW's own library only there; Live's when none is known).
+    async fn sounds_in(&self, _daw: Option<DawId>) -> Result<Rc<SoundIndex>, RuntimeError> {
+        self.sounds().await
+    }
+    /// The folders a search by names looks through in a session with this DAW.
+    async fn folders_in(&self, _daw: Option<DawId>) -> Vec<String> {
+        self.folders().await
+    }
 }
 pub type ResolveSound = Rc<dyn Fn(String, Signal) -> LocalBoxFuture<'static, Result<Option<String>, RuntimeError>>>;
 pub type OnEvent = Rc<dyn Fn(SessionEvent)>;
@@ -70,7 +79,8 @@ pub(crate) fn definition(name: &str) -> &'static Definition {
 
 /// What the library tools' definitions say in Live's words, and how many times.
 pub(crate) const LIBRARY_PHRASES: &[AssetPhrase] = &[
-    AssetPhrase { live: "Live's User Library and Places", count: 1, said: |p| p.vocab.library_places.into() },
+    AssetPhrase { live: "Live's User Library and Places, Splice, packs, folders they named", count: 1, said: |p| p.vocab.library_places.into() },
+    AssetPhrase { live: "load_sample and the other sample tools", count: 1, said: |p| sample_tools(p).into() },
     AssetPhrase { live: "an audio clip in the Set (its clipRef)", count: 1, said: |p| format!("an audio clip in the {} (its clipRef)", p.words.place) },
     AssetPhrase {
         live: "Live's presets and racks (in the User Library, Places and packs, and Live's own), Max for Live devices, and plug-ins' own presets",
@@ -85,7 +95,7 @@ pub(crate) const LIBRARY_PHRASES: &[AssetPhrase] = &[
             if p.caps.browser_items {
                 "; one in Live's Browser also gives browser, the item load_device takes as itemId".into()
             } else {
-                String::new()
+                preset_loading(p).into()
             }
         },
     },
@@ -106,10 +116,29 @@ pub(crate) const LIBRARY_PHRASES: &[AssetPhrase] = &[
     AssetPhrase { live: "A Set's path (from a result) or name", count: 1, said: |p| format!("A {}'s path (from a result) or name", p.words.place) },
 ];
 
-/// The library tools' definitions in the DAW's words.
+/// The tools a found sound's path goes to, in the DAW's words.
+fn sample_tools(profile: &DawProfile) -> &'static str {
+    profile.vocab.sample_tools
+}
+
+/// How a found preset is loaded, by its kind, for a DAW whose presets aren't Browser items.
+fn preset_loading(profile: &DawProfile) -> &'static str {
+    profile.vocab.preset_loading
+}
+
+/// The library tools' definitions in the DAW's words, find_presets' kinds the DAW's own.
 fn definitions_in(profile: &DawProfile) -> Vec<Definition> {
     let value: Value = serde_json::from_str(include_str!("tool-definitions.json")).unwrap();
-    serde_json::from_value(asset_in_words(value, profile, LIBRARY_PHRASES)).unwrap()
+    let mut value = asset_in_words(value, profile, LIBRARY_PHRASES);
+    // (Live's are the asset's own; another DAW's from its profile)
+    if profile.id != Some(DawId::Ableton) && !profile.vocab.preset_kinds.is_empty() {
+        for definition in value.as_array_mut().into_iter().flatten() {
+            if definition["name"] == FIND_PRESETS_TOOL {
+                definition["inputSchema"]["properties"]["kind"]["enum"] = json!(profile.vocab.preset_kinds);
+            }
+        }
+    }
+    serde_json::from_value(value).unwrap()
 }
 pub(crate) fn tell(callback: &Option<OnEvent>, text: String) {
     if let Some(callback) = callback {
@@ -193,7 +222,7 @@ struct LibraryTool {
 }
 impl LibraryTool {
     async fn everywhere(&self) -> Vec<String> {
-        let known = self.library.folders().await;
+        let known = self.library.folders_in(self.profile.id).await;
         if known.is_empty() {
             default_sample_folders(None, None, None)
         } else {
@@ -246,7 +275,7 @@ impl LibraryTool {
             &self.options.on_event,
             if like_name.is_empty() { "searching your sounds" } else { "listening, then searching your sounds" }.into(),
         );
-        let index = self.library.sounds().await?;
+        let index = self.library.sounds_in(self.profile.id).await?;
         let state = self.library.learning();
         let uncovered: Vec<_> = folders.iter().filter(|folder| !index.holds(folder)).cloned().collect();
         if !uncovered.is_empty() {
@@ -371,10 +400,14 @@ impl LibraryTool {
         }
         // The library's notes call 60 C4 and Live's call it C3: said, so the two aren't mixed.
         if rows.iter().any(|row| row.get("note").is_some()) {
-            response["octaves"] = json!(if self.profile.vocab.middle_c_octave == 3 {
-                format!("a sound's note calls MIDI 60 C4, where {}, listen and the notation call it C3", self.profile.words.app)
-            } else {
-                format!("a sound's note calls MIDI 60 C4, as {} and listen do; the notation calls it C3", self.profile.words.app)
+            response["octaves"] = json!(match self.profile.vocab.middle_c_octave {
+                3 => format!("a sound's note calls MIDI 60 C4, where {}, listen and the notation call it C3", self.profile.words.app),
+                4 => format!("a sound's note calls MIDI 60 C4, as {} and listen do; the notation calls it C3", self.profile.words.app),
+                _ => format!(
+                    "a sound's note calls MIDI 60 C4, where {} calls it {} (its note value 60); listen calls it C4 and the notation C3",
+                    self.profile.words.app,
+                    self.profile.note_name(60)
+                ),
             });
         }
         if !uncovered.is_empty() {
@@ -389,7 +422,15 @@ impl LibraryTool {
     }
     async fn find_presets(&self, input: JsonObject) -> Result<ToolResult, RuntimeError> {
         tell(&self.options.on_event, "searching your presets".into());
-        let entries = self.library.presets().await?;
+        // Only the DAW's own presets (Live's when none is known): another DAW's never come.
+        let daw = self.profile.id.unwrap_or(DawId::Ableton);
+        let entries: Vec<_> = self
+            .library
+            .presets()
+            .await?
+            .into_iter()
+            .filter(|e| preset_daws(&e.format).contains(&daw) && !(e.format == "jsfx" && e.error.is_some()))
+            .collect();
         let result = search_presets(
             &entries,
             &PresetQuery {
@@ -398,12 +439,12 @@ impl LibraryTool {
                 category: input
                     .get("kind")
                     .and_then(Value::as_str)
-                    .filter(|s| ["instrument", "audio effect", "midi effect", "drum rack", "plug-in"].contains(s))
+                    .filter(|s| self.profile.vocab.preset_kinds.contains(s))
                     .map(str::to_owned),
                 limit: limit_of(input.get("limit"), 20, 50),
             },
         );
-        let mut response = json!({"matched":result.matched,"presets":result.hits.into_iter().map(|hit|{let e=hit.entry;let mut row=json!({"name":e.name,"in":([e.source.as_str(),e.folder.as_str()].into_iter().filter(|s|!s.is_empty()).collect::<Vec<_>>().join(" / ")),"path":e.path});if let Some(device)=e.device.filter(|s|!s.is_empty()){row["device"]=json!(device);}if let Some(kind)=e.category{row["kind"]=json!(kind);}if let Some(browser)=e.browser.filter(|s|!s.is_empty()){row["browser"]=json!(browser);}if let Some(inside)=e.inside.filter(|i|!i.is_empty()){row["inside"]=json!(inside);}if let Some(about)=e.about.filter(|s|!s.is_empty()){row["about"]=json!(about);}if !hit.why.is_empty(){row["why"]=json!(hit.why.join("; "));}row}).collect::<Vec<_>>()});
+        let mut response = json!({"matched":result.matched,"presets":result.hits.into_iter().map(|hit|{let e=hit.entry;let mut row=json!({"name":e.name,"in":([e.source.as_str(),e.folder.as_str()].into_iter().filter(|s|!s.is_empty()).collect::<Vec<_>>().join(" / ")),"path":e.path});if let Some(device)=e.device.filter(|s|!s.is_empty()){row["device"]=json!(device);}if let Some(kind)=e.category{row["kind"]=json!(kind);}if let Some(add)=e.load.filter(|s|!s.is_empty()){row["add"]=json!(add);}if let Some(browser)=e.browser.filter(|s|!s.is_empty()){row["browser"]=json!(browser);}if let Some(inside)=e.inside.filter(|i|!i.is_empty()){row[if e.category==Some(PresetCategory::FxPresets){"presets"}else{"inside"}]=json!(inside);}if let Some(about)=e.about.filter(|s|!s.is_empty()){row["about"]=json!(about);}if !hit.why.is_empty(){row["why"]=json!(hit.why.join("; "));}row}).collect::<Vec<_>>()});
         merge(&mut response, learning_note(LearningState { todo: Some(0), ..self.library.learning() }));
         Ok(ToolResult::text(stringify(&response)))
     }
@@ -522,10 +563,16 @@ pub fn library_tools(library: Rc<dyn LibraryAccess>, options: LibraryToolsOption
 /// `library_tools`, saying the DAW's words.
 pub fn library_tools_for(profile: &DawProfile, library: Rc<dyn LibraryAccess>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
     let definitions = definitions_in(profile);
-    // Presets are found in Live's Browser and its preset files: only for a DAW with Browser items.
+    // Presets are a DAW's own (Live's Browser items and preset files, REAPER's and Renoise's library files): not for a DAW
+    // Kumi doesn't know.
+    let presets = profile.caps.presets;
+    // The producer's own projects are Live Sets (the library reads only .als): not offered as REAPER projects or Renoise
+    // songs until Kumi reads those files.
+    let own_projects = !matches!(profile.id, Some(DawId::Reaper | DawId::Renoise));
     [FIND_SOUNDS_TOOL, FIND_PRESETS_TOOL, MY_SETS_TOOL]
         .into_iter()
-        .filter(|name| *name != FIND_PRESETS_TOOL || profile.caps.browser_items)
+        .filter(|name| *name != FIND_PRESETS_TOOL || presets)
+        .filter(|name| *name != MY_SETS_TOOL || own_projects)
         .map(|name| {
             let definition = definitions.iter().find(|d| d.name == name).unwrap();
             Rc::new(LibraryTool {

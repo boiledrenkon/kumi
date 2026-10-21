@@ -12,7 +12,10 @@ use super::errors::{FailureKind, RuntimeError};
 use super::evolve::Knob;
 use super::goal::GoalStatus;
 use super::match_run::MatchStatus;
-pub use super::picture::{ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureValue};
+pub use super::picture::{
+    ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureItem, PictureLine, PictureRoute, PictureValue, PictureZone,
+    RouteChange,
+};
 pub use super::view::*;
 use crate::audio::matching::{Closeness, Focus};
 
@@ -553,6 +556,9 @@ pub struct SetAsk {
     /// What the producer calls the DAW and a place in it ("Live", "Set").
     pub daw: String,
     pub noun: String,
+    /// Kumi can't open places in this DAW: the producer opens it, and the conversation carries on there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_hand: bool,
 }
 
 /// The producer's answer when a conversation belongs to another Set.
@@ -766,6 +772,10 @@ pub trait Integration {
     fn words(&self) -> (&'static str, &'static str) {
         self.profile().word_pair()
     }
+    /// Whether Kumi can open a saved place in the DAW ([`Integration::open_place`]); else the producer opens it.
+    fn has_open_place(&self) -> bool {
+        false
+    }
     /// Open the saved place (a Set, a project) a kept conversation belongs to in the DAW, which may ask first whether to
     /// save the open one. `Err(why)` inside when it can't.
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
@@ -834,7 +844,13 @@ pub trait Integration {
             BodyKind::Notes => self.has_clip_view(),
             BodyKind::Grid => self.has_session_strip(),
             BodyKind::Timeline => self.has_arrangement_strip(),
+            _ => false,
         }
+    }
+    /// A pin as a recipe's blanks take it now: what was pinned where it is now, in the turn's short refs (a DAW whose refs
+    /// are places moves them with its tracks); None when Kumi can't tell. Live's and REAPER's refs hold: as the pin was made.
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        Some(pin.clone())
     }
     /// A body for FOCUS, read by the DAW; None when it can't say. Live's integration reads its views.
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
@@ -843,6 +859,7 @@ pub trait Integration {
             BodyRequest::Notes { item_ref } => self.clip_view(item_ref, signal).await?.map(FocusBody::Notes),
             BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index, signal).await?.map(FocusBody::Grid),
             BodyRequest::Timeline => self.arrangement_strip(signal).await?.map(FocusBody::Timeline),
+            _ => None,
         })
     }
     fn has_audition(&self) -> bool {
@@ -1158,6 +1175,9 @@ pub struct PinnedNode {
     /// A stretch of the Arrangement pointed at in Live, in beats from the Set's start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<PinnedTime>,
+    /// The layout its refs were read at, where refs are places (Renoise's): it's carried from there to where it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<u64>,
 }
 
 /// `(state: ConnectionState, cause?: DisconnectCause) => void`.
@@ -2111,6 +2131,10 @@ pub trait SessionController {
         let _ = text;
         Ok(None)
     }
+    /// A pin as a recipe's blanks take it now (the DAW's integration says); as it was made when nothing says otherwise.
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        Some(pin.clone())
+    }
     fn has_run_recipe(&self) -> bool {
         false
     }
@@ -2290,6 +2314,7 @@ pub trait SessionController {
             BodyKind::Notes => self.has_clip_view(),
             BodyKind::Grid => self.has_session_strip(),
             BodyKind::Timeline => self.has_arrangement_strip(),
+            _ => false,
         }
     }
     /// A body for FOCUS (while connected).
@@ -2299,6 +2324,7 @@ pub trait SessionController {
             BodyRequest::Notes { item_ref } => self.clip_view(item_ref).await?.map(FocusBody::Notes),
             BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index).await?.map(FocusBody::Grid),
             BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
+            _ => None,
         })
     }
     fn has_reconfigure(&self) -> bool {

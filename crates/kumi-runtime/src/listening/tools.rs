@@ -134,17 +134,48 @@ pub(crate) const JUDGE_PHRASES: &[AssetPhrase] = &[
         said: |p| format!("mono below a frequency{}", parenthetical(p.vocab.bass_mono)),
     },
     AssetPhrase { live: "starts in the Arrangement", count: 1, said: |p| format!("starts in the {}", p.words.timeline) },
+    AssetPhrase { live: "an audio file or clip whose", count: 1, said: |p| format!("an audio file or {} whose", p.vocab.clip) },
+    AssetPhrase { live: "an audio clip's clipRef", count: 1, said: |p| format!("{}'s {}", p.vocab.audio_clip, p.vocab.clip_ref) },
 ];
 pub(crate) const TUNE_PHRASES: &[AssetPhrase] = &[
     AssetPhrase { live: "calculates an EQ Eight's bands", count: 1, said: |p| format!("calculates {}'s bands", with_article(p.vocab.eq)) },
     AssetPhrase { live: "on EQ Eight, the nearest band", count: 1, said: |p| format!("on {}, the nearest band", p.vocab.eq) },
+    AssetPhrase {
+        live: ", and turns Adaptive Q off and Scale to 100% so they land as calculated",
+        count: 1,
+        said: |p| p.vocab.eq_fit_settings.into(),
+    },
 ];
 pub(crate) const SOUND_PHRASES: &[AssetPhrase] =
     &[AssetPhrase { live: "Measure sounds in Live:", count: 1, said: |p| format!("Measure sounds in {}:", p.words.app) }];
 pub(crate) const FORM_PHRASES: &[AssetPhrase] = &[
-    AssetPhrase { live: "plays the whole Arrangement", count: 1, said: |p| format!("plays the whole {}", p.words.timeline) },
-    AssetPhrase { live: "the Arrangement's clips", count: 1, said: |p| format!("the {}'s clips", p.words.timeline) },
-    AssetPhrase { live: "a clip in the Set", count: 2, said: |p| format!("a clip in the {}", p.words.place) },
+    AssetPhrase {
+        live: "plays the whole Arrangement (or from_beat for beats), listening as it plays",
+        count: 1,
+        said: |p| {
+            if p.caps.renders_to_listen {
+                format!("renders the whole {} offline (or from_beat for beats)", p.words.timeline)
+            } else {
+                format!("plays the whole {} (or from_beat for beats), listening as it plays", p.words.timeline)
+            }
+        },
+    },
+    AssetPhrase { live: "the Arrangement's clips", count: 1, said: |p| format!("the {}'s {}", p.words.timeline, p.vocab.clips) },
+    AssetPhrase { live: "a clip in the Set", count: 2, said: |p| format!("{} in the {}", with_article(p.vocab.clip), p.words.place) },
+    AssetPhrase { live: "(its clipRef)", count: 1, said: |p| format!("(its {})", p.vocab.clip_ref) },
+    AssetPhrase { live: "the song's last clip", count: 1, said: |p| format!("the song's last {}", p.vocab.clip) },
+    AssetPhrase {
+        live: "A whole-song listen takes as long as the song.",
+        count: 1,
+        said: |p| {
+            if p.caps.renders_to_listen {
+                "A whole song renders faster than it plays."
+            } else {
+                "A whole-song listen takes as long as the song."
+            }
+            .into()
+        },
+    },
     AssetPhrase { live: "this Set's tempo", count: 1, said: |p| format!("this {}'s tempo", p.words.place) },
     AssetPhrase { live: "this Set's bars", count: 1, said: |p| format!("this {}'s bars", p.words.place) },
     AssetPhrase { live: "the Arrangement's start", count: 1, said: |p| format!("the {}'s start", p.words.timeline) },
@@ -162,12 +193,26 @@ pub(crate) const GROOVE_PHRASES: &[AssetPhrase] = &[
         said: |p| format!(", {}", p.vocab.drum_stem_steps),
     },
     AssetPhrase { live: "isn't in Live", count: 2, said: |p| format!("isn't in {}", p.words.app) },
+    AssetPhrase { live: "an Arrangement audio clip's clipRef", count: 1, said: |p| p.vocab.stem_audio.into() },
     AssetPhrase {
-        live: "an Arrangement audio clip's clipRef",
+        live: "with clip (the part, a MIDI clip) and reference (a MIDI clip with",
         count: 1,
-        said: |p| format!("{} audio clip's clipRef", with_article(p.words.timeline)),
+        said: |p| format!("with {} (the part, {m}) and reference ({m} with", p.vocab.clip_field, m = p.vocab.midi_clip),
     },
+    AssetPhrase {
+        live: "give that MIDI clip as reference and the drum stem's clip as audio",
+        count: 1,
+        said: |p| format!("give that {} as reference and {} as audio", without_article(p.vocab.midi_clip), p.vocab.stem_as_audio),
+    },
+    AssetPhrase { live: "a MIDI clip's clipRef", count: 1, said: |p| p.vocab.part_ref.into() },
+    AssetPhrase { live: "the reference's MIDI clip (its clipRef)", count: 1, said: |p| p.vocab.reference_part.into() },
+    AssetPhrase { live: "(change_notes, transform_midi swing, quantize)", count: 1, said: |p| format!("({})", p.vocab.note_tools) },
 ];
+
+/// A name without its article: "MIDI clip" from "a MIDI clip".
+fn without_article(name: &str) -> &str {
+    name.strip_prefix("a ").or_else(|| name.strip_prefix("an ")).unwrap_or(name)
+}
 
 fn definition(data: &Value, profile: &DawProfile, phrases: &[AssetPhrase]) -> ToolDef {
     let data = asset_in_words(data.clone(), profile, phrases);
@@ -196,7 +241,18 @@ pub fn form_tool(profile: &DawProfile) -> ToolDef {
 
 /// The groove tool in the DAW's words.
 pub fn groove_tool(profile: &DawProfile) -> ToolDef {
-    definition(&GROOVE, profile, GROOVE_PHRASES)
+    let mut def = definition(&GROOVE, profile, GROOVE_PHRASES);
+    // The part is taken by the DAW's word for it, where the schema has it.
+    let field = profile.vocab.clip_field;
+    if field != crate::live_word!(clip_field) {
+        if let Some(properties) = def.schema.get_mut("properties").and_then(Value::as_object_mut) {
+            *properties = std::mem::take(properties)
+                .into_iter()
+                .map(|(key, value)| if key == "clip" { (field.to_owned(), value) } else { (key, value) })
+                .collect();
+        }
+    }
+    def
 }
 
 /// The sound tool's input as a request, or what's wrong with it.
@@ -234,10 +290,11 @@ pub fn form_request(input: &JsonObject) -> FormRequest {
 }
 
 /// The groove tool's input as a request, or what's wrong with it.
-pub fn groove_request(input: &JsonObject) -> Result<GrooveRequest, String> {
+pub fn groove_request(profile: &DawProfile, input: &JsonObject) -> Result<GrooveRequest, String> {
     let text = |key: &str| input.get(key).and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let field = profile.vocab.clip_field;
     let request = GrooveRequest {
-        clip: text("clip"),
+        clip: text(field),
         reference: text("reference"),
         reference_tempo: input
             .get("reference_tempo")
@@ -251,15 +308,16 @@ pub fn groove_request(input: &JsonObject) -> Result<GrooveRequest, String> {
     };
     let starting = request.clip.is_some() || request.reference.is_some();
     if starting && (request.clip.is_none() || request.reference.is_none()) {
-        return Err(
-            "A run starts with both clip (the part) and reference (the reference's MIDI clip, or an audio file of a pitched part).".into(),
-        );
+        return Err(format!(
+            "A run starts with both {field} (the part) and reference (the reference's {}, or an audio file of a pitched part).",
+            without_article(profile.vocab.midi_clip)
+        ));
     }
     if starting && (request.change.is_some() || request.apply || request.done) {
         return Err("Start a run first; judge a change (or apply, or end it) in a later call.".into());
     }
     if !starting && request.change.is_none() && !request.apply && !request.done {
-        return Err("Give clip and reference to start, the change you made, apply: true, or done: true.".into());
+        return Err(format!("Give {field} and reference to start, the change you made, apply: true, or done: true."));
     }
     Ok(request)
 }
@@ -424,16 +482,42 @@ fn capitalized(text: &str) -> String {
 }
 
 pub(crate) const AUDITION_PHRASES: &[AssetPhrase] = &[
-    AssetPhrase { live: "first candidate in the Set", count: 1, said: |p| format!("first candidate in the {}", p.words.place) },
+    AssetPhrase {
+        live: "Kumi plays the part and hears",
+        count: 1,
+        said: |p| if p.caps.renders_to_listen { "Kumi renders the part offline and hears" } else { "Kumi plays the part and hears" }.into(),
+    },
+    AssetPhrase {
+        live: "first candidate in the Set",
+        count: 1,
+        said: |p| {
+            if p.caps.renders_to_listen {
+                "first candidate out loud once it's rendered".into()
+            } else {
+                format!("first candidate in the {}", p.words.place)
+            }
+        },
+    },
+    AssetPhrase {
+        live: "in one real-time pass",
+        count: 1,
+        said: |p| if p.caps.renders_to_listen { "in one render" } else { "in one real-time pass" }.into(),
+    },
     AssetPhrase {
         live: "in the Arrangement, or a Session clip per candidate",
         count: 1,
         said: |p| format!("in the {}, or {} per candidate", p.words.timeline, p.vocab.launcher_clip),
     },
     AssetPhrase {
-        live: "plays from the Arrangement for the render",
+        live: "(clip), which Kumi plays from the Arrangement for the render and removes after",
         count: 1,
-        said: |p| format!("plays from the {} for the render", p.words.timeline),
+        said: |p| {
+            if p.caps.renders_to_listen {
+                format!("({}), which Kumi renders where it is", p.vocab.clip_field)
+            } else {
+                format!("({}), which Kumi plays from the {} for the render and removes after", p.vocab.clip_field, p.words.timeline)
+            }
+        },
     },
     AssetPhrase { live: "what Main plays at from_beat", count: 1, said: |p| format!("what {} plays at from_beat", p.words.master) },
     AssetPhrase { live: "(Main's output)", count: 1, said: |p| format!("({}'s output)", p.words.master) },
@@ -442,12 +526,20 @@ pub(crate) const AUDITION_PHRASES: &[AssetPhrase] = &[
         count: 1,
         said: |p| {
             format!(
-                "{} on that track to play (its clipRef); left out, the {} at from_beat",
+                "{} on that track to {} (its {}); left out, the {} at from_beat",
                 capitalized(p.vocab.launcher_clip),
+                if p.caps.renders_to_listen { "render" } else { "play" },
+                p.vocab.clip_ref,
                 p.words.timeline
             )
         },
     },
+    AssetPhrase {
+        live: "a clip's length when left out",
+        count: 1,
+        said: |p| format!("{}'s length when left out", with_article(p.vocab.clip)),
+    },
+    AssetPhrase { live: "an audio clip's clipRef", count: 1, said: |p| format!("{}'s {}", p.vocab.audio_clip, p.vocab.clip_ref) },
     AssetPhrase {
         live: "Where the part starts in the Arrangement",
         count: 1,
@@ -456,15 +548,38 @@ pub(crate) const AUDITION_PHRASES: &[AssetPhrase] = &[
     AssetPhrase { live: "Where to start in the Arrangement", count: 1, said: |p| format!("Where to start in the {}", p.words.timeline) },
 ];
 
-/// The audition tool in the DAW's words.
+/// The audition tool in the DAW's words: a candidate takes the DAW's own thing to play under the DAW's word for it
+/// (`clip` in Live, REAPER's `item`, Renoise's `pattern`).
 pub fn audition_tool(profile: &DawProfile) -> ToolDef {
-    definition(&AUDITION, profile, AUDITION_PHRASES)
+    let mut def = definition(&AUDITION, profile, AUDITION_PHRASES);
+    let field = profile.vocab.clip_field;
+    if field != crate::live_word!(clip_field) {
+        if let Some(properties) =
+            def.schema.get_mut("properties").and_then(|p| p.pointer_mut("/candidates/items/properties")).and_then(Value::as_object_mut)
+        {
+            if let Some(clip) = properties.shift_remove("clip") {
+                properties.insert(field.into(), clip);
+            }
+        }
+    }
+    def
 }
+
+/// What the render tool's description says in Live's words (it isn't one of the asset's "description" keys).
+pub(crate) const RENDER_PHRASES: &[AssetPhrase] = &[
+    AssetPhrase { live: "an audio track's own clips", count: 1, said: |p| format!("an audio track's own {}", p.vocab.clips) },
+    AssetPhrase {
+        live: "audition, or record by resampling",
+        count: 1,
+        said: |p| if p.caps.renders_to_listen { "audition, or listen with track" } else { "audition, or record by resampling" }.into(),
+    },
+];
 
 /// The render tool in the DAW's words.
 pub fn render_tool(profile: &DawProfile) -> ToolDef {
     let data = asset_in_words(AUDITION.clone(), profile, AUDITION_PHRASES);
-    ToolDef { description: data["renderDescription"].as_str().unwrap().into(), schema: data["renderSchema"].as_object().unwrap().clone() }
+    let described = asset_in_words(json!({"description": data["renderDescription"]}), profile, RENDER_PHRASES);
+    ToolDef { description: described["description"].as_str().unwrap().into(), schema: data["renderSchema"].as_object().unwrap().clone() }
 }
 
 /// The audition tool's input as a request, or what's wrong with it.
@@ -472,9 +587,10 @@ pub fn audition_request(profile: &DawProfile, input: &JsonObject) -> Result<Audi
     let mut candidates = Vec::new();
     for item in input.get("candidates").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
         let label = item.get("label").and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()).map(|s| head(s, 60));
+        let field = profile.vocab.clip_field;
         if item.get("mix") == Some(&Value::Bool(true)) {
-            if item.get("track").is_some() || item.get("clip").is_some() {
-                return Err("A mix candidate is the whole mix: give it no track or clip.".into());
+            if item.get("track").is_some() || item.get(field).is_some() {
+                return Err(format!("A mix candidate is the whole mix: give it no track or {field}."));
             }
             candidates.push(AuditionCandidate { track: MIX_CANDIDATE.into(), mix: Some(true), label, clip: None });
             continue;
@@ -484,7 +600,7 @@ pub fn audition_request(profile: &DawProfile, input: &JsonObject) -> Result<Audi
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .ok_or("Each candidate needs its track (a trackRef from discovery), or is the whole mix ({\"mix\": true}).")?;
-        let clip = item.get("clip").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        let clip = item.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         candidates.push(AuditionCandidate { track: track.into(), mix: None, label, clip });
     }
     if candidates.is_empty() || candidates.len() > 8 {
@@ -531,8 +647,14 @@ mod tests {
     use super::*;
     use crate::core::daw::check_asset_phrases;
 
-    const ASSETS: [(&LazyLock<Value>, &[AssetPhrase]); 5] =
-        [(&JUDGE, JUDGE_PHRASES), (&TUNE, TUNE_PHRASES), (&SOUND, SOUND_PHRASES), (&FORM, FORM_PHRASES), (&GROOVE, GROOVE_PHRASES)];
+    const ASSETS: [(&LazyLock<Value>, &[AssetPhrase]); 6] = [
+        (&JUDGE, JUDGE_PHRASES),
+        (&TUNE, TUNE_PHRASES),
+        (&SOUND, SOUND_PHRASES),
+        (&FORM, FORM_PHRASES),
+        (&GROOVE, GROOVE_PHRASES),
+        (&AUDITION, AUDITION_PHRASES),
+    ];
 
     #[test]
     fn each_assets_phrases_are_in_it_as_many_times_as_they_say_and_live_says_them_as_they_are() {
@@ -540,6 +662,62 @@ mod tests {
             assert_eq!(check_asset_phrases(data, phrases), Ok(()));
             assert_eq!(asset_in_words((**data).clone(), &DawProfile::ABLETON, phrases), **data);
         }
+        // The render tool's description is the asset's own key, read with phrases of its own.
+        let render = json!({"description": AUDITION["renderDescription"]});
+        assert_eq!(check_asset_phrases(&render, RENDER_PHRASES), Ok(()));
+        assert_eq!(render_tool(&DawProfile::ABLETON).description, AUDITION["renderDescription"].as_str().unwrap());
+        assert_eq!(audition_tool(&DawProfile::ABLETON).schema, AUDITION["schema"].as_object().unwrap().clone());
+    }
+
+    /// Every word a DAW of Kumi's own must not see in a tool it's offered: Live's, and a clip (REAPER has items and takes,
+    /// Renoise samples and patterns).
+    #[test]
+    fn reaper_and_renoise_tools_say_their_own_things_never_a_clip_or_lives_words() {
+        let live = regex::Regex::new(
+            r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Main|Drum Rack|Operator|EQ Eight|Utility|Limiter|Multiband Dynamics|Adaptive Q|live_command|[Cc]lips?)\b",
+        )
+        .unwrap();
+        for profile in [&DawProfile::REAPER, &DawProfile::RENOISE] {
+            for def in [
+                audition_tool(profile),
+                render_tool(profile),
+                judge_tool(profile),
+                tune_tool(profile),
+                sound_tool(profile),
+                form_tool(profile),
+                groove_tool(profile),
+            ] {
+                let text = format!("{} {}", def.description, serde_json::to_string(&def.schema).unwrap());
+                let found: Vec<&str> = live.find_iter(&text).map(|m| m.as_str()).collect();
+                assert!(found.is_empty(), "{:?}: {found:?} in {text}", profile.id);
+                for tool in ["change_notes", "transform_midi", "quantize"] {
+                    assert!(!text.contains(tool), "{:?}: Live's {tool} in {text}", profile.id);
+                }
+            }
+            // groove takes its part by the DAW's word, and says how to name it.
+            let groove = groove_tool(profile);
+            let properties = &groove.schema["properties"];
+            assert!(properties.get(profile.vocab.clip_field).is_some() && properties.get("clip").is_none(), "{properties}");
+            assert_eq!(properties[profile.vocab.clip_field]["description"], format!("Starts a run: the part, {}", profile.vocab.part_ref));
+            let input = json!({profile.vocab.clip_field: "a", "reference": "b"}).as_object().cloned().unwrap();
+            assert_eq!(groove_request(profile, &input).unwrap().clip.as_deref(), Some("a"));
+            let half = json!({"reference": "b"}).as_object().cloned().unwrap();
+            assert!(groove_request(profile, &half)
+                .unwrap_err()
+                .starts_with(&format!("A run starts with both {} (the part)", profile.vocab.clip_field)));
+            let audition = audition_tool(profile);
+            let candidate = &audition.schema["properties"]["candidates"]["items"]["properties"];
+            assert!(candidate.get(profile.vocab.clip_field).is_some() && candidate.get("clip").is_none(), "{candidate}");
+            assert!(audition.description.contains("renders the part offline"), "{}", audition.description);
+        }
+        // A candidate's part is taken by the DAW's word for it.
+        let input = json!({"candidates": [{"track": "track:1", "item": "item:2"}]}).as_object().cloned().unwrap();
+        assert_eq!(audition_request(&DawProfile::REAPER, &input).unwrap().candidates[0].clip.as_deref(), Some("item:2"));
+        let mix = json!({"candidates": [{"mix": true, "pattern": "pattern:1"}], "from_beat": 0}).as_object().cloned().unwrap();
+        assert_eq!(
+            audition_request(&DawProfile::RENOISE, &mix).unwrap_err(),
+            "A mix candidate is the whole mix: give it no track or pattern."
+        );
     }
 
     #[test]

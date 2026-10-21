@@ -3,7 +3,10 @@ mod fixture;
 use fixture::{put, Studio};
 use kumi_common::abort::Signal;
 use kumi_runtime::{
-    core::contracts::{KernelTool, LibraryState},
+    core::{
+        contracts::{KernelTool, LibraryState},
+        daw::DawId,
+    },
     library::{
         create_library, library_dir, sources::SourceOptions, tools::LibraryAccess, LearnNowOptions, Library, LibraryOptions,
         LibraryToolsOptions,
@@ -73,6 +76,8 @@ async fn full_library_learns_searches_compares_files_describes_sets_and_remember
             let known = library.sound_index().await.unwrap();
             let again = library.sound_index().await.unwrap();
             assert!(Rc::ptr_eq(&known, &again), "unchanged readers retain the in-memory index");
+            let live = library.sound_index_in(Some(DawId::Ableton)).await.unwrap();
+            assert!(Rc::ptr_eq(&known, &live), "Live's searches use the index the warm-up built, with no rebuild");
             let wavetable = result(&tools, "find_presets", json!({"device":"Wavetable"})).await;
             assert_eq!(wavetable["presets"][0]["browser"], "user_library/Presets/Instruments/Wavetable/Rolling Bass.adv");
             let night = result(&tools, "my_sets", json!({"set":"night drive"})).await;

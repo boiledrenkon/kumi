@@ -145,15 +145,19 @@ impl TuiApp {
             self.show_status();
         }
     }
-    fn status_line(&self) -> (Style, &'static str) {
+    fn status_line(&self) -> (Style, String) {
         let state = self.0.state.borrow();
-        // A chat without Live starts disconnected and stays so, unless setup connects Live mid-session.
+        let daw = crate::daw::words().app;
+        // A chat without the DAW starts disconnected and stays so, unless setup connects it mid-session.
         if matches!(state.connection, ConnectionState::Disconnected | ConnectionState::Error) {
-            (st::WARN, "Live not connected")
+            (st::WARN, format!("{daw} not connected"))
         } else if state.connection == ConnectionState::Connecting {
-            (st::FAINT, "connecting to Live…")
+            (st::FAINT, format!("connecting to {daw}…"))
+        } else if state.focus.as_ref().is_some_and(|focus| focus.busy.is_some()) {
+            // There, but answering late (a dialog is open): not "not connected".
+            (st::WARN, format!("{daw} busy"))
         } else {
-            (st::ACCENT, "Live")
+            (st::ACCENT, daw.to_string())
         }
     }
     fn draw_header(&self, screen: &mut Screen, columns: i32) {
@@ -321,7 +325,7 @@ impl TuiApp {
             add("  “How do I make my kick punchier?”".into(), st::TEXT);
         }
         add(String::new(), st::TEXT);
-        add("Kumi keeps each Set's conversations: /conversations goes back to one.".into(), st::FAINT);
+        add(format!("Kumi keeps each {}'s conversations: /conversations goes back to one.", crate::daw::words().place), st::FAINT);
         if let Some(line) = library_line(state.library.as_ref()) {
             add(line, st::FAINT);
         }
@@ -516,7 +520,7 @@ impl TuiApp {
             return NowLine {
                 dot: Some(st::ACCENT),
                 label: "watching".into(),
-                ..simple("Watching your changes in Live; tell Kumi when you're done", st::TEXT)
+                ..simple(&format!("Watching your changes in {}; tell Kumi when you're done", crate::daw::words().app), st::TEXT)
             };
         }
         let jobs = state.jobs.values().filter(|status| status.state == kumi_runtime::core::jobs::JobState::Running).count();
@@ -530,9 +534,9 @@ impl TuiApp {
         if state.connection == ConnectionState::Connected && state.set_name.as_ref().is_some_and(|s| !s.is_empty()) {
             vec![(state.set_name.clone().unwrap(), st::BRIGHT), ("Your selection will show here".into(), st::FAINT)]
         } else if state.connection == ConnectionState::Connecting {
-            vec![("Connecting to Live…".into(), st::DIM)]
+            vec![(format!("Connecting to {}…", crate::daw::words().app), st::DIM)]
         } else {
-            vec![("Live isn't connected".into(), st::DIM)]
+            vec![(format!("{} isn't connected", crate::daw::words().app), st::DIM)]
         }
     }
     fn draw_composer(&self, screen: &mut Screen, box_: Rect, layout: &EditorLayout, visible: i32) -> Cursor {
@@ -545,16 +549,16 @@ impl TuiApp {
         let busy = self.busy();
         let state = self.0.state.borrow();
         if state.editor.is_empty() {
-            let placeholder = voice.as_ref().map(|v| v.placeholder.as_str()).unwrap_or_else(|| {
+            let placeholder = voice.as_ref().map(|v| v.placeholder.clone()).unwrap_or_else(|| {
                 if busy && (state.current.is_some() || state.pending_turn) {
-                    "Tell Kumi more while it works"
+                    "Tell Kumi more while it works".into()
                 } else if state.connection == ConnectionState::Connected {
-                    "Ask Kumi about your Set"
+                    format!("Ask Kumi about your {}", crate::daw::words().place)
                 } else {
-                    "Ask Kumi anything"
+                    "Ask Kumi anything".into()
                 }
             });
-            screen.put(x, box_.y + 1, &truncate(placeholder, width), &st::FAINT);
+            screen.put(x, box_.y + 1, &truncate(&placeholder, width), &st::FAINT);
         } else {
             for (index, row) in layout.rows.iter().skip(first as usize).take(visible as usize).enumerate() {
                 screen.put_in(x, box_.y + 1 + index as i32, row, &st::BRIGHT, box_);
@@ -633,7 +637,7 @@ impl TuiApp {
             }
             screen.put(3, y, item.name, &if chosen { st::ACCENT } else { st::TEXT });
             if chosen {
-                screen.put(about, y, &truncate(item.about, (width - about - 1).max(1)), &st::BRIGHT);
+                screen.put(about, y, &truncate(&item.about(), (width - about - 1).max(1)), &st::BRIGHT);
             }
         }
     }

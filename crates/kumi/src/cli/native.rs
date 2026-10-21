@@ -34,12 +34,25 @@ pub struct CliIo {
     pub env: Env,
     pub args: Vec<String>,
     pub signals: bool,
-    pub reopen: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, i32>>>,
+    /// Opens Kumi again with these arguments, in place of starting the program (tests).
+    pub reopen: Option<Rc<dyn Fn(Vec<String>) -> LocalBoxFuture<'static, i32>>>,
+    /// Which DAWs are on this computer, for /daw to offer (tests); else the DAWs' own detection says.
+    pub daws_here: Option<crate::daw::Here>,
     exit_after_reopen: Rc<Cell<bool>>,
 }
 impl CliIo {
     pub fn new(input: Rc<dyn TerminalInput>, out: Rc<dyn TtyOutput>, err: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { input, out, err, env, args: vec![], signals: false, reopen: None, exit_after_reopen: Rc::new(Cell::new(false)) }
+        Self {
+            input,
+            out,
+            err,
+            env,
+            args: vec![],
+            signals: false,
+            reopen: None,
+            daws_here: None,
+            exit_after_reopen: Rc::new(Cell::new(false)),
+        }
     }
     pub fn installed(&self) -> bool {
         self.env.get("KUMI_INSTALLED").is_some_and(|s| s == "1")
@@ -70,6 +83,14 @@ pub fn help(installed: bool) -> String {
         "Sign in and connect Live: it puts the bridge in Live and can restart Live for you.\nThen talk about the open Live Set; /login and /model change the sign-in and model.",
     ));
     first.push((format!("{cmd} bridge"), "Or, with Live closed: put the bridge into Live, or bring it up to date"));
+    first.push((
+        format!("{cmd} --daw reaper|renoise"),
+        "Work in REAPER or Renoise instead: Kumi's extension or tool goes in as Live's bridge does",
+    ));
+    first.push((
+        format!("{cmd} --daw reaper|renoise bridge"),
+        "Put Kumi's extension into REAPER, or its tool into Renoise, or bring it up to date",
+    ));
     let mut more=vec![("-c, --continue","Continue the conversation you had last, in any Set"),("-r, --resume [id or name]","Continue a kept conversation by its id, the start of one, or its name;\nalone, choose one (both work with --inference-only too)"),("export [id or name]","Save a kept conversation as Markdown (--md, the default; --html a web page;\n--json a file another Kumi imports); your latest without an id or with --last.\n--full adds each step's input and result, -o <path> chooses where, --raw leaves\nkeys and paths in"),("import <file>","Keep a conversation saved with export --json, to carry on with -r"),("--inference-only","Chat without Live"),("--bridge-config <path>","Use this bridge configuration (an absolute path)"),("login","Sign in: asks whether with ChatGPT or an API key"),("login <provider>","Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"),("logout <provider>","Remove Kumi's sign-in for that provider"),("model [<provider>/<model>]","Show or choose the model; ollama/<model> or lmstudio/<model> for one on this computer"),("auth","Show which providers are usable (no secrets)"),("doctor","Check the installation, sign-in, the bridge, Live and the terminal"),("library","What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"),("update","Bring Kumi up to date, and the bridge in Live when it's older"),("update --check","Say whether there's a newer Kumi, without installing it")];
     let doctor = more.iter().position(|(s, _)| *s == "doctor").map_or(more.len(), |at| at + 1);
     more.insert(doctor, ("doctor --json", "The doctor's checks as JSON, without keys, to share"));
@@ -83,7 +104,7 @@ pub fn help(installed: bool) -> String {
     more.extend([("report", "Write a file to send when something goes wrong (no keys in it)"), ("--version", "Show Kumi's version")]);
     let more: Vec<_> = more.into_iter().map(|(s, text)| (format!("{cmd} {s}"), text)).collect();
     format!(
-        "Kumi {KUMI_VERSION} — producer assistant for Ableton Live\n\nFirst run:\n{}\n\nMore:\n{}\n\n{}",
+        "Kumi {KUMI_VERSION} — producer assistant for Ableton Live, REAPER and Renoise\n\nFirst run:\n{}\n\nMore:\n{}\n\n{}",
         help_rows(&first.iter().map(|(s, t)| (s.as_str(), *t)).collect::<Vec<_>>()),
         help_rows(&more.iter().map(|(s, t)| (s.as_str(), *t)).collect::<Vec<_>>()),
         include_str!("help-tail.txt")
@@ -151,10 +172,18 @@ fn installed_io(io: &CliIo) -> InstalledIo {
 }
 fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     let mut doctor = DoctorIo::new(io.out.clone(), io.env.clone());
-    doctor.bundled_bridge_version = crate::daw::current().bundled_bridge_version();
+    // Live's checks probe Live and judge its bridge by Live's version, whichever DAW the doctor speaks for.
+    let live = crate::daw::provider(kumi_runtime::core::daw::DawId::Ableton).expect("Live is registered");
+    doctor.bundled_bridge_version = live.bundled_bridge_version();
+    let env = io.env.clone();
+    let (own_factory, own_env) = (factory.clone(), env.clone());
     doctor.probe_live = Some(Rc::new(move |config| {
-        let factory = factory.clone();
-        async move { Ok(crate::daw::current().probe(config, &factory).await) }.boxed_local()
+        let probe = live.probe(config, &factory, &env);
+        async move { Ok(probe.await) }.boxed_local()
+    }));
+    doctor.probe_own = Some(Rc::new(move |daw| match crate::daw::provider(daw) {
+        Some(own) => own.probe(String::new(), &own_factory, &own_env),
+        None => async { crate::doctor::LiveProbe::default() }.boxed_local(),
     }));
     doctor
 }
@@ -204,12 +233,17 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             io.out.write(&format!("Kumi {KUMI_VERSION}\n"));
             Ok(0)
         }
-        AppConfig::Doctor { json } => {
+        AppConfig::Doctor { json, daw } => {
+            // The doctor speaks in the words of the DAW asked for, else the one this producer works with (Live's, for Live).
+            crate::daw::work_with(crate::daw::chosen(*daw, &io.env).0.id());
             let mut doctor = doctor_io(io, factory);
             doctor.json = *json;
             doctor::run_doctor(doctor).await
         }
-        AppConfig::Report => write_report(ReportIo::new(doctor_io(io, factory))).await,
+        AppConfig::Report { daw } => {
+            crate::daw::work_with(crate::daw::chosen(*daw, &io.env).0.id());
+            write_report(ReportIo::new(doctor_io(io, factory))).await
+        }
         AppConfig::Export { conversation, format, out, full, raw } => {
             let format = match format.as_str() {
                 "html" => Format::Html,
@@ -289,7 +323,7 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             options.signal = Some(signal);
             run_library(options).await
         }
-        AppConfig::Bridge { yes, allow_dirty } => {
+        AppConfig::Bridge { yes, allow_dirty, daw } => {
             let wait_ms = io
                 .env
                 .get("KUMI_BRIDGE_WAIT_SECONDS")
@@ -297,7 +331,8 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|n| n.saturating_mul(1000));
             let command = BridgeCommand { input: Some(io.input.clone()), yes: *yes, allow_dirty: *allow_dirty, wait_ms };
-            crate::daw::current().setup_bridge(io.out.clone(), &io.env, command).await
+            let provider = daw.and_then(crate::daw::provider).unwrap_or_else(crate::daw::current);
+            provider.setup_bridge(io.out.clone(), &io.env, command).await
         }
         AppConfig::Auth { .. } => {
             login::auth_status(&config, AuthIo { out: io.out.clone(), env: io.env.clone(), fetch: None }).await?;
@@ -416,7 +451,7 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
 async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     if let Some(reopen) = &io.reopen {
-        return Ok(reopen().await);
+        return Ok(reopen(io.args.clone()).await);
     }
     let exe = if io.installed() {
         std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(crate::process::executable_name("kumi"))
@@ -467,4 +502,92 @@ pub fn main_with(factory: impl Into<DawFactory>) -> i32 {
     let local = tokio::task::LocalSet::new();
     let code = local.block_on(&runtime, run(io, factory));
     shutdown::finish(runtime, local, code, explicit_exit.get(), err.as_ref())
+}
+
+#[cfg(test)]
+mod doctor_io_tests {
+    use super::*;
+    use crate::input::ByteListener;
+    use kumi_runtime::core::daw::DawId;
+
+    struct Silent;
+    impl TerminalInput for Silent {
+        fn is_tty(&self) -> bool {
+            false
+        }
+        fn is_raw(&self) -> bool {
+            false
+        }
+        fn set_raw_mode(&self, _: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _: ByteListener) {}
+        fn pause(&self) {}
+        fn on_end(&self, _: Rc<dyn Fn()>) {}
+    }
+    struct Nowhere;
+    impl TtyOutput for Nowhere {
+        fn is_tty(&self) -> bool {
+            false
+        }
+        fn columns(&self) -> Option<i32> {
+            None
+        }
+        fn rows(&self) -> Option<i32> {
+            None
+        }
+        fn write(&self, _: &str) {}
+    }
+
+    /// The doctor speaking for REAPER (used last) still probes Live for Live's checks, and judges Live's bridge by
+    /// Live's version, never REAPER's.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lives_checks_probe_live_whichever_daw_the_doctor_speaks_for() {
+        tokio::task::LocalSet::new().run_until(probe_live_as_reaper()).await;
+    }
+    async fn probe_live_as_reaper() {
+        crate::daw::work_with(DawId::Reaper);
+        let probed = Rc::new(Cell::new(0));
+        let count = probed.clone();
+        let factory = DawFactory {
+            ableton: Rc::new(move |options| {
+                count.set(count.get() + 1);
+                kumi_runtime::integrations::create_ableton_integration(options)
+            }),
+            own_host: None,
+        };
+        let io = CliIo::new(Rc::new(Silent), Rc::new(Nowhere), Rc::new(Nowhere), Env::new());
+        let doctor = doctor_io(&io, factory);
+        let live = crate::daw::provider(DawId::Ableton).unwrap();
+        assert_eq!(doctor.bundled_bridge_version, live.bundled_bridge_version());
+        let probe = doctor.probe_live.clone().unwrap();
+        let _ = probe("/nowhere/bridge-config.json".into()).await;
+        assert_eq!(probed.get(), 1, "Live's probe made Live's integration");
+        crate::daw::work_with(DawId::Ableton);
+    }
+
+    /// Review K42: the doctor starts Kumi's host for REAPER or Renoise once (through the session's host factory), and
+    /// a host that won't start says why.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_doctor_starts_kumis_host_for_reaper_and_renoise() {
+        tokio::task::LocalSet::new().run_until(probe_own_hosts()).await;
+    }
+    async fn probe_own_hosts() {
+        let asked = Rc::new(std::cell::RefCell::new(vec![]));
+        let seen = asked.clone();
+        let factory = DawFactory {
+            ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration),
+            own_host: Some(Rc::new(move |daw| {
+                seen.borrow_mut().push(daw);
+                Rc::new(|_| async { Err(RuntimeError::plain("daw-mcp-server wasn't found")) }.boxed_local())
+            })),
+        };
+        let io = CliIo::new(Rc::new(Silent), Rc::new(Nowhere), Rc::new(Nowhere), Env::new());
+        let probe = doctor_io(&io, factory).probe_own.expect("the doctor probes Kumi's own hosts");
+        for daw in [DawId::Reaper, DawId::Renoise] {
+            let host = probe(daw).await;
+            assert!(!host.started && host.said.as_deref().is_some_and(|said| said.contains("daw-mcp-server wasn't found")), "{host:?}");
+        }
+        assert_eq!(*asked.borrow(), [DawId::Reaper, DawId::Renoise]);
+    }
 }

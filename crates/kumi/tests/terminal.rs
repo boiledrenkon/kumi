@@ -1,3 +1,5 @@
+#[path = "support/live_words.rs"]
+mod live_words;
 #[path = "support/models.rs"]
 mod models;
 use async_trait::async_trait;
@@ -535,6 +537,10 @@ async fn busy_rejection_cancel_preserves_input_and_close_is_once() {
             flush().await;
             assert_eq!(f.control.calls.borrow().iter().filter(|c| c.starts_with("submit:")).cloned().collect::<Vec<_>>(), ["submit:first"]);
             assert!(f.text().contains("Busy; cancel first"));
+            // A command Kumi doesn't have is no turn: it's answered while Kumi works too.
+            f.input.write("/nonsense\r");
+            flush().await;
+            assert!(f.text().contains("Unknown command. Use /help."), "{}", f.text());
             f.input.write("follow\x03");
             flush().await;
             assert!(f.control.calls.borrow().contains(&"cancel".into()));
@@ -786,6 +792,11 @@ async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_nu
             f.input.write("hello\n");
             flush().await;
             assert!(f.control.calls.borrow().contains(&"submit:hello".into()));
+            // Review K13: a DAW Kumi can't open places in is opened by the producer, and nothing says Kumi will.
+            f.emit(json!({"type":"set-asked","ask":{"id":"there3","title":"warmer pads","set":"Song C","open":"Song A","daw":"REAPER","noun":"project","byHand":true}}));
+            assert!(f.text().contains("1. Open “Song C” in REAPER yourself (this conversation carries on once it's open) · 2. Carry it on here"), "{}", f.text());
+            f.input.write("3\n");
+            flush().await;
             // Names, forks and the status line.
             f.input.write("/rename Night drive\n/rename there1 Bass, take two\n/new Second\n/fork\n/fork Alt\n");
             flush().await;
@@ -885,6 +896,46 @@ async fn export_and_share_save_this_conversation_where_kumi_was_started_with_sec
             assert!(f.text().contains("[export] Saved this conversation as a web page: "));
             assert!(f.text().contains("[export] Use /export [md | html | json]"));
             f.quit().await;
+        })
+        .await;
+}
+
+/// Plain mode in a REAPER or Renoise session speaks the DAW's words, never Live's: its header, the commands' lines,
+/// what the session tells it, and the goodbye.
+#[tokio::test]
+async fn plain_mode_in_reaper_and_renoise_never_speaks_lives_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (daw, app, place) in [(kumi_runtime::core::daw::DawId::Reaper, "REAPER", "project"), (kumi_runtime::core::daw::DawId::Renoise, "Renoise", "song")] {
+                kumi::daw::work_with(daw);
+                for mode in ["live", "inference-only"] {
+                    let f = Fixture::with(false, false, None, None, None, |o| o.mode = mode.into());
+                    f.control.stop.set(false);
+                    flush().await;
+                    for event in [
+                        json!({"type":"connection","state":"connected"}),
+                        json!({"type":"observation","label":format!("{app} — Night Drive")}),
+                        json!({"type":"change","change":{"id":"c1","family":"mixer","title":"Bass volume","state":"unsure","at":1}}),
+                        json!({"type":"remembered","scope":"set","note":{"id":"s1","text":"The Reese is the main bass","at":1},"pending":true}),
+                        json!({"type":"watching","on":true}),
+                        json!({"type":"action","title":"Playing"}),
+                        json!({"type":"watching","on":false}),
+                        json!({"type":"connection","state":"disconnected"}),
+                    ] {
+                        f.emit(event);
+                    }
+                    f.input.write("/help\n/status\n/stop\n/memory\n/recipes\n/conversations\n/quit\n");
+                    flush().await;
+                    f.quit().await;
+                    let text = f.text();
+                    let leaks = live_words::leaks(&text);
+                    assert!(leaks.is_empty(), "{app} ({mode}) says Live's words:\n{}\n\nin:\n{text}", leaks.join("\n"));
+                    for want in [format!("MCP/{app}"), format!("Each {place}'s conversation continues next time")] {
+                        assert!(text.contains(&want), "{app} ({mode}): no {want:?} in:\n{text}");
+                    }
+                }
+            }
+            kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
         })
         .await;
 }

@@ -27,6 +27,8 @@ use kumi_runtime::{
 };
 use regex::Regex;
 use serde_json::{json, Value};
+#[path = "support/in_process.rs"]
+mod in_process;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -255,6 +257,18 @@ impl Integration for FakeIntegration {
     async fn close(&self) -> Result<(), RuntimeError> {
         Ok(())
     }
+    fn can_show(&self, kind: kumi_runtime::core::view::BodyKind) -> bool {
+        kind == kumi_runtime::core::view::BodyKind::Matrix
+    }
+    async fn focus_body(
+        &self,
+        request: &kumi_runtime::core::view::BodyRequest,
+        _: Signal,
+    ) -> Result<Option<kumi_runtime::core::view::FocusBody>, RuntimeError> {
+        use kumi_runtime::core::view::*;
+        Ok((request == &BodyRequest::Matrix)
+            .then(|| FocusBody::Matrix(SequenceMatrix { tracks: vec!["Kick".into()], slots: vec![], current: None, first: 0 })))
+    }
 }
 
 /// A session with every option on, over the fake DAW (or, `away`, without it).
@@ -445,21 +459,226 @@ async fn a_whole_session_over_another_daw_says_nothing_in_lives_words() {
             for (at, phrase, why) in ALLOWED {
                 assert!(said.iter().any(|text| text.contains(phrase)), "{at} no longer says {phrase} ({why}): take it off the list");
             }
-            let found: Vec<String> = said
-                .iter()
-                .map(|text| ALLOWED.iter().fold(text.clone(), |text, (_, phrase, _)| text.replace(phrase, "")))
-                .flat_map(|text| {
-                    LIVE_WORDS
-                        .find_iter(&text)
-                        .map(|word| {
-                            let (start, end) = (word.start().saturating_sub(80), (word.end() + 80).min(text.len()));
-                            let (start, end) = (floor(&text, start), ceil(&text, end));
-                            format!("{:?}: …{}…", word.as_str(), &text[start..end])
-                        })
-                        .collect::<Vec<_>>()
+            assert_no_live_words(&said);
+        })
+        .await;
+}
+
+/// Nothing said is in Live's words, but for what ALLOWED lets through.
+fn assert_no_live_words(said: &[String]) {
+    let found: Vec<String> = said
+        .iter()
+        .map(|text| ALLOWED.iter().fold(text.clone(), |text, (_, phrase, _)| text.replace(phrase, "")))
+        .flat_map(|text| {
+            LIVE_WORDS
+                .find_iter(&text)
+                .map(|word| {
+                    let (start, end) = (word.start().saturating_sub(80), (word.end() + 80).min(text.len()));
+                    let (start, end) = (floor(&text, start), ceil(&text, end));
+                    format!("{:?}: …{}…", word.as_str(), &text[start..end])
                 })
-                .collect();
-            assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
+}
+
+/// A session in a DAW of Kumi's own through its host (in process, in front of `config`'s simulated DAW) on a model that
+/// says `steps`, then the producer's /undo and one more question. What the model was sent (its tools, the plan's and
+/// undo's answers, the observations with kumiChanges) and what the producer was told (HISTORY's records, notices), and
+/// what /undo took back.
+async fn own_session(
+    daw: daw_bridge::Daw,
+    profile: DawProfile,
+    config: impl FnOnce(daw_bridge::auth::Secret) -> daw_mcp_server::simulator::SimulatorConfig,
+    create: fn(kumi_runtime::integrations::own_bridge::OwnOptions) -> Rc<dyn Integration>,
+    steps: Vec<Step>,
+) -> (Vec<String>, Vec<ChangeRecord>, Option<ChangeRecord>) {
+    use daw_bridge::{files::ensure_secret, paths::BridgePaths};
+    use daw_mcp_server::{host::Host, simulator::Simulator};
+    use kumi_runtime::core::context::IntegrationContext;
+    use kumi_runtime::integrations::own_bridge::{Connect, OwnOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(dir.path(), daw);
+    let mut config = config(ensure_secret(&paths.secret()).unwrap());
+    config.discovery_dir = Some(paths.discovery());
+    let simulator = Simulator::start(config).await.unwrap();
+    let host = Rc::new(in_process::InProcess { host: std::sync::Arc::new(Host::new(daw, dir.path())), id: Cell::new(0) });
+    let home = dir.path().to_path_buf();
+    let changes: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+    let into = changes.clone();
+    let integration: IntegrationFactory = Box::new(move |listener: ConnectionListener| {
+        let host = host.clone();
+        let connect: Connect = Rc::new(move |_| {
+            let host = host.clone();
+            async move { Ok(host as Rc<dyn kumi_runtime::mcp::client::McpEndpoint>) }.boxed_local()
+        });
+        let mut context = IntegrationContext::new(listener);
+        let into = into.clone();
+        context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+        create(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect) })
+    });
+    let main = Rc::new(Recorded::default());
+    let events = Rc::new(RefCell::new(vec![]));
+    let out = events.clone();
+    let mut options = SessionOptions::new(recording(main.clone(), None), integration, Rc::new(move |event| out.borrow_mut().push(event)));
+    options.profile = profile;
+    // Listening on: the listen tool, and the DAW's listening tools as its bridge offers them (M5).
+    options.listen = true;
+    options.timeout_ms = Some(20_000);
+    options.close_timeout_ms = Some(5_000);
+    options.conversations = Some(create_conversation_store(dir.path()));
+    let session = create_session(options).unwrap();
+    session.start().await.unwrap();
+    main.script.borrow_mut().extend(steps);
+    session.submit("Make the changes.", None).await.unwrap();
+    let undone = session.undo(None).await.unwrap();
+    session.submit("What changed?", None).await.unwrap();
+    session.close().await.unwrap();
+    simulator.stop();
+
+    let mut said: Vec<String> = main.requests.borrow().clone();
+    assert!(said.iter().any(|request| request.contains("kumiChanges")), "the model sees its changes");
+    said.extend(
+        main.tools
+            .borrow()
+            .iter()
+            .map(|tool| json!({"name":tool.name(),"description":tool.description(),"inputSchema":tool.input_schema()}).to_string()),
+    );
+    said.extend(events.borrow().iter().map(|event| serde_json::to_string(event).unwrap()));
+    said.extend(changes.borrow().iter().map(|record| serde_json::to_string(record).unwrap()));
+    // REAPER has items and takes, Renoise samples and patterns: a clip is Live's word there too, in every tool (the
+    // listening ones included) and every reply.
+    let clips = Regex::new(r"\b[Cc]lips?\b").unwrap();
+    for listening in ["listen", "audition", "judge", "tune", "sound", "form", "groove"] {
+        assert!(main.tools.borrow().iter().any(|tool| tool.name() == listening), "{listening} offered in {}", profile.words.app);
+    }
+    // The audition and the listen ran (their replies reached the model), not only refused.
+    let requests = main.requests.borrow();
+    assert!(requests.iter().any(|request| request.contains("\\\"takes\\\"")), "an audition's takes in {}", profile.words.app);
+    assert!(requests.iter().any(|request| request.contains("rendered it offline")), "a listen rendered in {}", profile.words.app);
+    drop(requests);
+    // (a HISTORY record's family is Kumi's own key for its kind, never shown as a word: an audition's heard row is "clip")
+    let found: Vec<&String> = said.iter().filter(|text| clips.is_match(&text.replace("\"family\":\"clip\"", ""))).collect();
+    assert!(found.is_empty(), "a clip in {}'s words: {found:?}", profile.words.app);
+    let changes = changes.borrow().clone();
+    (said, changes, undone)
+}
+
+/// A session in REAPER: the model changes the project with a plan, undoes a change, reads; the producer undoes another
+/// with /undo. Nothing the model is sent or the producer told is in Live's words.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
+    use daw_mcp_server::simulator::reaper::ReaperScript;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let script = ReaperScript::new(3, 0);
+            // A drum part and a reference with later, softer off-beats, for groove.
+            let eighths = |late: f64, off: i64| -> Vec<(i64, f64, f64, i64)> {
+                (0..16)
+                    .map(|n| (42, n as f64 * 0.5 + if n % 2 == 1 { late } else { 0. }, 0.25, if n % 2 == 1 { off } else { 110 }))
+                    .collect()
+            };
+            let (part, _) = script.add_midi_item("r:track:{T0002}", "Drums", 0., 8., &eighths(0., 110));
+            let (reference, _) = script.add_midi_item("r:track:{T0003}", "Reference", 0., 8., &eighths(0.08, 70));
+            let config = {
+                let script = script.clone();
+                move |secret| script.config(secret, "/lab/REAPER")
+            };
+            let steps = vec![
+                step(|_| {
+                    call(
+                        "make_changes",
+                        json!({"steps": [
+                            {"tool": "track_volume", "input": {"ref": "track:2", "volumeDb": -6}},
+                            {"tool": "track_add", "as": "pad", "input": {"name": "Pad"}},
+                            {"tool": "track_rename", "input": {"ref": "@pad", "name": "Pads"}},
+                        ]}),
+                    )
+                }),
+                step(|_| call("undo_change", json!({"change": "last"}))),
+                step(|_| call("reaper_read", json!({"kind": "track"}))),
+                step(|_| call("audition", json!({"candidates": [{"track": "track:2", "label": "warm"}], "from_beat": 0, "beats": 4}))),
+                step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
+                step(|_| call("judge", json!({"goal": {"loudness": -14}, "from_beat": 0, "beats": 4}))),
+                step(move |_| call("groove", json!({"item": part, "reference": reference}))),
+                step(|_| call("groove", json!({"apply": true}))),
+                step(|_| call("groove", json!({"done": true}))),
+                step(|_| answer("Done.")),
+            ];
+            let create = kumi_runtime::integrations::reaper::create_reaper_integration;
+            let (said, changes, undone) = own_session(daw_bridge::Daw::Reaper, DawProfile::REAPER, config, create, steps).await;
+            assert_eq!(script.volume(1), -6.0, "the plan ran");
+            let rename = changes.iter().rev().find(|record| record.title == "Renamed track “Pad” → “Pads”").map(|record| record.state);
+            assert_eq!(rename, Some(ChangeState::Undone), "the model undid the rename");
+            // The producer's /undo took back the latest change still standing: groove's move of the part's notes.
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Changed 8 notes in take “Drums”"));
+            assert!(
+                changes.iter().any(|record| record.title == "Added track “Pad”" && record.state == ChangeState::Applied),
+                "{changes:?}"
+            );
+            assert!(changes.iter().any(|record| record.title == "Track 1 volume -6 dB"), "{changes:?}");
+            assert_no_live_words(&said);
+        })
+        .await;
+}
+
+/// The same in Renoise: a fader and a device in one plan (the device moves Renoise's epoch), the device undone by the
+/// model, the fader by the producer's /undo.
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_session_changes_and_undoes_in_renoises_words() {
+    use daw_mcp_server::simulator::renoise::RenoiseScript;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let script = RenoiseScript::new();
+            // A pattern track's 8ths and a reference's, its off-beats later and softer, for groove.
+            let eighths = |delay: Option<&str>, volume: Option<&str>| -> Value {
+                let rows: Vec<Value> = (0..16)
+                    .map(|n| {
+                        let mut cell = json!({"col": 1, "note": "C-4", "instrument": "00"});
+                        if n % 2 == 1 {
+                            if let Some(delay) = delay {
+                                cell["delay"] = delay.into();
+                            }
+                            if let Some(volume) = volume {
+                                cell["volume"] = volume.into();
+                            }
+                        }
+                        json!({"line": n * 2 + 1, "notes": [cell]})
+                    })
+                    .collect();
+                Value::Array(rows)
+            };
+            script.set_lines(1, 1, eighths(None, None));
+            script.set_lines(3, 1, eighths(Some("50"), Some("48")));
+            let config = {
+                let script = script.clone();
+                move |secret| script.config_with_changes(secret, "/lab/Renoise")
+            };
+            let steps = vec![
+                step(|_| {
+                    call(
+                        "make_changes",
+                        json!({"steps": [
+                            {"tool": "track_volume", "input": {"ref": "track:1", "volumeDb": -6}},
+                            {"tool": "device_add", "as": "eq", "input": {"ref": "track:1", "path": "EQ 10"}},
+                        ]}),
+                    )
+                }),
+                step(|_| call("undo_change", json!({"change": "last"}))),
+                step(|_| call("renoise_read", json!({"kind": "track"}))),
+                step(|_| call("audition", json!({"candidates": [{"track": "track:1", "label": "kick"}], "from_beat": 0, "beats": 4}))),
+                step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
+                step(|_| call("groove", json!({"pattern": "1:pattern:1 1:track:1", "reference": "1:pattern:3 1:track:1"}))),
+                step(|_| call("groove", json!({"apply": true}))),
+                step(|_| answer("Done.")),
+            ];
+            let create = kumi_runtime::integrations::renoise::create_renoise_integration;
+            let (said, changes, undone) = own_session(daw_bridge::Daw::Renoise, DawProfile::RENOISE, config, create, steps).await;
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Track 1 volume -6 dB"));
+            assert_eq!(script.track_state(1), (0.0, false, 0), "the device and the fader both taken back");
+            assert!(changes.iter().any(|record| record.title == "Added “EQ 10” to “Track 1”"), "{changes:?}");
+            assert_no_live_words(&said);
         })
         .await;
 }
@@ -475,4 +694,24 @@ fn ceil(text: &str, mut at: usize) -> usize {
         at += 1;
     }
     at
+}
+
+/// FOCUS's bodies of another DAW's own (here its sequence) reach the app through the session, as Live's four always
+/// did.
+#[tokio::test(flavor = "current_thread")]
+async fn the_session_offers_another_daws_own_focus_bodies() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::{BodyKind, BodyRequest, FocusBody};
+            let dir = tempfile::tempdir().unwrap();
+            let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
+            let (session, _, _, _) = open(&main, &worker, dir.path(), false);
+            session.start().await.unwrap();
+            assert!(session.can_show(BodyKind::Matrix), "the DAW's own body");
+            assert!(!session.can_show(BodyKind::Tracker), "one the DAW doesn't draw");
+            assert!(session.can_show(BodyKind::Tree) && session.can_show(BodyKind::Timeline), "Live's four, as always");
+            assert!(matches!(session.focus_body(&BodyRequest::Matrix).await.unwrap(), Some(FocusBody::Matrix(_))));
+            session.close().await.unwrap();
+        })
+        .await;
 }

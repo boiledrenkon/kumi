@@ -26,7 +26,7 @@ use kumi_runtime::{
         openai_codex::OPENAI_CODEX,
         store::{open_credential_store, Credential, CredentialStore},
     },
-    core::errors::RuntimeError,
+    core::{daw::DawId, errors::RuntimeError},
     library::{
         learn::LearnPhase,
         sources::{dirname, join},
@@ -116,6 +116,8 @@ pub struct DoctorIo {
     pub node_version: Option<String>,
     pub terminal: Option<TerminalInfo>,
     pub probe_live: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Result<LiveProbe, RuntimeError>>>>,
+    /// Starts Kumi's host for REAPER or Renoise once, as Live's probe starts Live's bridge.
+    pub probe_own: Option<Rc<dyn Fn(DawId) -> LocalBoxFuture<'static, LiveProbe>>>,
     pub node_version_of: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Option<String>>>>,
     pub bundled_bridge_version: Option<String>,
     pub video_programs: Option<AsyncCheck<VideoPrograms>>,
@@ -134,6 +136,7 @@ impl DoctorIo {
             node_version: None,
             terminal: None,
             probe_live: None,
+            probe_own: None,
             node_version_of: None,
             bundled_bridge_version: None,
             video_programs: None,
@@ -467,17 +470,21 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let sign_in = sign_in_check(env, &servers).await?;
     let said = servers.iter().find(|s| sign_in.text.starts_with(&format!("{} isn't running", s.server.name))).map(|s| s.server.id.as_str());
     let mut checks = io.node_version.is_some().then(|| node.clone()).into_iter().chain([sign_in]).collect::<Vec<_>>();
+    // A KUMI_DAW Kumi doesn't know stops every session from starting.
+    if let Some(problem) = crate::config::daw_env_problem(env) {
+        checks.insert(0, Check::fix(format!("Kumi won't start: {problem}"), Some("Set KUMI_DAW to one of those, or unset it".into())));
+    }
     checks.extend(server_checks(&servers, env, said));
     // Each DAW's bridge and whether Kumi reaches the DAW through it.
-    for provider in crate::daw::providers() {
+    for provider in crate::daw::providers().into_iter().filter(|provider| crate::daw::in_use(*provider, env)) {
         checks.extend(provider.doctor_checks(io, &node).await);
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {
-            Check::ok(format!("Remembers Sets in {}", tilde(&projects)))
+            Check::ok(format!("Remembers {} in {}", crate::daw::words().places, tilde(&projects)))
         } else {
             Check::note(
-                format!("Can't write {}, so Kumi won't catch you up on Sets", tilde(&projects)),
+                format!("Can't write {}, so Kumi won't catch you up on {}", tilde(&projects), crate::daw::words().places),
                 Some("Check that folder's permissions, or set KUMI_PROJECTS_DIR".into()),
             )
         })
@@ -520,7 +527,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
         Check::ok("Watches videos: frames with ffmpeg, speech with whisper.cpp")
     });
     // What each DAW needs of this computer beyond its bridge (Live: Kumi's hands in its menus).
-    for provider in crate::daw::providers() {
+    for provider in crate::daw::providers().into_iter().filter(|provider| crate::daw::in_use(*provider, env)) {
         checks.extend(provider.extra_checks(io).await?);
     }
     let voice = if let Some(voice) = &io.voice {
@@ -600,7 +607,7 @@ pub async fn doctor_sections(io: &DoctorIo) -> Result<Vec<Section>, RuntimeError
     let (installation, checks) = futures::join!(installation_checks(&io.env, &io.installation), doctor_checks(io));
     Ok(vec![
         Section { title: "Installation".into(), checks: installation },
-        Section { title: "Sign-in, Live and the rest".into(), checks: checks? },
+        Section { title: format!("Sign-in, {} and the rest", crate::daw::used_names(&io.env)), checks: checks? },
     ])
 }
 /// 1 when anything needs fixing. Notes (a newer Kumi, Live not installed, `kumi` not on this window's PATH) are

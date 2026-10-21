@@ -1,0 +1,67 @@
+{
+  "about": "Proofs are lowercase hex HMAC-SHA256(key = the secret's bytes, message = serverMessage or clientMessage). secretFiles: a secret file's text and the secret read from it, or why it is refused.",
+  "protocol": "kumi-daw/1",
+  "cases": [
+    {
+      "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz",
+      "clientNonce": "0123456789abcdef0123456789abcdef",
+      "serverNonce": "fedcba9876543210fedcba9876543210",
+      "serverMessage": "kumi-daw/1\nserver\n0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210",
+      "serverProof": "da1db56c2cc45a88dbc197ab81c93770a182d2e3851561956a664a6568e1685b",
+      "clientMessage": "kumi-daw/1\nclient\n0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210",
+      "clientProof": "8b67d7def90a1f0993e71d7040cd99a9fc6d1d77f605f63434956019dbf421af"
+    },
+    {
+      "secret": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "clientNonce": "00000000000000000000000000000001",
+      "serverNonce": "fedcba9876543210fedcba9876543210",
+      "serverMessage": "kumi-daw/1\nserver\n00000000000000000000000000000001\nfedcba9876543210fedcba9876543210",
+      "serverProof": "ad3d364f75ebb2cd1003ef5cce2dde41751acdcb22d6834352ef1193facdfae1",
+      "clientMessage": "kumi-daw/1\nclient\n00000000000000000000000000000001\nfedcba9876543210fedcba9876543210",
+      "clientProof": "29c12adc92ba0ccf038833900602786855a2e87578429469120489067c08856e"
+    },
+    {
+      "secret": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ~",
+      "clientNonce": "00000000000000000000000000000002",
+      "serverNonce": "fedcba9876543210fedcba9876543210",
+      "serverMessage": "kumi-daw/1\nserver\n00000000000000000000000000000002\nfedcba9876543210fedcba9876543210",
+      "serverProof": "b6c6bddf23ee8ad3b9b2b0e243a2166030677931e36e3b83d5c01dfcf5ce9674",
+      "clientMessage": "kumi-daw/1\nclient\n00000000000000000000000000000002\nfedcba9876543210fedcba9876543210",
+      "clientProof": "95fb41ccfdb3d0c4aaf08a59df44f094c2832b946f0664c34ec9e86b1ec54d19"
+    }
+  ],
+  "secretFiles": [
+    {
+      "text": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz\n",
+      "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz"
+    },
+    {
+      "text": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz\r\n",
+      "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz"
+    },
+    {
+      "text": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz",
+      "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz"
+    },
+    {
+      "text": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz\n\n",
+      "error": "bad-byte"
+    },
+    {
+      "text": " kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz",
+      "error": "bad-byte"
+    },
+    {
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "error": "too-short"
+    },
+    {
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error": "too-long"
+    },
+    {
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+      "error": "bad-byte"
+    }
+  ]
+}

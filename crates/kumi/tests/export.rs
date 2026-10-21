@@ -487,3 +487,20 @@ async fn words_about_importing_name_the_command_kumi_runs_with() {
     let saved = kumi::export::saved_words(Format::Json, std::path::Path::new("k.json"), "cargo run -p kumi --");
     assert!(saved.contains("Another Kumi carries it on after: cargo run -p kumi -- import <this file>."), "{saved}");
 }
+
+/// `kumi export` of a REAPER or Renoise conversation speaks that DAW's words, whichever DAW Kumi was started for; a Live
+/// conversation's (and an imported one's) stay Live's.
+#[test]
+fn an_exported_conversation_speaks_the_words_of_the_daw_its_place_is_in() {
+    use kumi::export::{words_of, WORDS};
+    let id = "0123456789abcdef0123456789abcdef";
+    let (words, label) = words_of(&format!("reaper-{id}"));
+    assert_eq!(words, ("REAPER", "project"));
+    assert_eq!(label("reaper_read"), "looked at your project");
+    let (words, label) = words_of("renoise-unsaved");
+    assert_eq!(words, ("Renoise", "song"));
+    assert_eq!(label("renoise_read"), "looked at your song");
+    for place in [id, "unsaved", IMPORTED] {
+        assert_eq!(words_of(place).0, WORDS, "{place}");
+    }
+}

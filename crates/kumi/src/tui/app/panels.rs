@@ -21,7 +21,9 @@ use kumi_runtime::{
 use std::collections::HashMap;
 
 /// What the conversations list says of its keys.
-const CONVERSATIONS_HINT: &str = "enter goes back · tab: this Set or all · ctrl+f rename, pin, delete, copy id · esc closes";
+fn conversations_hint() -> String {
+    format!("enter goes back · tab: this {} or all · ctrl+f rename, pin, delete, copy id · esc closes", crate::daw::words().place)
+}
 /// After choosing a model: say when `/fast` puts it on its faster tier, since that costs more.
 fn fast_note(tier: Option<&ServiceTier>) -> String {
     tier.map(|tier| {
@@ -212,9 +214,10 @@ impl TuiApp {
         } else {
             items.extend(notes(&memory.memory.producer));
         }
-        items.push(PickerItem::heading(format!("About {}", memory.set_name.as_deref().unwrap_or("this Set"))));
+        let place = crate::daw::words().place;
+        items.push(PickerItem::heading(format!("About {}", memory.set_name.clone().unwrap_or_else(|| format!("this {place}")))));
         if !memory.saved {
-            items.push(inert("Kept once the Set is saved"));
+            items.push(inert(&format!("Kept once the {place} is saved")));
         } else if memory.memory.set.is_empty() {
             items.push(inert("Nothing yet"));
         } else {
@@ -266,7 +269,8 @@ impl TuiApp {
             }
         }
         if c.has_taste() {
-            items.push(PickerItem::heading("From your Sets"));
+            let places = crate::daw::words().places;
+            items.push(PickerItem::heading(format!("From your {places}")));
             if taste.is_empty() {
                 items.push(inert(
                     if self
@@ -277,10 +281,11 @@ impl TuiApp {
                         .as_ref()
                         .is_some_and(|l| matches!(l.state, LibraryState::Learning | LibraryState::Paused))
                     {
-                        "Learning your Sets…"
+                        format!("Learning your {places}…")
                     } else {
-                        "Nothing yet: how you work, from your own Live Sets"
-                    },
+                        format!("Nothing yet: how you work, from your own {} {places}", crate::daw::words().app)
+                    }
+                    .as_str(),
                 ));
             } else {
                 items.extend(taste.iter().map(|l| PickerItem::new(self.clean(&l.line.replace('\n', " "), 160), format!("taste:{}", l.id))));
@@ -373,9 +378,11 @@ impl TuiApp {
             let title = if parts.len() > 30 { format!("{}…", string::trim_end(&parts[..29].concat())) } else { title };
             let set = match row.set.as_deref() {
                 Some(name) => self.clean(name, 20),
-                None if matches!(Place::parse(&row.place), Some(Place::Unsaved(_))) => "A Set not saved yet".into(),
+                None if matches!(Place::parse(&row.place), Some(Place::Unsaved(_))) => {
+                    format!("A {} not saved yet", crate::daw::words().place)
+                }
                 None if row.place == kumi_runtime::IMPORTED => "Imported".into(),
-                None => "A saved Set".into(),
+                None => format!("A saved {}", crate::daw::words().place),
             };
             let age = if row.current { "this one".into() } else { since(row.saved_at as f64, now) };
             let mut item = noted(
@@ -406,11 +413,14 @@ impl TuiApp {
         };
         let known = self.0.state.borrow().set_name.is_some() || !here.is_empty();
         let tabs = PickerTabs {
-            names: vec!["This Set".into(), "All Sets".into()],
+            names: vec![
+                format!("This {}", crate::daw::capitalized(crate::daw::words().place)),
+                format!("All {}", crate::daw::capitalized(crate::daw::words().places)),
+            ],
             lists: vec![list(&here, false), list(&all, true)],
             at: if known && filter.as_deref().is_none_or(str::is_empty) { 0 } else { 1 },
         };
-        let options = PickerOptions { filterable: true, alternate: true, hint: Some(CONVERSATIONS_HINT.into()), ..Default::default() };
+        let options = PickerOptions { filterable: true, alternate: true, hint: Some(conversations_hint()), ..Default::default() };
         let mut picker = Picker::with_tabs("Conversations", tabs, options);
         picker.filter = filter.map(|f| string::head(&f, 40)).unwrap_or_default();
         let kept: Vec<ConversationSummary> = all.iter().chain(here.iter()).cloned().collect();
@@ -539,12 +549,18 @@ impl TuiApp {
         let theirs = ask.set.as_deref().map(|set| format!("“{}”", self.clean(set, 40))).unwrap_or_else(|| format!("its {noun}"));
         let open = ask.open.as_deref().map(|set| format!("“{}”", self.clean(set, 40))).unwrap_or_else(|| format!("a {noun} not saved yet"));
         let title = if ask.title.is_empty() { "This conversation".to_string() } else { format!("“{}”", self.clean(&ask.title, 40)) };
-        let items = vec![
+        // A DAW Kumi can't open places in: the producer opens it, and nothing recommends what Kumi can't do.
+        let open_it = if ask.by_hand {
+            item(format!("Open {theirs} in {daw} yourself"), "open", "This conversation carries on once it's open")
+        } else {
             noted(
                 item(format!("Open {theirs} in {daw}"), "open", format!("{daw} may ask whether to save {open} first")),
                 "recommended",
                 NoteTone::Accent,
-            ),
+            )
+        };
+        let items = vec![
+            open_it,
             item("Carry it on here, as a copy", "copy", format!("The original stays with {theirs}")),
             item("Cancel", "cancel", format!("Stay with {open}'s own conversation")),
         ];
@@ -556,7 +572,8 @@ impl TuiApp {
                 Some("copy") => SetChoice::Copy,
                 _ => SetChoice::Cancel,
             };
-            app.0.state.borrow_mut().activity = if choice == SetChoice::Copy { "carrying it on here" } else { "opening the Set" }.into();
+            app.0.state.borrow_mut().activity =
+                if choice == SetChoice::Copy { "carrying it on here".into() } else { format!("opening the {}", crate::daw::words().place) };
             app.0.options.controller.answer_set(choice).await
         });
         self.0.state.borrow_mut().set_ask = Some(picker);
@@ -565,7 +582,7 @@ impl TuiApp {
         let recipes = self.0.options.controller.recipes().await?;
         let now = now_ms_f64();
         let items = if recipes.is_empty() {
-            vec![inert("None yet: ask Kumi to save a way of working, or say “watch me” and do it in Live")]
+            vec![inert(&format!("None yet: ask Kumi to save a way of working, or say “watch me” and do it in {}", crate::daw::words().app))]
         } else {
             recipes
                 .iter()
@@ -678,7 +695,9 @@ impl TuiApp {
                     if !recipe.params.is_empty() {
                         // Its blanks go on a /recipe line, filled from what's pinned where a blank's name says what
                         // it is; enter runs it with no model call. The cursor waits at the first one left empty.
+                        // (as the DAW's integration carries it to now: a Renoise pin's places move with its tracks)
                         let pinned = app.0.state.borrow().pinned.as_ref().map(|p| p.pin.clone());
+                        let pinned = pinned.and_then(|pin| app.0.options.controller.pin_for_recipe(&pin));
                         let (line, after) = recipe_line(&recipe, pinned.as_ref());
                         let mut state = app.0.state.borrow_mut();
                         state.editor.set(&line);

@@ -15,12 +15,18 @@ threads-required = "num-cpus"
 # - the interoperability tests run beside the official MCP and model SDKs (npm), and the migration from the published
 #   1.7.5 (downloaded);
 # - the long sample-by-sample sweeps of the timing building blocks (kit::clock): the rules each one proves are run by the
-#   short tests beside them, which stay.
+#   short tests beside them, which stay;
+# - REAPER's and Renoise's whole-flow runs on simulators: the listening flows (own_listening_e2e, fake_daw_listening:
+#   renders, auditions, goals and judged rounds, a minute of CPU), the word checks over whole sessions (daw_words) and
+#   the full-screen app's sessions (app_sessions). The engine's, the host's and the extension's own tests stay, and so do
+#   the wire vectors, auth, the lifecycle, the change kinds' fences and the kind guards.
 # Live's own pins (pin_first_request, the changes oracle) stay in `ci` whatever their names say.
 [profile.ci]
 default-filter = '''
 not (
     binary_id(kumi-runtime::live_rendering) | binary_id(kumi-runtime::form) | binary_id(kumi-runtime::video)
+  | binary_id(kumi-runtime::own_listening_e2e) | binary_id(kumi-runtime::fake_daw_listening)
+  | binary_id(kumi::daw_words) | binary_id(kumi::app_sessions)
   | binary_id(kumi-runtime::listening) | binary_id(kumi-runtime::effects) | binary_id(kumi-runtime::sound)
   | binary_id(kumi-runtime::style_references) | binary_id(kumi-runtime::ai_sdk)
   | binary_id(ableton-mcp-server::benchmark) | binary_id(ableton-mcp-server::lifecycle_migration)
@@ -37,7 +43,10 @@ fail-fast = false
 
 # What differs by platform: installing, launching and updating; the terminal and stdin; Hands; paths, files and child
 # processes; the store; and a few smoke tests. The Ableton bridge's install lifecycle runs in `ci` on Linux (in a
-# moment there) and on every platform in `extended` (minutes on Windows).
+# moment there) and on every platform in `extended` (minutes on Windows). For REAPER and Renoise: their bridges going
+# into the DAWs' own folders (own_providers), Kumi's host on its loopback sockets to them (bridge, retire, credit), and
+# what each system decides for them (daw-bridge's system: a bridge's process, macOS's downloaded mark).
+# The extension REAPER loads is built, loaded and called through its C++ shim on every platform by CI's REAPER job.
 [profile.ci-os]
 default-filter = '''
 (
@@ -51,6 +60,7 @@ default-filter = '''
   | binary(host_probes) | binary(analysis_runner) | binary(sqlite_reader) | binary(native_connected)
   | binary(remote_adapter) | binary(loopback) | binary(ai_transport) | binary(network) | binary(store)
   | binary(willington) | binary(windows_console_control) | binary(windows_stdin) | binary(windows_tty)
+  | binary(own_providers) | binary(bridge) | binary(retire) | binary(credit)
 ) & not (
     binary_id(kumi-runtime::live_rendering) | binary_id(kumi-runtime::form) | binary_id(kumi-runtime::video)
   | binary_id(kumi-runtime::listening) | binary_id(kumi-runtime::effects) | binary_id(kumi-runtime::sound)

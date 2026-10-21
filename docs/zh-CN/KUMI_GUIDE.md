@@ -2,7 +2,7 @@
 
 [English](../en/KUMI_GUIDE.md) · 简体中文 · [日本語](../ja/KUMI_GUIDE.md)
 
-Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中打开的工程工作。它读取工程，按你的要求进行修改，并把每项修改显示在 HISTORY 中。它能播放、录音和渲染，聆听音频并与参考曲对比，观看视频教程，制作 Max for Live 设备，在网上查找资料，还会记住你的工作方式。
+Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中打开的工程工作。它读取工程，按你的要求进行修改，并把每项修改显示在 HISTORY 中。它能播放、录音和渲染，聆听音频并与参考曲对比，观看视频教程，制作 Max for Live 设备，在网上查找资料，还会记住你的工作方式。它也能在 REAPER 工程和 Renoise 歌曲中工作：本指南主要讲 Live，在那里有什么不同，请见[连接 REAPER 或 Renoise](#连接-reaper-或-renoise)。
 
 要安装 Kumi 并把它连接到 Live，请按照[快速开始](../../README.zh-CN.md#快速开始)操作。本指南介绍之后的一切。按键与界面请见[命令、按键与界面](KUMI_TUI.md)；修改与撤销如何工作，请见 [Kumi 如何修改你的工程](KUMI_CHANGES.md)。
 
@@ -79,6 +79,34 @@ Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包
 桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天（只有用 `-c` 或 `-r` 继续对话时才会保存对话）。
 
 **Willington。** 从带有 Willington 文件的版本起，Kumi 的桥接会带上它的原生绑定；在此之前，你可以自己安装 Willington。无论哪种方式，在你用 `/willington` 开启之前它们一直是关闭的。开启后，Kumi 还可以映射机架的宏旋钮、设置链区域（chain zone），并在自检通过时编辑 Follow Actions。Willington 有绑定的 Live 版本：macOS ARM64 上的 Live 12.4.15b4 和 b5（链区域仅限 b5），以及 Windows x64 上的 Live 12.4.15b5；请见 [Willington](WILLINGTON_INTEGRATION.md)。
+
+## 连接 REAPER 或 Renoise
+
+Kumi 可以在 REAPER 7 及更高版本和 Renoise 3.5 及更高版本中工作，macOS、Windows 和 Linux 都支持。两者各有一个 Kumi 自己的桥接：REAPER 从 `UserPlugins` 文件夹加载的扩展（`reaper_kumi`），以及 Renoise 从偏好设置中的 `Scripts/Tools` 加载的工具（`com.kumi.Bridge.xrnx`）。Kumi 通过自己的宿主程序（`daw-mcp-server`，安装在 Kumi 旁边）与它通信，只在你的电脑内进行：桥接只在 127.0.0.1 上监听，并且只应答持有 `~/.kumi` 中密钥的 Kumi。无需选择 Control Surface。
+
+**设置。** 运行 `kumi --daw reaper` 或 `kumi --daw renoise`（或者把 `KUMI_DAW` 设为 `reaper` 或 `renoise`）。设置会先登录，再进行 **Connect to REAPER**（或 **Connect to Renoise**），在 Linux 上也一样：Kumi 放好扩展（或工具）并打开这个 DAW。
+
+- **DAW 正开着时：** DAW 只在启动时加载 Kumi 的桥接，而 Kumi 从不替你退出它。选择 **I'll quit it**，自己退出 DAW（它会先提示保存）；Kumi 放好桥接后会重新打开它。你保存过的工程或歌曲在 DAW 的最近文件列表中。
+- **没有安装时：** Kumi 会告诉你去哪里获取（reaper.fm、renoise.com）；装好后选 **Look again** 重新检查。如果开着的是旧版 REAPER 或 Renoise，Kumi 会说明，并让它保持打开。
+- **从未打开过时：** Kumi 会打开它一次，让它建立自己的文件夹；Kumi 请你退出时退出它，Kumi 会带着桥接再次打开。
+- 按 **Esc** 和在 Live 中一样，会把这一步留到以后：Kumi 暂时在不连接 DAW 的情况下聊天。
+
+`kumi --daw reaper bridge`（或 `renoise`）在 shell 中做同样的事：写入 DAW 的文件夹之前会先询问（`--yes` 可预先确认），放入桥接或把它更新到最新，DAW 开着时会提示你重启它。
+
+**用哪个 DAW。** 之后只运行 `kumi`，就会使用装有桥接的那个 DAW。装了多个时，它选正在运行的那个，否则选你上次用的，再否则选 Live；如果还有别的 DAW 开着，它会说明（"Renoise is open too: Kumi works with REAPER. /daw renoise switches to Renoise."）。`/daw` 告诉你 Kumi 正在用哪个 DAW，`/daw <name>`（`live`、`reaper` 或 `renoise`）会关闭 Kumi，并用那个 DAW 重新打开。`--daw` 和 `KUMI_DAW` 总是优先。
+
+**Kumi 查找的位置。**
+
+- **REAPER：** 它的资源文件夹（Mac 上为 `~/Library/Application Support/REAPER`，Windows 上为 `%APPDATA%\REAPER`，Linux 上为 `~/.config/REAPER` 或 `~/.reaper`）、常用应用文件夹中的每个便携版 REAPER（应用旁边有 `reaper.ini`）、装有 Kumi 扩展的那个 REAPER，或者只用 `KUMI_REAPER_RESOURCE_DIR` 指定的文件夹。放在别处（例如另一个磁盘上）的便携版 REAPER，第一次需要设置 `KUMI_REAPER_RESOURCE_DIR`。
+- **Renoise：** 3.5 及更高版本中最新的偏好设置文件夹（例如 `~/Library/Preferences/Renoise`、`%APPDATA%\Renoise`，或 Linux 上 `~/.config/Renoise` 或 `~/.renoise` 中的 `V3.5.4`），或者 `KUMI_RENOISE_PREFS_DIR` 指定的文件夹：一个 `V<x.y.z>` 文件夹，或包含它们的文件夹。
+
+**连接。** DAW 带着桥接运行后，Kumi 会自己连接，DAW 回来时也会再次连接。DAW 忙于对话框或渲染时，Kumi 会说明，并在它应答之前不做任何修改。
+
+**在那里能做什么。** Kumi 读取工程或歌曲，并带撤销地修改它（能修改什么、撤销在那里如何工作，见 [REAPER 与 Renoise](KUMI_CHANGES.md#reaper-与-renoise)）；FOCUS、NOW 和 HISTORY 跟随 DAW 自己的视图（[命令、按键与界面](KUMI_TUI.md#reaper-与-renoise)）。它会聆听、判定自己的修改、配合 `/loop` 和 `/goal` 工作、匹配参考曲、执行即时短语、告诉你它关闭期间的变化、把你手动做的操作变成配方，并使用你的素材库、笔记和对话，全部用这个 DAW 的说法（各 DAW 的对照见 [Kumi 在 Live、REAPER 和 Renoise 中能做什么](DAWS.md)）。在 REAPER 中它还能运行 REAPER 的动作（action）、API 和 Lua（ReaScript）；在 Renoise 中能运行 Lua。以下仍只属于 Live：Max for Live 设备、Kumi Ears、Willington、Kumi 的 Live 扩展（含 **Ask Kumi about this**）、Live 自己的命令和 Live 的手册。
+
+**版本。** 每个 Kumi 版本都附带一个扩展和一个工具，`kumi update` 会把它们更新到最新（见下文“更新、报告与卸载”）。
+Kumi 1.20.0 附带 REAPER 扩展 0.1.0。
+Kumi 1.20.0 附带 Renoise 工具 1.0.0。
 
 ## 使用 Kumi
 
@@ -171,6 +199,13 @@ Kumi 能听音频文件和工程中的音频片段：参考曲、采样、并轨
 - **同时聆听多条轨道：**每条的声音，以及两条轨道在同一频段以相近电平重叠的地方。
 - **原理：**Kumi Ears，一个 Kumi 自带的小型 Max for Live 设备（`kumi bridge` 会把它放进你 User Library 的 Kumi 文件夹）。Kumi 需要聆听时把它放在轨道设备链的末端，用完后移走。除了它挡住的候选（见下文），声音原样通过，工程中不会录下任何东西。
 - 试听（audition）和声音匹配搜索也用同样的方式聆听候选：不需要临时轨道，也不需要预备录音。试听时你听到的是第一个候选，其余候选在 Kumi 录音时由 Kumi Ears 挡住。搜索会挡住它的所有候选，并在暂停或结束时把最好的那个放到“Kumi · Goal best”上。没有 Max for Live 时，Kumi 会改为先录音再聆听，候选会一起发声。
+
+**聆听 REAPER 工程或 Renoise 歌曲。** Kumi 会离线渲染那一段（比播放快，并在前面多渲染一小节），听完后再大声播放给你听（最长一分钟）。单独的一条轨道会单独渲染：REAPER 用推子前的分轨（stem），Renoise 用轨道独奏。
+
+- **REAPER 播放时，** Kumi 可以直接听正在播放的主输出（默认 8 秒）；单独的轨道则渲染。
+- **Renoise 播放时，** 渲染会让它停止播放，而 Renoise 的脚本听不到它正在播放的声音，所以 Kumi 只渲染你指定的那一段。
+- **判定修改时，** REAPER 用最后一个 ReaLimit（没有则用 Kumi 添加的 JS: Volume Adjustment）保持电平，Renoise 用最后一个 Maximizer（没有则用 Gainer）。目标和声音匹配搜索在轨道的临时副本（“Kumi · try …”）上尝试候选，结束后移除；最好的结果留在“Kumi · Goal best”上。
+- Renoise 的试用版（demo）无法渲染，所以 Kumi 在那里不能聆听；`kumi doctor` 会说明。
 
 ## 判定修改与循环
 
@@ -290,8 +325,8 @@ Kumi 了解你拥有的东西，所以你可以要“像这首参考曲里那样
 Kumi 保存的所有内容都会在保存时显示出来：对话中的一行，以及 HISTORY 标签页顶部带 **forget** 的一行。`/memory` 列出全部内容；选择某一项即可让它忘掉，选择一条笔记还可以修改它的文字或将它置顶。
 
 - **笔记**（✎）：你告诉 Kumi、而 Live 无法显示的内容，比如某条轨道的用途、你想要的效果、你的习惯和喜好。关于你的笔记保存在 `~/.kumi/memory.json`；关于某个已保存工程的笔记保存在 `~/.kumi/projects` 中该工程的文件夹里。每处最多 24 条，每条一句话；满了之后，未置顶的笔记中最旧的一条让出位置。Kumi 不会保存工程本身就能显示的内容、它自己做过的事，或任何读起来像指令、看起来像密钥的内容，因此工程里的文字无法变成长期指令。
-- **技巧**（◆）：Kumi 做出的某个东西背后的思路，保存下来以便日后用于同类声音。当某次构建值得复用时，Kumi 会在回答之后问你是否保存：按 1 保存；按 2、Enter、Esc，或不回答就继续往下做，都不会保存（在下一条消息里说“保存这个技巧”同样可以）。用 Kumi 的撤销撤销这次构建，这个问题也随之撤回。它只针对你要求的构建发问，从不针对 `/goal` 或 `/loop` 中的工作，也不会在 Kumi 自己刚提问时发问，而且每三次回答最多问一次。你给出的教程、参考或步骤始终优先：只有当你没有指定做法时，Kumi 才会用到某个技巧，并且会告诉你它在用。最多 40 条，保存在 `~/.kumi/techniques.json`。
-- **配方**（↻）：可以在任何工程中重放的工作方式，比如人声效果链或重采样循环。让 Kumi 保存它刚做的事、描述一个固定流程，或者说“看我做”，然后在 Live 中手动操作，做完时告诉它：Kumi 会把发生的变化变成一个配方，每次不同的地方留作空白。按名称请求某个配方即可运行它，或者使用 `/recipes`。配方保存在 `~/.kumi/recipes` 中，每个配方一个文件。
+- **技巧**（◆）：Kumi 做出的某个东西背后的思路，保存下来以便日后用于同类声音。当某次构建值得复用时，Kumi 会在回答之后问你是否保存：按 1 保存；按 2、Enter、Esc，或不回答就继续往下做，都不会保存（在下一条消息里说“保存这个技巧”同样可以）。用 Kumi 的撤销撤销这次构建，这个问题也随之撤回。它只针对你要求的构建发问，从不针对 `/goal` 或 `/loop` 中的工作，也不会在 Kumi 自己刚提问时发问，而且每三次回答最多问一次。你给出的教程、参考或步骤始终优先：只有当你没有指定做法时，Kumi 才会用到某个技巧，并且会告诉你它在用。最多 40 条，保存在 `~/.kumi/techniques.json`。技巧不按 DAW 区分：在 Live 中学到的技巧，在 REAPER 或 Renoise 中会作为可以借鉴的思路提出。
+- **配方**（↻）：可以在任何工程中重放的工作方式，比如人声效果链或重采样循环。让 Kumi 保存它刚做的事、描述一个固定流程，或者说“看我做”，然后在 Live 中手动操作，做完时告诉它：Kumi 会把发生的变化变成一个配方，每次不同的地方留作空白。按名称请求某个配方即可运行它，或者使用 `/recipes`。配方保存在 `~/.kumi/recipes` 中，每个配方一个文件。REAPER 和 Renoise 的配方分开保存（`~/.kumi/recipes/reaper`、`~/.kumi/recipes/renoise`），由那个 DAW 的修改组成，只在那个 DAW 中提出和运行。
 - **经验**（✦）：Kumi 在匹配声音时学到的东西，供下一次匹配使用。最多 60 条，保存在 `~/.kumi/playbook.json`。
 
 当某个请求需要 Kumi 的工具或 Live 的脚本接口没有提供的功能时，Kumi 会告诉你，给出变通的办法，并把缺失的能力记录在 `~/.kumi/gaps.jsonl` 中，供 Kumi 的开发者参考。这个记录绝不会被读回对话中；当你选择发送 `kumi report` 时，报告中会包含它。
@@ -318,6 +353,14 @@ Kumi 把每个工程的对话保存在 `~/.kumi/projects` 中：每次回答后�
 
 Kumi 还会记住它最后一次看到的每个已保存工程是什么样子。下次打开时，欢迎界面会说明这期间发生了哪些变化（“Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad””），Kumi 也会把这些考虑进去。Kumi 用保存在工程内部的 ID 识别工程，所以移动过的工程，或在同一个 Live Project 文件夹中另存为其他名称的工程，会接着之前的继续；保存到其他位置的副本则重新开始。
 
+**在 REAPER 和 Renoise 中**，每个保存过的工程或歌曲也是如此：
+
+- 它的对话、笔记和离开期间的变化都是它自己的。未保存的工程或歌曲在第一次保存之前，把这些内容放在该 DAW 的未保存位置；保存后就在保存后的位置继续。
+- Kumi 会把一个 ID 写进保存过的 REAPER 工程（REAPER 会在你下次保存时把它存进工程），所以移动过的工程，或在同一文件夹中另存为其他名称的工程，会接着之前的继续；原文件还在时保存到其他文件夹的副本则重新开始。
+- 其他工程的对话：Kumi 会请你自己打开那个工程（它无法从这里打开），打开后对话就会继续。
+- 离开期间的变化也包括 REAPER 或 Renoise 关闭或重启期间的变化，用 DAW 自己的说法：REAPER 的轨道、FX、对象（item）、标记与区域、速度与拍号；Renoise 的轨道、设备、模式（pattern）、乐器、速度、每拍行数（LPB）和模式序列。
+- 用来比较的状态保存在 `~/.kumi/bridges/reaper/snapshots`（或 `renoise`）中，只有你能读取。删除它只会让下一次比较从头开始。
+
 ## 当 Live 断开时
 
 Live 关闭或崩溃时，Kumi 会在一秒内察觉，告诉你，并保留对话。它每两秒查找一次 Live，Live 回来后会自动重新连接；正在执行的请求会回到输入框中，按一下 Enter 即可重新发送。如果 30 秒后 Live 仍未回来，Kumi 会问你 Live 是否已打开、是否已把 AbletonMcpBridge 选为 Control Surface。`/reconnect` 会立即尝试重连。
@@ -325,6 +368,8 @@ Live 关闭或崩溃时，Kumi 会在一秒内察觉，告诉你，并保留对�
 Live 也可能只是忙：加载大型 Set 或重量级设备时，它可能有一段时间不回应。Kumi 根据 AbletonMcpBridge 是否仍在监听来区分这两种情况。Live 忙时，Kumi 会告诉你并等待：请求不会被取消，Live 回应后会先重新读取所需的内容再继续，之前的修改仍可以用 Kumi 的撤销撤回。如果 Live 回来时打开的是另一个 Set，请求会在那里停止，就像你自己打开一个 Set 时一样。
 
 Kumi 的撤销只在它与 Live 的连接持续期间有效：在 Live 重启、重新连接或 Kumi 重启之后，之前的修改会显示 **no undo**，只能用 Live 自己的撤销来撤回。`/new` 会保留连接，所以撤销仍然可用。
+
+**REAPER 或 Renoise** 断开时也会同样说明：Kumi 在不连接 DAW 的情况下聊天，DAW 应答后会自己重新连接（"REAPER answered, so Kumi is connected to it now."）。在那里，Kumi 的撤销保留最新的 400 项修改，只在 Kumi 与 DAW 的连接持续期间有效：`/reconnect` 或 Kumi 重启之后，之前的修改会显示 **no undo**，每项都会说明 DAW 自己的撤销是否还能撤回它。
 
 ## 更新、报告与卸载
 
@@ -352,6 +397,13 @@ kumi uninstall                 # 卸载 Kumi；加上 --all 会同时删除你�
 
 `--rollback` 会回到上一个 Kumi；如果 Live 已关闭，也会一并恢复它的桥接。在终端中，Kumi 会询问是否等你先退出 Live（Kumi 从不自行关闭 Live）。否则较新的桥接会保留，它同样能与之前的 Kumi 配合使用；要把桥接也恢复，请退出 Live，然后运行两次 `kumi update --rollback`。
 
+**REAPER 的扩展和 Renoise 的工具**只要装有 Kumi 的桥接，就会跟着 Kumi 走：
+
+- `kumi update` 会放入新 Kumi 附带的版本，DAW 开着时会提示重启它（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。两者都放回 Kumi 之前放的位置，新版 Renoise 在它自己的版本文件夹中复制的工具副本也会一并更新。你移除过的不会被放回（"Kumi's tool isn't in Renoise any more"），REAPER 文件夹已不在的扩展也绝不会被移到另一个 REAPER 中：要装入，请用 `kumi --daw reaper bridge`。
+- `--rollback` 会恢复之前那个 Kumi 附带的版本。不认识 REAPER 和 Renoise 的 Kumi（1.19.3 及更早）会把它们原样留下、不再使用，并告诉你要移除时该删除哪个文件或文件夹。只要 `KUMI_DAW` 还是 `reaper` 或 `renoise`，那个 Kumi 就不会启动：要用它，请取消这个设置。
+- Kumi 放入之后在 DAW 文件夹中被改动过的副本，会先保存到 `~/.kumi/bridges/reaper/changed`（或 `renoise`），Kumi 会告诉你位置。
+- 两者都不需要关闭 Live 或该 DAW：正在运行的 DAW 会在重启时加载新版本。
+
 从当前的 1.7.5 安装版（自带 Node 24）升级时，关闭 Live，运行 `kumi update`，再照常打开 Kumi。原生应用首次启动时会迁移桥接，即使新旧桥接都为 1.0.74。设置、登录信息、对话和素材库仍在 `~/.kumi` 或已有的 `KUMI_HOME` 中，无需重新登录或移动数据。
 
 上一版应用及其 Node 会保留供回滚。在 Windows 上，原生版首次启动时会替换旧启动器，之后的启动不再经过 Node；普通更新不需要额外操作。`kumi update --rollback` 会一起恢复 JavaScript 应用及其桥接配置和密钥；必须先关闭 Live，并保留桥接的上一代文件。再回滚一次就会返回原生应用。Kumi 从不自行关闭 Live。
@@ -369,15 +421,22 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 
 每个问题都会给出一个下一步。有需要修复的问题时，`doctor` 以 1 退出；提示（这台电脑上没有 Live、有更新的 Kumi）不算在内。
 
+如果用过 REAPER 或 Renoise，`doctor` 也会用这个 DAW 的说法检查它（`kumi --daw reaper doctor` 说的就是这个 DAW）：
+
+- DAW 本身、它的版本和位置，以及是否打开过。
+- 其中 Kumi 的桥接：版本和校验和、Kumi 放入后是否被改动或删除、是否比这个 Kumi 附带的旧、它的参考文件和密钥、macOS 给它加的下载标记，以及扩展的架构。
+- DAW 是否在运行、桥接是否应答（以及打开的工程或歌曲），仍在运行旧桥接的 DAW（需要重启），以及占用其端口（REAPER 为 9770–9779，Renoise 为 9780–9789）的其他程序。
+- 对 Renoise：是否为试用版（无法渲染，所以 Kumi 不能离线聆听）、它的 OSC 服务器（开启时会接受来自网络、不需要密码的命令），以及 Kumi 的工具是否在 Tools › Tool Browser 中被关闭。
+
 `--json` 以 JSON 输出同样的检查，便于分享，和报告一样会删除密钥、令牌、主文件夹和账户名。其措辞可能随版本变化，因此不适合让脚本去匹配：
 
 - `kumi`：版本；`fixes`：需要修复的检查数量。
 - `sections`：每项有一个 `title` 和它的 `checks`，每个检查有 `status`（`ok`、`note` 或 `fix`）、`text`，以及有下一步时的 `next`。
 - 退出码与不加 `--json` 时相同。
 
-`report` 会写出 `~/kumi-report-<date and time>.txt`，其中包含 Kumi 和桥接的版本、doctor 的检查结果、你的设置、Kumi 在你上一次对话中做了什么、缺口日志，以及 Live 自身日志中来自桥接的行。密钥和令牌会被删除，你的主文件夹显示为 `~`，你的账户名显示为 `<user>`。发送前请先读一遍。
+`report` 会写出 `~/kumi-report-<date and time>.txt`，其中包含 Kumi 和桥接的版本、doctor 的检查结果、你的设置、Kumi 在你上一次对话中做了什么、缺口日志，以及 Live 自身日志中来自桥接的行（对 REAPER 和 Renoise，则是 `~/.kumi/bridges/<daw>/logs` 中 Kumi 桥接日志的最后几行）。密钥和令牌会被删除，你的主文件夹显示为 `~`，你的账户名显示为 `<user>`。发送前请先读一遍。
 
-`uninstall` 会移除 Kumi、为 `--rollback` 保留的版本、更新留下的文件、保留的旧版 Node、启动器、它添加的 PATH 条目，以及 Kumi 下载的内容（程序、模型和看过的视频，需要时会再次下载），并告诉你释放了多少空间。它会提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时）。你的对话、笔记、配方、登录信息、素材库和参考曲目会保留，除非你加上 `--all`。`--dry-run` 只说明会删除什么，不删除任何东西。
+`uninstall` 会移除 Kumi、为 `--rollback` 保留的版本、更新留下的文件、保留的旧版 Node、启动器、它添加的 PATH 条目，以及 Kumi 下载的内容（程序、模型和看过的视频，需要时会再次下载），并告诉你释放了多少空间。它会提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时），并把 Kumi 的扩展从 REAPER、工具从 Renoise 中移除。REAPER 和 Renoise 用来比较离开期间变化的状态也会保留，除非加上 `--all`；你改动过的桥接副本（`~/.kumi/bridges/<daw>/changed`）总会保留。你的对话、笔记、配方、登录信息、素材库和参考曲目会保留，除非你加上 `--all`。`--dry-run` 只说明会删除什么，不删除任何东西。
 
 - 当 Kumi 的文件夹（`KUMI_HOME`）是你的主文件夹、磁盘的根目录、相对路径，或者没有 Kumi 启动器和应用的文件夹时，它什么都不删除，并说明哪些 Kumi 的内容需要你手动移除。安装程序也不会安装到那里。用 `sudo` 运行时，它同样不会动你的主文件夹，也不会动任何不属于 root 的文件夹。
 - 在 `bin`、`downloads` 以及存放 Kumi 下载内容的文件夹中，只删除 Kumi 自己的文件；其他东西会保留并列出名称，文件夹也会保留。
@@ -401,7 +460,7 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 | 视频转写 | 每次 90 分钟 |
 | 事先检查的可用磁盘空间 | 录音需要 100 MB（在工程所在的磁盘上；未保存的工程则在你的主文件夹所在的磁盘上），制作设备需要 100 MB（在 User Library 所在的磁盘上），下载 Kumi 自己的模型需要它大小的两倍再加 200 MB，槽位链接需要它的大小再加 200 MB（在 Kumi 的文件夹所在的磁盘上） |
 
-**聆听**听的是文件、录音以及工程的轨道和混音（工程通过 Kumi Ears 聆听，需要 Max for Live）。它负责测量、比较，并按目标判定修改；品味由你决定。
+**聆听**听的是文件、录音以及工程的轨道和混音（工程通过 Kumi Ears 聆听，需要 Max for Live；REAPER 工程和 Renoise 歌曲则通过渲染来聆听）。它负责测量、比较，并按目标判定修改；品味由你决定。
 
 **Live 自己的命令**在 Mac 上需要为你的终端打开辅助功能。片段命令作用于 Session 中的片段，或你选中的片段。
 
@@ -445,7 +504,7 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `updateCheck` | `false` 关闭启动时的新版本检查 |
 | `whatsNew` | `false` 表示更新后首次启动时不显示 What's new |
 | `notifications` | `"off"`：Kumi 的窗口在其他窗口后面时不发桌面通知（或响铃）；否则为 `"auto"` |
-| `liveStatusBar` | `false`：Kumi 完成或需要你时，不在 Live 的状态栏显示一行 |
+| `liveStatusBar` | `false`：Kumi 完成或需要你时，不在 Live（或 Renoise）的状态栏显示一行 |
 | `keepAwake` | `false`：Kumi 工作时允许电脑休眠 |
 | `answerAfter` | 没人在时 Kumi 选择推荐答案之前的秒数（60）；`0` 表示从不 |
 | `instantPhrases` | `false`：固定短语（"tempo 124"、"mute drums"）也像其他消息一样发给模型（[即时短语](KUMI_TUI.md#即时短语)） |
@@ -457,6 +516,8 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `conversations` | `keepDays`：对话在最后一次使用后保留的天数，每个工程最近的 20 段不受此限（90；去掉后取 90 天与上次设定值中较长的一个）；`0` 表示全部保留 |
 
 `~/.kumi/slots.json` 保存你替换过的模型槽位（`/slots`），`~/.kumi/probes` 按设备和轨道保存每个旋钮起过的作用，`~/.kumi/models` 保存模型运行时和 Kumi 自己的模型。三者都跟随 `KUMI_HOME`。
+
+`~/.kumi/bridges/reaper` 和 `~/.kumi/bridges/renoise` 保存 Kumi 为各 DAW 的桥接保留的内容：密钥（`bridge.secret`）、运行中的桥接用来报告自己位置的文件（`discovery`）、日志（`logs`）、安装回执（`install-receipt.json`）、为回滚保留的版本（`generations`）、你改动过的副本（`changed`），以及比较离开期间变化所用的状态（`snapshots`）。`~/.kumi/last-daw` 记录你上次使用的 DAW。
 
 环境变量（路径必须是绝对路径）：
 
@@ -476,6 +537,9 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `GEMINI_API_KEY`、`GOOGLE_API_KEY` | 聆听模型用的 Gemini API 密钥（从 Gemini 自己的列表中选出的最新 Flash 模型） |
 | `KUMI_FAST=0` | 通过桥接的预览和应用这条较慢的路来设置设备参数（[一项修改如何进行](KUMI_CHANGES.md#一项修改如何进行)） |
 | `KUMI_YTDLP`、`KUMI_FFMPEG`、`KUMI_WHISPER`、`KUMI_WHISPER_MODEL` | 按路径指定你自己的 yt-dlp、ffmpeg、whisper.cpp（`whisper-cli`）或语音模型（`ggml-*.bin`） |
+| `KUMI_DAW` | 设为 `reaper` 或 `renoise` 即使用那个 DAW（Live 为 `ableton`），作用同 `--daw` |
+| `KUMI_REAPER_RESOURCE_DIR` | REAPER 的资源文件夹不在默认位置时用它指定；指定后 Kumi 只用这一个 |
+| `KUMI_RENOISE_PREFS_DIR` | Renoise 的偏好设置：一个 `V<x.y.z>` 文件夹，或包含它们的文件夹 |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Kumi 找不到 Live 的 Remote Scripts 文件夹时，用它指定 |
 | `KUMI_LIVE_EXTENSIONS_DIR` | Kumi 找不到 Live 的 Extensions 文件夹时，指定 `kumi bridge` 放置 Kumi 扩展、`kumi doctor` 查找扩展的位置 |
 | `KUMI_BRIDGE_WAIT_SECONDS` | `kumi bridge` 等待 Live 连接的时长；`0` 表示不等待 |

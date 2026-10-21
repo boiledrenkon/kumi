@@ -429,7 +429,8 @@ impl ModelControl {
         }
         let signal = Some(abort::timeout(15000));
         let listed = if let Some(server) = server {
-            local::list_local_models(&server, Transport { fetch: self.inner.options.fetch.clone(), signal }).await?
+            local::list_local_models_in(&server, Transport { fetch: self.inner.options.fetch.clone(), signal }, crate::daw::profile())
+                .await?
         } else if let Some(provider) = ProviderId::parse(provider) {
             list_models(
                 provider,

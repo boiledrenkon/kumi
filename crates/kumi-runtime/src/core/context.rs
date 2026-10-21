@@ -27,10 +27,16 @@ pub struct IntegrationContext {
     pub on_pointed: Option<Rc<dyn Fn(PinnedNode)>>,
     pub on_transport: Option<Rc<dyn Fn(Option<Transport>)>>,
     pub focus_interval_ms: Option<u64>,
+    /// Whether something draws the focus as it moves (the full screen's FOCUS). Without it, a DAW whose focus is
+    /// polled is asked about once a second: enough to see it go, come back or turn busy.
+    pub focus_drawn: bool,
     pub on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
     pub on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     pub low_disk: Option<LowDisk>,
     pub on_watch: Option<Rc<dyn Fn(bool)>>,
+    /// Asks the session to look at the DAW again: a look failed while the DAW was there (it was loading a file), and no
+    /// turn may come to look again.
+    pub on_look_again: Option<Rc<dyn Fn()>>,
     pub change_timeout_ms: Option<u64>,
     pub on_catch_up: Option<Rc<dyn Fn(CatchUp)>>,
     pub reconnect_interval_ms: Option<u64>,
@@ -55,10 +61,12 @@ impl IntegrationContext {
             on_pointed: None,
             on_transport: None,
             focus_interval_ms: None,
+            focus_drawn: true,
             on_change: None,
             on_action: None,
             low_disk: None,
             on_watch: None,
+            on_look_again: None,
             change_timeout_ms: None,
             on_catch_up: None,
             reconnect_interval_ms: None,

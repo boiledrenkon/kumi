@@ -177,3 +177,30 @@ fn words_in_two_scripts_are_split_where_the_script_changes() {
     assert_eq!(query_words("reverbを強く"), ["reverb", "を強", "強く"]);
     assert_eq!(query_words("ボーカル reverb"), ["ボー", "ーカ", "カル", "reverb"]);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_search_finds_only_this_daws_recipes() {
+    use kumi_runtime::core::daw::DawProfile;
+    let recipes: Vec<Recipe> = serde_json::from_value(json!([
+        {"version":1,"name":"Vocal chain","about":"EQ, compression and a short reverb for a vocal","params":[],"steps":[{"tool":"load_device"}],"created":1,"used":0},
+        {"version":1,"name":"Vocal chain REAPER","about":"ReaEQ, ReaComp and a short ReaVerbate for a vocal","params":[],"steps":[{"tool":"fx_add"}],"created":1,"used":0,"daw":"reaper"}
+    ]))
+    .unwrap();
+    let tool = |profile: DawProfile| {
+        kumi_runtime::core::recall::recall_tool_for(
+            profile,
+            RecallOptions {
+                conversations: None,
+                techniques: None,
+                recipes: Some(Rc::new(Recipes(recipes.clone()))),
+                current: Rc::new(|| None),
+            },
+        )
+    };
+    let (_, live) = search(&tool(DawProfile::ABLETON), "vocal chain").await;
+    assert!(live.contains("- Vocal chain: EQ") && !live.contains("REAPER"), "{live}");
+    let (_, reaper) = search(&tool(DawProfile::REAPER), "vocal chain").await;
+    assert!(reaper.contains("- Vocal chain REAPER: ReaEQ") && !reaper.contains("- Vocal chain: EQ"), "{reaper}");
+    let (_, renoise) = search(&tool(DawProfile::RENOISE), "vocal chain").await;
+    assert!(!renoise.contains("Vocal chain"), "{renoise}");
+}
