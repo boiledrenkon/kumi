@@ -62,6 +62,17 @@ pub struct DawSession {
     pub factory: DawFactory,
 }
 
+/// Whether `version` ("11.3.21", "3.4.4", "6.83") is older than `min` ("12", "3.5"), number by number; a version that
+/// doesn't start with a number isn't.
+pub fn older_than(version: &str, min: &str) -> bool {
+    let numbers = |text: &str| -> Vec<u32> {
+        let word = text.split_whitespace().next().unwrap_or("");
+        word.split('.').map_while(|part| part.parse().ok()).collect()
+    };
+    let version = numbers(version);
+    !version.is_empty() && version < numbers(min)
+}
+
 /// What of the DAW is on this computer, read from its files without opening it: whether it can take Kumi's bridge yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installed {
@@ -185,8 +196,8 @@ pub trait DawProvider {
     fn watch_words(&self) -> WatchWords;
     /// The step setup shows for the producer to tell the DAW to use Kumi's bridge; None when it needs none.
     fn enable_step(&self) -> Option<EnableStep>;
-    /// The oldest major version of the DAW Kumi works with.
-    fn min_major(&self) -> u32;
+    /// The oldest version of the DAW Kumi works with, as people write it ("12", "3.5").
+    fn min_version(&self) -> &'static str;
     /// The session's integration with the DAW: the app's neutral context, and what the DAW finds for itself.
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration>;
     /// For the doctor: whether Kumi reaches the DAW through a bridge configuration, and what it says.

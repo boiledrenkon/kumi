@@ -15,7 +15,10 @@ use daw_bridge::{
     detect::{self, Os},
     doctor::{self, Bundled, Level},
     files,
-    install::{reaper_extension_name, reaper_target, renoise_target, renoise_targets, unloadable, TargetError, RENOISE_TOOL_FOLDER},
+    install::{
+        min_version, reaper_extension_name, reaper_install, reaper_target, renoise_target, renoise_targets, unloadable, TargetError,
+        RENOISE_TOOL_FOLDER,
+    },
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
 };
@@ -44,7 +47,6 @@ pub struct Own {
     pub daw: Daw,
     /// The bridge, as the producer knows it: "Kumi's extension", "Kumi's tool".
     pub bridge: &'static str,
-    pub min_major: u32,
     pub create: fn(OwnOptions) -> Rc<dyn Integration>,
     /// What chatting without the DAW says it is.
     pub instructions: &'static str,
@@ -54,7 +56,6 @@ pub static REAPER: Own = Own {
     id: DawId::Reaper,
     daw: Daw::Reaper,
     bridge: "Kumi's extension",
-    min_major: 7,
     create: kumi_runtime::integrations::reaper::create_reaper_integration,
     instructions: "REAPER isn't connected, so Kumi can't see your project: answer from what you know, and say so.",
 };
@@ -63,7 +64,6 @@ pub static RENOISE: Own = Own {
     id: DawId::Renoise,
     daw: Daw::Renoise,
     bridge: "Kumi's tool",
-    min_major: 3,
     create: kumi_runtime::integrations::renoise::create_renoise_integration,
     instructions: "Renoise isn't connected, so Kumi can't see your song: answer from what you know, and say so.",
 };
@@ -107,11 +107,7 @@ impl Own {
     /// `target`, with why it can't go yet as detection says it; None when the DAW isn't installed.
     fn placed(&self, env: &Env) -> Result<Target, Option<TargetError>> {
         match self.daw {
-            Daw::Reaper => {
-                let installs = detected(env, detect::detect_reaper);
-                let install = installs.iter().find(|install| install.opened).or(installs.first()).ok_or(None)?;
-                reaper_target(install, Os::current()).map_err(Some)
-            }
+            Daw::Reaper => reaper_target(reaper_install(&detected(env, detect::detect_reaper))?, Os::current()).map_err(Some),
             Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
         }
     }
@@ -214,10 +210,7 @@ impl Own {
         let target = self.target(env)?;
         // A REAPER that can't load it (a 32-bit one, say) is said, and nothing goes in.
         if self.daw == Daw::Reaper {
-            let installs = detected(env, detect::detect_reaper);
-            if let Some(why) =
-                installs.iter().find(|install| install.opened).or(installs.first()).and_then(|install| unloadable(&source, install))
-            {
+            if let Some(why) = reaper_install(&detected(env, detect::detect_reaper)).ok().and_then(|install| unloadable(&source, install)) {
                 return Err(why);
             }
         }
@@ -341,8 +334,8 @@ impl DawProvider for Own {
     fn enable_step(&self) -> Option<EnableStep> {
         None
     }
-    fn min_major(&self) -> u32 {
-        self.min_major
+    fn min_version(&self) -> &'static str {
+        min_version(self.daw)
     }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
@@ -795,11 +788,57 @@ impl OwnSetup {
     fn own(&self) -> &'static Own {
         own_of(self.own)
     }
+    /// The app setup opens: the REAPER Kumi's extension goes in, the newest Renoise.
     fn app(&self) -> Option<PathBuf> {
         match self.own().daw {
-            Daw::Reaper => detected(&self.env, detect::detect_reaper).into_iter().find_map(|install| install.app),
-            Daw::Renoise => detected(&self.env, detect::detect_renoise).apps.into_iter().map(|app| app.path).next(),
+            Daw::Reaper => {
+                let installs = detected(&self.env, detect::detect_reaper);
+                let chosen = reaper_install(&installs).ok().and_then(|install| install.app.clone());
+                chosen.or_else(|| installs.into_iter().find_map(|install| install.app))
+            }
+            Daw::Renoise => detected(&self.env, detect::detect_renoise)
+                .apps
+                .into_iter()
+                .max_by_key(|app| app.version.as_deref().and_then(detect::Version::of_app))
+                .map(|app| app.path),
         }
+    }
+}
+
+/// Opens the DAW's app apart from Kumi: on macOS through `open`, whose answer says whether it opened; elsewhere as a
+/// process of its own ([`start_apart`]).
+fn open_app(app: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-a").arg(app).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        return open.status().is_ok_and(|status| status.success());
+    }
+    start_apart(std::process::Command::new(app))
+}
+
+/// Starts `command` with no terminal and in a process group of its own, so the DAW's output never prints over Kumi's,
+/// and closing Kumi's terminal (or Ctrl-C) never takes the DAW and its unsaved project with it. Whether it started.
+fn start_apart(mut command: std::process::Command) -> bool {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -833,15 +872,9 @@ impl DawSetup for OwnSetup {
         self.own().install(&self.env).map(|put| put.version)
     }
     async fn start(&self, app: Option<String>, _set: Option<String>) -> bool {
-        let Some(app) = app.map(PathBuf::from).or_else(|| self.app()) else { return false };
-        let mut command = if cfg!(target_os = "macos") {
-            let mut open = std::process::Command::new("open");
-            open.arg("-a").arg(&app);
-            open
-        } else {
-            std::process::Command::new(&app)
-        };
-        command.spawn().is_ok()
+        // An app setup didn't find ("") is looked for again.
+        let Some(app) = app.filter(|app| !app.is_empty()).map(PathBuf::from).or_else(|| self.app()) else { return false };
+        tokio::task::spawn_blocking(move || open_app(&app)).await.unwrap_or(false)
     }
     /// The bridge is in and the DAW is opening: the session takes the bridge and reconnects (as Live's setup does); one
     /// still starting is asked again shortly.
@@ -861,17 +894,73 @@ impl DawSetup for OwnSetup {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
-    async fn version(&self, _app: Option<String>) -> Option<String> {
+    /// The version of `app` (else of any one found).
+    async fn version(&self, app: Option<String>) -> Option<String> {
+        let app = app.filter(|app| !app.is_empty()).map(PathBuf::from);
+        let is = |path: &Path| app.as_deref().is_none_or(|app| app == path);
         match self.own().daw {
-            Daw::Reaper => detected(&self.env, detect::detect_reaper).into_iter().find_map(|install| install.version),
-            Daw::Renoise => detected(&self.env, detect::detect_renoise).apps.into_iter().find_map(|app| app.version),
+            Daw::Reaper => detected(&self.env, detect::detect_reaper)
+                .into_iter()
+                .filter(|install| install.app.as_deref().is_some_and(is))
+                .find_map(|install| install.version),
+            Daw::Renoise => {
+                detected(&self.env, detect::detect_renoise).apps.into_iter().filter(|found| is(&found.path)).find_map(|found| found.version)
+            }
         }
     }
     async fn installed(&self) -> Installed {
         match self.own().placed(&self.env) {
             Ok(_) => Installed::Ready,
-            Err(Some(TargetError::NeverOpened(_))) => Installed::NeverOpened(String::new()),
+            Err(Some(TargetError::Older(_, version))) => Installed::Older(version),
+            // The app setup opens once; with none found ("") the producer opens it.
+            Err(Some(TargetError::NeverOpened(_))) => {
+                Installed::NeverOpened(self.app().map(|app| app.to_string_lossy().into_owned()).unwrap_or_default())
+            }
             Err(None) => Installed::Missing,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review K19: an app that won't open (`open -a` answers it can't find it) says so, rather than leave setup
+    /// waiting for a DAW that never comes.
+    #[test]
+    fn an_app_that_wont_open_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!open_app(&dir.path().join("Nowhere").join(if cfg!(target_os = "macos") { "REAPER.app" } else { "reaper" })));
+    }
+
+    /// Review K21: the DAW starts with no terminal (its output can't print over Kumi's) and in a process group of its
+    /// own (closing Kumi's terminal, or Ctrl-C, doesn't reach it).
+    #[cfg(unix)]
+    #[test]
+    fn the_daw_starts_apart_from_kumis_terminal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("daw");
+        let said = dir.path().join("said");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ -c /dev/fd/1 ] && [ ! -t 1 ]; then out=null; else out=terminal; fi\n\
+             printf '%s\\n%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$out\" > \"$1.part\" && mv \"$1.part\" \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = std::process::Command::new(&script);
+        command.arg(&said);
+        assert!(start_apart(command));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !said.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&said).unwrap();
+        let mut lines = text.lines();
+        // SAFETY: getpgrp has no preconditions.
+        let ours = unsafe { libc::getpgrp() };
+        assert_ne!(lines.next().and_then(|pgid| pgid.parse::<i32>().ok()), Some(ours), "{text}");
+        assert_eq!(lines.next(), Some("null"), "{text}");
     }
 }

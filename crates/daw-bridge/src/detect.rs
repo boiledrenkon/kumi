@@ -301,6 +301,17 @@ impl std::fmt::Display for Version {
 
 /// The oldest Renoise whose scripting API (6.2) Kumi's tool needs.
 pub const RENOISE_MIN: Version = Version(3, 5, 0);
+/// The oldest REAPER Kumi's extension is built for.
+pub const REAPER_MIN: Version = Version(7, 0, 0);
+
+impl Version {
+    /// The version an app says, from its first word ("3.4.4 Demo", "7.22"); None when it doesn't start with one.
+    pub fn of_app(text: &str) -> Option<Version> {
+        let word = text.split_whitespace().next()?;
+        let numbers: String = word.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        Version::parse(numbers.trim_end_matches('.'))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

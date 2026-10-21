@@ -6,7 +6,7 @@ pub mod own;
 pub mod provider;
 
 pub use provider::{
-    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, OwnHostFactory,
+    older_than, BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, OwnHostFactory,
     RemovedBridge, Toggle, ToggleWords, WatchWords,
 };
 

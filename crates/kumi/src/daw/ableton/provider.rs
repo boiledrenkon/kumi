@@ -83,8 +83,8 @@ impl DawProvider for Ableton {
             put_off: "Kumi connects to Live by itself once Live answers: in Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge.",
         })
     }
-    fn min_major(&self) -> u32 {
-        live_app::MIN_LIVE_MAJOR
+    fn min_version(&self) -> &'static str {
+        "12"
     }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let env = session.env.clone();

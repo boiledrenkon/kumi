@@ -583,3 +583,53 @@ async fn an_update_keeps_the_bridges_in_place_and_a_rollback_takes_each_to_the_c
         assert!(!dir.path().join(default).join("UserPlugins").exists(), "{default}");
     }
 }
+
+/// Review K19 and U6: setup opens the app it found when the DAW hasn't been opened yet (never an empty name, which
+/// opened nothing), and names a REAPER older than 7 by its version rather than put the extension in it.
+#[tokio::test(flavor = "current_thread")]
+async fn setup_opens_the_app_it_found_and_names_an_older_reaper() {
+    use kumi::daw::{older_than, Installed};
+    let dir = tempfile::tempdir().unwrap();
+    let app = if cfg!(target_os = "macos") {
+        dir.path().join("Applications/REAPER.app")
+    } else if cfg!(windows) {
+        dir.path().join("Program Files/REAPER/reaper.exe")
+    } else {
+        dir.path().join("opt/REAPER/reaper")
+    };
+    let plist = |version: &str| format!("<plist><dict><key>CFBundleShortVersionString</key>\n<string>{version}</string></dict></plist>");
+    if cfg!(target_os = "macos") {
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/REAPER"), "").unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), plist("7.22")).unwrap();
+    } else {
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, "").unwrap();
+    }
+    let env = |resource: &std::path::Path| {
+        Env::from([
+            ("HOME".into(), dir.path().to_string_lossy().into_owned()),
+            ("KUMI_HOME".into(), dir.path().join(".kumi").to_string_lossy().into_owned()),
+            ("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned()),
+            ("ProgramFiles".into(), dir.path().join("Program Files").to_string_lossy().into_owned()),
+        ])
+    };
+    let setup = |env: &Env| own::REAPER.setup(env, Rc::default(), false, Rc::default());
+    // Installed, never opened (no resource folder yet): setup opens this app.
+    let never = setup(&env(&dir.path().join("REAPER"))).installed().await;
+    let Installed::NeverOpened(found) = never else { panic!("{never:?}") };
+    assert!(found.ends_with(app.file_name().unwrap().to_str().unwrap()), "{found}");
+    // A portable REAPER 6 (its reaper.ini beside the app; macOS apps say their version): named, and older than Kumi needs.
+    if cfg!(target_os = "macos") {
+        std::fs::write(app.join("Contents/Info.plist"), plist("6.83")).unwrap();
+        std::fs::write(dir.path().join("Applications/reaper.ini"), "").unwrap();
+        let older = setup(&env(&dir.path().join("Applications")));
+        assert_eq!(older.installed().await, Installed::Older("6.83".into()));
+        let version = older.version(Some(app.to_string_lossy().into_owned())).await.unwrap();
+        assert!(older_than(&version, DawProvider::min_version(&own::REAPER)), "{version}");
+        assert!(
+            !older_than("3.5.4", DawProvider::min_version(&own::RENOISE)) && older_than("3.4.4", DawProvider::min_version(&own::RENOISE))
+        );
+        assert!(older_than("11.3.21", "12") && !older_than("12.0b4", "12") && !older_than("unknown", "12"));
+    }
+}
