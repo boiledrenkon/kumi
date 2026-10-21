@@ -525,6 +525,15 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Ok(Applied { applied: now.clone(), display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
     let was = drawn(ctx, found.item);
+    // Its lane, told by what is on it with it (lane numbers move when a lane goes in above): the other items on it.
+    let mates: Vec<String> = match now["lane"].as_i64() {
+        Some(lane) => (0..ctx.reaper.track_item_count(found.track))
+            .filter_map(|n| ctx.reaper.track_item(found.track, n))
+            .filter(|other| *other != found.item && ctx.reaper.item_value(*other, "I_FIXEDLANE") as i64 == lane)
+            .map(|other| ctx.reaper.item_guid(other))
+            .collect(),
+        None => vec![],
+    };
     let item = put_place(ctx, &found.guid, &wanted)?;
     let after = place_of(ctx.reaper, item);
     if !same_place(&after, &wanted) {
@@ -537,11 +546,31 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         });
     }
     let items = drawn_items(vec![was], vec![drawn(ctx, item)]);
-    Ok(Applied {
-        applied: after.clone(),
-        display: json!({"title": title, "before": now, "after": after, "items": items}),
-        ..Default::default()
-    })
+    let mut applied = after.clone();
+    if now["lane"].is_i64() {
+        // The lanes of the track it left as the move left them (REAPER drops a bottom lane left empty).
+        applied["from"] = json!({"lanes": super::lanes::lane_names(ctx.reaper, found.track), "mates": mates});
+    }
+    Ok(Applied { applied, display: json!({"title": title, "before": now, "after": after, "items": items}), ..Default::default() })
+}
+
+/// The lane an item goes back to on the track it left (`from`, kept by the move): the lane its old lane mates are on, or,
+/// with none left, its number while no lane went in or out above it since. None when that can't be told.
+fn lane_back(ctx: &Ctx, track: Track, lane: i64, from: &Value) -> Option<i64> {
+    let reaper = ctx.reaper;
+    let mates: Vec<&str> = from["mates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let lanes_now: Vec<i64> = (0..reaper.track_item_count(track))
+        .filter_map(|n| reaper.track_item(track, n))
+        .filter(|item| mates.contains(&reaper.item_guid(*item).as_str()))
+        .map(|item| reaper.item_value(item, "I_FIXEDLANE") as i64)
+        .collect();
+    if let Some(first) = lanes_now.first() {
+        return lanes_now.iter().all(|l| l == first).then_some(*first);
+    }
+    let Some(then) = from["lanes"].as_array() else { return Some(lane) };
+    let now = super::lanes::lane_names(reaper, track);
+    let kept = then.len().min(now.len()).min(lane as usize + 1);
+    then.iter().take(kept).zip(now.iter()).all(|(a, b)| a.as_str() == Some(b.as_str())).then_some(lane)
 }
 
 pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -557,25 +586,34 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_place(&now, restore.applied) {
         return Err(changed(format!("{} has been moved in REAPER since Kumi moved it", label(ctx, found.item))));
     }
-    // The lane it goes back to, as the track it goes back to has lanes now: one whose fixed lanes went off or on since (or
-    // that has fewer) can't hold it as it was, which is the producer's change, found before anything is written. Told to
-    // undo anyway, it goes back to its place on that track, on its first lane if it has lanes.
+    // The lane it goes back to, as the track it goes back to has lanes now: one whose fixed lanes went off or on since
+    // can't hold it as it was, nor one where a lane went in or out above its lane (its number is another lane's now),
+    // which is the producer's change, found before anything is written. Told to undo anyway, it goes back to its place
+    // there: on its first lane, or at its lane's number. (A bottom lane REAPER dropped when the move emptied it is made
+    // again: its number is the lane after the last.)
     let mut back = restore.prior.clone();
     if let Some(track) = restore.prior["track"].as_str().and_then(|guid| track_by_guid(ctx, guid)) {
         let lanes = lane_count(ctx.reaper, track);
-        let fits = match restore.prior["lane"].as_i64() {
-            Some(lane) => lanes.is_some_and(|count| lane < count),
-            None => lanes.is_none(),
+        let refused = |why: &str| {
+            changed(format!(
+                "{} {why} since Kumi moved {} off it: it can't go back to its lane",
+                quoted(&super::track_name(ctx.reaper, track)),
+                label(ctx, found.item)
+            ))
         };
-        if !fits {
-            if !restore.discard {
-                return Err(changed(format!(
-                    "{}'s lanes have been changed in REAPER since Kumi moved {} off it: it can't go back to its lane",
-                    quoted(&super::track_name(ctx.reaper, track)),
-                    label(ctx, found.item)
-                )));
+        match (restore.prior["lane"].as_i64(), lanes) {
+            (Some(_), None) | (None, Some(_)) => {
+                if !restore.discard {
+                    return Err(refused("has had its fixed lanes turned off or on in REAPER"));
+                }
+                back["lane"] = lanes.map(|_| 0).into();
             }
-            back["lane"] = lanes.map(|_| 0).into();
+            (Some(lane), Some(count)) => match lane_back(ctx, track, lane, &restore.applied["from"]) {
+                Some(at) => back["lane"] = at.min(count).into(),
+                None if restore.discard => back["lane"] = lane.min(count).into(),
+                None => return Err(refused("has had lanes added or taken away above its lane in REAPER")),
+            },
+            (None, None) => {}
         }
     }
     let item = put_place(ctx, &found.guid, &back)?;

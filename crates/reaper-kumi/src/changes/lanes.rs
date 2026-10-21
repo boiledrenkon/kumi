@@ -396,7 +396,7 @@ fn name_wanted(input: &Value) -> Done<String> {
 }
 
 /// Every lane's name, top first: a lane is told by its place, which a lane added or taken away above it moves.
-fn lane_names(reaper: &Reaper, track: Track) -> Vec<String> {
+pub(super) fn lane_names(reaper: &Reaper, track: Track) -> Vec<String> {
     (0..lane_count(reaper, track).unwrap_or(0)).map(|lane| lane_name(reaper, track, lane)).collect()
 }
 

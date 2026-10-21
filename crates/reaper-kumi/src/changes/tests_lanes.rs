@@ -69,6 +69,51 @@ fn a_lane_names_undo_is_refused_once_a_lane_went_in_above_it() {
 }
 
 #[test]
+fn undoing_a_move_off_the_bottom_lane_puts_it_back_after_reaper_dropped_that_lane() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K2}", "toRef": SNARE}));
+    // The second lane held only that item: REAPER drops it.
+    state(|s| {
+        s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 1.0);
+        s.tracks[1].lane_names.truncate(1);
+    });
+    lab.undo("item-move", &preview, &applied).unwrap();
+    let (track, back) = item("{ITEM-K2}").unwrap();
+    assert_eq!((track, back.lane), (1, 1), "back on Kick, on a second lane again");
+}
+
+#[test]
+fn undoing_a_move_finds_its_lane_by_the_items_on_it_after_a_lane_went_in_above() {
+    let lab = lanes_lab();
+    // Another item shares the second lane with the one Kumi moves.
+    state(|s| {
+        let take = crate::reaper::fake::FakeTake::wave("{TAKE-K3}", "kick.wav");
+        let mut third = crate::reaper::fake::FakeItem::new("{ITEM-K3}", 4.0, 1.0, vec![take]);
+        third.lane = 1;
+        s.tracks[1].items.push(third);
+    });
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K2}", "toRef": SNARE}));
+    // A comp lane goes in on top: every lane moves down one.
+    state(|s| {
+        s.tracks[1].lane_names.insert(0, "C1".into());
+        s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 3.0);
+        for item in s.tracks[1].items.iter_mut() {
+            item.lane += 1;
+        }
+    });
+    lab.undo("item-move", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K2}").unwrap().1.lane, 2, "beside the item it shared its lane with");
+    // Alone on its lane, with lanes moved above it, it is refused rather than put on another lane.
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K2}", "toRef": SNARE}));
+    state(|s| {
+        s.tracks[1].lane_names.insert(0, "C1".into());
+        s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 3.0);
+    });
+    assert_eq!(code(lab.undo("item-move", &preview, &applied)), "changed");
+}
+
+#[test]
 fn undoing_lanes_off_leaves_the_track_once_the_producer_added_an_item_while_they_were_off_unless_told_to_discard() {
     let lab = lanes_lab();
     let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
