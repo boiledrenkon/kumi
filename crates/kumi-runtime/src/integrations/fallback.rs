@@ -205,6 +205,9 @@ impl Integration for FallbackIntegration {
     fn can_show(&self, kind: BodyKind) -> bool {
         self.current().can_show(kind)
     }
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        self.current().pin_for_recipe(pin)
+    }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         let c = self.current();
         if c.can_show(request.kind()) {

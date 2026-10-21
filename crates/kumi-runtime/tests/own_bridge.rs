@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::abort::Signal;
-use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError};
+use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError, view::BodyRequest};
 use kumi_runtime::integrations::{
     own_bridge::{Connect, OwnOptions},
     reaper::create_reaper_integration,
@@ -1127,6 +1127,9 @@ async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
                 connect: Some(connect),
             });
             renoise.start(Signal::new()).await.unwrap();
+            // The producer pins from FOCUS's tree of Bass, read at layout 0.
+            host.answers.borrow_mut().push(("focus_body", json!({"epoch": "1", "layout": 0, "devices": []}), false));
+            renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
             let pin = PinnedNode {
                 track_ref: "1:track:2".into(),
                 r#ref: "1:device:2.2".into(),
@@ -1165,6 +1168,110 @@ async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
             let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
             assert!(pinned["gone"].as_str().unwrap().starts_with("The producer pinned “Compressor” on “Bass” in FOCUS, and Renoise has renumbered"), "{pinned}");
             assert!(pinned.get("ref").is_none());
+        })
+        .await;
+}
+
+/// A Renoise song's snapshot at a layout, with these tracks.
+fn song_at(layout: u64, names: &[&str]) -> Value {
+    let tracks: Vec<Value> = names.iter().enumerate().map(|(i, name)| json!({"ref": format!("1:track:{}", i + 1), "name": name})).collect();
+    json!({"epoch": "1", "layout": layout, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": tracks, "selection": {}})
+}
+
+/// A Renoise song's host for the pin tests: Kick and Bass at layout 0, looked at once, whose events a test sends.
+async fn pinned_song() -> (Rc<Host>, Rc<Eventful>, Rc<dyn Integration>) {
+    let host = Rc::new(Host {
+        answers: RefCell::new(vec![
+            ("status", json!({"connected": true}), false),
+            ("snapshot", song_at(0, &["Kick", "Bass"]), false),
+            ("focus_body", json!({"epoch": "1", "layout": 0, "devices": []}), false),
+            ("read", json!({"epoch": "1", "layout": 1, "items": []}), false),
+        ]),
+        asked: RefCell::default(),
+    });
+    let eventful = Rc::new(Eventful { host: host.clone(), listener: RefCell::default() });
+    let connect: Connect = {
+        let eventful = eventful.clone();
+        Rc::new(move |_| {
+            let eventful = eventful.clone();
+            async move { Ok(eventful as Rc<dyn McpEndpoint>) }.boxed_local()
+        })
+    };
+    let renoise = create_renoise_integration(OwnOptions {
+        context: IntegrationContext::new(Rc::new(|_, _| {})),
+        kumi_home: std::env::temp_dir(),
+        connect: Some(connect),
+    });
+    renoise.start(Signal::new()).await.unwrap();
+    renoise.observe(Signal::new(), None).await.unwrap();
+    // The producer pins from FOCUS's tree of Bass, read at layout 0.
+    renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
+    (host, eventful, renoise)
+}
+
+fn compressor_on_bass() -> PinnedNode {
+    PinnedNode {
+        track_ref: "1:track:2".into(),
+        r#ref: "1:device:2.2".into(),
+        node: PinKind::Device,
+        name: "Compressor".into(),
+        trail: vec![],
+        siblings: vec![],
+        track: Some("Bass".into()),
+        live: None,
+        time: None,
+    }
+}
+
+/// A track added at the top, as the host tells it: Bass is track 3 now, and its Compressor 3.2.
+fn track_added_at_the_top(host: &Host, eventful: &Eventful) {
+    let send = eventful.listener.borrow().clone().expect("Kumi listens to the host's events");
+    send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 1, "made": [1]}}).as_object().unwrap().clone());
+    host.answers.borrow_mut().push(("snapshot", song_at(1, &["New", "Kick", "Bass"]), false));
+}
+
+// #361 final review (K3): a pin made from a FOCUS tree read before a track was added at the top, first seen by Kumi after
+// it, names what was pinned where it is now, carried from the layout the tree was read at (not taken to be at the layout
+// Kumi is at when it first sees it).
+#[tokio::test(flavor = "current_thread")]
+async fn a_pin_first_seen_after_a_shift_names_what_was_pinned() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            let hints = ObserveHints { pinned: Some(compressor_on_bass()), continuing: None };
+            let seen = renoise.observe(Signal::new(), Some(hints)).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert!(pinned.get("gone").is_none(), "{pinned}");
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the Compressor on Bass, not Kick's device");
+        })
+        .await;
+}
+
+// #361 final review (K3): /recipe fills its blanks from the pin as the integration carries it, in the turn's short refs,
+// never with the raw refs FOCUS pinned with: after a track is added at the top, the recipe edits the pinned device.
+#[tokio::test(flavor = "current_thread")]
+async fn a_recipes_blanks_take_the_pin_where_it_is_now() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let blank = renoise.pin_for_recipe(&compressor_on_bass()).expect("the pin, carried");
+            assert_ne!(blank.r#ref, "1:device:2.2", "never the raw ref");
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": blank.r#ref}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the pinned Compressor where it is now");
+            // Renumbered past what Kumi can follow: no blank is filled from it.
+            let send = eventful.listener.borrow().clone().unwrap();
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 4, "made": [1]}}).as_object().unwrap().clone());
+            assert!(renoise.pin_for_recipe(&compressor_on_bass()).is_none());
         })
         .await;
 }

@@ -695,7 +695,9 @@ impl TuiApp {
                     if !recipe.params.is_empty() {
                         // Its blanks go on a /recipe line, filled from what's pinned where a blank's name says what
                         // it is; enter runs it with no model call. The cursor waits at the first one left empty.
+                        // (as the DAW's integration carries it to now: a Renoise pin's places move with its tracks)
                         let pinned = app.0.state.borrow().pinned.as_ref().map(|p| p.pin.clone());
+                        let pinned = pinned.and_then(|pin| app.0.options.controller.pin_for_recipe(&pin));
                         let (line, after) = recipe_line(&recipe, pinned.as_ref());
                         let mut state = app.0.state.borrow_mut();
                         state.editor.set(&line);

@@ -3053,6 +3053,10 @@ impl SessionController for Session {
             })
             .collect())
     }
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        let integration = self.0.state.borrow().integration.clone();
+        integration.map_or_else(|| Some(pin.clone()), |integration| integration.pin_for_recipe(pin))
+    }
     fn has_run_recipe(&self) -> bool {
         true
     }

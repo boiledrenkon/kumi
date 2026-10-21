@@ -847,6 +847,11 @@ pub trait Integration {
             _ => false,
         }
     }
+    /// A pin as a recipe's blanks take it now: what was pinned where it is now, in the turn's short refs (a DAW whose refs
+    /// are places moves them with its tracks); None when Kumi can't tell. Live's and REAPER's refs hold: as the pin was made.
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        Some(pin.clone())
+    }
     /// A body for FOCUS, read by the DAW; None when it can't say. Live's integration reads its views.
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         Ok(match request {
@@ -2122,6 +2127,10 @@ pub trait SessionController {
     async fn instant(&self, text: &str) -> Result<Option<InstantOutcome>, RuntimeError> {
         let _ = text;
         Ok(None)
+    }
+    /// A pin as a recipe's blanks take it now (the DAW's integration says); as it was made when nothing says otherwise.
+    fn pin_for_recipe(&self, pin: &PinnedNode) -> Option<PinnedNode> {
+        Some(pin.clone())
     }
     fn has_run_recipe(&self) -> bool {
         false
