@@ -120,9 +120,11 @@ fn every_scenario(scenario: &Scenario, run: &Run) -> Vec<Check> {
         .collect();
     checks.push(Check::new("no extension called unchecked", unchecked.is_empty(), unchecked.join(", ")));
     // The DAW's own words in what Kumi said and in HISTORY.
+    // ("Set" as the verb is any producer's word: "Set up", "Set the"…)
+    let verbs = Regex::new(r"\bSet (up|the|it|to|a|an|your|my)\b").unwrap();
     let heard: Vec<String> = std::iter::once(run.said.as_str())
         .chain(run.changes.iter().map(|change| change.title.as_str()))
-        .flat_map(|text| LIVE.find_iter(text).map(|m| m.as_str().to_owned()).collect::<Vec<_>>())
+        .flat_map(|text| LIVE.find_iter(&verbs.replace_all(text, "")).map(|m| m.as_str().to_owned()).collect::<Vec<_>>())
         .collect();
     checks.push(Check::new("the DAW's own words, never Live's", heard.is_empty(), heard.join(", ")));
     let named = scenario.names.iter().any(|name| run.said.to_lowercase().contains(&name.to_lowercase()));
@@ -297,6 +299,17 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Di
     } else {
         lua(&host, &format!("{places}{prelude}\n{}", scenario.fixture), timeout).await.map_err(|e| failure(format!("fixture: {e}")))?;
     }
+    // A fixture that replaced every track reads as another project a moment later (#393): wait for the epoch to settle, so
+    // the session's refs aren't retired under it.
+    let mut last = Value::Null;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let epoch = host_call(&host, "snapshot", json!({})).await.map_err(failure)?["epoch"].clone();
+        if epoch == last {
+            break;
+        }
+        last = epoch;
+    }
     let before = lua(&host, &reader, timeout).await.map_err(|e| failure(format!("state before: {e}")))?;
     // EVAL_DRY=1: the fixture and its state only, no session (no model calls): to check the fixtures in the lab.
     if std::env::var_os("EVAL_DRY").is_some_and(|dry| !dry.is_empty()) {
@@ -432,7 +445,13 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Di
     }
     let tools_used = tools.borrow().clone();
     let run = Run { before, after, setup, said: said.borrow().clone(), calls, changes: changes.borrow().clone(), error };
-    let mut checks = (scenario.expect)(&Seen { before: &run.before, after: &run.after, said: &run.said, tools: &tools_used });
+    let mut checks = (scenario.expect)(&Seen {
+        before: &run.before,
+        after: &run.after,
+        said: &run.said,
+        tools: &tools_used,
+        changes: run.changes.len(),
+    });
     checks.extend(every_scenario(scenario, &run));
     folder.close().ok();
     Ok(Outcome { id: scenario.id, checks, said: run.said, tools: tools_used, seconds: started.elapsed().as_secs_f64(), error: None })

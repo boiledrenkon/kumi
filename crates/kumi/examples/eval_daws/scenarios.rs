@@ -21,6 +21,8 @@ pub struct Seen<'a> {
     pub after: &'a Value,
     pub said: &'a str,
     pub tools: &'a [String],
+    /// How many changes Kumi made (HISTORY rows).
+    pub changes: usize,
 }
 
 pub struct Scenario {
@@ -104,7 +106,8 @@ for i = 0, reaper.CountTracks(0) - 1 do
     if not row.offline then
       for p = 0, reaper.TrackFX_GetNumParams(t, f) - 1 do
         local _, pname = reaper.TrackFX_GetParamName(t, f, p, "")
-        if pname:lower():find("detector") then local _, v = reaper.TrackFX_GetFormattedParamValue(t, f, p, "") row.detector = v end
+        -- (ReaComp's detector input is SignIn: 0 the main input, anything else the sidechain; rendered in the 7.82 lab)
+        if pname == "SignIn" then local _, v = reaper.TrackFX_GetFormattedParamValue(t, f, p, "") row.detector = v end
       end
     end
     fx[#fx + 1] = row
@@ -535,11 +538,11 @@ audio(track("Drums"), MEDIA .. "/break120.wav", 0, 8)
                     track(state, "Drums")
                         .and_then(|t| list(&t["items"]).first().map(|i| (i["pos"].clone(), i["len"].clone(), i["rate"].clone())))
                 };
-                let fades = |state: &Value| -> Vec<String> {
+                let fades = |state: &Value| -> Vec<(f64, f64)> {
                     list(&state["tracks"])
                         .iter()
                         .flat_map(|t| list(&t["items"]))
-                        .map(|i| format!("{}/{}", i["fadein"], i["fadeout"]))
+                        .map(|i| (i["fadein"].as_f64().unwrap_or(0.0), i["fadeout"].as_f64().unwrap_or(0.0)))
                         .collect()
                 };
                 vec![
@@ -551,7 +554,7 @@ audio(track("Drums"), MEDIA .. "/break120.wav", 0, 8)
                         drums(before).is_some() && drums(before) == drums(after),
                         format!("{:?}", drums(after)),
                     ),
-                    Check::new("no fades added", fades(after).iter().all(|f| f == "0.0/0.0"), fades(after).join(" ")),
+                    Check::new("no fades added", fades(after).iter().all(|(i, o)| *i == 0.0 && *o == 0.0), format!("{:?}", fades(after))),
                 ]
             },
         },
@@ -564,17 +567,32 @@ audio(track("Drums"), MEDIA .. "/break120.wav", 0, 8)
             fixture: r#"
 local vox = track("Vocal")
 audio(vox, MEDIA .. "/vocal.wav", 0, 6)
-for i, name in ipairs({"ReaComp", "JS: sstillwell/1175", "JS: dynamics/general_dynamics"}) do
+-- Each set to work on the line: its threshold near -20 dB (found through its own formatted values), all three bypassed.
+for _, name in ipairs({"ReaComp", "JS: sstillwell/1175", "JS: sstillwell/expressbus"}) do
   local fx = reaper.TrackFX_AddByName(vox, name, false, -1)
   if fx < 0 then error("no FX " .. name) end
-  reaper.TrackFX_SetEnabled(vox, fx, i == 1)
+  for p = 0, reaper.TrackFX_GetNumParams(vox, fx) - 1 do
+    local _, pname = reaper.TrackFX_GetParamName(vox, fx, p, "")
+    if pname:lower():find("thresh") then
+      local best, gap = 0, math.huge
+      for v = 0, 1.0001, 0.005 do
+        reaper.TrackFX_SetParamNormalized(vox, fx, p, v)
+        local _, text = reaper.TrackFX_GetFormattedParamValue(vox, fx, p, "")
+        local db = tonumber(text:match("[-+]?%d+%.?%d*"))
+        if db and math.abs(db + 20) < gap then best, gap = v, math.abs(db + 20) end
+      end
+      reaper.TrackFX_SetParamNormalized(vox, fx, p, best)
+      break
+    end
+  end
+  reaper.TrackFX_SetEnabled(vox, fx, false)
 end
 audio(track("Music"), MEDIA .. "/bass.wav", 0, 6)
 "#,
             read: "",
             teardown: None,
             generates: false,
-            names: &["ReaComp", "1175", "General Dynamics"],
+            names: &["ReaComp", "1175", "Express"],
             expect: |seen| {
                 let after = seen.after;
                 let compressors: Vec<&Value> = track(after, "Vocal")
@@ -590,6 +608,7 @@ audio(track("Music"), MEDIA .. "/bass.wav", 0, 6)
                 vec![
                     Check::new("exactly one of the three compressors is left on", on.len() == 1, on.join(", ")),
                     Check::new("Kumi listened to them", listened, seen.tools.join(", ")),
+                    Check::new("it made the choice as a change", seen.changes > 0, format!("{} changes", seen.changes)),
                     Check::new("it says how the levels were matched", mentions(seen.said, &["level", "loudness", "lufs", "match"]), ""),
                 ]
             },
@@ -626,7 +645,11 @@ audio(track("Bass"), MEDIA .. "/bass.wav", 0, 8)
                         format!("{send:?}"),
                     ),
                     Check::new("the bass has 4 channels or more", bass.is_some_and(|t| t["nchan"].as_f64().unwrap_or(0.0) >= 4.0), ""),
-                    Check::new("the bass's compressor listens to its auxiliary input", detector.to_lowercase().contains("aux"), detector),
+                    Check::new(
+                        "the bass's compressor listens to an input other than its main one",
+                        !detector.is_empty() && detector != "0",
+                        detector,
+                    ),
                     Check::new("the kick still reaches the master", reaches(after, "Kick", "master", 0), ""),
                 ]
             },
