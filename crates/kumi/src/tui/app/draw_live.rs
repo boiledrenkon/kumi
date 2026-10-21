@@ -503,12 +503,15 @@ impl TuiApp {
         }
         2 + rows as i32
     }
-    /// A tracker's sequence: each slot's pattern under each track (muted ones dimmed), sections between, the current
-    /// slot raised.
+    /// A tracker's sequence as its matrix draws it: each slot's number and pattern, then each track's part of it (a
+    /// block in the slot's colour, dim where muted; a dot where empty; an alias as the pattern it plays), sections
+    /// between, the current slot raised with its pattern's name.
     fn draw_matrix(&self, screen: &mut Screen, x: i32, y: i32, width: i32, matrix: &SequenceMatrix, most: i32) -> i32 {
+        // (the slot's number, then its pattern's: "  3 02  ")
+        let lead = 8;
         let column = 4;
-        let fit = ((width - 5) / column).max(1) as usize;
-        let mut head = String::from("     ");
+        let fit = ((width - lead) / column).max(1) as usize;
+        let mut head = " ".repeat(lead as usize);
         for track in matrix.tracks.iter().take(fit) {
             // Padded by width, not characters: a wide name (CJK) takes two cells a character.
             let name = truncate_with(track, column - 1, "");
@@ -518,6 +521,7 @@ impl TuiApp {
         let rows = (most.max(2) - 1) as usize;
         let current = matrix.current.unwrap_or(0);
         let first = current.saturating_sub(rows / 2).min(matrix.slots.len().saturating_sub(rows));
+        let shown = matrix.tracks.len().min(fit);
         let mut row = 1;
         for (index, slot) in matrix.slots.iter().enumerate().skip(first) {
             if row as usize > rows {
@@ -530,18 +534,30 @@ impl TuiApp {
                 screen.put(x, y + row, &truncate(&format!("— {section}"), width), &st::FAINT);
                 row += 1;
             }
-            if Some(index) == matrix.current {
+            let here = Some(index) == matrix.current;
+            if here {
                 screen.fill(Rect::new(x - 1, y + row, width + 2, 1), &st::RAISED);
             }
             screen.put(x, y + row, &format!("{:>3} ", matrix.first + index + 1), &st::FAINT);
-            for track in 0..matrix.tracks.len().min(fit) {
+            screen.put(x + 4, y + row, &format!("{:02}", slot.pattern), &if here { st::TEXT } else { st::DIM });
+            for track in 0..shown {
                 let muted = slot.muted.contains(&track);
-                screen.put(
-                    x + 5 + track as i32 * column,
-                    y + row,
-                    &format!("{:02}", slot.pattern),
-                    &if muted { st::FAINT } else { st::TEXT },
-                );
+                let color = slot.colors.iter().find(|(at, _)| *at == track).map(|(_, color)| color.as_str());
+                let (text, style) = if let Some((_, source)) = slot.aliases.iter().find(|(at, _)| *at == track) {
+                    (format!("→{source:02}"), if muted { st::FAINT } else { st::DIM })
+                } else if slot.empty.contains(&track) {
+                    ("·".to_owned(), st::FAINT)
+                } else if muted {
+                    ("░░░".to_owned(), st::FAINT)
+                } else {
+                    ("███".to_owned(), color.map_or(st::TEXT, |color| Style::fg(chip_color(Some(color)))))
+                };
+                screen.put(x + lead + track as i32 * column, y + row, &text, &style);
+            }
+            // The current slot's pattern by its name, where there's room.
+            let after = x + lead + shown as i32 * column;
+            if let Some(name) = slot.name.as_deref().filter(|_| here && x + width - after > 4) {
+                screen.put(after, y + row, &truncate(name, x + width - after), &st::DIM);
             }
             row += 1;
         }

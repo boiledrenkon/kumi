@@ -174,12 +174,20 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     let first = lines.iter().position(|line| line.contains("E-2 02")).expect("the focused track's lines");
     assert!(lines.iter().take(first).any(|line| line.trim_end().ends_with("Bass") || line.contains(" Bass ")), "{}", lines.join("\n"));
 
-    // The pattern matrix: the sequence under each track, muted slots dimmed, sections between.
+    // The pattern matrix: each slot's pattern, then each track's part of it (review U9: not the pattern's number in every
+    // column): filled, empty, muted, an alias of another pattern's; sections between, the current slot's pattern named.
     *c.own.borrow_mut() = Some(FocusBody::Matrix(SequenceMatrix {
         tracks: vec!["Kick".into(), "ベース".into(), "Bass".into()],
         slots: vec![
-            SequenceSlot { pattern: 1, section: Some("Intro".into()), muted: vec![] },
-            SequenceSlot { pattern: 2, section: None, muted: vec![1] },
+            SequenceSlot { pattern: 1, section: Some("Intro".into()), empty: vec![2], ..Default::default() },
+            SequenceSlot {
+                pattern: 2,
+                muted: vec![1],
+                aliases: vec![(2, 1)],
+                colors: vec![(0, "#e04040".into())],
+                name: Some("Drop".into()),
+                ..Default::default()
+            },
         ],
         current: Some(1),
         // A long sequence comes as the slots around the current one: they keep their numbers.
@@ -189,8 +197,8 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     h.emit(json!({"type":"focus","focus":matrix}));
     shows(&h, "FOCUS · Pattern Matrix").await;
     h.has("— Intro");
-    h.has(" 41 ");
-    h.has(" 42 ");
+    h.has(" 41 01  ███ ███ ·");
+    h.has(" 42 02  ███ ░░░ →01 Drop");
     // Columns by width: a wide name takes the cells it needs, and the next column stays in place.
     h.has("Kic ベ  Bas");
 

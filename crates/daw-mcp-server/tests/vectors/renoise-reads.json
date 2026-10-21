@@ -1826,6 +1826,12 @@
           "slots": [
             {
               "aliases": {},
+              "emptyTracks": [
+                2,
+                3,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 1,
@@ -1836,6 +1842,14 @@
               "aliases": {
                 "2": 1
               },
+              "emptyTracks": [
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 2,
@@ -1844,6 +1858,12 @@
             },
             {
               "aliases": {},
+              "emptyTracks": [
+                2,
+                3,
+                6,
+                7
+              ],
               "mutedTracks": [
                 2
               ],
@@ -1854,6 +1874,15 @@
             },
             {
               "aliases": {},
+              "emptyTracks": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 3,

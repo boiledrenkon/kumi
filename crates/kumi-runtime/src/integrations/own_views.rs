@@ -342,11 +342,33 @@ pub fn matrix(body: &Value) -> SequenceMatrix {
                 pattern: number(slot, "pattern").unwrap_or(1.).max(1.) as usize - 1,
                 section: slot.get("section").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
                 muted: list(slot, "mutedTracks").filter_map(Value::as_f64).filter(|n| *n >= 1.).map(|n| n as usize - 1).collect(),
+                name: slot.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
+                empty: list(slot, "emptyTracks").filter_map(Value::as_f64).filter(|n| *n >= 1.).map(|n| n as usize - 1).collect(),
+                // (by track number, from 1; the pattern a Lua index, shown from 0 as the slot's own)
+                aliases: by_track(slot, "aliases")
+                    .filter_map(|(track, alias)| Some((track, alias.as_f64().filter(|n| *n >= 1.)? as usize - 1)))
+                    .collect(),
+                colors: by_track(slot, "colors")
+                    .filter_map(|(track, color)| Some((track, color.as_str().filter(|c| c.starts_with('#'))?.to_owned())))
+                    .collect(),
             })
             .collect(),
         current: number(body, "current").filter(|n| *n >= 1.).and_then(|n| (n as usize - 1).checked_sub(first)),
         first,
     }
+}
+
+/// An object keyed by track number (from 1, as text): each track's position (from 0) and value, in track order.
+fn by_track<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = (usize, &'a Value)> {
+    let mut found: Vec<(usize, &Value)> = value
+        .get(key)
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(track, value)| Some((track.parse::<usize>().ok().filter(|n| *n >= 1)? - 1, value)))
+        .collect();
+    found.sort_by_key(|(track, _)| *track);
+    found.into_iter()
 }
 
 /// An instrument's samples on the keyboard (Renoise's keyzones).
@@ -670,5 +692,15 @@ mod tests {
         assert_eq!(matrix.slots[matrix.current.unwrap()].pattern, 7, "the bridge's pattern 8 (a Lua index) is Renoise's 07");
         let whole = super::matrix(&json!({"tracks": ["Kick"], "slots": [slot(1), slot(2)], "current": 2}));
         assert_eq!((whole.first, whole.current), (0, Some(1)));
+    }
+
+    #[test]
+    fn a_matrix_slot_keeps_each_tracks_part_its_aliases_colours_and_emptiness() {
+        // (review U9) By track number from 1; an alias's pattern by Renoise's number, as the slot's own.
+        let body = json!({"tracks": ["Kick", "Bass", "Pad"], "slots": [{"pattern": 3, "name": "Drop", "mutedTracks": [2],
+            "emptyTracks": [3], "aliases": {"2": 1}, "colors": {"1": "#e04040", "3": "nope"}}]});
+        let slot = &matrix(&body).slots[0];
+        assert_eq!((slot.pattern, slot.name.as_deref(), &slot.muted, &slot.empty), (2, Some("Drop"), &vec![1], &vec![2]));
+        assert_eq!((&slot.aliases, &slot.colors), (&vec![(1, 0)], &vec![(0, "#e04040".to_owned())]));
     }
 }

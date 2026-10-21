@@ -520,6 +520,8 @@ test("reads: the matrix, phrase, instrument and dsp bodies", function()
   eq(matrix.slots[1].section, "Intro")
   eq(matrix.slots[2].section, json.null)
   eq(matrix.slots[2].aliases["2"], 1)
+  -- (review U9) the tracks with nothing in the slot's pattern, which the matrix draws as empty blocks
+  eq(table.concat(matrix.slots[1].emptyTracks, ","), "2,3,6,7")
   eq(matrix.slots[3].mutedTracks[1], 2)
   eq(matrix.current, 1, "the selected slot when nothing plays")
   mock.ops.transport("playing", true)

@@ -557,15 +557,24 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// One slot of the sequence: the pattern it plays (numbered as the DAW shows it), its section, and its muted tracks
-/// (positions among `tracks`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One slot of the sequence: the pattern it plays (numbered as the DAW shows it) and its name, its section, and each
+/// track's part of it (by position among `tracks`): muted, empty, an alias of another pattern's, its colour.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SequenceSlot {
     pub pattern: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
     #[serde(default)]
     pub muted: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty: Vec<usize>,
+    /// A track's part that plays another pattern's: the track, and that pattern (as the DAW numbers it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub colors: Vec<(usize, String)>,
 }
 
 /// An instrument's samples on the keyboard: each zone's note and velocity range, and its macros and phrases. Names
