@@ -921,6 +921,23 @@ fn a_render_stops_the_audition_playing_and_says_so() {
 }
 
 #[test]
+fn a_preview_and_a_scratch_set_never_ask_a_closed_tabs_project_anything() {
+    let rig = Rig::new();
+    let kick = copyable();
+    let file = wav_file(&rig.folder(), "take.wav", 4.0);
+    make(&rig, "s4", &kick, 1);
+    let copy = fake::with(|s| s.tracks[4].guid.clone());
+    rig.ask("audition", json!({"previewId": "p1", "file": file})).unwrap();
+    // The producer closes the tab (another project takes its place): its pointer is freed.
+    fake::with(|s| s.project_id += 1);
+    rig.tick();
+    assert!(rig.board().playing().is_none(), "the preview stopped with its project");
+    let set = rig.ask("scratch", json!({"action": "set", "scratchId": "s4", "values": [{"ref": format!("r:track:{copy}"), "device": 0, "param": 0, "normalized": 0.3}]}));
+    assert_eq!(set.unwrap_err().0, "gone");
+    assert_eq!(fake::with(|s| s.freed_project_uses), 0, "nothing asked of the closed project");
+}
+
+#[test]
 fn a_preview_goes_to_the_masters_hardware_output() {
     let rig = Rig::new();
     let file = wav_file(&rig.folder(), "take.wav", 1.0);

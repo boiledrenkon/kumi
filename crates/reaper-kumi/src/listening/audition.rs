@@ -159,8 +159,12 @@ impl Preview {
         Ok((Preview { id: id.into(), slot, source, until, proj }, answer))
     }
 
-    /// Whether it should stop now: its end reached, or the producer pressed play.
+    /// Whether it should stop now: its end reached, the producer pressed play, or its project's tab was closed (its
+    /// pointer isn't asked anything then).
     pub fn over(&self, reaper: &Reaper) -> bool {
+        if !reaper.project_valid(self.proj) {
+            return true;
+        }
         let state = reaper.play_state(self.proj);
         state.playing || state.recording || self.slot.position() >= self.until - 1e-3
     }

@@ -450,6 +450,8 @@ pub struct State {
     pub project: Option<(String, String)>,
     /// Which project object the active tab holds: a tab switch changes it, a new project in the tab doesn't.
     pub project_id: u64,
+    /// Calls that named a project no longer open (a pointer from before the tab changed): REAPER would read freed memory.
+    pub freed_project_uses: u32,
     /// The project objects of the other open tabs (by `project_id`).
     pub other_tabs: Vec<u64>,
     pub play_bits: i32,
@@ -566,6 +568,7 @@ impl Default for State {
             media: String::new(),
             project: None,
             project_id: 0,
+            freed_project_uses: 0,
             other_tabs: vec![],
             play_bits: 0,
             bpm: 0.0,
@@ -694,6 +697,16 @@ fn take_ptr(track: usize, item: usize, take: usize) -> *mut MediaItem_Take {
 
 fn project_ptr(s: &State) -> *mut ReaProject {
     (PROJECT_BASE + s.project_id * 16) as *mut ReaProject
+}
+
+/// Whether a call names a project that isn't open now (null is REAPER's "the current one"): counted, as REAPER would read
+/// freed memory there.
+fn freed_project(s: &mut State, proj: *mut ReaProject) -> bool {
+    let freed = !proj.is_null() && proj != project_ptr(s);
+    if freed {
+        s.freed_project_uses += 1;
+    }
+    freed
 }
 
 fn track_of(s: &State, handle: u64) -> Option<&FakeTrack> {
@@ -873,8 +886,8 @@ unsafe extern "C" fn get_current_project_in_load_save() -> *mut ReaProject {
 unsafe extern "C" fn master_get_tempo() -> f64 {
     with(|s| s.bpm)
 }
-unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
-    with(|s| s.play_bits)
+unsafe extern "C" fn get_play_state_ex(proj: *mut ReaProject) -> c_int {
+    with(|s| if freed_project(s, proj) { 0 } else { s.play_bits })
 }
 unsafe extern "C" fn get_project_state_change_count(_proj: *mut ReaProject) -> c_int {
     counted(|s| s.state_count)
@@ -1340,8 +1353,8 @@ unsafe extern "C" fn get_tempo_time_sig_marker(
 
 // ----- tracks -----
 
-unsafe extern "C" fn count_tracks(_proj: *mut ReaProject) -> c_int {
-    counted(|s| s.tracks.len() as c_int)
+unsafe extern "C" fn count_tracks(proj: *mut ReaProject) -> c_int {
+    counted(|s| if freed_project(s, proj) { 0 } else { s.tracks.len() as c_int })
 }
 unsafe extern "C" fn get_track(_proj: *mut ReaProject, index: c_int) -> *mut MediaTrack {
     counted(|s| if index >= 0 && (index as usize) < s.tracks.len() { track_ptr(index as usize) } else { ptr::null_mut() })

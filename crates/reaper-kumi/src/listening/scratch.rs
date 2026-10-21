@@ -551,6 +551,10 @@ impl Scratch {
         if let Some(busy) = reaper.busy() {
             return Err(("busy".into(), format!("{}; nothing changed", busy.reason())));
         }
+        // (a project whose tab was closed is never asked anything: its pointer is gone)
+        if !reaper.project_valid(make.proj) {
+            return Err(gone("the project these copies were made in isn't open any more"));
+        }
         // All checked first: a set is written whole or not at all.
         let mut writes: Vec<(Fx, i32, f64)> = Vec::new();
         for value in values {
