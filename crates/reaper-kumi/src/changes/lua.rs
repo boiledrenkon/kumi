@@ -185,6 +185,44 @@ for _, name in ipairs({{"MB", "ShowMessageBox", "GetUserInputs", "GetUserFileNam
     reaper[name] = function() error("reaper." .. name .. " opens a dialog, which would hold REAPER until someone answers it: Kumi refuses it (print shows a result)", 2) end
   end
 end
+-- The chunk runs inside Kumi's undo block: blocks it opens are counted, and closed for it when it leaves them open (an end
+-- past its own would close Kumi's); REAPER's undo and redo would move the history under Kumi's HISTORY; what it holds
+-- back of the screen's refresh is let go after it.
+local orig = {{}}
+for _, name in ipairs({{"Undo_BeginBlock", "Undo_BeginBlock2", "Undo_EndBlock", "Undo_EndBlock2", "PreventUIRefresh", "Main_OnCommand", "Main_OnCommandEx"}}) do
+  orig[name] = reaper[name]
+end
+local blocks, held_back = 0, 0
+for _, name in ipairs({{"Undo_BeginBlock", "Undo_BeginBlock2"}}) do
+  if orig[name] then reaper[name] = function(...) blocks = blocks + 1 return orig[name](...) end end
+end
+for _, name in ipairs({{"Undo_EndBlock", "Undo_EndBlock2"}}) do
+  if orig[name] then
+    reaper[name] = function(...)
+      if blocks == 0 then error("reaper." .. name .. " with no Undo_BeginBlock of the chunk's own would end Kumi's undo block around the chunk: Kumi refuses it", 2) end
+      blocks = blocks - 1
+      return orig[name](...)
+    end
+  end
+end
+if orig.PreventUIRefresh then
+  reaper.PreventUIRefresh = function(n) held_back = held_back + (tonumber(n) or 0) return orig.PreventUIRefresh(n) end
+end
+for _, name in ipairs({{"Undo_DoUndo2", "Undo_DoRedo2"}}) do
+  if reaper[name] then
+    reaper[name] = function() error("reaper." .. name .. " would move REAPER's history under Kumi's HISTORY: Kumi refuses it", 2) end
+  end
+end
+for _, name in ipairs({{"Main_OnCommand", "Main_OnCommandEx"}}) do
+  if orig[name] then
+    reaper[name] = function(command, ...)
+      if command == 40029 or command == 40030 then
+        error("REAPER's undo and redo (action " .. command .. ") would move REAPER's history under Kumi's HISTORY: Kumi refuses them", 2)
+      end
+      return orig[name](command, ...)
+    end
+  end
+end
 -- The time limit: a hook checks the clock; past it, every line of the chunk's own raises, so a chunk that catches errors
 -- (a loop of pcall) stops too. Coroutines the chunk makes get the hook as well; the chunk can't take it off.
 local started = reaper.time_precise()
@@ -222,6 +260,12 @@ local ok, failure = xpcall(function()
   results = pack(chunk())
 end, function(e) return e end)
 if sethook then sethook() end
+local closed = blocks
+for _ = 1, blocks do
+  if orig.Undo_EndBlock2 then orig.Undo_EndBlock2(0, "", -1) elseif orig.Undo_EndBlock then orig.Undo_EndBlock("", -1) end
+end
+if held_back ~= 0 and orig.PreventUIRefresh then orig.PreventUIRefresh(-held_back) end
+local tail = closed > 0 and (',"closedBlocks":' .. closed) or ""
 -- The answer, within its own second (and its budget of values and bytes).
 local encoded, result
 if sethook then
@@ -242,9 +286,9 @@ local lines = {{}}
 for i, line in ipairs(printed) do lines[i] = quote(line) end
 if dropped > 0 then lines[#lines + 1] = quote("(" .. dropped .. " more printed lines not kept)") end
 if ok then
-  answer('{{"compiled":true,"ok":true,"result":' .. result .. ',"printed":[' .. table.concat(lines, ",") .. ']}}')
+  answer('{{"compiled":true,"ok":true,"result":' .. result .. ',"printed":[' .. table.concat(lines, ",") .. ']' .. tail .. '}}')
 else
-  answer('{{"compiled":true,"ok":false,"error":' .. where(failure) .. ',"printed":[' .. table.concat(lines, ",") .. ']}}')
+  answer('{{"compiled":true,"ok":false,"error":' .. where(failure) .. ',"printed":[' .. table.concat(lines, ",") .. ']' .. tail .. '}}')
 end
 "##,
         code = long_string(code),
@@ -318,6 +362,9 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     // (REAPER counts a block's changes only as it ends, so whether the chunk changed anything isn't known here: the block
     // is always closed as a write, REAPER's undo covers whatever it did, and the answer's undo.entry says whether REAPER
     // made a point of it)
+    if let Some(closed) = ran["closedBlocks"].as_u64() {
+        display["note"] = format!("{NOTE} It left {closed} undo block(s) of its own open: Kumi closed them.").into();
+    }
     let applied = if ran["ok"] == true {
         json!({"result": ran["result"], "printed": printed})
     } else {

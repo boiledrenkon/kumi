@@ -343,7 +343,7 @@ pub fn uncallable(index: usize) -> Option<&'static str> {
 
 /// Functions Kumi never calls by name, and why: they open windows or dialogs, quit, change REAPER's own settings, run
 /// programs or register code. An action is run with the `action` method, which keeps dialogs and quitting out.
-const DENIED: [(&str, &str); 27] = [
+const DENIED: [(&str, &str); 36] = [
     ("Main_OnCommand", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
     ("KBD_OnMainActionEx", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
     ("PromptForAction", "opens the action list"),
@@ -371,6 +371,17 @@ const DENIED: [(&str, &str); 27] = [
     ("Help_Set", "changes REAPER's help line"),
     ("DockWindow", "moves REAPER's windows"),
     ("realloc_cmd", "manages REAPER's own buffers"),
+    // (Kumi's change runs in an undo block of its own: one left open, or an end past it, swallows the producer's later
+    // edits; REAPER's undo and redo move its history under Kumi's HISTORY)
+    ("Undo_BeginBlock", "opens an undo block of its own inside Kumi's (one left open swallows every later edit)"),
+    ("Undo_EndBlock", "ends an undo block, which would end Kumi's own around the call"),
+    ("Undo_DoUndo", "moves REAPER's history under Kumi's HISTORY: REAPER's own undo is the producer's"),
+    ("Undo_DoRedo", "moves REAPER's history under Kumi's HISTORY: REAPER's own redo is the producer's"),
+    ("Undo_OnStateChange", "makes an undo point of its own inside Kumi's undo block"),
+    ("PreventUIRefresh", "holds back REAPER's screen, which a call can't let go of again"),
+    ("set_config_var", "changes REAPER's preferences"),
+    ("MIDIEditor_LastFocused_OnCommand", "runs a MIDI editor action (some open dialogs)"),
+    ("MIDIEditor_OnCommand", "runs a MIDI editor action (some open dialogs)"),
 ];
 
 pub fn denied(index: usize) -> Option<String> {

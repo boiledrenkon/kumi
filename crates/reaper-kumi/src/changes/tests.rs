@@ -3425,35 +3425,50 @@ fn a_lua_chunk_that_gives_no_answer_is_uncertain_and_limits_are_checked() {
     assert!(refused(json!({"code": "return 1", "timeoutMs": 60_000})).contains("timeoutMs"));
 }
 
+/// The wrapper run by LuaJIT against a stand-in `reaper` table (`more` adds to it): its answer, and what the stand-in wrote
+/// to stderr. None when LuaJIT isn't installed.
+fn luajit_wrapper(dir: &std::path::Path, more: &str, code: &str, limit: u64) -> Option<(Value, String)> {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit isn't installed: the wrapper's own test is skipped");
+        return None;
+    }
+    // (LuaJIT calls no hook inside code it compiled: REAPER's Lua compiles nothing, so neither does this)
+    let stub = format!(
+        "if jit then jit.off() end\nreaper = {{ SetExtState = function(_, _, v) io.write(v) end, time_precise = os.clock, \
+         ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end, \
+         MB = function() return 1 end {more} }}\n"
+    );
+    let path = dir.join("w.lua");
+    std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit))).unwrap();
+    // (a wrapper whose limit doesn't hold would run on: it's stopped after 20 s, and the test fails)
+    let mut child = std::process::Command::new("luajit")
+        .arg(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the wrapper ran past 20 s: {code}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let out = child.wait_with_output().unwrap();
+    let answer = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    Some((answer, String::from_utf8_lossy(&out.stderr).into_owned()))
+}
+
 /// The wrapper itself, run by LuaJIT where it is installed, against a stand-in `reaper` table.
 #[test]
 fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit isn't installed: the wrapper's own test is skipped");
+    let dir = tempfile::tempdir().unwrap();
+    if luajit_wrapper(dir.path(), "", "return 1", 1000).is_none() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
-    let run = |code: &str, limit: u64| -> Value {
-        // (LuaJIT calls no hook inside code it compiled: REAPER's Lua compiles nothing, so neither does this)
-        let stub = "if jit then jit.off() end\nreaper = { SetExtState = function(_, _, v) io.write(v) end, time_precise = os.clock, \
-                    ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end, \
-                    MB = function() return 1 end }\n";
-        let path = dir.path().join("w.lua");
-        std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit))).unwrap();
-        // (a wrapper whose limit doesn't hold would run on: it's stopped after 20 s, and the test fails)
-        let mut child = std::process::Command::new("luajit").arg(&path).stdout(std::process::Stdio::piped()).spawn().unwrap();
-        let started = std::time::Instant::now();
-        while child.try_wait().unwrap().is_none() {
-            if started.elapsed() > std::time::Duration::from_secs(20) {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("the wrapper ran past 20 s: {code}");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let out = child.wait_with_output().unwrap();
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
-    };
+    let run = |code: &str, limit: u64| -> Value { luajit_wrapper(dir.path(), "", code, limit).unwrap().0 };
     let ran = run("print('a', 2)\nreaper.ShowConsoleMsg('b')\nreturn {x = 1.5, y = {1, 2, 'q\"'}}, nil, true", 1000);
     assert_eq!(ran["ok"], true);
     assert_eq!(ran["printed"], json!(["a\t2", "b"]));
@@ -3503,6 +3518,61 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert_eq!(run("local t = {5}\nreturn t[1]", 1000)["result"], 5);
     assert_eq!(run("local t = {5}\nreturn t[#t]", 1000)["result"], 5);
     assert_eq!(run("local s = 'a]='\nreturn s", 1000)["result"], "a]=");
+}
+
+#[test]
+fn a_lua_chunk_leaves_no_undo_block_open_no_refresh_held_and_doesnt_move_reapers_history() {
+    // The chunk runs inside Kumi's undo block: one it leaves open would swallow the producer's later edits, an end past its
+    // own would close Kumi's, and REAPER's undo or redo would move the history under HISTORY (review R7).
+    let dir = tempfile::tempdir().unwrap();
+    let log = ", Undo_BeginBlock2 = function() io.stderr:write('begin ') end, Undo_EndBlock2 = function() io.stderr:write('end ') end, \
+               PreventUIRefresh = function(n) io.stderr:write('refresh' .. n .. ' ') end, \
+               Undo_DoUndo2 = function() io.stderr:write('UNDO ') end, Main_OnCommand = function(c) io.stderr:write('action' .. c .. ' ') end";
+    let Some((left, told)) = luajit_wrapper(dir.path(), log, "reaper.Undo_BeginBlock2(0)\nreaper.PreventUIRefresh(1)\nerror('boom')", 1000)
+    else {
+        return;
+    };
+    assert_eq!(told.split_whitespace().collect::<Vec<_>>(), ["begin", "refresh1", "end", "refresh-1"], "closed and let go after it");
+    assert_eq!((left["ok"].clone(), left["closedBlocks"].clone()), (json!(false), json!(1)));
+    let (extra_end, told) = luajit_wrapper(dir.path(), log, "reaper.Undo_EndBlock2(0, 'x', -1)", 1000).unwrap();
+    assert!(extra_end["error"]["message"].as_str().unwrap().contains("Kumi's undo block"), "{extra_end}");
+    assert!(!told.contains("end"), "Kumi's own block stays open: {told}");
+    let (undo, told) = luajit_wrapper(dir.path(), log, "reaper.Undo_DoUndo2(0)", 1000).unwrap();
+    assert!(undo["error"]["message"].as_str().unwrap().contains("history"), "{undo}");
+    let (action, told_action) = luajit_wrapper(dir.path(), log, "reaper.Main_OnCommand(40029, 0)", 1000).unwrap();
+    assert!(action["error"]["message"].as_str().unwrap().contains("history"), "{action}");
+    assert!(!told.contains("UNDO") && !told_action.contains("action40029"), "{told} {told_action}");
+    // Its own begin and end, balanced, and other actions, run as asked.
+    let (balanced, told) = luajit_wrapper(
+        dir.path(),
+        log,
+        "reaper.Undo_BeginBlock2(0)\nreaper.Undo_EndBlock2(0, 'mine', -1)\nreaper.Main_OnCommand(40001, 0)",
+        1000,
+    )
+    .unwrap();
+    assert_eq!((balanced["ok"].clone(), balanced.get("closedBlocks")), (json!(true), None));
+    assert_eq!(told.split_whitespace().collect::<Vec<_>>(), ["begin", "end", "action40001"]);
+}
+
+#[test]
+fn the_generic_call_refuses_what_would_unbalance_reapers_undo_blocks_or_ui() {
+    let lab = Lab::new();
+    for name in [
+        "Undo_BeginBlock2",
+        "Undo_EndBlock2",
+        "Undo_DoUndo2",
+        "Undo_DoRedo2",
+        "Undo_OnStateChange",
+        "Undo_OnStateChangeEx2",
+        "PreventUIRefresh",
+        "set_config_var_string",
+        "MIDIEditor_LastFocused_OnCommand",
+        "MIDIEditor_OnCommand",
+    ] {
+        let (code, why) = lab.call("change_preview", json!({"kind": "api-call", "input": {"fn": name, "args": []}})).unwrap_err();
+        assert_eq!(code, "bad-params", "{name}");
+        assert!(why.starts_with(name) && !why.contains("doesn't"), "{name}: {why}");
+    }
 }
 
 // ----- sidechains: a send's channels, a track's channels, an FX's pins (S8) -----
