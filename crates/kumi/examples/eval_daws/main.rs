@@ -9,8 +9,9 @@
 //!
 //! It uses your sign-in and model (Kumi's own folder) and Kumi's host in process on the lab's kumi-home. The fixtures
 //! rewrite the project or song they find, so it holds the lab's lock for the whole run (`<locks>/<daw>.lock`, made with
-//! mkdir; a wrapper that holds it names itself `holder <pid>` in its owner file) and refuses any project or song but the
-//! lab's scratch one: unsaved and untitled, or saved under the lab's folder (the kumi-home's parent).
+//! mkdir; a wrapper that holds it names itself `holder <pid>` in its owner file), runs only on a lab: the kumi-home's
+//! parent must hold the `.kumi-eval-lab` marker the lab's setup writes (never Kumi's own folder or the home folder), and
+//! refuses any project or song but the lab's scratch one: unsaved and untitled, or saved under that lab folder.
 //!
 //! cargo run -p kumi --example eval_daws -- --daw reaper|renoise --kumi-home <lab kumi-home> --locks <dir>
 //!     [--only P30,R31] [--out <results.md>]
@@ -62,6 +63,7 @@ use std::{
 mod in_process;
 use in_process::InProcess;
 
+mod guard;
 mod media;
 mod scenarios;
 use scenarios::{Check, Scenario, Seen};
@@ -303,27 +305,10 @@ impl Drop for LabLock {
     }
 }
 
-/// Whether the open project or song is the lab's scratch one: unsaved and untitled, or saved under the lab's folder (the
-/// kumi-home's parent); else why not, naming it.
-fn scratch(project: &Value, home: &Path) -> Result<(), String> {
-    let path = project["path"].as_str().unwrap_or_default();
-    let name = project["name"].as_str().unwrap_or_default();
-    let lab = home.parent().unwrap_or(home);
-    let lab = lab.canonicalize().unwrap_or_else(|_| lab.to_path_buf());
-    let under_lab = !path.is_empty() && Path::new(path).canonicalize().is_ok_and(|file| file.starts_with(&lab));
-    let untitled = path.is_empty() && (name.is_empty() || name.eq_ignore_ascii_case("untitled"));
-    if under_lab || untitled {
-        Ok(())
-    } else {
-        Err(format!(
-            "refusing: the open project isn't the lab's scratch one ({}), and the fixtures would rewrite it",
-            if path.is_empty() { name } else { path }
-        ))
-    }
-}
-
 /// Where a run's files go: the sounds the fixtures load, the songs they save, Kumi's tools (yt-dlp, whisper) and videos.
 struct Dirs {
+    /// The lab folder (marked, see `guard`).
+    lab: PathBuf,
     media: PathBuf,
     songs: PathBuf,
     tools: String,
@@ -348,7 +333,7 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Di
     }
     // Only the lab's scratch project or song: the fixtures rewrite what's open.
     let project = host_call(&host, "snapshot", json!({})).await.map_err(failure)?["project"].clone();
-    scratch(&project, home).map_err(failure)?;
+    guard::scratch(&project, &dirs.lab).map_err(failure)?;
     // (Renoise stops a callback at 800 ms; REAPER's chunks may take longer on a big template)
     let (prelude, state, timeout) = match scenario.daw {
         Daw::Reaper => (scenarios::REAPER_PRELUDE, scenarios::REAPER_STATE, 5_000),
@@ -558,7 +543,10 @@ async fn run() -> Result<i32, RuntimeError> {
         _ => return Err(RuntimeError::plain(usage)),
     };
     let home = PathBuf::from(flag("--kumi-home").ok_or_else(|| RuntimeError::plain(usage))?);
-    // The lab's lock, for the whole run (released as `_lock` goes, before the process ends).
+    // Only a marked lab, never Kumi's own folder or the home folder; then the lab's lock, for the whole run (released as
+    // `_lock` goes, before the process ends).
+    let user_home = std::env::var_os("HOME").map(PathBuf::from).or_else(::home::home_dir).unwrap_or_default();
+    let lab = guard::lab_of(&home, &user_home).map_err(RuntimeError::plain)?;
     let locks = PathBuf::from(flag("--locks").ok_or_else(|| RuntimeError::plain(usage))?);
     let _lock = LabLock::take(&locks, daw).map_err(RuntimeError::plain)?;
     let only: Vec<String> = flag("--only").map(|list| list.split(',').map(str::to_owned).collect()).unwrap_or_default();
@@ -578,10 +566,15 @@ async fn run() -> Result<i32, RuntimeError> {
     let mut outcomes = vec![];
     let mut text = format!("# eval_daws: {} with {}\n\n", daw.name(), config.model.as_deref().unwrap_or("undefined"));
     // The fixtures' sounds and songs beside the lab's kumi-home; Kumi's own tools (yt-dlp, whisper) where Kumi keeps them.
-    let lab = home.parent().map(Path::to_path_buf).unwrap_or_else(|| home.clone()).join("m7g");
+    let files = lab.join("m7g");
     let videos = tempfile::Builder::new().prefix("kumi-eval-videos-").tempdir().map_err(|e| RuntimeError::plain(e.to_string()))?;
-    let dirs =
-        Dirs { media: lab.join("media"), songs: lab.join("songs"), tools: load_tools_dir(&env)?, videos: videos.path().to_path_buf() };
+    let dirs = Dirs {
+        media: files.join("media"),
+        songs: files.join("songs"),
+        tools: load_tools_dir(&env)?,
+        videos: videos.path().to_path_buf(),
+        lab,
+    };
     media::write_all(&dirs.media).map_err(|e| RuntimeError::plain(format!("the fixtures' sounds: {e}")))?;
     std::fs::create_dir_all(&dirs.songs).map_err(|e| RuntimeError::plain(e.to_string()))?;
     for scenario in scenarios::all().iter().filter(|s| s.daw == daw && (only.is_empty() || only.iter().any(|o| o == s.id))) {
