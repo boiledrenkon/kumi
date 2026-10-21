@@ -289,13 +289,25 @@ fn routes_hash(reaper: &Reaper, track: Track) -> String {
     content_hash(&text)
 }
 
-/// The track's FX and its takes' FX, in order.
+/// The track's FX and its takes' FX, in order, each container followed by the FX inside it (at any depth).
 fn all_fx(reaper: &Reaper, track: Track) -> Vec<Fx> {
+    fn with_inside(reaper: &Reaper, fx: Fx, all: &mut Vec<Fx>) {
+        all.push(fx);
+        for child in reaper.fx_children(fx) {
+            with_inside(reaper, child, all);
+        }
+    }
     let mut owners = vec![FxOwner::Track(track)];
     for item in (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n)) {
         owners.extend((0..reaper.take_count(item)).filter_map(|n| reaper.take_at(item, n)).map(FxOwner::Take));
     }
-    owners.into_iter().flat_map(|owner| (0..reaper.fx_count(owner)).map(move |index| Fx { owner, index })).collect()
+    let mut all = Vec::new();
+    for owner in owners {
+        for index in 0..reaper.fx_count(owner) {
+            with_inside(reaper, Fx { owner, index }, &mut all);
+        }
+    }
+    all
 }
 
 /// What tells a track made from the template from how the insert left it: its state as the producer can change it (items

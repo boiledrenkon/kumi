@@ -806,7 +806,7 @@ pub fn chain_load_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied
         return Err(fx::take_back_added(ctx, holder, &before, "the chain isn't what it should be after loading the file"));
     }
     let signatures: Vec<Value> =
-        made.iter().map(|g| fxchain::adopt(ctx, holder, g).map(|at| signature(ctx, at.fx)).unwrap_or(Value::Null)).collect();
+        made.iter().map(|g| fxchain::adopt(ctx, holder, g).map(|at| fx::deep_signature(ctx, at.fx)).unwrap_or(Value::Null)).collect();
     let fx_refs: Vec<String> = made.iter().map(|g| refs::fx_ref(g)).collect();
     Ok(Applied {
         applied: json!({"guids": made, "index": place, "signatures": signatures}),
@@ -816,7 +816,8 @@ pub fn chain_load_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied
     })
 }
 
-/// Takes off FX Kumi added (a chain loaded, a copy), refusing when the producer has changed or automated any since.
+/// Takes off FX Kumi added (a chain loaded, a copy), refusing when the producer has changed or automated any since, or any
+/// FX inside a container of them (the container takes those with it).
 fn take_off(ctx: &Ctx, guids: &[String], signatures: &[Value], discard: bool) -> Done<(usize, String)> {
     let found: Vec<(FxAt, &Value)> = guids
         .iter()
@@ -831,11 +832,14 @@ fn take_off(ctx: &Ctx, guids: &[String], signatures: &[Value], discard: bool) ->
             return Err(changed("some of the FX Kumi added are gone: the rest stay (discard takes them off too)"));
         }
         for (at, sig) in &found {
-            if !fxchain::fx_envelopes(ctx.reaper, at).is_empty() {
+            if fxchain::fx_envelopes_deep(ctx.reaper, at) > 0 {
                 return Err(changed(format!("{} has automation in it now", super::quoted(&fx_label(ctx, at.fx)))));
             }
-            if !sig.is_null() && signature_as(ctx, at.fx, sig) != **sig {
-                return Err(changed(format!("{} has been changed in REAPER since", super::quoted(&fx_label(ctx, at.fx)))));
+            if !sig.is_null() && !fx::deep_as_recorded(ctx, at.fx, sig) {
+                return Err(changed(format!(
+                    "{} (or an FX inside it) has been changed in REAPER since",
+                    super::quoted(&fx_label(ctx, at.fx))
+                )));
             }
         }
     }
@@ -939,7 +943,7 @@ pub fn copy_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         }
     };
     Ok(Applied {
-        applied: json!({"guids": [made.guid], "index": place, "signatures": [signature(ctx, made.fx)]}),
+        applied: json!({"guids": [made.guid], "index": place, "signatures": [fx::deep_signature(ctx, made.fx)]}),
         created: Some(json!({"ref": refs::fx_ref(&made.guid), "kind": "fx"})),
         display: json!({"title": format!("Copied {} to {}", label(ctx, &at), fxchain::holder_label(ctx, holder)), "ref": refs::fx_ref(&made.guid)}),
         ..Default::default()

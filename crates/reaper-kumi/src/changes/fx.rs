@@ -77,6 +77,43 @@ pub(super) fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
     now
 }
 
+/// An FX's signature and, for a container, every FX inside it at any depth: each one's GUID and its own signature, so a
+/// knob turned or a plug-in dropped in inside a container counts as what it is, the producer's.
+pub(super) fn deep_signature(ctx: &Ctx, fx: Fx) -> Value {
+    let mut signature = signature(ctx, fx);
+    if fxchain::is_container(ctx.reaper, fx) {
+        signature["children"] = ctx
+            .reaper
+            .fx_children(fx)
+            .into_iter()
+            .map(|child| json!({"guid": ctx.reaper.fx_guid(child), "signature": deep_signature(ctx, child)}))
+            .collect::<Vec<_>>()
+            .into();
+    }
+    signature
+}
+
+/// Whether the FX, and every FX inside it, is as its `deep_signature` says (a signature taken without the FX inside,
+/// before they were kept, holds only while there are none).
+pub(super) fn deep_as_recorded(ctx: &Ctx, fx: Fx, recorded: &Value) -> bool {
+    let mut own = recorded.clone();
+    let inside = own.as_object_mut().and_then(|fields| fields.remove("children"));
+    if signature_as(ctx, fx, &own) != own {
+        return false;
+    }
+    let now = ctx.reaper.fx_children(fx);
+    match inside.as_ref().and_then(Value::as_array) {
+        None => now.is_empty(),
+        Some(kept) => {
+            kept.len() == now.len()
+                && kept.iter().zip(&now).all(|(kept, child)| {
+                    kept["guid"].as_str().is_some_and(|guid| guid.eq_ignore_ascii_case(&ctx.reaper.fx_guid(*child)))
+                        && deep_as_recorded(ctx, *child, &kept["signature"])
+                })
+        }
+    }
+}
+
 /// Whether two signatures differ only in their parameters' values.
 fn same_but_hash(a: &Value, b: &Value) -> bool {
     ["name", "enabled", "offline", "preset", "params"].iter().all(|key| a[key] == b[key])

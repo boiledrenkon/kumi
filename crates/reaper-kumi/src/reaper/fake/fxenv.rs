@@ -255,6 +255,20 @@ fn prune_all(s: &mut State) {
 
 fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
     let mut text = format!("BYPASS {} {} 0\n", if fx.enabled { 0 } else { 1 }, if fx.offline { 1 } else { 0 });
+    // Equal states share a number, so an unchanged FX reads the same each time (print fences hash chunk text). A
+    // plug-in's is inside its block, where REAPER keeps the plug-in's own state; a container's covers the container
+    // alone (what is inside it has entries of its own, as in REAPER's text).
+    let mut kept = fx.clone();
+    if kept.children.is_some() {
+        kept.children = Some(vec![]);
+    }
+    let n = match s.fx_store.iter().position(|stored| *stored == kept) {
+        Some(n) => n,
+        None => {
+            s.fx_store.push(kept);
+            s.fx_store.len() - 1
+        }
+    };
     match &fx.children {
         Some(children) => {
             text += "<CONTAINER Container \"\"\n";
@@ -262,6 +276,7 @@ fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
                 text += &entry_text(s, owner, child);
             }
             text += ">\n";
+            text += &format!("FAKEFX {n}\n");
         }
         None => {
             text += &format!("<VST \"{}\" fake.vst 0 \"\" 0\n", fx.name);
@@ -271,18 +286,10 @@ fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
             if let Some(chunk) = &fx.chunk {
                 text += &format!("CHUNK {chunk}\n");
             }
+            text += &format!("FAKEFX {n}\n");
             text += ">\n";
         }
     }
-    // Equal states share a number, so an unchanged FX reads the same each time (print fences hash chunk text).
-    let n = match s.fx_store.iter().position(|kept| kept == fx) {
-        Some(n) => n,
-        None => {
-            s.fx_store.push(fx.clone());
-            s.fx_store.len() - 1
-        }
-    };
-    text += &format!("FAKEFX {n}\n");
     if !fx.renamed.is_empty() {
         text += &format!("RENAMED \"{}\"\n", fx.renamed);
     }
@@ -373,6 +380,8 @@ fn parse_entries(s: &mut State, lines: &[&str], at: &mut usize, end_at_close: bo
                             }
                         } else if let Some(rest) = inner.strip_prefix("CHUNK ") {
                             chunk = Some(rest.to_string());
+                        } else if let Some(n) = inner.strip_prefix("FAKEFX ") {
+                            stored = n.trim().parse::<usize>().ok();
                         }
                         *at += 1;
                     }

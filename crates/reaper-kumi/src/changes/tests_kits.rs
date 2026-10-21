@@ -204,6 +204,32 @@ fn a_container_kit_is_one_track_its_pads_in_one_container_behind_the_choke() {
 }
 
 #[test]
+fn a_container_kits_undo_leaves_it_once_the_producer_turned_a_pad_inside_the_container() {
+    let lab = Lab::new();
+    fake::extra(|e| e.stable_chunks = true);
+    let (_dir, paths) = sounds(&["Kick", "Snare"]);
+    let (preview, made) = lab.make("drum-kit", kit(&paths, json!({"layout": "container", "name": "Kit"})), "Kumi: kit (kc011)");
+    // (no hi-hats, no choke: the container is the track's only FX)
+    fn pads(s: &mut fake::State) -> &mut Vec<fake::FakeFx> {
+        s.tracks[4].fx[0].children.as_mut().expect("the kit's container")
+    }
+    // A pad's sampler inside the container, its volume turned down.
+    let was = state(|s| std::mem::replace(&mut pads(s)[0].params[0].value, 0.1));
+    let (code, message) = lab.undo("drum-kit", &preview, &made, "Kumi: undo (kc012)").unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb", "Kit"]);
+    // And a plug-in the producer dropped into the container.
+    state(|s| {
+        pads(s)[0].params[0].value = was;
+        pads(s).push(fake::FakeFx::new("{THEIRS}", "VST: ReaEQ (Cockos)"));
+    });
+    assert_eq!(lab.undo("drum-kit", &preview, &made, "Kumi: undo (kc013)").unwrap_err().0, "changed");
+    state(|s| pads(s).pop());
+    lab.undo("drum-kit", &preview, &made, "Kumi: undo (kc014)").unwrap();
+    assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
+}
+
+#[test]
 fn hats_choke_only_when_some_close_and_some_open_and_a_reaper_without_the_choke_still_makes_the_kit() {
     let lab = Lab::new();
     let (_dir, paths) = sounds(&["Kick", "Closed Hat", "Open Hat", "Hat"]);

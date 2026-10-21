@@ -691,6 +691,29 @@ fn an_fx_is_copied_to_another_track_a_take_and_a_container_and_undo_takes_the_co
     assert_eq!(lab.apply("fx-copy", &input, &preview["fence"]).unwrap_err().0, "changed");
 }
 
+#[test]
+fn a_copied_containers_undo_leaves_it_once_the_producer_changed_an_fx_inside_it() {
+    let lab = chains_lab();
+    let _dir = resource();
+    let (preview, applied) = lab.make("fx-copy", json!({"ref": fx_ref("{FX-C}"), "toRef": "r:track:{DDDD}", "index": 0}));
+    let inside = |s: &mut fake::State| s.tracks[3].fx[0].children.as_mut().unwrap().clone();
+    assert_eq!(state(|s| inside(s).len()), 2, "the copy holds what the container holds");
+    // A knob of the copied ReaComp inside it, then a plug-in dropped in beside it.
+    state(|s| s.tracks[3].fx[0].children.as_mut().unwrap()[0].params.push(FakeParam::new("Ratio", 0.3, "3:1")));
+    let (code, message) = lab.undo("fx-copy", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert!(message.contains("an FX inside it"), "{message}");
+    state(|s| {
+        let children = s.tracks[3].fx[0].children.as_mut().unwrap();
+        children[0].params.pop();
+        children.push(plugin("{THEIRS}", "VST: ReaVerb (Cockos)"));
+    });
+    assert_eq!(lab.undo("fx-copy", &preview, &applied).unwrap_err().0, "changed");
+    state(|s| s.tracks[3].fx[0].children.as_mut().unwrap().pop());
+    lab.undo("fx-copy", &preview, &applied).unwrap();
+    assert_eq!(state(|s| guids(&s.tracks[3].fx)), ["{FX-VERB}"]);
+}
+
 // ----- the guard against recording in touch, latch and write modes -----
 
 #[test]
