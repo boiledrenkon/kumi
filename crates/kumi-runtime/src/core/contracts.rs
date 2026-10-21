@@ -1175,6 +1175,9 @@ pub struct PinnedNode {
     /// A stretch of the Arrangement pointed at in Live, in beats from the Set's start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<PinnedTime>,
+    /// The layout its refs were read at, where refs are places (Renoise's): it's carried from there to where it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<u64>,
 }
 
 /// `(state: ConnectionState, cause?: DisconnectCause) => void`.

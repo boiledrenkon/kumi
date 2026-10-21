@@ -171,6 +171,7 @@ fn pin(node: PinKind, r: &str, name: &str) -> PinnedNode {
         track: None,
         live: None,
         time: None,
+        layout: None,
     }
 }
 
@@ -935,6 +936,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
         device_trees: vec![
             DeviceTree {
                 owner: None,
+                layout: None,
                 track_ref: "7:track:0".into(),
                 devices: vec![
                     device("7:device:0:-1", "Arpeggiator", "MidiArpeggiator", DeviceType::MidiEffect),
@@ -954,7 +956,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                     },
                 ],
             },
-            DeviceTree { track_ref: "7:track:3".into(), devices: vec![], owner: None },
+            DeviceTree { track_ref: "7:track:3".into(), devices: vec![], owner: None, layout: None },
         ],
         clip_views: vec![
             ClipView {

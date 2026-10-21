@@ -4,7 +4,12 @@
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::abort::Signal;
-use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError, view::BodyRequest};
+use kumi_runtime::core::{
+    context::IntegrationContext,
+    contracts::*,
+    errors::RuntimeError,
+    view::{BodyRequest, FocusBody},
+};
 use kumi_runtime::integrations::{
     own_bridge::{Connect, OwnOptions},
     reaper::create_reaper_integration,
@@ -700,6 +705,7 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
                 track: Some("Bass".into()),
                 live: None,
                 time: None,
+                layout: None,
             };
             let seen = reaper.observe(Signal::new(), Some(ObserveHints { pinned: Some(pin), continuing: None })).await.unwrap();
             let context: Value = serde_json::from_str(&seen.context).unwrap();
@@ -1127,9 +1133,6 @@ async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
                 connect: Some(connect),
             });
             renoise.start(Signal::new()).await.unwrap();
-            // The producer pins from FOCUS's tree of Bass, read at layout 0.
-            host.answers.borrow_mut().push(("focus_body", json!({"epoch": "1", "layout": 0, "devices": []}), false));
-            renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
             let pin = PinnedNode {
                 track_ref: "1:track:2".into(),
                 r#ref: "1:device:2.2".into(),
@@ -1140,6 +1143,8 @@ async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
                 track: Some("Bass".into()),
                 live: None,
                 time: None,
+                // (FOCUS read its tree at layout 0)
+                layout: Some(0),
             };
             let look = |pin: &PinnedNode| {
                 let hints = ObserveHints { pinned: Some(pin.clone()), continuing: None };
@@ -1204,11 +1209,17 @@ async fn pinned_song() -> (Rc<Host>, Rc<Eventful>, Rc<dyn Integration>) {
     });
     renoise.start(Signal::new()).await.unwrap();
     renoise.observe(Signal::new(), None).await.unwrap();
-    // The producer pins from FOCUS's tree of Bass, read at layout 0.
-    renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
+    // The producer pins from FOCUS's tree of Bass: it says the layout its refs were read at.
+    let Some(FocusBody::Tree(tree)) =
+        renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap()
+    else {
+        panic!("a tree")
+    };
+    assert_eq!(tree.layout, Some(0));
     (host, eventful, renoise)
 }
 
+/// The pin FOCUS makes from Bass's tree as read at layout 0: its Compressor, stamped with that layout.
 fn compressor_on_bass() -> PinnedNode {
     PinnedNode {
         track_ref: "1:track:2".into(),
@@ -1220,6 +1231,7 @@ fn compressor_on_bass() -> PinnedNode {
         track: Some("Bass".into()),
         live: None,
         time: None,
+        layout: Some(0),
     }
 }
 
@@ -1272,6 +1284,29 @@ async fn a_recipes_blanks_take_the_pin_where_it_is_now() {
             let send = eventful.listener.borrow().clone().unwrap();
             send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 4, "made": [1]}}).as_object().unwrap().clone());
             assert!(renoise.pin_for_recipe(&compressor_on_bass()).is_none());
+        })
+        .await;
+}
+
+// #361 final review (K3, reviewer999): FOCUS reading `1:track:2`'s tree again after the shift (now Kick's) changes nothing
+// for a pin made from the tree read before it: the pin says where its own refs were read.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pin_keeps_the_layout_of_its_own_tree_when_the_same_ref_is_read_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            host.answers.borrow_mut().push(("focus_body", json!({"epoch": "1", "layout": 1, "devices": []}), false));
+            renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
+            let hints = ObserveHints { pinned: Some(compressor_on_bass()), continuing: None };
+            let seen = renoise.observe(Signal::new(), Some(hints)).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "Bass's Compressor, not Kick's device");
+            assert!(pinned.get("layout").is_none(), "the model isn't told where its refs were read: {pinned}");
         })
         .await;
 }

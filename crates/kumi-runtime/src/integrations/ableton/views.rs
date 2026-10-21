@@ -219,7 +219,7 @@ pub async fn device_tree(host: &dyn ViewHost, track_ref: &str, signal: Signal) -
             }
             level = next;
         }
-        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices, owner: None }))
+        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices, owner: None, layout: None }))
     }
     .await;
     match result {

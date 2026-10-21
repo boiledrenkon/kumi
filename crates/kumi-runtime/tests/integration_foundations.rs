@@ -83,7 +83,7 @@ impl Integration for TestIntegration {
         self.name == "live"
     }
     async fn device_tree(&self, track_ref: &str, _: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
-        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![], owner: None }))
+        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![], owner: None, layout: None }))
     }
     fn fingerprint(&self) -> Option<Value> {
         Some(json!({"name": self.name}))

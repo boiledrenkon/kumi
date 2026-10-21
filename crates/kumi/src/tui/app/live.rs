@@ -435,6 +435,8 @@ impl TuiApp {
                 track: focus.track.as_ref().map(|t| t.name.clone()),
                 live: None,
                 time: None,
+                // (where the tree's refs were read: Renoise's places move with its tracks before Kumi sees the pin)
+                layout: state.tree.as_ref().and_then(|tree| tree.layout),
             },
         });
         drop(state);

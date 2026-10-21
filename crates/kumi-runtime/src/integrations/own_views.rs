@@ -109,7 +109,7 @@ pub fn tree(track_ref: &str, body: &Value) -> DeviceTree {
         );
     }
     let owner = (text(body, "owner") == "take").then(|| format!("take “{}”", text(body, "ownerName")));
-    DeviceTree { track_ref: track_ref.into(), devices, owner }
+    DeviceTree { track_ref: track_ref.into(), devices, owner, layout: body.get("layout").and_then(Value::as_u64) }
 }
 
 /// A controller lane's name in REAPER's words ("CC 1", "Pitch", "Program", "Channel pressure", "Poly aftertouch") and the

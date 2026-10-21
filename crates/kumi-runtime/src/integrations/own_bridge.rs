@@ -160,10 +160,8 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// turn), carried through the track shifts since Kumi first saw it; None for one whose object was deleted.
     pins: Rc<RefCell<indexmap::IndexMap<(String, String), Option<Carried>>>>,
     /// Where refs are positions: the last track shifts Kumi followed (the epoch, the layout each came after, the shift), so
-    /// a pin made from a FOCUS tree read a few shifts before Kumi first sees it is carried from where the tree was read.
+    /// a pin made from a FOCUS tree read a few shifts before Kumi first sees it is carried from the layout it was read at.
     shifts: Rc<RefCell<std::collections::VecDeque<(Option<String>, u64, Shift)>>>,
-    /// The epoch and layout each FOCUS tree was read at, by the ref it was asked for: where a pin made from it starts.
-    trees_read: RefCell<indexmap::IndexMap<String, (Option<String>, Option<u64>)>>,
     /// Where each saved project was last seen, by the id its file carries.
     places: Places,
     /// (M7) The variations tool, where the DAW's profile offers it (core's, with the DAW's backend).
@@ -244,11 +242,10 @@ struct Carried {
     layout: Option<u64>,
 }
 
-/// How many pins an integration follows (the oldest goes first), how many track shifts it keeps to carry a pin first seen
-/// after them, and how many trees' layouts it remembers.
+/// How many pins an integration follows (the oldest goes first), and how many track shifts it keeps to carry a pin first
+/// seen after them.
 const PINS_KEPT: usize = 64;
 const SHIFTS_KEPT: usize = 64;
-const TREES_KEPT: usize = 64;
 
 /// Where a ref is after a shift: None for what was deleted (an empty ref stays empty).
 fn carried_ref<S: RefScheme>(scheme: &S, shift: &Shift, reference: &str) -> Option<String> {
@@ -346,7 +343,6 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         heard: Rc::default(),
         pins: Rc::default(),
         shifts: Rc::default(),
-        trees_read: RefCell::default(),
         places: Places::new(&kumi_home, daw.host_flag),
         variations,
     })
@@ -596,10 +592,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     /// couldn't follow (a gap in the layouts, another epoch), or what was pinned was deleted, the pin is told by its name
     /// only, and no ref of it lands on whatever sits at its old place.
     fn pin_now(&self, pin: &PinnedNode) -> Value {
+        // (where its refs were read is Kumi's to know, not the model's)
+        let told = PinnedNode { layout: None, ..pin.clone() };
         if !self.book.borrow().scheme.positional() {
-            return self.book.borrow_mut().shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
+            return self.book.borrow_mut().shorten(&serde_json::to_value(&told).unwrap_or(Value::Null));
         }
         let place = self.pin_place(pin);
+        let pin = &told;
         let mut book = self.book.borrow_mut();
         let on = pin.track.as_deref().map(|track| format!(" on “{track}”")).unwrap_or_default();
         let told = |gone: String| json!({"gone": gone, "name": pin.name, "node": pin.node, "track": pin.track});
@@ -618,8 +617,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// Where a pin's object is now, where refs are positions: else whether it was deleted (true) or a shift went by that Kumi
-    /// couldn't carry it through (false). First seen, its refs are where the FOCUS tree it was made from was read, carried
-    /// through the shifts Kumi followed since; a pin of no tree Kumi read is never taken to be where its refs say now.
+    /// couldn't carry it through (false). First seen, its refs are at the layout its FOCUS tree was read at (the pin says
+    /// it), carried through the shifts Kumi followed since; a pin that doesn't say is never taken to be where its refs say.
     fn pin_place(&self, pin: &PinnedNode) -> Result<Carried, bool> {
         let (epoch, layout) = (self.epoch.borrow().clone(), self.layout.get());
         let key = (pin.track_ref.clone(), pin.r#ref.clone());
@@ -631,9 +630,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             None => {}
         }
         let of_epoch = epoch.as_deref().is_some_and(|now| pin.r#ref.split_once(':').is_some_and(|(of, _)| of == now));
-        let read = self.trees_read.borrow().get(&pin.track_ref).cloned();
-        let (Some((read_epoch, Some(from))), Some(to)) = (read, layout) else { return Err(false) };
-        if !of_epoch || read_epoch != epoch || from > to {
+        let (Some(from), Some(to)) = (pin.layout, layout) else { return Err(false) };
+        if !of_epoch || from > to {
             return Err(false);
         }
         let first = {
@@ -1378,7 +1376,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         let carried = self.pin_place(pin).ok()?;
         let mut book = self.book.borrow_mut();
-        let mut now = pin.clone();
+        let mut now = PinnedNode { layout: None, ..pin.clone() };
         now.track_ref = if carried.track_ref.is_empty() { String::new() } else { book.short_ref(&carried.track_ref) };
         now.r#ref = book.short_ref(&carried.node_ref);
         Some(now)
@@ -1398,17 +1396,6 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         Ok(match self.call("focus_body", args, signal).await? {
             Ok(body) => {
                 follow_epoch(&self.book, &self.epoch, &self.layout, &body);
-                // (where refs are positions: the layout a pin made from this tree starts at)
-                if let (BodyRequest::Tree { track_ref }, true) = (request, self.book.borrow().scheme.positional()) {
-                    let epoch = body.get("epoch").and_then(Value::as_str).map(str::to_owned).or_else(|| self.epoch.borrow().clone());
-                    let layout = body.get("layout").and_then(Value::as_u64).or(self.layout.get());
-                    let mut trees = self.trees_read.borrow_mut();
-                    trees.shift_remove(track_ref);
-                    if trees.len() >= TREES_KEPT {
-                        trees.shift_remove_index(0);
-                    }
-                    trees.insert(track_ref.clone(), (epoch, layout));
-                }
                 (self.daw.to_body)(request, &body)
             }
             Err(_) => None,

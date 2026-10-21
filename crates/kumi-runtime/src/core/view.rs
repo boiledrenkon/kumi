@@ -882,6 +882,9 @@ pub struct DeviceTree {
     /// Whose chain it is when it isn't the track's own, in the DAW's words ("take “kick.wav”").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The layout its refs are at, where refs are places (Renoise's move with its tracks): a pin made from it starts there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<u64>,
 }
 
 #[cfg(test)]
