@@ -155,6 +155,29 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
         .await;
 }
 
+/// (#361 review K14) The project's fingerprint, for what Kumi logs of the producer's reactions: from the last look.
+#[tokio::test(flavor = "current_thread")]
+async fn a_projects_fingerprint_is_its_name_tempo_meter_and_the_roles_its_tracks_play() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", reaper_snapshot(), false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host, Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            assert_eq!(reaper.fingerprint(), None, "not before a look");
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let print = reaper.fingerprint().unwrap();
+            assert_eq!(print["name"], "Night Drive");
+            assert_eq!(print["tempo"], 124);
+            assert_eq!(print["meter"], "4/4");
+            assert_eq!(print["roles"], json!({"bass": 1, "drums": 1}));
+            assert_eq!(print["tokens"], json!(["drums", "bass"]));
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn an_unsaved_project_is_the_dawss_unsaved_place_and_a_daw_not_there_is_said_in_its_words() {
     tokio::task::LocalSet::new()

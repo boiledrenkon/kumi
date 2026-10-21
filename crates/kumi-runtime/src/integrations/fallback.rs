@@ -5,6 +5,7 @@ use crate::core::{
 };
 use async_trait::async_trait;
 use kumi_common::abort::Signal;
+use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
 
 pub struct FallbackIntegration {
@@ -89,6 +90,12 @@ impl Integration for FallbackIntegration {
             return Err(KumiError::new(FailureKind::Request, self.not_connected("undo")).into());
         }
         current.undo(id, signal).await
+    }
+    fn fingerprint(&self) -> Option<Value> {
+        self.current().fingerprint()
+    }
+    fn first_heard(&self, since: i64) -> Option<i64> {
+        self.current().first_heard(since)
     }
     fn has_audio_file(&self) -> bool {
         true

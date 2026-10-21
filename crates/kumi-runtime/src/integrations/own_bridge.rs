@@ -21,6 +21,7 @@ use crate::{
         own_listening::{Flags, OwnListening},
         own_phrases::{PhraseLook, Phrased},
     },
+    library::taste,
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
 };
@@ -1139,6 +1140,9 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
             .min();
         by_playing.into_iter().chain(by_kumi).min()
     }
+    fn fingerprint(&self) -> Option<Value> {
+        self.looked.borrow().as_ref().map(fingerprint_of)
+    }
     /// A line in the DAW's status bar (Renoise's, through the tool's show_status), where its profile says it has one.
     async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
         if !self.daw.profile.caps.status_line || self.closed.get() || !self.connected.get() {
@@ -1460,6 +1464,34 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
         }
     }
     shown
+}
+
+/// A project's fingerprint, as Kumi logs it with the producer's reactions (Live's, from what a look reads): its name,
+/// tempo and meter, how many tracks play each role and the words in their names. A look doesn't read the FX on each
+/// track, so their kinds aren't in it.
+fn fingerprint_of(snapshot: &Value) -> Value {
+    let at = |paths: &[&str]| paths.iter().find_map(|at| snapshot.pointer(at).filter(|value| !value.is_null())).cloned();
+    let meter = at(&["/transport/timeSignature", "/project/timeSignature"])
+        .and_then(|signature| Some(format!("{}/{}", signature.get(0)?.as_u64()?, signature.get(1)?.as_u64()?)));
+    let (mut roles, mut tokens) = (std::collections::BTreeMap::<&str, usize>::new(), Vec::<String>::new());
+    for name in snapshot.get("tracks").and_then(Value::as_array).into_iter().flatten().filter_map(|track| track.get("name")?.as_str()) {
+        if let Some(role) = taste::role_of(name, &[]) {
+            *roles.entry(role.as_str()).or_default() += 1;
+        }
+        for word in taste::name_words(name) {
+            if word.chars().any(|c| c.is_ascii_alphabetic()) && !tokens.contains(&word) && tokens.len() < 32 {
+                tokens.push(word);
+            }
+        }
+    }
+    json!({
+        "name": snapshot.pointer("/project/name"),
+        "tempo": at(&["/transport/tempo", "/transport/bpm", "/project/tempo", "/project/bpm"]),
+        "meter": meter,
+        "scale": null,
+        "roles": roles,
+        "tokens": tokens,
+    })
 }
 
 /// The read tool's description: what it reads, and for each kind read inside something, its parent.

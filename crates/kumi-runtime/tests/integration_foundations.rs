@@ -85,6 +85,12 @@ impl Integration for TestIntegration {
     async fn device_tree(&self, track_ref: &str, _: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
         Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![], owner: None }))
     }
+    fn fingerprint(&self) -> Option<Value> {
+        Some(json!({"name": self.name}))
+    }
+    fn first_heard(&self, since: i64) -> Option<i64> {
+        Some(since + 1)
+    }
 }
 fn integration(name: &'static str, error: Option<RuntimeError>, log: Rc<RefCell<Vec<String>>>) -> Rc<TestIntegration> {
     Rc::new(TestIntegration { name, error, log, hints: RefCell::new(None), closed: Cell::new(false) })
@@ -147,6 +153,9 @@ async fn connected_primary_forwards_focus_hints_and_optional_views() {
     wrapped.observe(Signal::new(), Some(hints.clone())).await.unwrap();
     assert_eq!(*primary.hints.borrow(), Some(hints));
     assert_eq!(wrapped.device_tree("1:track:0", Signal::new()).await.unwrap().unwrap().track_ref, "1:track:0");
+    // (#361 review K14) What the taste log reads of the DAW: the project's fingerprint and when it was heard.
+    assert_eq!(wrapped.fingerprint(), Some(json!({"name": "live"})));
+    assert_eq!(wrapped.first_heard(5), Some(6));
     wrapped.close().await.unwrap();
     assert!(primary.closed.get());
 }
