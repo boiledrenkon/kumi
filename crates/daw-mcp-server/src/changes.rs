@@ -288,6 +288,15 @@ impl Journal {
         Ok(Ok(record))
     }
 
+    /// Before an apply is answered, what Kumi's undo puts back becomes what the apply found (the host makes some kinds from
+    /// what it read again at the apply).
+    pub fn refresh_prior(&self, id: &str, prior: Value) {
+        let mut inner = self.inner.lock().expect("journal lock");
+        if let Some(record) = inner.records.get_mut(id).filter(|record| record.state == State::Applying) {
+            record.prior = prior;
+        }
+    }
+
     /// The bridge's answer to the apply (or None when it never came): the record's state, and the answer kept for its key.
     pub fn end_apply(&self, id: &str, key: &str, answer: Result<&Value, (&Value, bool)>) -> (Value, bool) {
         let mut inner = self.inner.lock().expect("journal lock");
@@ -702,7 +711,10 @@ impl crate::host::Host {
             apply_params(&record)
         };
         match self.call("change_apply", params, &record.instance, CHANGE_TIMEOUT).await {
-            Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
+            Ok(answer) => {
+                let answer = self.with_added_content(&record, answer).await;
+                self.journal().end_apply(&id, &key, Ok(&answer))
+            }
             // The bridge took it and couldn't say how it ended (a job it claimed and didn't finish in time): it may have
             // changed the DAW.
             Err(error @ crate::host::CallError::Bridge { .. }) if matches!(&error, crate::host::CallError::Bridge { code, .. } if code == daw_bridge::wire::code::UNCERTAIN) => {

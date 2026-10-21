@@ -75,10 +75,15 @@ fn blanked(text: &str, tag: &str) -> String {
     out
 }
 
+/// What Renoise writes into a device's preset data as its view changes (the producer folds it, shows its devices or a
+/// Splitter's other chain, moves a plug-in's editor): no change to what it holds. The tool's `VIEW_STATE` is the same.
+pub const VIEW_STATE: [&str; 5] =
+    ["IsMaximized", "ShowDevices", "CurrentlyVisibleChain", "MonitorVisibleChain", "PluginEditorWindowPosition"];
+
 /// Preset data with what moves by itself left out, printed: as the tool's `shape_of`. Parameter values and plug-in chunks
-/// (automation, meta devices and macros move them), and the inner devices' `SelectedPresetIsModified` and `IsSelected`
+/// (automation, meta devices and macros move them), the inner devices' `SelectedPresetIsModified` and `IsSelected`
 /// (Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the producer's
-/// clicks: lab, 2026-10-20).
+/// clicks: lab, 2026-10-20), and what Renoise's view shows of them (`VIEW_STATE`).
 pub fn shape_of(xml: &str) -> String {
     let shape = blanked(xml, "Value");
     // `<ParameterChunk>…</ParameterChunk>` (the first end after each start) becomes `<ParameterChunk/>`.
@@ -99,7 +104,30 @@ pub fn shape_of(xml: &str) -> String {
         }
     }
     out.push_str(rest);
-    print_of(&blanked(&blanked(&out, "SelectedPresetIsModified"), "IsSelected"))
+    let mut shape = blanked(&blanked(&out, "SelectedPresetIsModified"), "IsSelected");
+    for tag in VIEW_STATE {
+        shape = blanked(&shape, tag);
+    }
+    print_of(&shape)
+}
+
+/// A device inside's content, printed: its whole XML (values, plug-in state, switch) but what moves by itself and what
+/// the view shows. What Kumi's undo of adding it compares with the one Renoise wrote right after the add.
+pub fn content_of(device: &Element) -> String {
+    let mut text = device.to_xml();
+    for tag in ["SelectedPresetIsModified", "IsSelected"].into_iter().chain(VIEW_STATE) {
+        text = blanked(&text, tag);
+    }
+    print_of(&text)
+}
+
+/// The content of the device at `at` (places from 1) in preset data: what Kumi keeps of one it added.
+pub fn content_at(text: &str, at: &[i64]) -> Option<String> {
+    let document = xml::parse(text).ok()?;
+    let locus = resolve(slot(&document).ok()?, at, false).ok()?;
+    let container = element_at(slot(&document).ok()?, &locus.container)?;
+    let kind = type_of(container, locus.container.is_empty());
+    devices_in(container, kind, locus.lane).get(locus.place).map(|device| content_of(device))
 }
 
 const DOOFER: &str = "DooferDevice";
@@ -848,6 +876,22 @@ fn checked_mappings(container: &Element, kind: &str, asked: &Value) -> Result<Ve
     Ok(out)
 }
 
+/// Whether mappings Kumi kept (as `mappings_of` gives them) still have their lane and device in the container.
+fn mappings_fit(container: &Element, kind: &str, mappings: &Value) -> Result<(), Refusal> {
+    for mapping in mappings.as_array().into_iter().flatten() {
+        let lane = mapping["lane"].as_i64().unwrap_or(1);
+        let place = mapping["device"].as_i64().unwrap_or(0);
+        let fits = lane >= 1
+            && lane as usize <= lanes_of(kind)
+            && place >= 1
+            && place as usize <= devices_in(container, kind, (lane - 1) as usize).len();
+        if !fits {
+            return changed("a device a mapping went to isn't there any more");
+        }
+    }
+    Ok(())
+}
+
 fn doofer_macro(mut document: xml::Document, top: &str, input: &Value, device: &Device) -> Result<Edited, Refusal> {
     let m = input.get("macro").and_then(Value::as_i64).unwrap_or(0);
     let count = macro_count(top);
@@ -886,6 +930,10 @@ fn doofer_macro(mut document: xml::Document, top: &str, input: &Value, device: &
     let mut applied = Map::new();
     prior.insert("macro".into(), m.into());
     applied.insert("macro".into(), m.into());
+    // (the container's lanes as previewed and as left: its mappings are places in them)
+    let chains = Value::Array((0..lanes_of(top)).map(|lane| chain_print(slot_, &[], lane)).collect());
+    prior.insert("chains".into(), chains.clone());
+    applied.insert("chains".into(), chains);
     if let Some(name) = name {
         prior.insert("name".into(), macro_.and_then(|e| e.child_text("Name")).unwrap_or_else(|| format!("Macro {m}")).into());
         applied.insert("name".into(), name.into());
@@ -1113,7 +1161,6 @@ fn device_move(mut document: xml::Document, input: &Value, device: &Device) -> R
     let at = int_list(input.get("at"), "at")?.ok_or_else(|| Refusal::Bad("at: the device's place, from 1".into()))?;
     let to = int_list(input.get("to"), "to")?.ok_or_else(|| Refusal::Bad("to: where it goes, as places from 1".into()))?;
     let from = resolve(slot(&document)?, &at, false)?;
-    let where_ = place_words(&to, slot(&document)?);
     let label = inner_label(
         element_at(slot(&document)?, &from.container)
             .map(|c| {
@@ -1123,30 +1170,14 @@ fn device_move(mut document: xml::Document, input: &Value, device: &Device) -> R
             .expect("resolved"),
     );
     let before = json!({"from": chain_print(slot(&document)?, &from.container, from.lane)});
-    let same_container = |locus: &Locus| locus.container == from.container;
     // Where it lands is read with the device out of its place (as the producer's drag does).
     let mut probe = document.clone();
     let (element, _, _) = take_out(slot_mut(&mut probe), &from);
     let target = resolve(slot(&probe)?, &to, true)?;
-    if !same_container(&target) && routed(slot(&document)?, &from) {
-        return bad(format!(
-            "macros or meta devices aim at {} (or it aims at others): it keeps them only inside its own Doofer or Splitter",
-            q(&label)
-        ));
-    }
-    if target.container == from.container && target.lane != from.lane && routed(slot(&document)?, &from) {
-        // (macro mappings follow a device into the other lane; meta devices don't aim across lanes)
-        let container = element_at(slot(&document)?, &from.container).expect("resolved");
-        let kind = type_of(container, from.container.is_empty());
-        let aimed = devices_in(container, kind, from.lane).iter().enumerate().any(|(d, device)| {
-            destination_prefixes(device).iter().any(|prefix| {
-                let effect = value_of(device, &format!("{prefix}DestEffect")).unwrap_or(-1.0);
-                effect as i64 == from.place as i64 || (d == from.place && effect >= 0.0)
-            })
-        });
-        if aimed {
-            return bad(format!("meta devices aim at {} (or it aims at others), and they don't aim across lanes", q(&label)));
-        }
+    // (where it lands, in words, read the same way: with it out of its place)
+    let where_ = place_words(&to, slot(&probe)?);
+    if let Some(why) = move_refusal(slot(&document)?, &from, &target, &label) {
+        return bad(why);
     }
     if target.container == from.container && target.lane == from.lane && target.place == from.place {
         return Ok(Edited {
@@ -1158,7 +1189,15 @@ fn device_move(mut document: xml::Document, input: &Value, device: &Device) -> R
         });
     }
     move_device(slot_mut(&mut document), &from, &target, element);
-    let after = json!({"to": chain_print(slot(&document)?, &target.container, target.lane), "from": chain_print(slot(&document)?, &from.container, from.lane)});
+    let to_print = chain_print(slot(&document)?, &target.container, target.lane);
+    // (the source lane as the move left it: the same lane, or as it is with the device out, whose path an insert before it
+    // in the top lane would move)
+    let from_print = if target.container == from.container && target.lane == from.lane {
+        to_print.clone()
+    } else {
+        chain_print(slot(&probe)?, &from.container, from.lane)
+    };
+    let after = json!({"to": to_print, "from": from_print});
     Ok(Edited {
         document,
         title: format!("Moved {} in {} to {where_}", q(&label), q(&device.named())),
@@ -1166,6 +1205,32 @@ fn device_move(mut document: xml::Document, input: &Value, device: &Device) -> R
         prior: json!({"at": at, "to": to, "chain": before}),
         applied: json!({"at": at, "to": to, "chain": after}),
     })
+}
+
+/// Why the device at `from` can't go to `target` (found with it out of its place): something aims at it (a macro, a meta
+/// device beside it) or it aims somewhere, and it would leave its own container; or meta devices aim at it, or it at
+/// others, and it would change lanes (they don't aim across lanes). Macro mappings follow a device within its container.
+fn move_refusal(slot_: &Element, from: &Locus, target: &Locus, label: &str) -> Option<String> {
+    if target.container != from.container && routed(slot_, from) {
+        return Some(format!(
+            "macros or meta devices aim at {} (or it aims at others): it keeps them only inside its own Doofer or Splitter",
+            q(label)
+        ));
+    }
+    if target.container == from.container && target.lane != from.lane && routed(slot_, from) {
+        let container = element_at(slot_, &from.container).expect("resolved");
+        let kind = type_of(container, from.container.is_empty());
+        let aimed = devices_in(container, kind, from.lane).iter().enumerate().any(|(d, device)| {
+            destination_prefixes(device).iter().any(|prefix| {
+                let effect = value_of(device, &format!("{prefix}DestEffect")).unwrap_or(-1.0);
+                effect as i64 == from.place as i64 || (d == from.place && effect >= 0.0)
+            })
+        });
+        if aimed {
+            return Some(format!("meta devices aim at {} (or it aims at others), and they don't aim across lanes", q(label)));
+        }
+    }
+    None
 }
 
 /// Moves the device from one place to another (in its container: its mappings follow; to another container: nothing aims
@@ -1291,6 +1356,9 @@ fn device_set(mut document: xml::Document, input: &Value, device: &Device) -> Re
                 trimmed(max)
             ));
         }
+        if let Some(problem) = aim_problem(container, &kind, locus.lane, locus.place, target, &element, value) {
+            return bad(problem);
+        }
         let now = value_of(target, &element);
         prior.insert("param".into(), json!({"k": k, "element": element, "value": now}));
         applied.insert("param".into(), json!({"k": k, "element": element, "value": value}));
@@ -1337,6 +1405,8 @@ fn device_set(mut document: xml::Document, input: &Value, device: &Device) -> Re
         set_name(element, name);
     }
     prior.insert("at".into(), json!(at));
+    // (the lane as previewed: a device dropped in before the apply makes the place another device's)
+    prior.insert("chain".into(), chain.clone());
     applied.insert("at".into(), json!(at));
     applied.insert("chain".into(), chain);
     applied.insert("type".into(), target_type.into());
@@ -1347,6 +1417,49 @@ fn device_set(mut document: xml::Document, input: &Value, device: &Device) -> Re
         prior: Value::Object(prior),
         applied: Value::Object(applied),
     })
+}
+
+/// What's wrong with aiming a meta device inside a container (its Dest. Track, Effect or Parameter, or *Hydra's OutN ones)
+/// at `value`, which Renoise doesn't check: inside, it aims along its own lane (its track is its own: -1), at another device
+/// there (from 0, as Renoise keeps it) or none (-1), and at a parameter that device has (0 is its on/off).
+fn aim_problem(container: &Element, kind: &str, lane: usize, place: usize, device: &Element, element: &str, value: f64) -> Option<String> {
+    let label = q(&inner_label(device));
+    if element.ends_with("DestTrack") {
+        let inside = if kind == SPLITTER { "Splitter" } else { "Doofer" };
+        return (value != -1.0).then(|| format!("{label} aims inside its {inside} only: its track is its own (-1)"));
+    }
+    let (prefix, effect_asked) = match (element.strip_suffix("DestEffect"), element.strip_suffix("DestParameter")) {
+        (Some(prefix), _) => (prefix, true),
+        (_, Some(prefix)) => (prefix, false),
+        _ => return None,
+    };
+    if value == -1.0 {
+        return None;
+    }
+    let devices = devices_in(container, kind, lane);
+    if effect_asked && (value.fract() != 0.0 || value < 0.0 || value as usize >= devices.len() || value as usize == place) {
+        return Some(format!(
+            "{label} aims at another device of its chain: from 0 to {} but {place} (itself), or -1 for none",
+            devices.len().saturating_sub(1)
+        ));
+    }
+    let effect = if effect_asked { value } else { value_of(device, &format!("{prefix}DestEffect")).unwrap_or(-1.0) };
+    if effect < 0.0 {
+        return Some(format!("{label} aims at no device yet: set its Dest. Effect first (or -1 for none)"));
+    }
+    let parameter = if effect_asked { value_of(device, &format!("{prefix}DestParameter")).unwrap_or(-1.0) } else { value };
+    let target = devices.get(effect as usize)?;
+    match parameter_count(target) {
+        Ok(count) if parameter < 0.0 || (parameter.fract() == 0.0 && parameter as usize <= count) => None,
+        Ok(count) if effect_asked => Some(format!(
+            "{label}'s Dest. Parameter ({}) is past what {} has (0 for its on/off to {count}): set it first, or -1",
+            trimmed(parameter),
+            q(&inner_label(target))
+        )),
+        Ok(count) => Some(format!("{label} aims at a parameter of {} from 0 (its on/off) to {count}", q(&inner_label(target)))),
+        // (a plug-in's parameters Kumi can't count: Renoise takes it as asked)
+        Err(_) => None,
+    }
 }
 
 fn target_mut<'a>(slot_: &'a mut Element, locus: &Locus) -> &'a mut Element {
@@ -1663,8 +1776,42 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
         "doofer-device-add" => {
             let at = list_of(&kept.applied["at"]);
             let locus = resolve(slot(&document)?, &at, false)?;
+            let (label, content, aimed) = {
+                let container = element_at(slot(&document)?, &locus.container).expect("resolved");
+                let kind = type_of(container, locus.container.is_empty());
+                let devices = devices_in(container, kind, locus.lane);
+                let added = devices[locus.place];
+                // (the meta devices beside it that aim at it now: their aims go with it)
+                let aimed: Vec<String> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(d, device)| {
+                        *d != locus.place
+                            && destination_prefixes(device)
+                                .iter()
+                                .any(|prefix| value_of(device, &format!("{prefix}DestEffect")) == Some(locus.place as f64))
+                    })
+                    .map(|(_, device)| q(&inner_label(device)))
+                    .collect();
+                (inner_label(added), content_of(added), aimed)
+            };
+            // What the producer did with it since Kumi added it (its knobs, its switch, a plug-in's state) is theirs, and so
+            // are the aims they gave meta devices at it: Kumi takes it out only on discard, and says what goes with it.
+            let turned = kept.applied.get("content").and_then(Value::as_str).is_some_and(|added| added != content);
+            if (turned || !aimed.is_empty()) && !kept.discard {
+                let mut why = vec![];
+                if turned {
+                    why.push(format!("{} was changed in Renoise since Kumi added it", q(&label)));
+                }
+                if !aimed.is_empty() {
+                    why.push(format!("{} aim{} at it now", aimed.join(" and "), if aimed.len() == 1 { "s" } else { "" }));
+                }
+                return changed(format!("{}, so Kumi leaves it (undo with discard to take it out anyway)", why.join(", and ")));
+            }
             take_out(slot_mut(&mut document), &locus);
-            Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
+            let note = (!aimed.is_empty())
+                .then(|| format!("{} aim{} at nothing now.", aimed.join(" and "), if aimed.len() == 1 { "s" } else { "" }));
+            Ok(Undo::Write { document: Box::new(document), title: put_back, note })
         }
         "doofer-device-delete" => {
             let at = list_of(&kept.prior["at"]);
@@ -1722,11 +1869,15 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             if at == to {
                 return Ok(Undo::Back(format!("{} as it was", device.named())));
             }
-            // Taken back: from where it went to where it was, read the same way (with it out of its place).
+            // Taken back: from where it went to where it was, read the same way (with it out of its place), and only as the
+            // move itself may go (an aim the producer gave a meta device at it since would point elsewhere after).
             let from = resolve(slot(&document)?, &to, false)?;
             let mut probe = document.clone();
             let (element, _, _) = take_out(slot_mut(&mut probe), &from);
             let target = resolve(slot(&probe)?, &at, true)?;
+            if let Some(why) = move_refusal(slot(&document)?, &from, &target, &inner_label(&element)) {
+                return changed(format!("{why} (since Kumi moved it)"));
+            }
             move_device(slot_mut(&mut document), &from, &target, element);
             Ok(Undo::Write { document: Box::new(document), title: put_back, note: None })
         }
@@ -1754,8 +1905,17 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
                     return changed(format!("macro {m} of {} changed in Renoise since Kumi set it", q(&device.named())));
                 }
                 if field == "mappings" {
-                    // (what goes back must still fit what is in the container now)
-                    checked_mappings(slot_, &top, was)?;
+                    // (its mappings are places in the container's lanes: put back only while they are as Kumi left them)
+                    let chains = Value::Array((0..lanes_of(&top)).map(|lane| chain_print(slot_, &[], lane)).collect());
+                    if kept.applied.get("chains").is_some_and(|kept| *kept != chains) {
+                        return changed(format!(
+                            "the devices in {} were added, deleted or moved in Renoise since, so macro {m}'s mappings can't be put back where they were",
+                            q(&device.named())
+                        ));
+                    }
+                    // (what goes back was a mapping of these places: only the places are checked, not what Kumi knows of
+                    // the parameters, as a plug-in's can't be counted)
+                    mappings_fit(slot_, &top, was)?;
                 }
                 back.insert(field.into(), was.clone());
                 wrote = true;
@@ -2307,6 +2467,8 @@ impl crate::host::Host {
                 json!({"error": format!("{} changed in Renoise since the preview: preview it again", q(&device.named())), "code": "changed"}),
             );
         }
+        // What Kumi's undo puts back is what this apply found (a deleted device's knobs turned since the preview, say).
+        self.journal().refresh_prior(&record.id, edited.prior.clone());
         let composed = edited.document.to_xml();
         let mut apply = json!({
             "kind": record.kind,
@@ -2316,6 +2478,24 @@ impl crate::host::Host {
         });
         crate::changes::place(&mut apply, record.epoch.as_deref(), record.input_layout);
         Ok(apply)
+    }
+
+    /// A doofer-device-add's apply answer with what the device added holds as Renoise wrote it (`applied.edit.content`, read
+    /// back right after): Kumi's undo compares it, and leaves a device the producer worked on since. Unchanged for any other
+    /// kind, or when it can't be read.
+    pub(crate) async fn with_added_content(&self, record: &crate::changes::Record, mut answer: Value) -> Value {
+        if record.kind != "doofer-device-add" || !host_makes(self.daw(), &record.kind, &record.input) {
+            return answer;
+        }
+        let Some(at) = answer.pointer("/applied/edit/at").map(list_of).filter(|at| !at.is_empty()) else { return answer };
+        let mut params = read_params(&record.input, &record.kind);
+        crate::changes::place(&mut params, record.epoch.as_deref(), record.input_layout);
+        let Ok(read) = self.call("preset_read", params, &record.instance, crate::changes::CHANGE_TIMEOUT).await else { return answer };
+        let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
+        if let (Some(content), Some(edit)) = (content_at(text, &at), answer.pointer_mut("/applied/edit")) {
+            edit["content"] = content.into();
+        }
+        answer
     }
 
     /// The reads of the devices doofer-make puts in a container, by lane (each its ref and its preset_read), checked to be

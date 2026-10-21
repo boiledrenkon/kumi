@@ -881,8 +881,8 @@ test("devices m4: a Doofer isn't made when a device changed since the host read 
   local epoch, layout = place(peer)
   local reference = epoch .. ":device:2.2"
   local read = call(peer, "preset_read", { ref = reference, epoch = epoch, layout = layout }).result
-  -- A structural edit by the producer (an element changes): the EQ's shape moves.
-  device_data(2, 2).preset_data = mock.song:track(2):device(2).active_preset_data:gsub("<IsMaximized>true</IsMaximized>", "<IsMaximized>false</IsMaximized>", 1)
+  -- A structural edit by the producer (an element comes): the EQ's shape moves. (Folding it is no such edit: the view.)
+  device_data(2, 2).preset_data = mock.song:track(2):device(2).active_preset_data:gsub("</DeviceSlot>", "  <Gain2>\n      <Value>0</Value>\n    </Gain2>\n  </DeviceSlot>", 1)
   local input = { trackRef = epoch .. ":track:2", deviceRefs = { reference }, shapes = { read.shape }, presetData = DOOFER_XML, type = "doofer" }
   failure(call(peer, "change_apply", { kind = "doofer-make", input = input, fence = { ids = { read.id } }, desc = "Kumi: make (k1)", epoch = epoch, layout = layout }), "changed", "read it again")
   input.shapes = nil
@@ -1985,4 +1985,12 @@ test("devices m4: what a Doofer shows (folded, its devices shown or not, where i
   ok(back.result, json.encode(back.error or {}))
   eq(names_on(1), "")
   mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: a Doofer's shape leaves out what Renoise's view shows of it, as the host's shape_of does (the same number)", function()
+  local presets = T.load_payload_module("changes_presets")
+  local viewed = "<a><IsMaximized>true</IsMaximized><Value>1</Value><ShowDevices>false</ShowDevices><CurrentlyVisibleChain>1</CurrentlyVisibleChain></a>"
+  eq(presets.shape_of(viewed), "4d722c4cf7fe3489:67")
+  local folded = viewed:gsub("<IsMaximized>true", "<IsMaximized>false"):gsub("<ShowDevices>false", "<ShowDevices>true")
+  eq(presets.shape_of(folded), presets.shape_of(viewed))
 end)

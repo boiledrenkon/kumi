@@ -38,6 +38,10 @@ function M.shape_of(xml)
   local shape = xml:gsub("<Value>[^<]*</Value>", "<Value/>"):gsub("<ParameterChunk>.-</ParameterChunk>", "<ParameterChunk/>")
   shape = shape:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
   shape = shape:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
+  -- (and what Renoise's view shows of it: no change to what it holds)
+  for _, tag in ipairs(material_.VIEW_STATE) do
+    shape = shape:gsub("<" .. tag .. ">[^<]*</" .. tag .. ">", "<" .. tag .. "/>")
+  end
   return M.print_of(shape)
 end
 

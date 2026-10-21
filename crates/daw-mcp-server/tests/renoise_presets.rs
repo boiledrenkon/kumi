@@ -237,3 +237,25 @@ async fn a_doofer_read_by_ref_says_what_it_holds_its_preset_data_on_ask_and_the_
     assert_eq!(body["nodes"][1]["childNodes"][0]["name"], "EQ 5");
     assert_eq!(body["nodes"][0]["childNodes"], json!([]));
 }
+
+#[tokio::test]
+async fn kumis_undo_of_a_device_delete_puts_it_back_as_the_apply_found_it() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-delete", json!({"ref": "e1:device:3.2", "at": [2]})).await;
+    // The producer turns the Gainer's volume between the preview and the apply (a value: the apply goes on).
+    lab.edit_xml("<Volume>\n            <Value>1.0</Value>", "<Volume>\n            <Value>1.5</Value>");
+    let turned = lab.xml();
+    assert!(!lab.apply(&preview, "a1").await.1);
+    let (undone, is_error) = lab.undo(&preview, "u1", false).await;
+    assert!(!is_error, "{undone}");
+    assert_eq!(lab.xml(), turned, "the Gainer back as the apply took it out, at 1.5");
+}
+
+#[tokio::test]
+async fn a_device_kumi_added_is_kept_as_renoise_wrote_it_for_kumis_undo() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-add", json!({"ref": "e1:device:3.2", "path": "Gainer", "at": [3]})).await;
+    let (applied, is_error) = lab.apply(&preview, "a1").await;
+    assert!(!is_error, "{applied}");
+    assert!(applied["applied"]["edit"]["content"].as_str().is_some_and(|print| print.contains(':')), "{applied}");
+}
