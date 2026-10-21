@@ -894,7 +894,10 @@ function handlers.digest(params)
 end
 
 function handlers.focus()
-  return stamped(focus.focus(epoch(), b.changed or 0), b.layout)
+  local answer = focus.focus(epoch(), b.changed or 0)
+  -- (while Kumi renders, bodies are refused: the focus says Renoise is busy, so Kumi keeps what it showed)
+  if listening.active() then answer.busy = "rendering" end
+  return stamped(answer, b.layout)
 end
 
 function handlers.focus_body(params)

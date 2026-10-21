@@ -130,6 +130,9 @@ impl TuiApp {
                     state.clip = None;
                     state.clip_key = None;
                     state.strip = Strip::default();
+                    // (a DAW's own body is read anew once it's back)
+                    state.own.key = None;
+                    state.own.body = None;
                 }
             }
             "observation" => self.0.state.borrow_mut().set_name = observed_name(&value),

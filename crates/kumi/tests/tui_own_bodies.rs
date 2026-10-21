@@ -787,3 +787,81 @@ fn reapers_arrange_comes_back_after_the_midi_editor_or_an_fx_window() {
     assert_eq!(touched_next(Some(&fx), Some(&arrange), tree), Some(Touched::Timeline), "FX window → arrange");
     assert_eq!(touched_next(Some(&arrange), Some(&arrange), Some(Touched::Timeline)), Some(Touched::Timeline), "nothing moved");
 }
+
+/// A pattern of Renoise's, one Bass line of it.
+fn bass_pattern(cell: &str) -> FocusBody {
+    FocusBody::Tracker(TrackerGrid {
+        item_ref: "3:pattern:1".into(),
+        name: "Drop".into(),
+        lines: 64,
+        cursor: Some(0),
+        lpb: Some(4.),
+        tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells: vec![cell.into()] }],
+        ..Default::default()
+    })
+}
+fn bass_pattern_focus() -> Value {
+    json!({"type": "focus", "focus": {"track": {"name": "Bass", "kind": "sequencer"}, "trackRef": "3:track:1",
+        "mainView": {"kind": "pattern-editor", "label": "Pattern Editor"}, "item": {"kind": "pattern-track", "itemRef": "3:pattern:1"}}})
+}
+// (review K18) A body of Renoise's own that reads empty (a refused read: Renoise while Kumi renders) comes back: the body
+// shown stays through a refused read, and with none shown yet the next focus asks again.
+case!(renoises_pattern_comes_back_after_a_read_that_brought_nothing, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    // Nothing the first time (refused): the next focus asks again at once (not only on the 1.5 s refresh), and it's drawn.
+    *c.own.borrow_mut() = Some(bass_pattern("E-2 02 .. .. .."));
+    c.own_refused.set(true);
+    h.emit(bass_pattern_focus());
+    delay(30).await;
+    assert!(!has(&h.screen(), "E-2 02 .. .. .."));
+    c.own_refused.set(false);
+    h.emit(bass_pattern_focus());
+    for _ in 0..30 {
+        if has(&h.screen(), "E-2 02 .. .. ..") {
+            break;
+        }
+        delay(10).await;
+    }
+    h.has("E-2 02 .. .. ..");
+    // A refused read (here asked at once, as a reconnect asks) leaves the pattern drawn.
+    c.own_refused.set(true);
+    h.emit(json!({"type": "connection", "state": "connected"}));
+    delay(60).await;
+    h.has("E-2 02 .. .. ..");
+    // And the next read that brings it is drawn.
+    c.own_refused.set(false);
+    *c.own.borrow_mut() = Some(bass_pattern("G-2 02 .. .. .."));
+    h.emit(json!({"type": "connection", "state": "connected"}));
+    shows(&h, "G-2 02 .. .. ..").await;
+    // Away and back (another song may be open now): what was shown before isn't kept through a refused read.
+    c.own_refused.set(true);
+    h.emit(json!({"type": "connection", "state": "disconnected"}));
+    h.emit(json!({"type": "connection", "state": "connected"}));
+    delay(60).await;
+    assert!(!has(&h.screen(), "G-2 02 .. .. .."), "{}", h.screen().join("\n"));
+    h.close().await;
+});
+// (review K18) With nothing shown yet and no focus coming (the producer stays on the pattern while Kumi renders), the
+// pane's timer still reads the pattern again, so it's drawn once Renoise answers.
+case!(renoises_pattern_refused_while_nothing_is_shown_is_read_again_on_the_timer, async {
+    tokio::time::pause();
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    *c.own.borrow_mut() = Some(bass_pattern("E-2 02 .. .. .."));
+    c.own_refused.set(true);
+    h.emit(bass_pattern_focus());
+    delay(5).await;
+    assert!(!has(&h.screen(), "E-2 02 .. .. .."));
+    c.own_refused.set(false);
+    tokio::time::advance(std::time::Duration::from_millis(1600)).await;
+    delay(5).await;
+    h.has("E-2 02 .. .. ..");
+    h.close().await;
+});

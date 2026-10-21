@@ -95,6 +95,10 @@ impl TuiApp {
                 FocusBody::Mixer(_) => BodyKind::Mixer,
                 _ => BodyKind::Routing,
             })
+        } else if let Some(asked) = (rows.is_none() && clip.is_none()).then(|| self.own_request()).flatten() {
+            // A body of the DAW's own asked for and not read yet (or refused, as Renoise refuses while Kumi renders): it's
+            // still read again, so it comes back.
+            Some(asked.kind())
         } else if grid.is_some() {
             Some(BodyKind::Grid)
         } else if timeline.is_some() {

@@ -104,6 +104,8 @@ pub struct Control {
     pub arrangement: RefCell<Option<ArrangementStrip>>,
     /// The body of a DAW's own view (a tracker's pattern, its matrix, keyzones, routing), for any request of its kind.
     pub own: RefCell<Option<FocusBody>>,
+    /// The DAW refuses its own bodies (Renoise while Kumi renders): they read as nothing, though it can show them.
+    pub own_refused: Cell<bool>,
     /// What /export and /share get as the conversation going on now.
     pub export: RefCell<Option<ConversationToExport>>,
 }
@@ -129,6 +131,7 @@ impl Default for Control {
             session: RefCell::default(),
             arrangement: RefCell::default(),
             own: RefCell::default(),
+            own_refused: Cell::default(),
             export: RefCell::default(),
         }
     }
@@ -539,7 +542,7 @@ impl SessionController for Control {
             BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
             other => {
                 self.call(format!("own:{other:?}"));
-                self.own.borrow().clone().filter(|own| own_kind(own) == other.kind())
+                self.own.borrow().clone().filter(|own| own_kind(own) == other.kind() && !self.own_refused.get())
             }
         })
     }

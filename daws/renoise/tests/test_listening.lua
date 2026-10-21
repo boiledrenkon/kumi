@@ -139,6 +139,8 @@ test("listening: a render job renders the mix as the producer has it, then each 
   local half = status(peer, "j1")
   eq(half.state, "running")
   ok(math.abs(half.progress - 0.5 / 3) < 1e-9, "progress: " .. half.progress)
+  -- (review K18) While Kumi renders, the focus says Renoise is busy, so Kumi keeps the body it showed (bodies are refused)
+  eq(result(call(peer, "focus", {}), "focus").busy, "rendering")
   mock.finish_render()
   -- 2: Bass soloed (it was OFF: a solo plays it anyway), every other track OFF
   eq(#mock.renders, 2)
@@ -158,6 +160,7 @@ test("listening: a render job renders the mix as the producer has it, then each 
   local done = status(peer, "j1")
   eq(done.state, "done")
   eq(done.progress, 1)
+  eq(result(call(peer, "focus", {}), "focus").busy, nil, "free again once the job is done")
   eq(#done.files, 3)
   local by = {}
   for _, f in ipairs(done.files) do by[f.id] = f end

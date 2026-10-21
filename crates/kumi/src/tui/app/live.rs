@@ -303,13 +303,13 @@ impl TuiApp {
             let result = app.0.options.controller.focus_body(&request).await;
             let again = {
                 let mut state = app.0.state.borrow_mut();
-                // A busy DAW answers nothing: what was shown stays.
-                let busy = state.focus.as_ref().is_some_and(|focus| focus.busy.is_some());
+                // A read that brings nothing (refused: a busy DAW, Renoise while Kumi renders) leaves what was shown;
+                // with nothing shown yet, the request is forgotten, so the next focus asks again.
                 if state.own.key.as_ref() == Some(&key) {
-                    if let Ok(body) = result {
-                        if body.is_some() || !busy {
-                            state.own.body = body;
-                        }
+                    match result {
+                        Ok(Some(body)) => state.own.body = Some(body),
+                        _ if state.own.body.is_none() => state.own.key = None,
+                        _ => {}
                     }
                 }
                 state.own.reading = false;
