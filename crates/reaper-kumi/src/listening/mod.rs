@@ -115,6 +115,10 @@ pub struct Listening {
     scratch: RefCell<scratch::Scratch>,
     /// Inside REAPER's render for Kumi: the ticks REAPER gives meanwhile only report and cancel.
     rendering: Cell<bool>,
+    /// When Kumi's last render ended: REAPER closes its audio device to render and reopens it a moment after (0.2 s,
+    /// measured), so an audition just after it may open the device itself; at any other time a closed device is the
+    /// producer's choice.
+    rendered_at: Cell<Option<Instant>>,
     /// When the render window's Cancel was last pressed (for this render).
     pressed: Cell<Option<Instant>>,
     told_titles: Cell<bool>,
@@ -192,6 +196,7 @@ impl Listening {
             rendering: Cell::new(false),
             pressed: Cell::new(None),
             told_titles: Cell::new(false),
+            rendered_at: Cell::new(None),
             swept: Cell::new(false),
             beat: Cell::new(None),
             inside_ticks: Cell::new(0),
@@ -285,7 +290,8 @@ impl Listening {
     pub fn audition(&self, reaper: &Reaper, params: &Value) -> Answer {
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
         self.stop_preview(reaper);
-        let (preview, answer) = audition::Preview::start(reaper, info.ptr, params)?;
+        let after_render = self.rendered_at.get().is_some_and(|at| at.elapsed() < audition::AFTER_RENDER);
+        let (preview, answer) = audition::Preview::start(reaper, info.ptr, params, after_render)?;
         crate::log::line(&format!("preview {} plays {}", preview.id, answer));
         self.board.set_playing(Some(Playing { id: preview.id.clone(), slot: preview.slot.clone(), stop: false }));
         *self.preview.borrow_mut() = Some(preview);
@@ -551,6 +557,7 @@ impl Listening {
         let hooks = RunHooks { listening: self, snapshot, out, job: &plan.job };
         let mut ended = render::run(reaper, reads, &plan, &hooks);
         self.rendering.set(false);
+        self.rendered_at.set(Some(Instant::now()));
         if auditioning {
             ended.note_first("The audition playing was stopped: REAPER closes its audio device to render".into());
         }

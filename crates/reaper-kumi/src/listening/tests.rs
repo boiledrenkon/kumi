@@ -934,12 +934,26 @@ fn audition_says_why_when_it_cant_play() {
     let rig = Rig::new();
     let file = wav_file(&rig.folder(), "take.wav", 1.0);
     let refused = |params: Value| rig.ask("audition", params).unwrap_err();
+    // A device that isn't running is the producer's choice (freed for another app, say): never opened, only said.
+    fake::with(|s| {
+        s.listening.audio = false;
+        s.listening.device_opens = true;
+    });
+    let (_, why) = refused(json!({"previewId": "p1", "file": file}));
+    assert!(why.contains("audio isn't running") && why.contains("start REAPER's audio"), "{why}");
+    assert_eq!(fake::with(|s| s.listening.inits), 0, "Kumi never opens the producer's device");
+    // Right after Kumi's own render (REAPER closes its device to render, and reopens it a moment after), it's opened.
+    fake::with(|s| s.listening.audio = true);
+    rig.ask(
+        "render_start",
+        json!({"jobId": "jr1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}),
+    )
+    .unwrap();
+    rig.tick();
+    assert_eq!(rig.status("jr1")["state"], "done");
     fake::with(|s| s.listening.audio = false);
-    assert!(refused(json!({"previewId": "p1", "file": file})).1.contains("audio isn't running"));
-    assert_eq!(fake::with(|s| s.listening.inits), 1, "Kumi tried to open it first");
-    // A device REAPER closed (around a render, or stopped in the background) is opened, as pressing play would.
-    fake::with(|s| s.listening.device_opens = true);
     assert!(rig.ask("audition", json!({"previewId": "p0", "file": file})).is_ok());
+    assert_eq!(fake::with(|s| s.listening.inits), 1);
     rig.board().stop_preview(&json!({})).unwrap();
     rig.tick();
     fake::with(|s| {
