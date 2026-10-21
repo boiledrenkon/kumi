@@ -1,9 +1,12 @@
 //! `docs/<lang>/DAWS.md`, the producer's page of what Kumi does in each DAW, keeps up with the code: each capability
-//! flag has a row, a DAW whose profile has the flag shows ✓ in its column, and every kind category of REAPER and Renoise
-//! (a change tool's first word: `track_`, `fx_`, `slot_`) is named in that DAW's section. A new ability can't ship
-//! unlisted.
-use super::{reaper_changes, renoise_changes};
+//! flag has a row, ticked exactly for the DAWs whose profiles have it; each FOCUS view REAPER and Renoise draw has a row
+//! ticked for them; every kind category of REAPER and Renoise (a change tool's first word: `track_`, `fx_`, `slot_`) is
+//! named in that DAW's section, and every kind their own undo skips in its limits; each cell speaks the legend's forms.
+//! A new flag, FOCUS view, kind category or undo-skipped kind can't ship unlisted (the bridges' other tools aren't
+//! checked here).
+use super::{reaper, reaper_changes, renoise, renoise_changes};
 use crate::core::daw::{Capabilities, DawProfile};
+use crate::core::view::BodyKind;
 use std::collections::BTreeSet;
 
 const LANGUAGES: [&str; 3] = ["en", "ja", "zh-CN"];
@@ -35,18 +38,39 @@ const ROWS: &[(&str, &str)] = &[
     ("pointing", "Pointing at something in the DAW"),
     ("presets", "Finds and loads the DAW's presets"),
     ("manual", "Searches the DAW's manual"),
-    ("browser_items", "Searches the DAW's manual; loads Browser items"),
+    ("browser_items", "Loads Browser items by id"),
     ("configured_plugin_params", "Plug-in parameters shown once configured"),
     ("max_for_live_devices", "Max for Live devices"),
     ("ears", "Max for Live devices, Kumi Ears"),
-    ("ui_hands", "Max for Live devices, Kumi Ears, Kumi's hands"),
+    ("ui_hands", "Kumi's hands on the DAW's window"),
     ("extension_sdk", "Live's Extensions SDK"),
     ("willington", "Live's Extensions SDK, Willington"),
 ];
 
-/// Flags Kumi's own bridges answer for REAPER and Renoise outside their profiles: its undo and stop (the integration's
-/// own), Lua (`run_lua`), and the id each bridge keeps in the saved project.
-const GIVEN_BY_THE_BRIDGE: &[&str] = &["undo", "scripting", "stop_transport", "durable_project_id"];
+/// The words that start a FOCUS view's row in the English table.
+fn view_row(kind: BodyKind) -> &'static str {
+    match kind {
+        BodyKind::Tree => "A track's devices as a tree",
+        BodyKind::Notes => "The notes in the note editor",
+        BodyKind::Grid => "A launcher grid",
+        BodyKind::Timeline => "The timeline at a glance",
+        BodyKind::Tracker => "The Pattern and Phrase Editors' lines",
+        BodyKind::Matrix => "The Pattern Matrix",
+        BodyKind::Keyzones => "An instrument's keyzones",
+        BodyKind::Routing => "A track's routing",
+        BodyKind::Mixer => "The mixer",
+    }
+}
+
+/// How a cell may start in each language, as its legend names the forms (✓ first).
+const FORMS: [(&str, &[&str]); 3] = [
+    ("en", &["✓", "Live only", "REAPER only", "Renoise only", "not yet", "not needed", "no:", "instead:"]),
+    ("ja", &["✓", "Live のみ", "REAPER のみ", "Renoise のみ", "まだ", "不要", "不可", "代わりに"]),
+    ("zh-CN", &["✓", "仅 Live", "仅 REAPER", "仅 Renoise", "尚未", "不需要", "不能", "改为"]),
+];
+
+/// Each language's heading of a DAW's limits.
+const LIMITS: [(&str, &str); 3] = [("en", "### Limits"), ("ja", "### 制限"), ("zh-CN", "### 限制")];
 
 const COLUMNS: [(&DawProfile, &str); 3] =
     [(&DawProfile::ABLETON, "Live"), (&DawProfile::REAPER, "REAPER"), (&DawProfile::RENOISE, "Renoise")];
@@ -116,7 +140,7 @@ fn every_capability_has_a_row_ticked_for_each_daw_whose_profile_has_it() {
             if on && !ticked(cell) {
                 wrong.push(format!("{name}: {daw}'s profile has it, the page says “{cell}”"));
             }
-            if !on && ticked(cell) && (profile.id == DawProfile::ABLETON.id || !GIVEN_BY_THE_BRIDGE.contains(&name.as_str())) {
+            if !on && ticked(cell) {
                 wrong.push(format!("{name}: the page ticks it for {daw}, whose profile hasn't it"));
             }
         }
@@ -160,5 +184,67 @@ fn the_readmes_and_guides_link_the_page() {
         assert!(text.contains(&format!("(docs/{language}/DAWS.md)")), "{readme} links docs/{language}/DAWS.md");
         let guide = std::fs::read_to_string(format!("{root}/docs/{language}/KUMI_GUIDE.md")).unwrap();
         assert!(guide.contains("(DAWS.md)"), "docs/{language}/KUMI_GUIDE.md links DAWS.md");
+    }
+}
+
+#[test]
+fn each_focus_view_reaper_and_renoise_draw_is_a_row_ticked_for_them() {
+    let rows = table(&doc("en"));
+    for (column, daw) in [(2, &reaper::DAW), (3, &renoise::DAW)] {
+        let app = daw.profile.words.app;
+        for kind in [
+            BodyKind::Tree,
+            BodyKind::Notes,
+            BodyKind::Grid,
+            BodyKind::Timeline,
+            BodyKind::Tracker,
+            BodyKind::Matrix,
+            BodyKind::Keyzones,
+            BodyKind::Routing,
+            BodyKind::Mixer,
+        ] {
+            let label = view_row(kind);
+            let row = rows.iter().find(|row| row[0].starts_with(label)).unwrap_or_else(|| panic!("no row “{label}” for {kind:?}"));
+            let drawn = daw.bodies.contains(&kind);
+            assert_eq!(ticked(&row[column]), drawn, "{app}'s cell for {kind:?} (“{label}”) is “{}”", row[column]);
+        }
+    }
+}
+
+#[test]
+fn each_cell_speaks_its_legends_forms() {
+    for (language, forms) in FORMS {
+        let text = doc(language);
+        let legend = &text[..text.find("\n| ").expect("a table")];
+        for form in forms {
+            assert!(legend.contains(form.trim_end_matches(':')), "docs/{language}/DAWS.md's legend names “{form}”");
+        }
+        for row in table(&text).iter().skip(1) {
+            for cell in row[1..].iter().filter(|cell| !cell.is_empty()) {
+                assert!(
+                    forms.iter().any(|form| cell.starts_with(form)),
+                    "docs/{language}/DAWS.md: “{cell}” (row “{}”) is no legend form",
+                    row[0]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_kind_the_daws_own_undo_skips_is_named_in_its_limits() {
+    for (language, heading) in LIMITS {
+        let text = doc(language);
+        for (name, kinds) in [("REAPER", reaper_changes::CHANGES.kinds), ("Renoise", renoise_changes::CHANGES.kinds)] {
+            let part = section(&text, name);
+            let limits = &part[part.find(heading).unwrap_or_else(|| panic!("docs/{language}/DAWS.md's {name} has no “{heading}”"))..];
+            let limits = limits[4..].find("\n### ").map_or(limits, |end| &limits[..end + 4]);
+            let missing: Vec<&str> = kinds
+                .iter()
+                .filter(|kind| kind.skipped_by_daw_undo && !limits.contains(&format!("`{}`", kind.tool)))
+                .map(|kind| kind.tool)
+                .collect();
+            assert!(missing.is_empty(), "docs/{language}/DAWS.md's {name} limits don't name {missing:?}, which {name}'s undo skips");
+        }
     }
 }

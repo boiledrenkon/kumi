@@ -10,8 +10,10 @@ the [capability matrix](CAPABILITY_MATRIX.md).
 
 ## At a glance
 
-✓ works. "Live only" is something only Live has. "Not yet" names what's
-missing.
+✓ works. "Live only", "REAPER only" or "Renoise only" is something only that
+DAW has. "not yet" names what's missing. "not needed" means the DAW does it
+another way. "no" means the DAW's API doesn't allow it. "instead" names what
+does the job there.
 
 | Ability | Live | REAPER | Renoise |
 | --- | --- | --- | --- |
@@ -22,12 +24,12 @@ missing.
 | Stop everything at once (`/stop`) | ✓ | ✓ | ✓ |
 | Knows whether the DAW is recording | ✓ | ✓ | ✓ |
 | A line in the DAW's status bar | ✓ | no: REAPER's API has no status bar (a notification instead) | ✓ |
-| Opens a saved project | ✓ | not yet: setup's restart doesn't open it again | not yet: setup's restart doesn't open it again |
+| Opens a saved project | ✓ | not yet: you open it yourself (`kumi -r` and setup's restart don't) | not yet: you open it yourself (`kumi -r` and setup's restart don't) |
 | Catches up on what changed while Kumi was closed | ✓ | ✓ | ✓ |
 | Conversations follow the saved project | ✓ | ✓ | ✓ |
 | **Listening** | | | |
 | Hears tracks or the mix | ✓ | ✓ | ✓ |
-| Renders offline to listen, then plays it out loud | hears as Live plays | ✓ | ✓ |
+| Renders offline to listen, then plays it out loud | instead: hears as Live plays | ✓ | ✓ |
 | Auditions candidates against a reference, and goals (`/goal`) on a rig kept open | ✓ | ✓ | ✓ |
 | Judges its changes, `/loop`, matches references | ✓ | ✓ | ✓ |
 | The audio file behind a clip, item or sample | ✓ | ✓ | ✓ |
@@ -36,18 +38,25 @@ missing.
 | **FOCUS** | | | |
 | FOCUS and the beat light follow the DAW as it changes | ✓ | ✓ | ✓ |
 | A track's devices as a tree | ✓ | ✓ FX chains and containers | ✓ Track DSPs, Doofers and Splitters |
-| The notes in the note editor | ✓ | ✓ the MIDI editor | the Pattern and Phrase Editors' lines instead |
-| The timeline at a glance | ✓ Arrangement | ✓ arrange view | the Pattern Matrix instead |
+| The notes in the note editor | ✓ | ✓ the MIDI editor | instead: the Pattern and Phrase Editors' lines |
+| The Pattern and Phrase Editors' lines | Renoise only | Renoise only | ✓ |
+| The timeline at a glance | ✓ Arrangement | ✓ arrange view | instead: the Pattern Matrix |
+| The Pattern Matrix | Renoise only | Renoise only | ✓ |
 | A launcher grid | ✓ Session View | Live only | Live only |
-| Pointing at something in the DAW (**Ask Kumi about this**) | ✓ | Live only | Live only |
+| An instrument's keyzones as a map of keys | not yet: Sampler's zones aren't drawn | Renoise only | ✓ |
+| A track's routing: sends, receives and hardware outputs | not yet | ✓ | not yet |
+| The mixer: levels, pan, mute and solo | not yet | ✓ with peak meters | ✓ without meters (Renoise's API has none) |
+| Pointing at something in the DAW (**Ask Kumi about this**) | ✓ | not yet: no REAPER action for it | not yet: no Renoise menu entry for it |
 | **Library and tutorials** | | | |
 | Watches video tutorials | ✓ | ✓ | ✓ |
 | Finds and loads the DAW's presets | ✓ | ✓ | ✓ |
 | Lists your own projects (`my_sets`) | ✓ | not yet: `.rpp` files aren't read | not yet: `.xrns` files aren't read |
-| Searches the DAW's manual; loads Browser items by id | ✓ | Live only | Live only |
-| Plug-in parameters shown once configured | ✓ | Live only: every parameter is there | Live only: every parameter is there |
+| Searches the DAW's manual | ✓ | not yet: REAPER's manual isn't searched | not yet: Renoise's manual isn't searched |
+| Loads Browser items by id | ✓ | Live only | Live only |
+| Plug-in parameters shown once configured | ✓ | not needed: every parameter is there | not needed: every parameter is there |
+| Kumi's hands on the DAW's window, where its scripting can't reach | ✓ | not yet | not yet |
 | **Live's own** | | | |
-| Max for Live devices, Kumi Ears, Kumi's hands on Live's window | ✓ | Live only | Live only |
+| Max for Live devices, Kumi Ears | ✓ | Live only | Live only |
 | Live's Extensions SDK, Willington | ✓ | Live only | Live only |
 
 ## Live
@@ -60,7 +69,9 @@ missing.
 
 ## REAPER
 
-Through Kumi's extension (`reaper_kumi`). Tested on REAPER 7.82 on macOS.
+Through Kumi's extension (`reaper_kumi`). Needs REAPER 7 or later on macOS,
+Windows or Linux ([what it runs on](SUPPORT_MATRIX.md#reaper-and-renoise));
+tested on 7.82 on macOS, not yet on Windows or Linux.
 
 ### Your setup
 
@@ -74,7 +85,8 @@ with REAPER's factory defaults:
 - the render settings in use (source, bounds, format, sample rate, file
   pattern), which it tells you about before changing.
 
-A file Kumi imports loops its source only when your imported media does.
+A file Kumi imports loops its source only when your imported media does, and
+gets no fades, as your own import gets none.
 
 ### What Kumi can change
 
@@ -138,12 +150,15 @@ next version), track templates and FX chains.
 ### Limits
 
 - **Only REAPER's undo** takes back `run_lua`, `api_call` and `run_action`.
-  `run_action` never runs an action that opens a dialog, quits, opens, closes
-  or saves projects, or renders.
-- **Only Kumi's undo** takes back what REAPER's undo skips: repeat, the
-  metronome switch, a ReaEQ band's type or switch, the automation override,
-  the project's notes, title, author, grid and timebase, and parameter
-  modulation with nothing on.
+  `run_action` never runs an action whose name ends in “…” (a dialog), that
+  quits, opens, closes or saves projects, renders, or undoes or redoes in
+  REAPER.
+- **Only Kumi's undo** takes back what REAPER's undo skips: repeat
+  (`loop_repeat`), the metronome switch (`metronome_switch`), a ReaEQ band's
+  type or switch (`fx_eq_band`), the automation override
+  (`automation_override`), the project's notes, title, author, grid and
+  timebase (`project_notes`, `project_info`, `project_grid`,
+  `project_timebase`), and parameter modulation with nothing on.
 - Kumi's undo of parameter modulation turns its switches off but leaves the
   settings REAPER keeps once made; the HISTORY row says so.
 - A project whose tracks are all replaced at once reads as another project:
@@ -153,8 +168,9 @@ next version), track templates and FX chains.
 
 ## Renoise
 
-Through Kumi's tool (`com.kumi.Bridge.xrnx`). Tested on Renoise 3.5.4 on
-macOS.
+Through Kumi's tool (`com.kumi.Bridge.xrnx`). Needs Renoise 3.5 or later on
+macOS, Windows or Linux ([what it runs on](SUPPORT_MATRIX.md#reaper-and-renoise));
+tested on 3.5.4 on macOS, not yet on Windows or Linux.
 
 ### Your setup
 
@@ -224,9 +240,10 @@ saves the song, instruments and device presets.
 ### Limits
 
 - **Only Renoise's undo** takes back `run_lua`.
-- **Only Kumi's undo** takes back what Renoise's undo skips: mute, solo, the
-  loop, the pattern loop, the metronome switch, editing settings and a
-  plug-in's auto-suspend.
+- **Only Kumi's undo** takes back what Renoise's undo skips: mute and solo
+  (`track_mute`, `track_solo`), the loop and the pattern loop (`loop_range`,
+  `loop_pattern`), the metronome switch (`metronome_switch`), editing settings
+  (`edit_settings`) and a plug-in's auto-suspend (`plugin_suspend`).
 - After Renoise's own undo and redo of line edits (`notes_write`, `lines_copy`,
   `phrase_write` and the like), Kumi's undo of them is refused: it can't tell
   Renoise's redo from your own identical lines. Renoise's undo still can.

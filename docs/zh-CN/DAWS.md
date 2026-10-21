@@ -6,7 +6,7 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 
 ## 一览
 
-✓ 表示能做；“仅 Live”表示只有 Live 才有；“尚未”说明还缺什么。
+✓ 表示能做；“仅 Live”“仅 REAPER”“仅 Renoise”表示只有那个 DAW 才有；“尚未”说明还缺什么；“不需要”表示该 DAW 用别的方式做到；“不能”表示 DAW 的 API 不允许；“改为”说明在那里由什么来做。
 
 | 能力 | Live | REAPER | Renoise |
 | --- | --- | --- | --- |
@@ -17,12 +17,12 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 | 一次停止一切（`/stop`） | ✓ | ✓ | ✓ |
 | 知道 DAW 是否正在录音 | ✓ | ✓ | ✓ |
 | 在 DAW 的状态栏显示一行 | ✓ | 不能：REAPER 的 API 没有状态栏（改用通知） | ✓ |
-| 打开保存的工程 | ✓ | 尚未：设置中的重启不会重新打开它 | 尚未：设置中的重启不会重新打开它 |
+| 打开保存的工程 | ✓ | 尚未：需要你自己打开（`kumi -r` 和设置中的重启都不会打开） | 尚未：需要你自己打开（`kumi -r` 和设置中的重启都不会打开） |
 | 告诉你 Kumi 关闭期间的变化 | ✓ | ✓ | ✓ |
 | 对话跟随保存的工程 | ✓ | ✓ | ✓ |
 | **聆听** | | | |
 | 聆听轨道或混音 | ✓ | ✓ | ✓ |
-| 离线渲染后聆听，再大声播放给你听 | 直接听 Live 播放的声音 | ✓ | ✓ |
+| 离线渲染后聆听，再大声播放给你听 | 改为：直接听 Live 播放的声音 | ✓ | ✓ |
 | 对照参考曲试听候选，以及在保持打开的装置上运行 `/goal` | ✓ | ✓ | ✓ |
 | 判定自己的修改、`/loop`、匹配参考曲 | ✓ | ✓ | ✓ |
 | 片段、对象（item）或采样背后的音频文件 | ✓ | ✓ | ✓ |
@@ -31,18 +31,25 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 | **FOCUS** | | | |
 | FOCUS 和节拍灯跟随 DAW 的变化 | ✓ | ✓ | ✓ |
 | 以树状显示轨道的设备 | ✓ | ✓ FX 链和容器 | ✓ Track DSPs、Doofer 和 Splitter |
-| 音符编辑器中的音符 | ✓ | ✓ MIDI 编辑器 | 改为 Pattern Editor 和 Phrase Editor 的行 |
-| 时间线一览 | ✓ 编曲视图 | ✓ 编排视图 | 改为 Pattern Matrix |
+| 音符编辑器中的音符 | ✓ | ✓ MIDI 编辑器 | 改为：Pattern Editor 和 Phrase Editor 的行 |
+| Pattern Editor 和 Phrase Editor 的行 | 仅 Renoise | 仅 Renoise | ✓ |
+| 时间线一览 | ✓ 编曲视图 | ✓ 编排视图 | 改为：Pattern Matrix |
+| Pattern Matrix | 仅 Renoise | 仅 Renoise | ✓ |
 | 启动器网格 | ✓ 会话视图 | 仅 Live | 仅 Live |
-| 指向 DAW 中的对象（**Ask Kumi about this**） | ✓ | 仅 Live | 仅 Live |
+| 以琴键图显示乐器的键区 | 尚未：不绘制 Sampler 的区域 | 仅 Renoise | ✓ |
+| 轨道的路由：发送、接收和硬件输出 | 尚未 | ✓ | 尚未 |
+| 混音器：电平、声像、静音和独奏 | 尚未 | ✓ 带峰值表 | ✓ 没有电平表（Renoise 的 API 不提供） |
+| 指向 DAW 中的对象（**Ask Kumi about this**） | ✓ | 尚未：REAPER 中还没有对应的动作 | 尚未：Renoise 中还没有对应的菜单项 |
 | **素材库与教程** | | | |
 | 观看视频教程 | ✓ | ✓ | ✓ |
 | 查找并载入 DAW 的预设 | ✓ | ✓ | ✓ |
 | 列出你自己的工程（`my_sets`） | ✓ | 尚未：不读取 `.rpp` 文件 | 尚未：不读取 `.xrns` 文件 |
-| 搜索 DAW 的手册；按 ID 载入浏览器项目 | ✓ | 仅 Live | 仅 Live |
-| 要先配置才显示的插件参数 | ✓ | 仅 Live：所有参数本来就在 | 仅 Live：所有参数本来就在 |
+| 搜索 DAW 的手册 | ✓ | 尚未：不搜索 REAPER 的手册 | 尚未：不搜索 Renoise 的手册 |
+| 按 ID 载入浏览器项目 | ✓ | 仅 Live | 仅 Live |
+| 要先配置才显示的插件参数 | ✓ | 不需要：所有参数本来就在 | 不需要：所有参数本来就在 |
+| 在脚本够不到的地方操作 DAW 窗口的 Kumi 的“手” | ✓ | 尚未 | 尚未 |
 | **Live 自己的** | | | |
-| Max for Live 设备、Kumi Ears、Kumi 操作 Live 窗口的“手” | ✓ | 仅 Live | 仅 Live |
+| Max for Live 设备、Kumi Ears | ✓ | 仅 Live | 仅 Live |
 | Live 的 Extensions SDK、Willington | ✓ | 仅 Live | 仅 Live |
 
 ## Live
@@ -53,7 +60,7 @@ Kumi 能在 Ableton Live、REAPER 和 Renoise 中工作，用的是各个 DAW �
 
 ## REAPER
 
-通过 Kumi 的扩展（`reaper_kumi`）工作。已在 macOS 上的 REAPER 7.82 验证。
+通过 Kumi 的扩展（`reaper_kumi`）工作。需要 macOS、Windows 或 Linux 上的 REAPER 7 或更高版本（[运行环境](SUPPORT_MATRIX.md#reaper-与-renoise)）；已在 macOS 上的 7.82 验证，尚未在 Windows 或 Linux 上试用。
 
 ### 你的设置
 
@@ -63,7 +70,7 @@ Kumi 每次查看时都会读取你对 REAPER 的设置，并按它工作，而�
 - 装了 SWS、ReaPack、ReaImGui 和 js_ReaScriptAPI 中的哪些（只在装了时才使用）；
 - 正在使用的渲染设置（来源、范围、格式、采样率、文件名模式），修改之前会先告诉你。
 
-Kumi 导入的文件，只在你导入的媒体会循环时才循环其源。
+Kumi 导入的文件，只在你导入的媒体会循环时才循环其源，而且和你自己导入的一样不加淡入淡出。
 
 ### Kumi 能修改什么
 
@@ -97,8 +104,8 @@ Kumi 导入的文件，只在你导入的媒体会循环时才循环其源。
 
 ### 限制
 
-- **只有 REAPER 的撤销**能撤回 `run_lua`、`api_call` 和 `run_action`。`run_action` 绝不运行会打开对话框、退出、打开/关闭/保存工程或渲染的动作。
-- **只有 Kumi 的撤销**能撤回 REAPER 的撤销跳过的内容：循环播放（repeat）、节拍器开关、ReaEQ 频段的类型或开关、自动化覆盖、工程的备注、标题、作者、网格和时基，以及什么都没开启的参数调制。
+- **只有 REAPER 的撤销**能撤回 `run_lua`、`api_call` 和 `run_action`。`run_action` 绝不运行名称以“…”结尾的动作（对话框），也不运行退出、打开/关闭/保存工程、渲染，或在 REAPER 中撤销和重做的动作。
+- **只有 Kumi 的撤销**能撤回 REAPER 的撤销跳过的内容：循环播放（repeat，`loop_repeat`）、节拍器开关（`metronome_switch`）、ReaEQ 频段的类型或开关（`fx_eq_band`）、自动化覆盖（`automation_override`）、工程的备注、标题、作者、网格和时基（`project_notes`、`project_info`、`project_grid`、`project_timebase`），以及什么都没开启的参数调制。
 - 用 Kumi 的撤销撤回参数调制时，会关掉它的开关，但 REAPER 一旦创建就会保留的设置仍然留着；HISTORY 的那一行会说明。
 - 所有轨道一次被全部替换的工程会被当作另一个工程：Kumi 的引用失效，它会重新读取。
 - `track_midi_out` 需要在 REAPER 的偏好设置中有 MIDI 输出设备。
@@ -106,7 +113,7 @@ Kumi 导入的文件，只在你导入的媒体会循环时才循环其源。
 
 ## Renoise
 
-通过 Kumi 的工具（`com.kumi.Bridge.xrnx`）工作。已在 macOS 上的 Renoise 3.5.4 验证。
+通过 Kumi 的工具（`com.kumi.Bridge.xrnx`）工作。需要 macOS、Windows 或 Linux 上的 Renoise 3.5 或更高版本（[运行环境](SUPPORT_MATRIX.md#reaper-与-renoise)）；已在 macOS 上的 3.5.4 验证，尚未在 Windows 或 Linux 上试用。
 
 ### 你的设置
 
@@ -146,7 +153,7 @@ Kumi 每次查看时都会读取这首歌曲的设置并照着做：BPM（2 倍�
 ### 限制
 
 - **只有 Renoise 的撤销**能撤回 `run_lua`。
-- **只有 Kumi 的撤销**能撤回 Renoise 的撤销跳过的内容：静音、独奏、循环、模式循环、节拍器开关、编辑设置和插件的自动休眠。
+- **只有 Kumi 的撤销**能撤回 Renoise 的撤销跳过的内容：静音和独奏（`track_mute`、`track_solo`）、循环和模式循环（`loop_range`、`loop_pattern`）、节拍器开关（`metronome_switch`）、编辑设置（`edit_settings`）和插件的自动休眠（`plugin_suspend`）。
 - 行的编辑（`notes_write`、`lines_copy`、`phrase_write` 等）经过 Renoise 自己的撤销和重做之后，Kumi 对它们的撤销会被拒绝：它分不清 Renoise 的重做和你自己写下的相同的行。Renoise 的撤销仍然可以撤回。
 - 在长时间的会话中，载入和卸下 AU 乐器之后，Renoise 的撤销历史有时会变空（原因不明）。
 - FOCUS 的 Mixer 没有电平表：Renoise 的 API 不提供。

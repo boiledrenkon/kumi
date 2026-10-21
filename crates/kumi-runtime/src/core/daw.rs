@@ -833,6 +833,11 @@ impl DawProfile {
         // The fixed phrases are its changes, and it says whether it records (M6); it has no status line. What changed while
         // Kumi wasn't running is told (M6).
         caps: Capabilities {
+            // (its own undo, /stop, Lua and an id kept in the saved project are the extension's)
+            undo: true,
+            stop_transport: true,
+            scripting: Some(ScriptKind::Lua),
+            durable_project_id: true,
             instant: true,
             recording_state: true,
             device_tree: true,
@@ -921,6 +926,11 @@ impl DawProfile {
         // The fixed phrases are its changes and it says whether it records (M6); what changed while Kumi wasn't running is
         // told (M6).
         caps: Capabilities {
+            // (its own undo, /stop, Lua and an id kept in the saved song are the tool's)
+            undo: true,
+            stop_transport: true,
+            scripting: Some(ScriptKind::Lua),
+            durable_project_id: true,
             instant: true,
             recording_state: true,
             device_tree: true,
