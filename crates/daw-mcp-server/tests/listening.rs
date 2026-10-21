@@ -239,6 +239,36 @@ async fn a_render_stops_what_still_plays_out_loud_and_says_so_but_not_a_play_tha
 }
 
 #[tokio::test]
+async fn a_tool_the_daws_list_doesnt_have_is_refused_before_its_bridge_is_asked() {
+    async fn refused(lab: &mut Lab, name: &str) -> Value {
+        lab.next_id += 1;
+        let message = json!({"jsonrpc": "2.0", "id": lab.next_id, "method": "tools/call", "params": {"name": name, "arguments": {}}});
+        lab.session.call(message).await
+    }
+    // Renoise's tool hears nothing it plays and has no cursor in beats or seconds; REAPER has no Renoise actions.
+    let script = RenoiseScript::new();
+    let mut lab = Lab::renoise(&script).await;
+    let (listed, _) = (lab.session.call(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await, ());
+    let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(!names.contains(&"hear") && !names.contains(&"cursor_set"), "{names:?}");
+    for name in ["hear", "cursor_set"] {
+        let answer = refused(&mut lab, name).await;
+        assert_eq!(answer["error"]["message"], format!("Unknown tool: {name}"), "{answer}");
+    }
+    assert!(
+        script.asked().iter().all(|(method, _)| !matches!(method.as_str(), "capture_start" | "transport_play")),
+        "the bridge wasn't asked"
+    );
+    let script = ReaperScript::new(3, 0);
+    let mut lab = Lab::reaper(&script).await;
+    for name in ["audition_note", "select", "instrument_save", "device_editor"] {
+        let answer = refused(&mut lab, name).await;
+        assert_eq!(answer["error"]["message"], format!("Unknown tool: {name}"), "{answer}");
+    }
+    assert!(script.asked().iter().all(|(method, _)| !matches!(method.as_str(), "audition_note" | "select" | "instrument_save")));
+}
+
+#[tokio::test]
 async fn an_items_audio_is_its_source_file_and_a_midi_item_says_it_has_none() {
     let script = ReaperScript::new(3, 0);
     script.listening().set_silent_ref("r:item:{I-T0002}");

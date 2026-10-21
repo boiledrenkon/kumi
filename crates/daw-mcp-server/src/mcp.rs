@@ -9,8 +9,22 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The tools, described for the model.
+/// Whether a DAW's tool list has this tool (the names read once per DAW).
+fn listed(daw: Daw, name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(Default::default);
+    let mut names = names.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = names.entry(daw.to_string()).or_insert_with(|| {
+        tool_list(daw).as_array().into_iter().flatten().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect()
+    });
+    list.iter().any(|listed| listed == name)
+}
+
 pub fn tools(host: &Host) -> Value {
-    let daw = host.daw();
+    tool_list(host.daw())
+}
+
+fn tool_list(daw: Daw) -> Value {
     let kinds = kinds(daw);
     let pick = json!({
         "pid": {"type": "integer", "minimum": 1, "description": format!("The {daw} process to use, from discover, when several run.")},
@@ -232,9 +246,10 @@ pub fn tools(host: &Host) -> Value {
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
-        // Renoise's scripts can't hear what it plays: it only renders.
+        // Renoise's scripts can't hear what it plays: it only renders. Its tool has no edit cursor to move in beats or
+        // seconds (transport_play takes a slot and line).
         if let Some(tools) = list.as_array_mut() {
-            tools.retain(|tool| tool["name"] != "hear");
+            tools.retain(|tool| tool["name"] != "hear" && tool["name"] != "cursor_set");
         }
         // (M4 n-devices) A device read by ref says what a Doofer, Splitter or Notepad holds; its preset data on ask.
         list[2]["inputSchema"]["properties"]["presetData"] = json!({"type": "boolean", "description": "With ref of a device: also its preset data, its settings as Renoise's XML (for device_preset_data). A Doofer's, Splitter's or Notepad's contents come by themselves."});
@@ -561,6 +576,10 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if !arguments.is_object() {
                 return Some(error(id, -32602, "Invalid params"));
+            }
+            // A tool this DAW's list doesn't have (the other DAW's, say) is unknown here: its bridge isn't asked.
+            if !listed(host.daw(), name) {
+                return Some(error(id, -32602, &format!("Unknown tool: {name}")));
             }
             match name {
                 "status" => match Pick::from_arguments(&arguments) {
