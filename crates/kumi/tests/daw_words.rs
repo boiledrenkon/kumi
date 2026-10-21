@@ -334,7 +334,7 @@ case!(reapers_and_renoises_setup_never_speak_lives_words, async {
         "REAPER 7 hasn't been opened here yet",
     ];
     setup_states(DawId::Reaper).await.saw(&reaper.map(String::from)).assert_none("REAPER's setup");
-    let renoise = ["Renoise is open · restart needed", "Renoise 3 not found", "renoise.com", "chat without Renoise for now"];
+    let renoise = ["Renoise is open · restart needed", "Renoise 3.5 not found", "renoise.com", "chat without Renoise for now"];
     setup_states(DawId::Renoise).await.saw(&renoise.map(String::from)).assert_none("Renoise's setup");
 });
 
