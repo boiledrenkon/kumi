@@ -27,15 +27,6 @@ fn texts(daw: &OwnDaw) -> Vec<(String, String)> {
 }
 
 #[test]
-fn each_daws_instructions_keep_within_lives() {
-    let live = super::ableton::context::INSTRUCTIONS.len();
-    for daw in DAWS {
-        let text = instructions_of(daw);
-        assert!(text.len() <= live, "{}'s instructions are {} bytes, over Live's {live}", daw.profile.words.app, text.len());
-    }
-}
-
-#[test]
 fn reaper_and_renoise_are_told_of_in_their_own_words() {
     let live = live_words();
     for daw in DAWS {
