@@ -3586,6 +3586,27 @@ fn a_lua_chunk_leaves_no_undo_block_open_no_refresh_held_and_doesnt_move_reapers
 }
 
 #[test]
+fn a_getter_that_makes_what_it_gets_is_a_change_not_a_read() {
+    // GetFXEnvelope(…, true) makes an envelope; reading container_map.add maps a macro: as reads they'd be bare edits, with
+    // no undo point and no HISTORY row (review R6).
+    use crate::reaper::generic::{function, reads_only};
+    let fx_env = function("GetFXEnvelope").unwrap();
+    assert!(reads_only(fx_env, &json!([KICK, 0, 3, false])));
+    assert!(!reads_only(fx_env, &json!([KICK, 0, 3, true])));
+    assert!(!reads_only(fx_env, &json!({"track": KICK, "fxindex": 0, "parameterindex": 3, "create": 1})));
+    assert!(!reads_only(function("TakeFX_GetEnvelope").unwrap(), &json!(["r:take:{T}", 0, 3, true])));
+    let named = function("TrackFX_GetNamedConfigParm").unwrap();
+    assert!(reads_only(named, &json!([KICK, 0, "param.0.lfo.active"])));
+    assert!(!reads_only(named, &json!([KICK, 0, "container_map.add.0.2"])));
+    assert!(!reads_only(named, &json!([KICK, 0, "param.3.container_map.delete"])));
+    assert!(!reads_only(function("TakeFX_GetNamedConfigParm").unwrap(), &json!(["r:take:{T}", 0, "container_map.add.0.0"])));
+    // The read call refuses it, pointing to api-call.
+    let lab = Lab::new();
+    let refused = lab.call("read", json!({"kind": "call", "fn": "GetFXEnvelope", "args": [KICK, 0, 0, true]})).unwrap_err();
+    assert!(refused.1.contains("api-call"), "{refused:?}");
+}
+
+#[test]
 fn the_generic_call_refuses_what_would_unbalance_reapers_undo_blocks_or_ui() {
     let lab = Lab::new();
     for name in [

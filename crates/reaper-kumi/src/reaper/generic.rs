@@ -415,6 +415,18 @@ pub fn reads_only(index: usize, args: &Value) -> bool {
         }
         return false;
     }
+    // A getter that makes what it gets: an envelope asked to be made (`create`), a container macro mapped or taken off by
+    // reading its key. Those are changes (api-call): a read has no undo point and no HISTORY row.
+    if given("create").is_some_and(|v| v == &Value::Bool(true) || v.as_i64().is_some_and(|n| n != 0)) {
+        return false;
+    }
+    if name.ends_with("_GetNamedConfigParm")
+        && given("parmname")
+            .and_then(Value::as_str)
+            .is_some_and(|key| key.contains("container_map.add") || key.contains("container_map.delete"))
+    {
+        return false;
+    }
     const READS: [&str; 21] = [
         "Get",
         "Count",
