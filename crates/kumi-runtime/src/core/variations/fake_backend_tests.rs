@@ -1,0 +1,442 @@
+//! The variations tool against a fake DAW of sixteen steps, with no DAW at all: what core owns, the same for every backend
+//! (numbering across makes, keep, change, drop and "rest", the checks and their warnings, the sets kept across a restart,
+//! takes found again by their names, and when takes are rendered and drawn again).
+use super::backend::{Rendered, Set, Source, VariationsBackend, Words};
+use super::heard::Heard;
+use super::tool::{names, Variations};
+use super::{Material, Rng};
+use crate::core::contracts::{JsonObject, KernelTool};
+use async_trait::async_trait;
+use kumi_common::abort::Signal;
+use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+const STEPS: usize = 16;
+const BEAT: [u8; STEPS] = [9, 0, 0, 5, 0, 0, 7, 0, 9, 0, 0, 5, 0, 0, 7, 0];
+
+/// Sixteen steps, each a level 0 to 9 (0 plays nothing).
+#[derive(Debug, Clone, PartialEq)]
+struct Steps(Vec<u8>);
+
+impl Material for Steps {
+    fn distance(&self, other: &Self) -> f64 {
+        self.0.iter().zip(&other.0).filter(|(a, b)| a != b).count() as f64 / STEPS as f64
+    }
+
+    fn silent(&self) -> bool {
+        self.0.iter().all(|level| *level == 0)
+    }
+}
+
+/// The fake DAW: its takes by id (name and steps), the changes it made, whether it plays, the renders it made and how many of
+/// the next takes rendered clip. `generation` moves when it starts again: places from before are unknown then.
+#[derive(Default)]
+struct Daw {
+    takes: RefCell<BTreeMap<u64, (String, Steps)>>,
+    next: Cell<u64>,
+    changes: Cell<usize>,
+    playing: Cell<bool>,
+    renders: Cell<usize>,
+    clips: Cell<usize>,
+    generation: Cell<u64>,
+}
+
+impl Daw {
+    fn change(&self) -> String {
+        self.changes.set(self.changes.get() + 1);
+        format!("c{}", self.changes.get())
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.takes.borrow().values().map(|(name, _)| name.clone()).collect()
+    }
+}
+
+struct Fake(Rc<Daw>);
+
+static WORDS: Words = Words {
+    app: "Fake",
+    sources: "{steps: sixteen levels 0–9, name}",
+    anchors: "steps every take keeps",
+    ops: "flip {amount}: flips that share of the steps",
+    lines: "{step, level}",
+    places: "the end",
+    place_names: &["end"],
+    at: "nothing",
+    options: "none",
+    extract: None,
+    idioms: "",
+    directions: &["a few flipped", "some flipped", "more flipped", "many flipped"],
+    source_schema: r#"{"type": "object"}"#,
+    op_schema: r#"{"type": "object"}"#,
+    options_schema: r#"{"type": "object"}"#,
+    at_schema: r#"{"type": "object"}"#,
+};
+
+fn id_of(row: &Value) -> u64 {
+    row["id"].as_u64().unwrap_or(0)
+}
+
+#[async_trait(?Send)]
+impl VariationsBackend for Fake {
+    type Material = Steps;
+    type Data = ();
+
+    fn words(&self) -> &'static Words {
+        &WORDS
+    }
+
+    async fn project_key(&self, _: &Signal) -> Option<String> {
+        Some("song 1".into())
+    }
+
+    async fn source(&self, input: &JsonObject, _: &Signal) -> Result<Source<Steps, ()>, String> {
+        let source = input.get("source").cloned().unwrap_or(Value::Null);
+        let material = source["steps"].as_array().map(|steps| Steps(steps.iter().map(|level| level.as_u64().unwrap_or(0) as u8).collect()));
+        let name = source["name"].as_str().unwrap_or("Beat");
+        Ok(Source { label: format!("steps of “{name}”"), short: name.into(), key: name.to_lowercase(), material, data: () })
+    }
+
+    fn direction_ops(&self, direction: &str) -> Vec<Value> {
+        let amount = match direction {
+            "a few flipped" => 0.15,
+            "some flipped" => 0.2,
+            "more flipped" => 0.25,
+            _ => 0.3,
+        };
+        vec![json!({"op": "flip", "amount": amount})]
+    }
+
+    fn check_ops(&self, ops: &[Value]) -> Result<(), String> {
+        match ops.iter().find(|op| op["op"] != "flip") {
+            Some(op) => Err(format!("{op}: op is flip")),
+            None => Ok(()),
+        }
+    }
+
+    fn apply_ops(&self, ops: &[Value], factor: f64, take: &mut Steps, _: &Steps, rng: &mut Rng) -> Result<Vec<String>, String> {
+        let mut said = Vec::new();
+        for op in ops {
+            let share = op["amount"].as_f64().unwrap_or(0.2) * factor;
+            let at = rng.choose(STEPS, ((share * STEPS as f64).round() as usize).clamp(1, STEPS));
+            for step in &at {
+                take.0[*step] = if take.0[*step] == 0 { 5 } else { 0 };
+            }
+            said.push(format!("flipped steps {at:?}"));
+        }
+        Ok(said)
+    }
+
+    fn written(&self, _: &Set<Self>, lines: &[Value], _: &Steps) -> Result<Steps, String> {
+        let mut steps = Steps(vec![0; STEPS]);
+        for line in lines {
+            let step = line["step"].as_u64().filter(|step| (*step as usize) < STEPS).ok_or("step is 0 to 15")? as usize;
+            steps.0[step] = line["level"].as_u64().unwrap_or(5).min(9) as u8;
+        }
+        Ok(steps)
+    }
+
+    fn empty(&self, _: &Set<Self>) -> Steps {
+        Steps(vec![0; STEPS])
+    }
+
+    fn anchors_kept(&self, _: &Steps, _: &Steps) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn judge(&self, _: Option<&Steps>, _: &Steps, _: &[Value]) -> Vec<String> {
+        vec![]
+    }
+
+    fn digest(&self, material: &Steps) -> String {
+        format!("{:?}", material.0)
+    }
+
+    async fn write_new(
+        &self,
+        set: &Set<Self>,
+        number: usize,
+        material: &Steps,
+        _: &Signal,
+    ) -> Result<(String, Value, String), (String, bool)> {
+        let daw = &self.0;
+        let id = daw.next.get() + 1;
+        daw.next.set(id);
+        let [name, _] = names(number, &set.source.short);
+        daw.takes.borrow_mut().insert(id, (name, material.clone()));
+        Ok((daw.change(), json!({"id": id, "gen": daw.generation.get()}), format!("take:{id}")))
+    }
+
+    async fn find(&self, set: &mut Set<Self>, numbers: &[usize], _: &Signal) -> Result<Vec<Value>, String> {
+        let daw = &self.0;
+        let takes = daw.takes.borrow();
+        let short = set.source.short.clone();
+        let mut rows = Vec::new();
+        for number in numbers {
+            let Some(take) = set.take_mut(*number) else {
+                rows.push(Value::Null);
+                continue;
+            };
+            let row = if take.place["gen"].as_u64() == Some(daw.generation.get()) {
+                let id = take.place["id"].as_u64().unwrap_or(0);
+                if takes.contains_key(&id) {
+                    json!({"ref": format!("take:{id}"), "id": id})
+                } else {
+                    json!({"gone": true})
+                }
+            } else {
+                // (a place from before the DAW started again: the take by the name Kumi gave it)
+                let wanted = names(*number, &short);
+                match takes.iter().find(|(_, (name, _))| wanted.contains(name)) {
+                    Some((id, _)) => {
+                        take.place = json!({"id": id, "gen": daw.generation.get()});
+                        json!({"ref": format!("take:{id}"), "id": id})
+                    }
+                    None => json!({}),
+                }
+            };
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
+    async fn current(&self, _: &Set<Self>, row: &Value, _: &Signal) -> Result<Steps, String> {
+        self.0.takes.borrow().get(&id_of(row)).map(|(_, steps)| steps.clone()).ok_or("gone".into())
+    }
+
+    async fn rewrite(&self, _: &Set<Self>, row: &Value, _: &Steps, after: &Steps, _: &Signal) -> Result<String, (String, bool)> {
+        let daw = &self.0;
+        match daw.takes.borrow_mut().get_mut(&id_of(row)) {
+            Some((_, steps)) => *steps = after.clone(),
+            None => return Err(("gone".into(), false)),
+        }
+        Ok(daw.change())
+    }
+
+    async fn mark_kept(&self, set: &Set<Self>, number: usize, row: &Value, _: &Signal) -> Result<Option<String>, String> {
+        let daw = &self.0;
+        let [name, kept] = names(number, &set.source.short);
+        {
+            let mut takes = daw.takes.borrow_mut();
+            let Some((now, _)) = takes.get_mut(&id_of(row)) else { return Err("gone".into()) };
+            if *now != name {
+                return Ok(None);
+            }
+            *now = kept;
+        }
+        Ok(Some(daw.change()))
+    }
+
+    async fn place(&self, _: &mut Set<Self>, _: usize, _: &Value, _: &JsonObject, _: &Signal) -> Result<Value, String> {
+        Ok(json!("at the end"))
+    }
+
+    fn undroppable(&self, _: &Set<Self>, _: usize, _: &Value) -> Option<String> {
+        None
+    }
+
+    async fn drop(&self, _: &Set<Self>, rows: &[(usize, Value)], _: &Signal) -> Result<(String, Value), String> {
+        let daw = &self.0;
+        for (_, row) in rows {
+            daw.takes.borrow_mut().remove(&id_of(row));
+        }
+        Ok((daw.change(), json!({"display": {"title": format!("Deleted {} takes", rows.len())}})))
+    }
+
+    fn cant_render(&self) -> Option<String> {
+        None
+    }
+
+    async fn playing(&self, _: &Signal) -> bool {
+        self.0.playing.get()
+    }
+
+    async fn render(&self, set: &mut Set<Self>, numbers: &[usize], with_source: bool, _: &Signal) -> Result<Rendered, String> {
+        let daw = &self.0;
+        daw.renders.set(daw.renders.get() + 1);
+        let heard = |steps: &Steps, peak: f64| Heard {
+            peak,
+            level: -18.,
+            onsets: steps.0.iter().enumerate().filter(|(_, level)| **level > 0).map(|(step, _)| step as f64 * 0.125).collect(),
+        };
+        let source = set.source.material.as_ref().filter(|_| with_source).map(|steps| heard(steps, -6.));
+        let mut takes = BTreeMap::new();
+        for number in numbers {
+            let Some(take) = set.take(*number) else { continue };
+            let clips = daw.clips.get() > 0;
+            if clips {
+                daw.clips.set(daw.clips.get() - 1);
+            }
+            takes.insert(*number, Ok(heard(&take.material, if clips { 0. } else { -6. })));
+        }
+        Ok((source, takes))
+    }
+
+    fn short(&self, long: &str) -> String {
+        long.into()
+    }
+
+    fn end_note(&self, _: &Set<Self>) -> Option<String> {
+        None
+    }
+
+    async fn extract(&self, _: &JsonObject, _: &Signal) -> Result<Value, String> {
+        Err("no extract".into())
+    }
+
+    fn material_json(&self, material: &Steps) -> Value {
+        json!(material.0)
+    }
+
+    fn material_of(&self, value: &Value) -> Option<Steps> {
+        Some(Steps(value.as_array()?.iter().map(|level| level.as_u64().unwrap_or(0) as u8).collect()))
+    }
+
+    fn data_json(&self, _: &()) -> Value {
+        Value::Null
+    }
+
+    fn data_of(&self, _: &Value) -> Option<()> {
+        Some(())
+    }
+}
+
+/// Kumi (another run of it, when called again) with the fake DAW and Kumi's folder `home`.
+fn kumi(daw: &Rc<Daw>, home: &std::path::Path) -> Rc<dyn KernelTool> {
+    Variations::new(Fake(daw.clone()), home.into()).tool()
+}
+
+async fn run(tool: &Rc<dyn KernelTool>, value: Value) -> Result<Value, String> {
+    let done = tool.execute(value.as_object().cloned().unwrap(), Signal::new()).await.unwrap();
+    if done.is_error {
+        Err(done.text)
+    } else {
+        Ok(serde_json::from_str(&done.text).unwrap())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn takes_are_numbered_kept_changed_and_dropped_by_core_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    let made = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 4, "seed": 1})).await.unwrap();
+    let takes = made["takes"].as_array().unwrap();
+    assert_eq!(takes.len(), 4, "{made}");
+    assert!(takes.iter().all(|take| take["line"].as_str().unwrap().contains(" \u{b7} heard: peak \u{2212}6.0 dBFS")), "{made}");
+    assert_eq!(daw.changes.get(), 4, "each take its own change");
+    assert_eq!(daw.renders.get(), 1, "one render for every take");
+    assert_eq!(daw.names(), ["V1 \u{b7} Beat", "V2 \u{b7} Beat", "V3 \u{b7} Beat", "V4 \u{b7} Beat"]);
+
+    let kept = run(&tool, json!({"action": "keep", "names": ["V1", "V3"]})).await.unwrap();
+    assert_eq!(kept["rest"], json!(["V2", "V4"]), "{kept}");
+    assert_eq!(daw.names(), ["V1 \u{b7} Beat \u{b7} kept", "V2 \u{b7} Beat", "V3 \u{b7} Beat \u{b7} kept", "V4 \u{b7} Beat"]);
+    let before = daw.takes.borrow().clone();
+    let changed = run(&tool, json!({"action": "change", "names": ["rest"]})).await.unwrap();
+    assert_eq!(changed["changed"].as_array().unwrap().len(), 2, "{changed}");
+    let after = daw.takes.borrow().clone();
+    assert_eq!((&after[&1], &after[&3]), (&before[&1], &before[&3]), "the kept takes are as they were");
+    assert!(after[&2] != before[&2] && after[&4] != before[&4], "the rest changed");
+    assert!(run(&tool, json!({"action": "change", "names": ["V1"]})).await.unwrap_err().contains("V1 is kept"));
+    let changes = daw.changes.get();
+    let dropped = run(&tool, json!({"action": "drop"})).await.unwrap();
+    assert_eq!(dropped["dropped"], json!(["V2", "V4"]), "{dropped}");
+    assert_eq!(daw.changes.get(), changes + 1, "the rest go in one change");
+    assert!(run(&tool, json!({"action": "drop"})).await.unwrap_err().contains("names no take"), "\"rest\" never reaches a kept take");
+
+    // (the same source again goes on numbering; another source starts set 2, and set 1 is still there by number and by name)
+    let more = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 2})).await.unwrap();
+    assert_eq!((&more["set"], &more["takes"][0]["take"]), (&json!(1), &json!("V5")), "{more}");
+    let other = run(&tool, json!({"action": "make", "source": {"steps": BEAT, "name": "Fill"}, "count": 1, "seed": 3})).await.unwrap();
+    assert_eq!((&other["set"], &other["takes"][0]["take"]), (&json!(2), &json!("V1")), "{other}");
+    assert_eq!(run(&tool, json!({"action": "list", "set": 1})).await.unwrap()["takes"].as_array().unwrap().len(), 3, "V1, V3, V5");
+    assert_eq!(run(&tool, json!({"action": "list", "set": "beat"})).await.unwrap()["set"], 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kept_takes_outlive_a_restart_and_takes_are_found_by_the_names_kumi_gave_them() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 3, "seed": 4, "listen": false})).await.unwrap();
+    run(&tool, json!({"action": "keep", "names": ["V2"]})).await.unwrap();
+    // (the producer renames V3: Kumi can't tell it's V3 once its place is lost)
+    daw.takes.borrow_mut().get_mut(&3).unwrap().0 = "my fill".into();
+    drop(tool);
+
+    // (Kumi again, and the DAW started again: its places from before are unknown)
+    daw.generation.set(1);
+    let again = kumi(&daw, home.path());
+    let listed = run(&again, json!({"action": "list"})).await.unwrap();
+    assert!(listed["takes"][1].as_str().unwrap().ends_with("(kept)"), "{listed}");
+    let dropped = run(&again, json!({"action": "drop"})).await.unwrap();
+    assert_eq!(dropped["dropped"], json!(["V1"]), "found by its name: {dropped}");
+    assert!(dropped["skipped"][0].as_str().unwrap().contains("can't find V3"), "{dropped}");
+    assert_eq!(daw.names(), ["V2 \u{b7} Beat \u{b7} kept", "my fill"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_take_the_producer_edited_or_deleted_is_left_out_of_a_drop() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 3, "seed": 5, "listen": false})).await.unwrap();
+    daw.takes.borrow_mut().get_mut(&1).unwrap().1 .0[15] = 9;
+    daw.takes.borrow_mut().remove(&2);
+    let dropped = run(&tool, json!({"action": "drop"})).await.unwrap();
+    assert_eq!(dropped["dropped"], json!(["V3"]), "{dropped}");
+    assert!(dropped["skipped"][0].as_str().unwrap().contains("V1 was edited in Fake"), "{dropped}");
+    assert!(dropped["skipped"][1].as_str().unwrap().contains("V2 isn't in the Fake any more"), "{dropped}");
+    assert_eq!(daw.names(), ["V1 \u{b7} Beat"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lines_the_model_writes_are_written_with_a_warning_and_operator_takes_meet_the_floors() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    let same: Vec<Value> =
+        BEAT.iter().enumerate().filter(|(_, level)| **level > 0).map(|(step, level)| json!({"step": step, "level": level})).collect();
+    let made = run(
+        &tool,
+        json!({"action": "make", "source": {"steps": BEAT}, "minDistance": 0.9, "listen": false, "takes": [{"direction": "as I wrote it", "lines": same}]}),
+    )
+    .await
+    .unwrap();
+    assert!(made["takes"][0]["line"].as_str().unwrap().contains("written as asked, though"), "{made}");
+    assert_eq!(daw.changes.get(), 1);
+    let refused = run(
+        &tool,
+        json!({"action": "make", "source": {"steps": BEAT}, "minDistance": 0.9, "listen": false, "takes": [{"ops": [{"op": "flip", "amount": 0.01}]}]}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        refused["takes"].as_array().unwrap().is_empty() && refused["skipped"][0].as_str().unwrap().contains("wasn't made"),
+        "{refused}"
+    );
+    assert_eq!(daw.changes.get(), 1, "nothing written");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn nothing_renders_while_the_daw_plays_and_a_take_that_clips_where_the_source_doesnt_is_drawn_again() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    daw.playing.set(true);
+    let made = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 6})).await.unwrap();
+    assert!(made["heard"][0].as_str().unwrap().starts_with("Fake is playing"), "{made}");
+    assert!(!made["takes"][0]["line"].as_str().unwrap().contains("heard:"), "{made}");
+    assert_eq!(daw.renders.get(), 0, "a render would stop the playback");
+
+    daw.playing.set(false);
+    daw.clips.set(1);
+    let made = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 7})).await.unwrap();
+    let line = made["takes"][0]["line"].as_str().unwrap();
+    assert!(line.contains("(drawn again after the render: it clips (peak 0.0 dBFS))"), "{made}");
+    assert!(line.contains(" \u{b7} heard: peak \u{2212}6.0 dBFS"), "heard again, fine now: {made}");
+    assert_eq!(daw.changes.get(), 3, "the first take, the second, and its rewrite");
+    assert_eq!(daw.renders.get(), 2, "the take, then the take drawn again");
+}
