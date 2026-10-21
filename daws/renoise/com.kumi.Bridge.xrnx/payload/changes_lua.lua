@@ -177,6 +177,33 @@ local function plain(value, depth)
   return out
 end
 
+-- Lua's own functions: an error raised in code one of them called (table.sort's comparator, pcall's function) goes back
+-- to the Lua that called it. Any other C function (Renoise's, firing notifiers) may catch it itself: it shows an error and
+-- disables the notifier.
+local LIBRARY = {}
+for _, t in ipairs({ _G, string, table, math, os, io, coroutine, debug, rawget(_G, "bit"), rawget(_G, "jit"), package }) do
+  if type(t) == "table" then
+    for _, v in pairs(t) do
+      if type(v) == "function" then LIBRARY[v] = true end
+    end
+  end
+end
+
+-- Whether a stop raised in the code the count hook interrupted (the hook's caller, `level` 2 from it) reaches `run`, the
+-- function run-lua's pcall runs the chunk in: only through the chunk's code and Lua's functions, never through one of the
+-- tool's guards (its notifiers run whole) or a C function of Renoise's. Code outside `run` (run-lua's own, after the chunk
+-- ended) is never stopped; a coroutine the chunk made is stopped where it is: its error goes to its resumer.
+local function stoppable(level, run, thread, is_guard)
+  while true do
+    local info = debug.getinfo(level + 1, "fS")
+    if not info then return coroutine.running() ~= thread end
+    local fn = info.func
+    if fn == run then return true end
+    if is_guard(fn) or (info.what == "C" and not LIBRARY[fn]) then return false end
+    level = level + 1
+  end
+end
+
 local NOTE = "Only Renoise's own undo can take back what it did (Edit > Undo); Kumi can't."
 local UNKEPT_NOTE = "What it changed (mute, solo, selection or transport) is nothing Renoise's undo takes back, and Kumi can't either."
 
@@ -214,12 +241,19 @@ local function apply(song, env, input, fence, desc)
     jit.off()
     jit.flush()
   end
-  -- (inside the tool's own notifiers the stop waits for the chunk's code: they run whole)
+  -- (inside the tool's own notifiers, their guards included, the stop waits for the chunk's code: they run whole)
   local in_notifier = env.in_notifier or function() return false end
+  local is_guard = env.is_guard or function() return false end
+  local thread = coroutine.running()
+  -- (the chunk runs under a frame of the tool's that stays on the stack whatever the chunk does: its own `return f()` is a
+  -- tail call, which takes the chunk's frame away)
+  local function run() return (chunk()) end
   debug.sethook(function()
-    if env.now_ms() > deadline and not in_notifier() then error(string.format("Kumi stopped it: it ran longer than %d ms", limit), 2) end
+    if env.now_ms() > deadline and not in_notifier() and stoppable(2, run, thread, is_guard) then
+      error(string.format("Kumi stopped it: it ran longer than %d ms", limit), 2)
+    end
   end, "", 1000)
-  local ok, result = pcall(chunk)
+  local ok, result = pcall(run)
   debug.sethook()
   if jitted then jit.on() end
   local told = (env.changes and env.changes() or 0) ~= before

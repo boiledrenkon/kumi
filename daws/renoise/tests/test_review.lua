@@ -1942,6 +1942,30 @@ test("run-lua: the time limit stops a chunk whose calls fire the tool's notifier
   ok(#mock.data.patterns - patterns < 3000, "stopped part way: " .. (#mock.data.patterns - patterns) .. " made")
 end)
 
+test("run-lua: a stop never lands in the guard around the tool's notifiers, before or after the notifier's own code (#361 N4, final review)", function()
+  local env, peer = setup()
+  -- (a different count of the chunk's own instructions each round moves where the hook's count runs out)
+  for pad = 0, 59 do
+    mock.clock_step_ms = 1
+    local code = "local x = 0\nfor i = 1, 3000 do " .. string.rep("x = x + 1 ", pad) .. "song.sequencer:insert_new_pattern_at(1) end"
+    local done = run_lua(peer, code, string.format("Kumi: Ran Lua (kq%02d)", pad), { timeoutMs = 5 })
+    mock.clock_step_ms = nil
+    ok(done.result, json.encode(done.error or {}))
+    ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 5 ms", 1, true), json.encode(done.result.applied.failed or {}))
+  end
+  -- (Renoise disables a notifier that raises behind an error dialog: the mock records it and takes the notifier off)
+  for _, err in ipairs(mock.errors) do ok(not err:find("^notifier"), err) end
+end)
+
+test("run-lua: a chunk's loop in a coroutine of its own is stopped too", function()
+  local env, peer = setup()
+  mock.clock_step_ms = 1
+  local done = run_lua(peer, "local co = coroutine.wrap(function() local n = 0 while true do n = n + 1 end end)\nco()", "Kumi: Ran Lua (kq90)", { timeoutMs = 20 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 20 ms", 1, true), json.encode(done.result.applied.failed or {}))
+end)
+
 test("run-lua: code a chunk loads itself is under the time limit too: the JIT is off while it runs (#361 N18)", function()
   local env, peer = setup()
   mock.clock_step_ms = 1

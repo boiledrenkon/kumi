@@ -150,10 +150,13 @@ end
 -- How deep in the tool's notifiers the code running now is: a run-lua chunk's time limit (a count hook) stops the chunk only
 -- outside them, so every notifier runs whole (setting the hook aside instead would restart its count at each notifier).
 local guarded = 0
+-- The guards themselves, by identity: a stop must not land in one either, before its count goes up or after it goes down
+-- (raised there, it would reach Renoise's notifier dispatch, which disables the notifier behind an error dialog).
+local guards = setmetatable({}, { __mode = "k" })
 
 -- A notifier, run whole and never raising. One that failed may have left the song half watched: it is watched anew.
 local function guard(where, fn)
-  return function(...)
+  local function guarded_fn(...)
     guarded = guarded + 1
     local ok, result = xpcall(fn, debug.traceback, ...)
     guarded = guarded - 1
@@ -164,6 +167,8 @@ local function guard(where, fn)
     end
     return result
   end
+  guards[guarded_fn] = true
+  return guarded_fn
 end
 
 local function show_status(message)
@@ -1201,6 +1206,7 @@ local function change_env()
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
     in_notifier = function() return guarded > 0 end,
+    is_guard = function(fn) return guards[fn] == true end,
     -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
     -- instrument file into slot i that the places log doesn't take for a delete.
     work_dir = function()
