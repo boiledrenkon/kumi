@@ -1329,8 +1329,12 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
             write(buf, size, &text);
             return true;
         }
-        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
+        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk. Its selection isn't in it
+        // either, and its height is a line of its own (7.82 lab: selecting the track changes nothing in its chunk, a
+        // height change moves `TRACKHEIGHT`).
         t.sends.clear();
+        t.selected = false;
+        let height = t.extra.remove("I_HEIGHTOVERRIDE").unwrap_or(0.0);
         let n = match s.chunks.iter().position(|kept| *kept == t) {
             Some(n) => n,
             None => {
@@ -1342,7 +1346,8 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
         let lanerec = if comping { "LANEREC -1 0 -1 0\n" } else { "LANEREC -1 -1 -1 0\n" };
         // (r-tracks) A track whose controls are locked says so in its state.
         let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
-        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}FAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
+        let text =
+            format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}TRACKHEIGHT {height} 0 0 0 0 0 0\nFAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
         write(buf, size, &text);
         true
     })

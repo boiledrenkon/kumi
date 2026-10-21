@@ -212,6 +212,22 @@ fn a_comp_makes_the_comp_lane_and_area_and_its_undo_puts_the_whole_track_back() 
 }
 
 #[test]
+fn a_comps_undo_puts_the_track_back_after_the_producer_only_selected_or_resized_it() {
+    let lab = lanes_lab();
+    let before = state(|s| s.tracks[1].clone());
+    let (preview, applied) = lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5}));
+    // The producer clicks Kick and makes it taller: nothing they would want kept.
+    state(|s| {
+        s.tracks[1].selected = true;
+        s.tracks[1].extra.insert("I_HEIGHTOVERRIDE".into(), 120.0);
+    });
+    lab.undo("lane-comp", &preview, &applied).unwrap();
+    let kick = state(|s| s.tracks[1].clone());
+    assert_eq!((kick.items.len(), kick.lane_names.len()), (before.items.len(), before.lane_names.len()), "the comp is gone");
+    assert!(kick.selected, "the producer's selection stands");
+}
+
+#[test]
 fn a_comp_is_refused_on_a_changed_track_and_with_nothing_to_comp_and_its_undo_fenced() {
     let lab = lanes_lab();
     let before = state(|s| s.tracks[1].clone());
