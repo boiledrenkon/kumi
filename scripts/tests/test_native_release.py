@@ -141,14 +141,15 @@ class NativeRelease(unittest.TestCase):
         cargo_version = lambda name: tomllib.loads((root / name).read_text())["package"]["version"]
         version = cargo_version("crates/kumi/Cargo.toml")
         self.assertEqual(read_json("package.json")["version"], version)
-        for name in ("crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml"):
+        # Kumi's host for REAPER and Renoise ships beside it and moves with it (its MCP serverInfo and hello say it).
+        for name in ("crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml", "crates/daw-mcp-server/Cargo.toml"):
             self.assertEqual(cargo_version(name), version, name)
         declared = re.search(r'KUMI_VERSION[^=]*=\s*"([^"\n]+)"', (root / "crates/kumi-runtime/src/version.rs").read_text())
         self.assertIsNotNone(declared)
         self.assertEqual(declared[1], version)
         cargo_lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
         for package in cargo_lock:
-            if package["name"] in ("kumi", "kumi-runtime", "kumi-common"):
+            if package["name"] in ("kumi", "kumi-runtime", "kumi-common", "daw-mcp-server"):
                 self.assertEqual(package["version"], version, package["name"])
         bridge = cargo_version("crates/ableton-mcp-server/Cargo.toml")
         self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)

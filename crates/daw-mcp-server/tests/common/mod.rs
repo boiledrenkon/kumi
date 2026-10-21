@@ -39,6 +39,8 @@ impl Session {
             (home.to_string_lossy().into_owned(), "<home>".into()),
             (format!("\"pid\":{pid}"), "\"pid\":\"<pid>\"".into()),
             (format!("\\\"pid\\\":{pid}"), "\\\"pid\\\":<pid>".into()),
+            // The host's own version (serverInfo), which moves with each release.
+            (format!("bridge\",\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")), "bridge\",\"version\":\"<version>\"}".into()),
         ];
         Self { input, output: BufReader::new(output).lines(), transcript: String::new(), replace, served }
     }

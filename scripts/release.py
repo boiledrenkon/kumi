@@ -65,7 +65,8 @@ RENOISE_MANIFEST = native.RENOISE_TOOL_SOURCE + "/manifest.xml"
 # Kumi's own, daw-bridge and its host for REAPER and Renoise (daw-mcp-server) among them.
 KUMI = ("crates/kumi/", "crates/kumi-runtime/", "crates/kumi-common/", "crates/kumi-store/", "crates/daw-bridge/",
         "crates/daw-mcp-server/", "install.sh", "install.ps1")
-CRATES = ("kumi", "kumi-common", "kumi-runtime")
+# Kumi's own crates, at Kumi's version: Kumi, its runtime and common parts, and its host for REAPER and Renoise.
+CRATES = ("kumi", "kumi-common", "kumi-runtime", "daw-mcp-server")
 # The CHANGELOG's dates are New York's, as its earlier entries are.
 TIMEZONE = "America/New_York"
 WIDTH = 102

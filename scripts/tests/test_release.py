@@ -20,7 +20,7 @@ sys.modules[SPEC.name] = release  # dataclasses look their module up there
 SPEC.loader.exec_module(release)
 
 FILES = ["package.json", "Cargo.lock", "CHANGELOG.md", "README.md", "README.ja.md", "README.zh-CN.md",
-         "crates/kumi/Cargo.toml", "crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml",
+         "crates/kumi/Cargo.toml", "crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml", "crates/daw-mcp-server/Cargo.toml",
          "crates/kumi-runtime/src/version.rs", "crates/ableton-mcp-server/Cargo.toml",
          "docs/en/KUMI_CHANGES.md", "docs/ja/KUMI_CHANGES.md", "docs/zh-CN/KUMI_CHANGES.md",
          release.REAPER_CARGO, release.RENOISE_VERSION, release.RENOISE_MANIFEST]
@@ -395,7 +395,7 @@ class DawEdits(unittest.TestCase):
     def test_daw_bridges_as_they_were_say_nothing(self):
         plan, texts, changed, really = self.released()
         self.assertEqual(sorted(changed), really)
-        self.assertEqual(len(changed), 13)  # what a release changed before REAPER and Renoise
+        self.assertEqual(len(changed), 14)  # what a release changed before REAPER and Renoise, and the host for them
         new = entry(texts["CHANGELOG.md"], plan.new)
         self.assertNotIn("REAPER", new)
         self.assertNotIn("Renoise", new)
