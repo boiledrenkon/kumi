@@ -696,10 +696,11 @@ fn events() -> Vec<SessionEvent> {
             at: 1234.5,
             beats_per_bar: Some(4.0),
             meter: None,
+            line: None,
         }),
     });
     events.push(SessionEvent::Transport {
-        transport: Some(LiveTransport { playing: false, tempo: None, beat: None, at: 0.0, beats_per_bar: None, meter: None }),
+        transport: Some(LiveTransport { playing: false, tempo: None, beat: None, at: 0.0, beats_per_bar: None, meter: None, line: None }),
     });
     events.push(SessionEvent::Transport { transport: None });
     events.push(SessionEvent::Watching { on: true });

@@ -190,6 +190,10 @@ fn fill_focus(focus: &Value) -> DawFocus {
         section_follows: (transport.get("playing") == Some(&Value::Bool(true))
             && transport.get("followPlayer") == Some(&Value::Bool(true)))
         .then_some(true),
+        // (the pattern's edit line, by Renoise's numbers from 0; a phrase's isn't in the focus)
+        line: (shown == "pattern")
+            .then(|| selection.get("line").and_then(Value::as_f64).filter(|n| *n >= 0.).map(|n| n as usize))
+            .flatten(),
         ..Default::default()
     }
 }

@@ -119,6 +119,9 @@ pub struct DawFocus {
     /// The device chain open when it isn't the track's own (REAPER's take FX): FOCUS's tree is that chain's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_ref: Option<String>,
+    /// The edit cursor's line in the item (a tracker's pattern; 0 is the first line): FOCUS follows it between reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 /// What the producer is looking at, as Live's integration has always sent it.
@@ -364,6 +367,9 @@ pub struct Transport {
     /// lines per beat ("LPB 4").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meter: Option<String>,
+    /// The line playing in a tracker's pattern (0 is the first line), while it plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 /// The transport, as Live's integration has always sent it.

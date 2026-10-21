@@ -727,6 +727,24 @@ impl Harness {
             vt.styles[row].get(cell.checked_sub(1)?).cloned()
         })
     }
+    /// The styles of the `cells` cells just before where `text` shows (a tracker line's number beside its cells).
+    pub fn styles_before(&self, text: &str, cells: usize) -> Vec<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars
+            .iter()
+            .enumerate()
+            .find_map(|(row, chars)| {
+                let at = chars.concat().find(text)?;
+                let (mut bytes, mut cell) = (0, 0);
+                while bytes < at {
+                    bytes += chars[cell].len();
+                    cell += 1;
+                }
+                Some(vt.styles[row][cell.saturating_sub(cells)..cell].to_vec())
+            })
+            .unwrap_or_default()
+    }
     pub fn has(&self, text: &str) {
         let lines = self.screen();
         assert!(has(&lines, text), "Missing {text:?}:\n{}", lines.join("\n"));

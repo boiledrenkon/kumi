@@ -896,3 +896,59 @@ case!(reapers_focus_counts_bars_in_the_projects_meter, async {
     h.has("loop 3–5 · selection 9–10 · 10 bars");
     h.close().await;
 });
+// (review U7) Renoise's pattern follows the cursor and the playing line between reads (every 1.5 s): the focus's line
+// moves the cursor, the transport's the playing line; a line past those read, or playback back at an earlier line,
+// reads the pattern again.
+case!(renoises_pattern_follows_the_cursor_and_playback_between_reads, async {
+    tokio::time::pause();
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    *c.own.borrow_mut() = Some(FocusBody::Tracker(TrackerGrid {
+        item_ref: "3:pattern:1".into(),
+        name: "Drop".into(),
+        lines: 64,
+        from: 0,
+        cursor: Some(0),
+        playing: Some(2),
+        lpb: Some(4.),
+        tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells: (0..33).map(|i| format!("C-4 {i:02} .. .. ..")).collect() }],
+        ..Default::default()
+    }));
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let focus = |line: usize| {
+        json!({"type": "focus", "focus": {"track": {"name": "Bass", "kind": "sequencer"}, "trackRef": "3:track:1", "line": line,
+            "mainView": {"kind": "pattern-editor", "label": "Pattern Editor"}, "item": {"kind": "pattern-track", "itemRef": "3:pattern:1"}}})
+    };
+    let transport = |line: usize| json!({"type": "transport", "transport": {"playing": true, "at": 0.0, "line": line}});
+    let reads = |h: &Harness| h.calls().iter().filter(|call| call.starts_with("own:Tracker")).count();
+    let [r, g, b] = kumi::tui::style::palette::RAISED;
+    let raised =
+        |h: &Harness, cells: &str| h.styles_before(cells, 1).iter().any(|style| style.split('|').nth(1) == Some(&format!("{r},{g},{b}")));
+    let [r, g, b] = kumi::tui::style::palette::ACCENT;
+    let playing =
+        |h: &Harness, cells: &str| h.styles_before(cells, 4).iter().any(|style| style.split('|').next() == Some(&format!("{r},{g},{b}")));
+    h.emit(focus(0));
+    shows(&h, "C-4 00").await;
+    // (playback starting reads the pattern again, once)
+    h.emit(transport(2));
+    delay(5).await;
+    let read = reads(&h);
+    assert!(raised(&h, "C-4 00 ") && playing(&h, "C-4 02 "), "{}", h.screen().join("\n"));
+    h.emit(focus(6));
+    h.emit(transport(5));
+    delay(5).await;
+    assert!(raised(&h, "C-4 06 ") && !raised(&h, "C-4 00 "), "the cursor moved:\n{}", h.screen().join("\n"));
+    assert!(playing(&h, "C-4 05 ") && !playing(&h, "C-4 02 "), "the playing line moved:\n{}", h.screen().join("\n"));
+    assert_eq!(reads(&h), read, "no read for that");
+    // Playback back at line 1 (the next pattern, or a loop): read again.
+    h.emit(transport(1));
+    delay(5).await;
+    assert_eq!(reads(&h), read + 1);
+    // The cursor past the lines read: read again.
+    h.emit(focus(40));
+    delay(5).await;
+    assert_eq!(reads(&h), read + 2);
+    h.close().await;
+});

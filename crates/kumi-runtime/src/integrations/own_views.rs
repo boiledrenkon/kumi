@@ -504,6 +504,8 @@ pub fn transport(focus: &Value, at: f64) -> Option<Transport> {
         at,
         beats_per_bar: number(transport, "beatsPerBar"),
         meter: signature.or(lpb),
+        // (Renoise's: lines by its own numbers, from 0)
+        line: number(transport, "line").filter(|n| *n >= 0. && flag(transport, "playing")).map(|n| n as usize),
     })
 }
 
@@ -564,6 +566,14 @@ mod tests {
         );
         assert_eq!(lanes[3].track_ref.as_deref(), Some("r:track:{B}"));
         assert_eq!((strip.lanes_from, strip.track_count), (Some(40), Some(200)));
+    }
+
+    #[test]
+    fn a_trackers_transport_says_the_line_playing_while_it_plays() {
+        // (review U7) FOCUS moves a pattern's playing line between reads by it.
+        let line = |playing: bool| transport(&json!({"transport": {"playing": playing, "line": 12, "lpb": 4}}), 0.).unwrap().line;
+        assert_eq!((line(true), line(false)), (Some(12), None));
+        assert_eq!(transport(&json!({"transport": {"playing": true, "beat": 3.0}}), 0.).unwrap().line, None, "REAPER's has none");
     }
 
     #[test]

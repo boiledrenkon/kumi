@@ -324,6 +324,43 @@ impl TuiApp {
             Ok(())
         });
     }
+    /// Moves a tracker's cursor and playing line to where the focus and the transport say they are now, between the
+    /// reads (every 1.5 s): a line past those read, or playback back at an earlier line (the next pattern, a loop),
+    /// is read again.
+    pub(super) fn follow_lines(&self) {
+        let again = {
+            let mut state = self.0.state.borrow_mut();
+            let item = state.focus.as_ref().and_then(item_ref);
+            let cursor = state.focus.as_ref().and_then(|focus| focus.line);
+            let (playing, line) = state.transport.as_ref().map_or((false, None), |transport| (transport.playing, transport.line));
+            let Some(FocusBody::Tracker(grid)) = state.own.body.as_mut() else { return };
+            let read = grid.from..grid.from + grid.tracks.iter().map(|track| track.cells.len()).max().unwrap_or(0);
+            // (another pattern's lines, or none: its own read is coming)
+            if item.as_deref() != Some(grid.item_ref.as_str()) || read.is_empty() {
+                return;
+            }
+            let mut again = false;
+            if let Some(cursor) = cursor.filter(|cursor| grid.cursor != Some(*cursor)) {
+                if read.contains(&cursor) {
+                    grid.cursor = Some(cursor);
+                } else {
+                    again = true;
+                }
+            }
+            if let Some(was) = grid.playing {
+                match line {
+                    Some(line) if line < was || (read.contains(&was) && !read.contains(&line)) => again = true,
+                    Some(line) => grid.playing = Some(line),
+                    None if !playing => grid.playing = None,
+                    None => {}
+                }
+            }
+            again
+        };
+        if again {
+            self.read_own(true);
+        }
+    }
     /// The DAW's own body FOCUS draws now, read for where the producer is.
     pub(super) fn own_shown(&self) -> Option<FocusBody> {
         let request = self.own_request()?;

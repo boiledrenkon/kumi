@@ -426,7 +426,7 @@ async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
             use kumi_runtime::core::view::ViewKind;
             let focus = json!({
                 "epoch": "3", "view": "pattern", "matrixVisible": true, "dspVisible": true, "changed": 2,
-                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay"},
+                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay", "line": 12},
                 "transport": {"playing": true, "followPlayer": true, "beat": 8.0, "tempo": 128, "beatsPerBar": 4},
             });
             let host = Rc::new(Host {
@@ -449,6 +449,7 @@ async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
             assert_eq!(focus.section_follows, Some(true), "playing and following: the sequence slot is playback's");
             assert_eq!(focus.section.as_ref().and_then(|s| s.index), Some(2.), "slots from 1 in Renoise, from 0 in FOCUS");
             assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("3:pattern:4"));
+            assert_eq!(focus.line, Some(12), "the pattern's edit line, by Renoise's numbers (review U7)");
             renoise.close().await.unwrap();
         })
         .await;
