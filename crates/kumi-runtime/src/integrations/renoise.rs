@@ -50,6 +50,8 @@ pub const CATCH_UP: CatchUpWords = CatchUpWords {
     facts: song_facts,
     recipe: RecipeKinds {
         track_add: "track_add",
+        // (a sequencer track by default)
+        track_types: &["send", "group"],
         effect: "device",
         effect_add: |made, _| {
             let path = made.get("path").and_then(Value::as_str).filter(|path| !path.is_empty())?;

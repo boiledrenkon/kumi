@@ -51,8 +51,10 @@ pub type DraftStep = (&'static str, JsonObject);
 
 /// The change kinds a draft recipe is made of.
 pub struct RecipeKinds {
-    /// The kind that adds a track (`{name}`).
+    /// The kind that adds a track (`{name}`), and the kinds of track (the host's `kind` facet) it makes by its `type`
+    /// besides its default one.
     pub track_add: &'static str,
+    pub track_types: &'static [&'static str],
     /// The kind of record an effect is ("FX", "device"), and the step that adds one to a track (without its `ref`), from
     /// what it's made of and its name.
     pub effect: &'static str,
@@ -420,13 +422,17 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
             ("track", "added") => {
                 draft.made += 1;
                 let mark = format!("t{}", draft.made);
+                let made = change.get("madeOf").cloned().unwrap_or(Value::Null);
                 let mut input = JsonObject::new();
                 if !name.is_empty() {
                     input.insert("name".into(), name.clone().into());
                 }
+                // (a send or group track made as one; what's put on it comes as its own changes, after it)
+                if let Some(kind) = made.get("kind").and_then(Value::as_str).filter(|kind| kinds.track_types.contains(kind)) {
+                    input.insert("type".into(), kind.into());
+                }
                 draft.step(kinds.track_add, input, Some(mark.clone()));
                 draft.tracks.push((name.clone(), format!("@{mark}")));
-                let made = change.get("madeOf").cloned().unwrap_or(Value::Null);
                 for (leaf, value) in made.get("mixer").and_then(Value::as_object).into_iter().flatten() {
                     let neutral = matches!(value, Value::Bool(false)) || value.as_f64() == Some(0.0) || value.is_null();
                     if !neutral {
@@ -474,6 +480,8 @@ pub fn draft(answer: &Value, words: &CatchUpWords) -> Option<Value> {
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
+                    // (a `…Hash` leaf is the parameters' fingerprint, never one of them)
+                    .filter(|d| d.get("fingerprint") != Some(&Value::Bool(true)))
                     .filter_map(|d| Some((d.get("what")?.as_str()?.strip_prefix("parameters.")?.to_owned(), plain(&d["to"]))))
                     .collect();
                 if values.is_empty() {
@@ -642,6 +650,7 @@ mod tests {
         },
         recipe: RecipeKinds {
             track_add: "track_add",
+            track_types: &[],
             effect: "FX",
             effect_add: |made, name| {
                 let plugin = made.get("plugin").and_then(Value::as_str).unwrap_or(name);
@@ -769,6 +778,92 @@ mod tests {
         let lines: Vec<Vec<String>> = told.borrow().iter().map(|c| c.lines.clone()).collect();
         assert_eq!(lines, [vec![], vec!["Tempo 120 → 121 BPM".to_string()]]);
         assert!(remembered.since("A").is_some() && remembered.since("B").is_none());
+    }
+
+    /// What the host says of an FX whose parameters moved: the diff's details as watch_stop sends them, with the one
+    /// moved parameter it names (as its `name_moves` does) when `named`.
+    fn host_said(named: bool) -> Value {
+        use daw_mcp_server::semantic::{diff, Change, Detail, Snapshot};
+        let snapshot = |hash: &str, ratio: f64| {
+            Snapshot {
+            records: vec![
+                serde_json::from_value(json!({"k": "track", "id": "{B}", "n": "Bass", "o": 1})).unwrap(),
+                serde_json::from_value(json!({"k": "FX", "id": "{F}", "n": "ReaComp", "o": 0, "p": "{B}", "f": {"parameters": {"parametersHash": hash}}, "v": [0.5, ratio]})).unwrap(),
+            ],
+            ..Default::default()
+        }
+        };
+        let mut said = diff(&snapshot("77aa", 0.1), &snapshot("77ab", 0.4), true, &Default::default());
+        if named {
+            if let Change::Changed { details, .. } = &mut said.changes[0] {
+                details.push(Detail {
+                    facet: "parameters".into(),
+                    what: "parameters.Ratio".into(),
+                    from: json!(0.1),
+                    to: json!({"value": 0.4, "shows": "0.4"}),
+                    fingerprint: false,
+                });
+            }
+        }
+        json!({"changes": said.changes})
+    }
+
+    // Review K7: the parameters' fingerprint is never drafted as a parameter to set.
+    #[test]
+    fn a_tweaked_effects_fingerprint_is_never_drafted_as_one_of_its_parameters() {
+        let answer = host_said(true);
+        assert_eq!(answer["changes"][0]["details"][0]["what"], "parameters.parametersHash", "{answer}");
+        let drafted = draft(&answer, &WORDS).unwrap();
+        assert_eq!(
+            drafted["steps"],
+            json!([{"tool": "fx_params", "input": {"values": [{"param": "Ratio", "normalized": 0.4}], "ref": "$reacomp"}}])
+        );
+        // Its names not read (past what the host reads): nothing to set, and it's left out.
+        let answer = host_said(false);
+        assert!(draft(&answer, &WORDS).is_none(), "{answer}");
+    }
+
+    // Review K8: what the producer put on a track they added is drafted on that track, with the parameters they moved;
+    // Renoise's send track is made as one.
+    #[test]
+    fn effects_put_on_a_track_added_while_watching_are_drafted_on_it() {
+        use daw_mcp_server::semantic::{diff, Snapshot};
+        let reaper = |records: Vec<Value>| Snapshot {
+            records: records.into_iter().map(|r| serde_json::from_value(r).unwrap()).collect(),
+            ..Default::default()
+        };
+        let before = reaper(vec![json!({"k": "track", "id": "{A}", "n": "Vox", "o": 1})]);
+        let after = reaper(vec![
+            json!({"k": "track", "id": "{A}", "n": "Vox", "o": 1}),
+            json!({"k": "track", "id": "{B}", "n": "Vox Bus", "o": 2}),
+            json!({"k": "FX", "id": "{F1}", "n": "ReaComp", "o": 0, "p": "{B}", "v": [0.5, 0.2], "f": {"plugin": "VST: ReaComp (Cockos)"}}),
+        ]);
+        let mut said = serde_json::to_value(diff(&before, &after, true, &Default::default()).changes).unwrap();
+        // (the parameter the host names for it, as its name_moves does)
+        said[1]["madeOf"]["parameters"] = json!([{"name": "Threshold", "value": {"value": 0.2, "shows": "-20 dB"}}]);
+        let drafted = draft(&json!({"changes": said}), &crate::integrations::reaper::CATCH_UP).unwrap();
+        assert_eq!(
+            drafted["steps"],
+            json!([
+                {"tool": "track_add", "input": {"name": "Vox Bus"}, "as": "t1"},
+                {"tool": "fx_add", "input": {"name": "VST: ReaComp (Cockos)", "ref": "@t1"}, "as": "fx1"},
+                {"tool": "fx_params", "input": {"values": [{"param": "Threshold", "normalized": 0.2}], "ref": "@fx1"}},
+            ])
+        );
+        let renoise = json!({"changes": [
+            {"change": "added", "kind": "track", "item": {"name": "Reverb", "order": 9}, "madeOf": {"name": "Reverb", "kind": "send"}},
+            {"change": "added", "kind": "device", "item": {"name": "Reverb", "order": 2, "on": "Reverb"}, "madeOf": {"path": "Audio/Effects/Native/Reverb"}},
+            {"change": "added", "kind": "track", "item": {"name": "Lead", "order": 3}, "madeOf": {"name": "Lead", "kind": "sequencer"}},
+        ]});
+        let drafted = draft(&renoise, &crate::integrations::renoise::CATCH_UP).unwrap();
+        assert_eq!(
+            drafted["steps"],
+            json!([
+                {"tool": "track_add", "input": {"name": "Reverb", "type": "send"}, "as": "t1"},
+                {"tool": "device_add", "input": {"path": "Audio/Effects/Native/Reverb", "ref": "@t1"}, "as": "fx1"},
+                {"tool": "track_add", "input": {"name": "Lead"}, "as": "t2"},
+            ])
+        );
     }
 
     #[test]

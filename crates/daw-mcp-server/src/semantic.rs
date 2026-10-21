@@ -445,12 +445,15 @@ pub fn diff(before: &Snapshot, after: &Snapshot, watching: bool, firsts: &HashMa
             out.changes.push(Change::Removed { kind: kind.into(), item: item(old, &before_keys) });
         }
         for new in news.iter().filter(|r| !taken_new.contains(&r.key())) {
-            if new.p.as_ref().is_some_and(|p| after_keys.contains_key(p) && !matched_after.contains(p)) {
+            // (while watching, what has values of its own, an FX or a device, is told on its own too, with the parameters
+            // moved on it, so that it can be made again)
+            if new.p.as_ref().is_some_and(|p| after_keys.contains_key(p) && !matched_after.contains(p)) && !(watching && new.v.is_some()) {
                 continue;
             }
             let key = new.key();
             let (made, moves) = if watching {
-                let children: Vec<&Record> = after.records.iter().filter(|r| r.p.as_deref() == Some(key.as_str())).collect();
+                let children: Vec<&Record> =
+                    after.records.iter().filter(|r| r.p.as_deref() == Some(key.as_str()) && r.v.is_none()).collect();
                 let first = firsts.get(&key);
                 (made_of(new, &children), moved(first.and_then(|f| f.v.as_ref()), new.v.as_ref()))
             } else {
@@ -625,6 +628,31 @@ mod tests {
         let Change::Added { made_of, .. } = &diff.changes[0] else { panic!() };
         assert_eq!(made_of.get("FX"), Some(&json!(["ReaVerbate"])), "{made_of:?}");
         assert_eq!(made_of.get("mixer"), Some(&json!({"volume": -3.0})));
+    }
+
+    // Review K8: an FX put on a track added while watching is told on its own, with what it's made of and the parameters
+    // moved since its first look, after the track; what has no values (an item) is still told by the track.
+    #[test]
+    fn what_comes_on_a_track_added_while_watching_is_told_with_its_own_parameters() {
+        let before = snapshot(vec![json!({"k": "track", "id": "{A}", "n": "Vox", "o": 1})]);
+        let after = snapshot(vec![
+            json!({"k": "track", "id": "{A}", "n": "Vox", "o": 1}),
+            json!({"k": "track", "id": "{B}", "n": "Vox Bus", "o": 2}),
+            json!({"k": "FX", "id": "{F1}", "n": "ReaEQ", "o": 0, "p": "{B}", "v": [0.5, 0.25], "f": {"plugin": "VST: ReaEQ (Cockos)"}}),
+            json!({"k": "item", "id": "{I1}", "n": "take 1", "o": 0, "p": "{B}"}),
+        ]);
+        let firsts: HashMap<String, Record> = [("{F1}".to_string(), record(json!({"k": "FX", "id": "{F1}", "v": [0.5, 0.5]})))].into();
+        let diff = diff(&before, &after, true, &firsts);
+        assert_eq!(said(&diff), ["+track Vox Bus", "+FX ReaEQ"]);
+        let Change::Added { made_of, .. } = &diff.changes[0] else { panic!() };
+        assert_eq!((made_of.get("FX"), made_of.get("item")), (None, Some(&json!(["take 1"]))), "{made_of:?}");
+        let Change::Added { moved, made_of, item, .. } = &diff.changes[1] else { panic!() };
+        assert_eq!(item.on.as_deref(), Some("Vox Bus"));
+        assert_eq!(made_of.get("plugin"), Some(&json!("VST: ReaEQ (Cockos)")));
+        assert_eq!(moved, &[Moved { index: 1, from: json!(0.5), to: json!(0.25) }]);
+        // Catch-up (not watching) still tells it by the track.
+        let diff = super::diff(&before, &after, false, &HashMap::new());
+        assert_eq!(said(&diff), ["+track Vox Bus"]);
     }
 
     #[test]
