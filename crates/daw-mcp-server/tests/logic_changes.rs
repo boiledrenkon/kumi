@@ -253,9 +253,10 @@ async fn a_track_added_below_a_track_moves_the_epoch_and_changes_before_it_are_s
     assert_eq!((add["prior"].clone(), add["target"].clone()), (json!({"tracks": 2}), json!({"ref": null, "kind": "track", "index": 1})));
     assert_eq!(add["display"], json!({"title": "Added instrument track “Pad”", "index": 1}));
     assert_eq!((added["epoch"].clone(), added["created"].clone()), (json!("3"), json!({"ref": "3:track:2", "kind": "track"})));
+    // (named, the track is renamed through the Inspector once Logic made it: "Renaming" lands on top, as the M3 scene reads)
     assert_eq!(
         (added["applied"].clone(), added["undo"]["title"].clone()),
-        (json!({"index": 2, "name": "Pad", "kind": "instrument"}), json!("Undo Create Track"))
+        (json!({"index": 2, "name": "Pad", "kind": "instrument"}), json!("Undo Renaming"))
     );
     assert_eq!(lab.script.track_count(), 3);
     let (page, _) = lab.tool("read", json!({"kind": "track"})).await;
@@ -287,7 +288,7 @@ async fn a_track_added_below_a_track_moves_the_epoch_and_changes_before_it_are_s
     let (undone, is_error) = lab.undo(&volume, "u3", false).await;
     assert!(!is_error && undone["state"] == "undone", "{undone}");
     assert_eq!(lab.script.volume(1), 0.0);
-    assert_eq!(lab.script.undo_titles(), ["Undo Renaming", "Undo Create Track", "Undo Renaming", "Undo Delete Tracks"]);
+    assert_eq!(lab.script.undo_titles(), ["Undo Renaming", "Undo Create Track", "Undo Renaming", "Undo Renaming", "Undo Delete Tracks"]);
 
     // A track deleted: its restore is Cmd-Z, while Logic's undo has it on top; with another step on top, Kumi can't.
     let (delete, deleted) = lab.make("track-delete", json!({"ref": "5:track:2"}), "a5").await;
@@ -387,7 +388,9 @@ async fn markers_and_the_tempo_change_and_come_back_in_logics_words() {
     );
     let (refused, is_error) = lab.try_preview("marker-add", json!({"position": 6})).await;
     assert!(is_error && refused["error"].as_str().unwrap().contains("not seconds"), "{refused}");
-    // One added before the recorded one is first in the list; a move re-sorts it; a delete and the undos, each a step.
+    // One added before the recorded one is first in the list, and Logic names markers by their place in it ("Marker 1"
+    // is the new one, the recorded one reads "Marker 2", as the M4 key command scene shows); a move re-sorts it; a
+    // delete and the undos, each a step.
     let (add, added) = lab.make("marker-add", json!({"positionBeats": 16}), "a2").await;
     assert_eq!((add["prior"].clone(), add["display"]["title"].clone()), (json!({"markers": 1}), json!("Marker at bar 5")));
     assert_eq!(
@@ -396,15 +399,16 @@ async fn markers_and_the_tempo_change_and_come_back_in_logics_words() {
     );
     assert_eq!(
         (added["display"]["title"].clone(), added["undo"]["title"].clone()),
-        (json!("Marker “Marker 2” at bar 5"), json!("Undo Create Marker"))
+        (json!("Marker “Marker 1” at bar 5"), json!("Undo Create Marker"))
     );
     let (page, _) = lab.tool("read", json!({"kind": "marker"})).await;
-    assert_eq!(page["items"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Marker 2", "Marker 1"]);
-    assert_eq!(page["items"][0]["position"], position(5, 1));
+    assert_eq!(page["items"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Marker 1", "Marker 2"]);
+    assert_eq!((page["items"][0]["position"].clone(), page["items"][0]["length"].clone()), (position(5, 1), json!(0.0)));
+    assert_eq!(page["items"][1]["length"], 32.0, "the recorded marker keeps its length");
     let (moved, applied) = lab.make("marker-move", json!({"ref": "1:marker:1", "positionBeats": 40}), "a3").await;
     assert_eq!(
         (moved["prior"].clone(), applied["display"]["title"].clone()),
-        (json!({"position": position(5, 1)}), json!("Moved marker “Marker 2” to bar 11"))
+        (json!({"position": position(5, 1)}), json!("Moved marker “Marker 1” to bar 11"))
     );
     assert_eq!(applied["undo"]["title"], "Undo Value Change");
     assert_eq!(lab.script.markers(), [("Marker 1".to_string(), 32.0), ("Marker 2".to_string(), 40.0)]);
@@ -419,25 +423,22 @@ async fn markers_and_the_tempo_change_and_come_back_in_logics_words() {
     assert_eq!(back["display"], json!({"title": "Marker “Marker 2” put back", "note": "Put back with Logic Pro's own undo."}));
     let (undone, is_error) = lab.undo(&moved, "u3", false).await;
     assert!(!is_error && undone["display"]["title"] == "marker “Marker 2” back at bar 5", "{undone}");
-    assert_eq!(lab.script.markers(), [("Marker 2".to_string(), 16.0), ("Marker 1".to_string(), 32.0)]);
+    assert_eq!(lab.script.markers(), [("Marker 1".to_string(), 16.0), ("Marker 2".to_string(), 32.0)]);
     let (gone, is_error) = lab.undo(&add, "u4", false).await;
     assert!(
         !is_error
             && gone["restored"] == json!({"deleted": "1:marker:1"})
-            && gone["display"]["title"] == "marker “Marker 2” taken away again",
+            && gone["display"]["title"] == "marker “Marker 1” taken away again",
         "{gone}"
     );
     assert_eq!(lab.script.markers(), [("Marker 1".to_string(), 32.0)]);
     assert_eq!(lab.script.undo_titles(), ["Undo Create Marker", "Undo Value Change", "Undo Value Change", "Undo Delete"]);
     assert_eq!(lab.script.epoch(), 1, "markers and the tempo never move the epoch");
 
-    // What the bridge can't make yet is refused saying why (a track moved or coloured among them: the headers can't be
+    // What the bridge can't make is refused saying why (a track moved or coloured among them: the headers can't be
     // dragged, and a colour could never be read back); what it makes beyond the simulator says so too.
     for (kind, why) in [
         ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
-        ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
-        ("fx-param", "a plug-in's controls aren't reached yet"),
-        ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
         ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
         ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
     ] {
@@ -445,7 +446,7 @@ async fn markers_and_the_tempo_change_and_come_back_in_logics_words() {
         assert!(is_error && refused["code"] == "bad-params", "{kind}: {refused}");
         assert_eq!(refused["error"], format!("Logic Pro's bridge can't make a {kind} change yet: {why}"));
     }
-    let (refused, _) = lab.try_preview("fx-bypass", json!({"ref": "1:plugin:1.1", "bypass": true})).await;
+    let (refused, _) = lab.try_preview("notes-add", json!({"ref": "1:region:1", "notes": [{"pitch": 60, "start": 0, "length": 1}]})).await;
     assert!(refused["error"].as_str().unwrap().starts_with("the simulated Logic Pro makes only"), "{refused}");
     let (refused, _) = lab.try_preview("bogus", json!({})).await;
     assert_eq!(refused["error"], "Logic Pro has no change kind \"bogus\"");
@@ -565,6 +566,35 @@ async fn the_change_methods_on_the_wire() {
     lab.undo(&flatten, "u20", false).await;
     lab.undo(&stack, "u21", false).await;
     assert_eq!((lab.script.epoch(), lab.script.track_count(), lab.script.regions().len()), (24, 2, 1), "every M4 undo went through");
+    // (M4b) A Gain on the Stereo Out (an output strip no track has, output:1) and its gain set; a send to a bus nothing
+    // takes (Logic makes an aux for it) and its level; a patch loaded and a Smart Control turned; a setting stepped;
+    // Volume automation; each undone; a bounce and an export refused before anything is written (their folder isn't
+    // there). None of them moves the epoch.
+    let (gain, _) = lab.make("fx-add", json!({"ref": "24:output:1", "name": "Gain"}), "a26").await;
+    let (set, _) = lab.make("fx-param", json!({"ref": "24:plugin:0.1.1", "param": "Gain", "value": -3}), "a27").await;
+    lab.undo(&set, "u22", false).await;
+    lab.undo(&gain, "u23", false).await;
+    let (send, _) = lab.make("send-add", json!({"ref": "24:track:1", "bus": 1}), "a28").await;
+    let (level, _) = lab.make("send-volume", json!({"ref": "24:send:1.1", "volumeDb": -6}), "a29").await;
+    lab.undo(&level, "u24", false).await;
+    lab.undo(&send, "u25", false).await;
+    let (patch, _) = lab.make("patch-load", json!({"ref": "24:track:2", "patch": "Piano/Steinway Grand Piano"}), "a30").await;
+    lab.undo(&patch, "u26", false).await;
+    let (smart, _) = lab.make("smart-control-set", json!({"ref": "24:track:2", "control": 1, "value": 0.6}), "a31").await;
+    lab.undo(&smart, "u27", false).await;
+    let (preset, _) = lab.make("fx-preset", json!({"ref": "24:plugin:2.3", "step": 1}), "a32").await;
+    lab.undo(&preset, "u28", false).await;
+    let events = json!([{"positionBeats": 0, "value": 90}, {"positionBeats": 8, "value": 100}]);
+    let (automation, _) = lab.make("automation-add", json!({"ref": "24:track:1", "parameter": "Volume", "events": events}), "a33").await;
+    lab.undo(&automation, "u29", false).await;
+    let folder = "/Users/me/Music/Logic/Kumi Bounces";
+    lab.tool("bounce", json!({"epoch": "24", "startBeats": 0, "endBeats": 16, "path": format!("{folder}/Scratch.wav")})).await;
+    lab.tool("export_tracks", json!({"epoch": "24", "path": folder})).await;
+    assert_eq!(
+        (lab.script.epoch(), lab.script.auxes().len(), lab.script.plugins("output:1").len(), lab.script.patch(2).as_deref()),
+        (24, 0, 0, Some("Studio Grand")),
+        "every M4b undo went through"
+    );
     let asked: Vec<String> = lab.script.asked().into_iter().map(|(method, _)| method).collect();
     for method in [
         "change_preview",
@@ -576,6 +606,8 @@ async fn the_change_methods_on_the_wire() {
         "cursor_set",
         "transport_stop",
         "project_save",
+        "bounce",
+        "export_tracks",
     ] {
         assert!(asked.iter().any(|m| m == method), "{method} never reached the bridge");
     }
@@ -672,7 +704,8 @@ async fn a_key_command_is_a_row_only_when_logic_keeps_a_step_of_it_and_only_logi
         (applied["applied"].clone(), applied["undo"]["title"].clone()),
         (json!({"command": 513, "name": "Create Marker", "key": "⌥'", "step": "Create Marker"}), json!("Undo Create Marker"))
     );
-    assert_eq!(lab.script.markers(), [("Marker 2".to_string(), 16.0), ("Marker 1".to_string(), 32.0)]);
+    // (Logic names markers by their place: the new one before the recorded one is "Marker 1", as the M4 scene reads)
+    assert_eq!(lab.script.markers(), [("Marker 1".to_string(), 16.0), ("Marker 2".to_string(), 32.0)]);
     let (refused, is_error) = lab.undo(&created, "u1", false).await;
     assert!(is_error && refused["code"] == "daw-only", "{refused}");
     assert_eq!(refused["error"], "Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)");
@@ -1227,5 +1260,606 @@ async fn a_cmd_z_on_a_split_is_named_back_to_the_host() {
         );
     }
     // (no tool is asked after an event: the session's line reader would take the event's notification for the answer)
+    lab.simulator.stop();
+}
+
+// ----- M4, the second slice -----
+
+fn names(plugins: Vec<(String, bool)>) -> Vec<String> {
+    plugins.into_iter().map(|(name, _)| name).collect()
+}
+
+fn refused_with(answer: &(Value, bool), words: &str) -> bool {
+    answer.1 && answer.0["error"].as_str().is_some_and(|error| error.contains(words))
+}
+
+/// (M4b) Plug-ins on a strip as the bridge's second slice makes them (its `change-fx-add`, `change-fx-delete` and
+/// `change-fx-params` scenes): a Gain added below Vocal's Channel EQ through the empty slot and taken off again by
+/// value; a Gain on the Stereo Out (an output strip no track has, `1:output:1`, whose plug-ins are `plugin` rows under
+/// it), its gain found in its window's Controls View by reading the slider's text (no step of Logic's undo) and read
+/// back as the `param` rows read it; two of Vocal's Channel EQ rows set at once and put back; a setting stepped with
+/// the window's buttons and taken back with its own undo; a bypass. An effect deleted comes back through Logic's own
+/// undo while on top (with its settings), else by name (with Logic's defaults); an instrument isn't deleted; a name the
+/// plug-in menu's search takes as another plug-in is taken off again; `fx-move` and `send-mode` are refused in the
+/// bridge's words.
+#[tokio::test]
+async fn plug_ins_go_on_a_track_and_the_stereo_out_are_tuned_in_the_controls_view_and_each_comes_back() {
+    let mut lab = Lab::start().await;
+    let (add, added) = lab.make("fx-add", json!({"ref": "1:track:1", "name": "Gain"}), "a1").await;
+    assert_eq!(
+        (add["target"].clone(), add["prior"].clone(), add["display"].clone()),
+        (
+            json!({"ref": "1:track:1", "kind": "track"}),
+            json!({"plugins": ["Channel EQ"], "instrument": null}),
+            json!({"title": "Added “Gain” to “Vocal”", "index": 1})
+        )
+    );
+    assert_eq!(
+        (added["applied"].clone(), added["created"].clone(), added["undo"]["title"].clone()),
+        (
+            json!({"index": 1, "name": "Gain", "slot": 2, "plugins": ["Channel EQ", "Gain"]}),
+            json!({"ref": "1:plugin:1.2", "kind": "plugin"}),
+            json!("Undo Insert Plug-in in Channel Strip")
+        )
+    );
+    let (rows, _) = lab.tool("read", json!({"kind": "plugin", "parent": "1:track:1"})).await;
+    assert_eq!(
+        rows["items"][1],
+        json!({"bypassed": false, "kind": "effect", "name": "Gain", "ref": "1:plugin:1.2", "slot": 2, "trackRef": "1:track:1"})
+    );
+    let (off, is_error) = lab.undo(&add, "u1", false).await;
+    assert!(!is_error && off["restored"] == json!({"deleted": "1:plugin:1.2", "plugins": ["Channel EQ"]}), "{off}");
+    assert_eq!(off["display"]["title"], "“Gain” taken off “Vocal”");
+
+    // A Gain on the Stereo Out, which no track has.
+    let (stereo, made) = lab.make("fx-add", json!({"ref": "1:output:1", "name": "Gain"}), "a2").await;
+    assert_eq!(stereo["target"], json!({"ref": "1:output:1", "kind": "output"}));
+    assert_eq!(
+        (made["created"].clone(), made["display"]["title"].clone()),
+        (json!({"ref": "1:plugin:0.1.1", "kind": "plugin"}), json!("Added “Gain” to “Stereo Out”"))
+    );
+    let (rows, _) = lab.tool("read", json!({"kind": "plugin", "parent": "1:output:1"})).await;
+    assert_eq!(
+        rows["items"],
+        json!([{"bypassed": false, "kind": "effect", "name": "Gain", "ref": "1:plugin:0.1.1", "slot": 1, "trackRef": "1:output:1"}])
+    );
+    let (all, _) = lab.tool("read", json!({"kind": "plugin"})).await;
+    assert_eq!((all["total"].clone(), all["items"][5]["trackRef"].clone()), (json!(6), json!("1:output:1")), "the tracks' first");
+    let (params, _) = lab.tool("read", json!({"kind": "param", "parent": "1:plugin:0.1.1"})).await;
+    assert_eq!(
+        params["items"][1],
+        json!({"index": 2, "max": 1200.0, "min": 0.0, "name": "Gain", "normalized": 0.8, "pluginRef": "1:plugin:0.1.1", "ref": "1:param:0.1.1.2", "text": "0.0 dB", "value": 960.0})
+    );
+    let (gain, set) = lab.make("fx-param", json!({"ref": "1:plugin:0.1.1", "param": "Gain", "value": -6}), "a3").await;
+    assert_eq!(
+        (gain["target"].clone(), gain["prior"].clone(), gain["display"]["title"].clone()),
+        (
+            json!({"ref": "1:plugin:0.1.1", "kind": "plugin", "track": "1:output:1"}),
+            json!({"plugin": "Gain", "params": [{"index": 2, "name": "Gain", "value": 960.0, "text": "0.0 dB"}]}),
+            json!("“Gain” Gain on “Stereo Out”")
+        )
+    );
+    assert_eq!(
+        (set["applied"].clone(), set["display"]["title"].clone(), set["undo"]["entry"].clone()),
+        (
+            json!({"plugin": "Gain", "params": [{"index": 2, "name": "Gain", "value": 900.0, "text": "-6.0 dB"}]}),
+            json!("“Gain”'s Gain → -6.0 dB on “Stereo Out”"),
+            json!(false)
+        )
+    );
+    let (row, _) = lab.tool("read", json!({"ref": "1:param:0.1.1.2"})).await;
+    assert_eq!((row["items"][0]["text"].clone(), row["items"][0]["normalized"].clone()), (json!("-6.0 dB"), json!(0.75)));
+    assert_eq!(lab.script.param("output:1", 1, "Gain"), Some((Some(900.0), "-6.0 dB".to_string())));
+    for (input, words) in [
+        (json!({"ref": "1:param:0.1.1.2", "normalized": 2}), "normalized must be a number from 0 to 1"),
+        (json!({"ref": "1:plugin:0.1.1", "param": "Drive", "value": 1}), "“Gain” has no parameter named \"Drive\""),
+        (json!({"ref": "1:plugin:0.1.1", "param": "Gain", "value": "loud"}), "Gain is a slider: give normalized or a number"),
+        (json!({"ref": "1:plugin:0.1.1"}), "pass the parameter's ref as ref, or the plug-in's ref as ref and param"),
+        (json!({"ref": "1:plugin:0.2.1", "param": 2, "value": 0}), "1:output:2 isn't in the project"),
+    ] {
+        let refused = lab.try_preview("fx-param", input.clone()).await;
+        assert!(refused_with(&refused, words), "{input}: {}", refused.0);
+    }
+    // A value no place of the slider reads is refused at the apply, before anything is set.
+    let far = lab.preview("fx-param", json!({"ref": "1:param:0.1.1.2", "value": 40})).await;
+    let refused = lab.apply(&far, "a4").await;
+    assert!(refused_with(&refused, "no value of “Gain”'s Gain reads 40"), "{}", refused.0);
+
+    // Two of Vocal's Channel EQ rows at once, as the change-fx-params scene, put back by value.
+    let values = json!([{"param": "Low Shelf Gain", "value": 3}, {"param": "Peak 1 On/Off", "value": "off"}]);
+    let (eq, set) = lab.make("fx-params", json!({"ref": "1:plugin:1.1", "values": values}), "a5").await;
+    assert_eq!(
+        (eq["prior"]["params"].clone(), eq["display"]["title"].clone()),
+        (
+            json!([{"index": 7, "name": "Low Shelf Gain", "value": 240.0, "text": "0.0 dB"}, {"index": 9, "name": "Peak 1 On/Off", "value": 1.0, "text": "on"}]),
+            json!("“Channel EQ” 2 parameters on “Vocal”")
+        )
+    );
+    assert_eq!(
+        (set["applied"]["params"].clone(), set["display"]["lines"].clone()),
+        (
+            json!([{"index": 7, "name": "Low Shelf Gain", "value": 270.0, "text": "+3.0 dB"}, {"index": 9, "name": "Peak 1 On/Off", "value": 0.0, "text": "off"}]),
+            json!(["Low Shelf Gain → +3.0 dB", "Peak 1 On/Off → off"])
+        )
+    );
+    let (row, _) = lab.tool("read", json!({"ref": "1:param:1.1.7"})).await;
+    assert_eq!(
+        row["items"][0],
+        json!({"index": 7, "max": 480.0, "min": 0.0, "name": "Low Shelf Gain", "normalized": 0.5625, "pluginRef": "1:plugin:1.1", "ref": "1:param:1.1.7", "text": "+3.0 dB", "value": 270.0})
+    );
+    let (back, is_error) = lab.undo(&eq, "u2", false).await;
+    assert!(!is_error && back["restored"]["params"][1]["text"] == "on", "{back}");
+    assert_eq!(back["display"]["title"], "“Channel EQ” 2 parameters on “Vocal” (put back)");
+
+    // A setting of Keys' Compressor (its slot 3, under Studio Grand's Piano), stepped to by the window's next button and
+    // taken back with the window's own undo.
+    let (preset, stepped) = lab.make("fx-preset", json!({"ref": "1:plugin:2.3", "preset": "Drum Bus"}), "a6").await;
+    assert_eq!(
+        (preset["prior"].clone(), preset["display"]["title"].clone()),
+        (json!({"plugin": "Compressor", "preset": "Default Preset"}), json!("“Compressor” on “Keys”: “Drum Bus”"))
+    );
+    assert_eq!(
+        (stepped["applied"].clone(), stepped["display"]["title"].clone(), stepped["undo"]["entry"].clone()),
+        (
+            json!({"plugin": "Compressor", "preset": "Drum Bus", "steps": 2}),
+            json!("“Compressor” on “Keys” set to “Drum Bus”"),
+            json!(false)
+        )
+    );
+    assert_eq!(lab.script.param("track:2", 3, "Threshold"), Some((Some(420.0), "-18.0 dB".to_string())));
+    let refused = lab.try_preview("fx-preset", json!({"ref": "1:plugin:2.3", "step": 0})).await;
+    assert!(refused_with(&refused, "step must be a whole number from -64 to 64, not 0"), "{}", refused.0);
+    let (back, is_error) = lab.undo(&preset, "u3", false).await;
+    assert!(!is_error && back["restored"] == json!({"preset": "Default Preset"}), "{back}");
+    assert_eq!(back["display"]["note"], "Put back with the plug-in window's own undo.");
+    assert_eq!(
+        (lab.script.preset("track:2", 3).as_deref(), lab.script.param("track:2", 3, "Threshold").map(|(_, text)| text)),
+        (Some("Default Preset"), Some("-20.0 dB".into()))
+    );
+
+    // A bypass, as the bridge makes it: a track's plug-in.
+    let (bypass, bypassed) = lab.make("fx-bypass", json!({"ref": "1:plugin:1.1", "bypass": true}), "a7").await;
+    assert_eq!(
+        (bypass["target"].clone(), bypass["display"]["title"].clone(), bypassed["undo"]["entry"].clone()),
+        (json!({"ref": "1:plugin:1.1", "kind": "plugin", "track": "1:track:1"}), json!("Bypassed “Channel EQ” on “Vocal”"), json!(false))
+    );
+    let refused = lab.try_preview("fx-bypass", json!({"ref": "1:plugin:0.1.1", "bypass": true})).await;
+    assert!(refused_with(&refused, "ref must be a plugin ref (1:plugin:1.1), not 1:plugin:0.1.1"), "{}", refused.0);
+    lab.undo(&bypass, "u4", false).await;
+    let (back, _) = lab.undo(&gain, "u5", false).await;
+    assert_eq!(back["display"]["title"], "“Gain”'s Gain → 0.0 dB on “Stereo Out” (put back)");
+    let (gone, _) = lab.undo(&stereo, "u6", false).await;
+    assert_eq!(gone["restored"], json!({"deleted": "1:plugin:0.1.1", "plugins": []}));
+    assert!(lab.script.plugins("output:1").is_empty());
+
+    // Deleted, as the change-fx-delete scene: back through Logic's own undo while on top, with its settings.
+    let (delete, deleted) = lab.make("fx-delete", json!({"ref": "1:plugin:2.4"}), "a8").await;
+    assert_eq!(
+        (delete["target"].clone(), delete["prior"].clone(), delete["display"]["title"].clone()),
+        (
+            json!({"ref": "1:plugin:2.4", "kind": "plugin", "track": "1:track:2"}),
+            json!({"name": "ChromaVerb", "slot": 4}),
+            json!("Deleted “ChromaVerb” from “Keys”")
+        )
+    );
+    assert_eq!(
+        (deleted["applied"].clone(), deleted["undo"]["title"].clone()),
+        (json!({"deleted": true, "plugins": ["Channel EQ", "Compressor"]}), json!("Undo Remove Plug-in in Channel Strip"))
+    );
+    let (back, is_error) = lab.undo(&delete, "u7", false).await;
+    assert!(!is_error && back["restored"] == json!({"ref": "1:plugin:2.4", "pressed": "Undo Remove Plug-in in Channel Strip"}), "{back}");
+    lab.make("fx-param", json!({"ref": "1:plugin:2.3", "param": "Threshold", "value": -30}), "a9").await;
+    let (delete, _) = lab.make("fx-delete", json!({"ref": "1:plugin:2.3"}), "a10").await;
+    let (back, _) = lab.undo(&delete, "u8", false).await;
+    assert_eq!(back["display"]["note"], "Put back with Logic Pro's own undo, with its settings.");
+    assert_eq!(lab.script.param("track:2", 3, "Threshold"), Some((Some(300.0), "-30.0 dB".to_string())), "as it was");
+    // With a step on top, by its name, with Logic's defaults.
+    let (delete, _) = lab.make("fx-delete", json!({"ref": "1:plugin:2.3"}), "a11").await;
+    lab.make("fx-add", json!({"ref": "1:track:1", "name": "Tape Delay"}), "a12").await;
+    let (again, _) = lab.undo(&delete, "u9", false).await;
+    assert_eq!(
+        again["display"]["note"],
+        "Put back by name, with Logic Pro's default settings: Logic Pro's own undo had other steps on top."
+    );
+    assert_eq!(
+        (names(lab.script.plugins("track:2")), lab.script.param("track:2", 3, "Threshold").map(|(_, text)| text)),
+        (vec!["Piano".to_string(), "Channel EQ".into(), "Compressor".into(), "ChromaVerb".into()], Some("-20.0 dB".into()))
+    );
+
+    // Refused: an instrument, a place past the effects, what isn't a strip, an output that isn't there.
+    let refused = lab.try_preview("fx-delete", json!({"ref": "1:plugin:2.1"})).await;
+    assert!(
+        refused_with(&refused, "“Piano” is the instrument of “Keys”: Kumi takes effects off a strip, not its instrument"),
+        "{}",
+        refused.0
+    );
+    for (input, words) in [
+        (
+            json!({"ref": "1:track:2", "name": "Gain", "index": 4}),
+            "index must be a place among the strip's 3 effect plug-in(s), from 0 to 3",
+        ),
+        (
+            json!({"ref": "1:region:1", "name": "Gain"}),
+            "ref must be a track or output ref, such as 1:track:1, or 1:output:1 for the Stereo Out",
+        ),
+        (json!({"ref": "1:output:2", "name": "Gain"}), "1:output:2 isn't in the project"),
+    ] {
+        let refused = lab.try_preview("fx-add", input.clone()).await;
+        assert!(refused_with(&refused, words), "{input}: {}", refused.0);
+    }
+    // A name the menu's search takes as another plug-in: taken off again, nothing left changed.
+    let comp = lab.preview("fx-add", json!({"ref": "1:track:1", "name": "Comp"})).await;
+    let refused = lab.apply(&comp, "a13").await;
+    assert!(refused_with(&refused, "Logic Pro's plug-in search for “Comp” took “Compressor”, so Kumi took it off again"), "{}", refused.0);
+    assert_eq!(names(lab.script.plugins("track:1")), ["Channel EQ", "Tape Delay"]);
+    // Through an insert bar: before Keys' Channel EQ, a step Logic names otherwise.
+    let (bar, inserted) = lab.make("fx-add", json!({"ref": "1:track:2", "name": "Gain", "index": 0}), "a14").await;
+    assert_eq!(
+        (inserted["applied"].clone(), inserted["undo"]["title"].clone()),
+        (
+            json!({"index": 0, "name": "Gain", "slot": 2, "plugins": ["Gain", "Channel EQ", "Compressor", "ChromaVerb"]}),
+            json!("Undo Change Plug-in in Channel Strip")
+        )
+    );
+    lab.undo(&bar, "u10", false).await;
+    for (kind, input, words) in [
+        ("fx-move", json!({"ref": "1:plugin:2.2", "index": 2}), "Logic Pro moves a plug-in from one slot to another only by dragging it"),
+        (
+            "send-mode",
+            json!({"ref": "1:send:1.1", "mode": "pre-fader"}),
+            "a send's mode is a mark in its menu, which Logic Pro draws itself",
+        ),
+    ] {
+        let refused = lab.try_preview(kind, input.clone()).await;
+        assert!(refused_with(&refused, words), "{kind}: {}", refused.0);
+    }
+    assert_eq!(lab.script.epoch(), 1, "plug-ins never move the epoch");
+    lab.simulator.stop();
+}
+
+/// (M4b) Sends as the bridge's second slice makes them (`changes/sends.rs`): one from Vocal to a bus nothing takes
+/// (Logic makes an aux for it, named under `created`; an aux has no ref and moves nothing), at −∞ unless a level is
+/// given; its level set (no step of Logic's undo); a send removed and put back through Logic's own undo, and by value
+/// with a step on top; the sends in the reads and the routing body. A send made comes back off through Logic's own undo
+/// while on top (the aux goes with it), else by value (the aux stays in the Mixer). Outputs have no sends, and a send's
+/// mode is refused in the bridge's words.
+#[tokio::test]
+async fn a_send_to_a_new_bus_makes_an_aux_its_level_changes_and_each_comes_back() {
+    let mut lab = Lab::start().await;
+    let (add, added) = lab.make("send-add", json!({"ref": "1:track:1", "bus": 1}), "a1").await;
+    assert_eq!(
+        (add["target"].clone(), add["prior"].clone(), add["display"].clone()),
+        (
+            json!({"ref": "1:track:1", "kind": "track"}),
+            json!({"sends": []}),
+            json!({"title": "Added send from “Vocal” to Bus 1", "note": "Logic Pro makes a send at its own default level (−∞ on this Mac): give volumeDb to hear it."})
+        )
+    );
+    assert_eq!(
+        (added["applied"].clone(), added["created"].clone(), added["display"]["note"].clone(), added["undo"]["title"].clone()),
+        (
+            json!({"destination": "Bus 1", "slot": 1, "level": -96.0}),
+            json!({"ref": "1:send:1.1", "kind": "send", "bus": 1, "aux": "Aux 1"}),
+            json!("Logic Pro made the aux “Aux 1” for Bus 1."),
+            json!("Undo Change Send in Channel Strip")
+        )
+    );
+    assert_eq!((lab.script.epoch(), lab.script.auxes()), (1, vec!["Aux 1".to_string()]));
+    let (rows, _) = lab.tool("read", json!({"kind": "send", "parent": "1:track:1"})).await;
+    assert_eq!(rows["items"], json!([{"destination": "Bus 1", "level": -96.0, "ref": "1:send:1.1", "slot": 1, "trackRef": "1:track:1"}]));
+    let (level, set) = lab.make("send-volume", json!({"ref": "1:send:1.1", "volumeDb": -6}), "a2").await;
+    assert_eq!(
+        (level["target"].clone(), level["prior"].clone(), level["display"]["title"].clone()),
+        (
+            json!({"ref": "1:send:1.1", "kind": "send", "track": "1:track:1"}),
+            json!({"level": -96.0}),
+            json!("Send from “Vocal” to Bus 1 at −6 dB")
+        )
+    );
+    assert_eq!((set["applied"].clone(), set["undo"]["entry"].clone()), (json!({"level": -6.0}), json!(false)));
+    let (routing, _) = lab.tool("focus_body", json!({"kind": "routing", "ref": "1:track:1"})).await;
+    assert_eq!(routing["sends"], json!([{"destination": "Bus 1", "level": -6.0, "sendRef": "1:send:1.1", "slot": 1}]));
+    // Keys to the same bus: Aux 1 takes it, so Logic makes none.
+    let (keys, made) = lab.make("send-add", json!({"ref": "1:track:2", "bus": "Bus 1", "volumeDb": -12}), "a3").await;
+    assert_eq!(
+        (keys["display"]["level"].clone(), made["created"].clone(), made["applied"]["level"].clone()),
+        (json!("−12"), json!({"ref": "1:send:2.1", "kind": "send", "bus": 1}), json!(-12.0))
+    );
+    for (input, words) in [
+        (json!({"ref": "1:output:1", "bus": 2}), "a send goes from a track's strip: an output has none"),
+        (json!({"ref": "1:track:1", "bus": 65}), "bus (or toRef) must name a bus from 1 to 64"),
+        (json!({"ref": "1:track:1", "bus": 2, "mode": "pre-fader"}), "which Kumi can't read back: leave mode out"),
+        (json!({"ref": "1:track:1", "bus": 2, "volumeDb": 7}), "volumeDb must be at most 6"),
+    ] {
+        let refused = lab.try_preview("send-add", input.clone()).await;
+        assert!(refused_with(&refused, words), "{input}: {}", refused.0);
+    }
+    // Removed: back through Logic's own undo while on top; with a step on top, made again by value at its level.
+    let (remove, removed) = lab.make("send-remove", json!({"ref": "1:send:2.1"}), "a4").await;
+    assert_eq!(
+        (remove["prior"].clone(), remove["display"]["title"].clone()),
+        (json!({"destination": "Bus 1", "level": -12.0, "slot": 1}), json!("Removed the send from “Keys” to Bus 1"))
+    );
+    assert_eq!(
+        (removed["applied"].clone(), removed["undo"]["title"].clone()),
+        (json!({"removed": true, "sends": []}), json!("Undo Change Send in Channel Strip"))
+    );
+    let (back, is_error) = lab.undo(&remove, "u1", false).await;
+    assert!(!is_error && back["restored"] == json!({"destination": "Bus 1", "pressed": "Undo Change Send in Channel Strip"}), "{back}");
+    assert_eq!(lab.script.sends(2), [("Bus 1".to_string(), -12.0)]);
+    let (remove, _) = lab.make("send-remove", json!({"ref": "1:send:2.1"}), "a5").await;
+    lab.make("fx-add", json!({"ref": "1:track:1", "name": "Gain"}), "a6").await;
+    let (again, _) = lab.undo(&remove, "u2", false).await;
+    assert_eq!(
+        (again["restored"].clone(), again["display"]["note"].clone()),
+        (json!({"destination": "Bus 1", "ref": "1:send:2.1"}), json!("Put back by value: Logic Pro's own undo had other steps on top."))
+    );
+    assert_eq!(lab.script.sends(2), [("Bus 1".to_string(), -12.0)]);
+    // Vocal's level back by value, and its send taken away by value (a step on top): the aux stays in the Mixer.
+    lab.undo(&level, "u3", false).await;
+    assert_eq!(lab.script.sends(1), [("Bus 1".to_string(), -96.0)]);
+    let (gone, _) = lab.undo(&add, "u4", false).await;
+    assert_eq!(
+        (gone["restored"].clone(), gone["display"]["note"].clone()),
+        (json!({"removed": "1:send:1.1"}), json!("The aux “Aux 1” Logic Pro made for it stays in the Mixer."))
+    );
+    assert!(lab.script.sends(1).is_empty());
+    // Made and taken back at once: Logic's own undo, the aux it made with it.
+    let (bus2, made) = lab.make("send-add", json!({"ref": "1:track:1", "bus": 2, "volumeDb": 0}), "a7").await;
+    assert_eq!((made["created"]["aux"].clone(), made["applied"]["level"].clone()), (json!("Aux 2"), json!(0.0)));
+    let (gone, _) = lab.undo(&bus2, "u5", false).await;
+    assert_eq!(
+        (gone["restored"]["pressed"].clone(), gone["display"]["note"].clone()),
+        (json!("Undo Change Send in Channel Strip"), json!("Taken back with Logic Pro's own undo, with the aux it made."))
+    );
+    assert_eq!(lab.script.auxes(), ["Aux 1"]);
+    assert_eq!(lab.script.epoch(), 1, "sends never move the epoch");
+    lab.simulator.stop();
+}
+
+/// (M4b) A patch from the Library and the Smart Controls, as the bridge's `change-smart-control-set` and
+/// `change-patch-load` scenes: Keys plays Studio Grand, whose Smart Controls read as the pane shows them and turn (no
+/// step of Logic's undo; back by value); a patch loaded through the Library's search replaces the whole strip and comes
+/// back only through Logic's own undo while on top, else Kumi says it can't; the Library shows a track the patches of
+/// its kind.
+#[tokio::test]
+async fn a_patch_loads_from_the_library_its_smart_controls_turn_and_only_logics_own_undo_takes_it_back() {
+    let mut lab = Lab::start().await;
+    let (smart, _) = lab.tool("read", json!({"kind": "smart", "parent": "1:track:2"})).await;
+    assert_eq!(
+        smart["items"][2],
+        json!({"index": 3, "name": "Comp", "ref": "1:smart:2.3", "text": "38%", "trackRef": "1:track:2", "value": 0.375})
+    );
+    let (turn, turned) = lab.make("smart-control-set", json!({"ref": "1:track:2", "control": 1, "value": 0.6}), "a1").await;
+    assert_eq!(
+        (turn["target"].clone(), turn["prior"].clone(), turn["display"]["title"].clone()),
+        (
+            json!({"ref": "1:smart:2.1", "kind": "smart", "track": "1:track:2"}),
+            json!({"name": "Tone", "value": 0.0, "text": "0%"}),
+            json!("“Keys”'s Smart Control “Tone” at 60%")
+        )
+    );
+    assert_eq!(
+        (turned["applied"].clone(), turned["display"]["title"].clone(), turned["undo"]["entry"].clone()),
+        (json!({"name": "Tone", "value": 0.6, "text": "60%"}), json!("“Keys”'s Smart Control “Tone” at 60%"), json!(false))
+    );
+    let (back, _) = lab.undo(&turn, "u1", false).await;
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (json!({"name": "Tone", "value": 0.0, "text": "0%"}), json!("“Keys”'s Smart Control “Tone” at 0% (put back)"))
+    );
+    for (input, words) in [
+        (
+            json!({"ref": "1:track:2", "control": "Nothing Here", "value": 0.5}),
+            "this track has no Smart Control named \"Nothing Here\": it has “Tone”, “Low Cut”, “Comp”, “Ratio”",
+        ),
+        (json!({"ref": "1:track:2", "control": 9, "value": 0.5}), "control must be a Smart Control's place from 1 to 4, or its name"),
+        (json!({"ref": "1:track:2", "control": 1, "value": 50}), "value must be a number from 0 to 1"),
+        (json!({"ref": "1:track:1", "control": 1, "value": 0.5}), "Logic Pro's Smart Controls pane shows no controls for this track"),
+    ] {
+        let refused = lab.try_preview("smart-control-set", input.clone()).await;
+        assert!(refused_with(&refused, words), "{input}: {}", refused.0);
+    }
+    let (refused, is_error) = lab.tool("read", json!({"kind": "smart"})).await;
+    assert!(is_error && refused["error"] == "smart: pass the parent track", "{refused}");
+
+    let (load, loaded) = lab.make("patch-load", json!({"ref": "1:track:2", "patch": "Piano/Steinway Grand Piano"}), "a2").await;
+    assert_eq!(
+        (load["prior"].clone(), load["display"]["title"].clone()),
+        (
+            json!({"patch": "Studio Grand", "plugins": ["Piano", "Channel EQ", "Compressor", "ChromaVerb"]}),
+            json!("Loaded the patch “Steinway Grand Piano” on “Keys”")
+        )
+    );
+    assert_eq!(
+        (loaded["applied"].clone(), loaded["undo"]["title"].clone()),
+        (json!({"patch": "Steinway Grand Piano", "plugins": ["Piano", "Channel EQ", "Space Designer"]}), json!("Undo Load Patch"))
+    );
+    assert_eq!(lab.script.smart(2).into_iter().map(|(name, _)| name).collect::<Vec<_>>(), ["Tone", "Room", "Reverb"]);
+    let (back, is_error) = lab.undo(&load, "u2", false).await;
+    assert!(!is_error && back["restored"]["pressed"] == "Undo Load Patch", "{back}");
+    assert_eq!(back["display"]["note"], "Put back with Logic Pro's own undo.");
+    assert_eq!(
+        (lab.script.patch(2).as_deref(), lab.script.plugins("track:2").len(), lab.script.smart(2)[2].1),
+        (Some("Studio Grand"), 4, 0.375)
+    );
+    // With a step on top, only Logic Pro's own undo (Cmd-Z) can.
+    let (load, _) = lab.make("patch-load", json!({"ref": "1:track:2", "patch": "Deep Sub Bass"}), "a3").await;
+    lab.make("fx-add", json!({"ref": "1:track:1", "name": "Gain"}), "a4").await;
+    let refused = lab.undo(&load, "u3", false).await;
+    assert!(refused_with(&refused, "Logic Pro's undo has other steps on top of the patch load"), "{}", refused.0);
+    assert_eq!(lab.script.patch(2).as_deref(), Some("Deep Sub Bass"));
+    // An audio track is shown the Library's audio patches.
+    let piano = lab.preview("patch-load", json!({"ref": "1:track:1", "patch": "Steinway Grand Piano"})).await;
+    let refused = lab.apply(&piano, "a5").await;
+    assert!(refused_with(&refused, "Logic Pro's Library finds no patch named “Steinway Grand Piano” for this track"), "{}", refused.0);
+    let (vocal, loaded) = lab.make("patch-load", json!({"ref": "1:track:1", "patch": "Classic Vocal"}), "a6").await;
+    assert_eq!(vocal["prior"], json!({"patch": "", "plugins": ["Channel EQ", "Gain"]}), "the Gain added above");
+    assert_eq!(
+        loaded["applied"],
+        json!({"patch": "Classic Vocal", "plugins": ["Channel EQ", "Compressor", "Channel EQ", "Tape Delay", "Spring Box"]})
+    );
+    assert_eq!(lab.script.epoch(), 1, "a patch never moves the epoch");
+    lab.simulator.stop();
+}
+
+/// (M4b) Automation through the Track Automation Event List, as the bridge's `change-automation-add` and
+/// `change-automation-edit` scenes: Volume events written on Vocal on whole beats (the change fences the track's whole
+/// automation and answers the events it made and removed), read a row per parameter with its number, changed (an event
+/// taken out and made again) and deleted by their index among the parameter's events, each put back by value; what the
+/// list names no parameter for, a position off the beat, a value past 127 and an index past the events refused.
+#[tokio::test]
+async fn automation_events_go_in_change_and_come_out_through_the_track_automation_event_list() {
+    let mut lab = Lab::start().await;
+    let events = json!([{"positionBeats": 0, "value": 90}, {"positionBeats": 4, "value": 60}]);
+    let (add, added) = lab.make("automation-add", json!({"ref": "1:track:1", "parameter": "Volume", "events": events}), "a1").await;
+    assert_eq!(
+        (add["target"].clone(), add["prior"].clone(), add["display"]["title"].clone()),
+        (json!({"ref": "1:track:1", "kind": "track"}), json!({"events": []}), json!("Wrote 2 Volume automation events on “Vocal”"))
+    );
+    let made = json!([
+        {"positionBeats": 0.0, "value": 90, "number": 7, "parameter": "Volume"},
+        {"positionBeats": 4.0, "value": 60, "number": 7, "parameter": "Volume"}
+    ]);
+    assert_eq!(
+        (added["applied"].clone(), added["undo"]["title"].clone()),
+        (json!({"made": made, "removed": [], "events": made}), json!("Undo Value Change"))
+    );
+    let (lanes, _) = lab.tool("read", json!({"kind": "automation", "parent": "1:track:1"})).await;
+    assert_eq!(
+        lanes["items"],
+        json!([{"events": [{"positionBeats": 0.0, "value": 90}, {"positionBeats": 4.0, "value": 60}], "index": 1, "number": 7, "parameter": "Volume", "ref": "1:automation:1.1", "trackRef": "1:track:1"}])
+    );
+    let (one, _) = lab.tool("read", json!({"ref": "1:automation:1.1"})).await;
+    assert_eq!(one["items"][0]["number"], 7);
+    let (pan, _) =
+        lab.make("automation-add", json!({"ref": "1:track:2", "parameter": 10, "events": [{"positionBeats": 4, "value": 64}]}), "a2").await;
+    assert_eq!(pan["display"]["title"], "Wrote 1 parameter 10 automation event on “Keys”");
+    let (change, changed) = lab
+        .make(
+            "automation-change",
+            json!({"ref": "1:track:1", "parameter": "Volume", "changes": [{"index": 1, "value": 100, "positionBeats": 8}]}),
+            "a3",
+        )
+        .await;
+    assert_eq!(
+        (change["display"]["title"].clone(), changed["applied"]["made"].clone(), changed["applied"]["removed"].clone()),
+        (
+            json!("Changed 1 Volume automation event on “Vocal”"),
+            json!([{"positionBeats": 8.0, "value": 100, "number": 7, "parameter": "Volume"}]),
+            json!([{"positionBeats": 4.0, "value": 60, "number": 7, "parameter": "Volume"}])
+        )
+    );
+    assert_eq!(lab.script.automation(1, "Volume"), [(0.0, 90), (8.0, 100)]);
+    let (back, _) = lab.undo(&change, "u1", false).await;
+    assert_eq!(back["display"]["title"], "“Vocal”'s automation put back");
+    assert_eq!(lab.script.automation(1, "Volume"), [(0.0, 90), (4.0, 60)]);
+    let (delete, deleted) = lab.make("automation-delete", json!({"ref": "1:track:1", "parameter": "Volume", "indexes": [0]}), "a4").await;
+    assert_eq!(
+        (delete["display"]["title"].clone(), deleted["undo"]["title"].clone()),
+        (json!("Deleted 1 Volume automation event on “Vocal”"), json!("Undo Delete"))
+    );
+    assert_eq!(lab.script.automation(1, "Volume"), [(4.0, 60)]);
+    for (kind, input, words) in [
+        (
+            "automation-add",
+            json!({"ref": "1:track:1", "parameter": "Volume", "events": [{"positionBeats": 1.5, "value": 90}]}),
+            "Logic Pro's playhead display places an automation event on a beat: give whole beats",
+        ),
+        (
+            "automation-add",
+            json!({"ref": "1:track:1", "parameter": "Volume", "events": [{"positionBeats": 4, "value": 128}]}),
+            "every event needs a value from 0 to 127",
+        ),
+        (
+            "automation-change",
+            json!({"ref": "1:track:1", "parameter": "Volume", "changes": [{"index": 5, "value": 0}]}),
+            "every index must be the place of an event of that parameter, from 0 (it has 1)",
+        ),
+        ("automation-delete", json!({"ref": "1:track:1", "parameter": "Volume", "indexes": [0, 0]}), "an event is named twice"),
+    ] {
+        let refused = lab.try_preview(kind, input.clone()).await;
+        assert!(refused_with(&refused, words), "{input}: {}", refused.0);
+    }
+    let brightness = lab
+        .preview("automation-add", json!({"ref": "1:track:1", "parameter": "Brightness", "events": [{"positionBeats": 0, "value": 1}]}))
+        .await;
+    let refused = lab.apply(&brightness, "a5").await;
+    assert!(refused_with(&refused, "no automation parameter of this track is named “Brightness”"), "{}", refused.0);
+    for (change, key) in [(&delete, "u2"), (&pan, "u3"), (&add, "u4")] {
+        let (undone, is_error) = lab.undo(change, key, false).await;
+        assert!(!is_error && undone["state"] == "undone", "{undone}");
+    }
+    assert!(lab.script.automation(1, "Volume").is_empty() && lab.script.automation(2, "Pan").is_empty());
+    let (lanes, _) = lab.tool("read", json!({"kind": "automation", "parent": "1:track:1"})).await;
+    assert_eq!(lanes["total"], 0);
+    assert_eq!(lab.script.epoch(), 1, "automation never moves the epoch");
+    lab.simulator.stop();
+}
+
+/// (M4b) A bounce and the tracks exported are no change, as the bridge's `bounce.rs` makes them (its `change-bounce`
+/// and `change-export-tracks` scenes): the bounce writes the range (through the Tempo List) at the path given in the
+/// format asked (24-bit WAV by default, its header as long as Logic's) and answers what the file's header says; the
+/// export writes a file for each track with sound, named by number, into the folder given and lists the files it wrote;
+/// never over a file, never into a folder that isn't there, and the epoch is checked as every call's is. The host
+/// titles each for HISTORY. Nothing is journaled and Logic's history takes no step.
+#[tokio::test]
+async fn a_bounce_and_an_export_write_audio_files_and_change_nothing() {
+    let mut lab = Lab::start().await;
+    let files = tempfile::tempdir().unwrap();
+    let path = files.path().join("Scratch bars 1 to 5.wav").to_string_lossy().into_owned();
+    let (bounced, is_error) = lab.tool("bounce", json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": path})).await;
+    assert!(!is_error, "{bounced}");
+    assert_eq!(
+        bounced,
+        json!({
+            "epoch": "1", "bounced": path, "format": "wav24", "bytes": 1_589_820, "seconds": 6.0, "rate": 44100, "channels": 2,
+            "bits": 24, "startBeats": 0.0, "endBeats": 16.0, "display": {"title": "Bounced “Scratch bars 1 to 5.wav” (6.0 s)"},
+        })
+    );
+    let written = std::fs::read(&path).unwrap();
+    assert_eq!((written.len(), &written[..4], &written[8..12]), (1_589_820, &b"RIFF"[..], &b"WAVE"[..]));
+    assert!(lab.script.undo_titles().is_empty(), "no step of Logic's undo");
+    let aiff = files.path().join("Scratch.aif").to_string_lossy().into_owned();
+    let (bounced, _) = lab.tool("bounce", json!({"epoch": "1", "startBeats": 0, "endBeats": 4, "path": aiff, "format": "aiff24"})).await;
+    assert_eq!((bounced["format"].clone(), bounced["seconds"].clone(), bounced["bits"].clone()), (json!("aiff24"), json!(1.5), json!(24)));
+    let header = std::fs::read(&aiff).unwrap();
+    assert_eq!((&header[..4], &header[8..16]), (&b"FORM"[..], &b"AIFFCOMM"[..]));
+    let missing = files.path().join("not there").join("x.wav").to_string_lossy().into_owned();
+    for (arguments, words) in [
+        (json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": path}), "is there already: Kumi never writes over a file"),
+        (
+            json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": missing}),
+            "isn't there (or Kumi can't see it); Kumi makes no folders",
+        ),
+        (json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": "x.wav"}), "path must be a whole path"),
+        (json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": path.replace(".wav", ".aiff")}), "path must end in .wav for wav24"),
+        (
+            json!({"epoch": "1", "startBeats": 0, "endBeats": 16, "path": path, "format": "mp3"}),
+            "format must be one of wav24, wav16, wav32f, aiff24",
+        ),
+        (json!({"epoch": "1", "startBeats": 16, "endBeats": 16, "path": path}), "endBeats must be after startBeats"),
+    ] {
+        let refused = lab.tool("bounce", arguments.clone()).await;
+        assert!(refused_with(&refused, words) && refused.0["code"] == "bad-params", "{arguments}: {}", refused.0);
+    }
+    let (stale, is_error) = lab.tool("bounce", json!({"epoch": "0", "startBeats": 0, "endBeats": 16, "path": path})).await;
+    assert!(is_error && stale["code"] == "stale", "{stale}");
+
+    let folder = files.path().join("tracks");
+    std::fs::create_dir(&folder).unwrap();
+    let folder = folder.to_string_lossy().into_owned();
+    let (exported, is_error) = lab.tool("export_tracks", json!({"epoch": "1", "path": folder})).await;
+    assert!(!is_error, "{exported}");
+    assert_eq!(
+        exported,
+        json!({"epoch": "1", "folder": folder, "files": [{"name": "01.wav", "bytes": 1_589_820, "seconds": 6.0}],
+            "display": {"title": "Exported 1 audio file into “tracks”"}}),
+        "Vocal, with no region, writes none"
+    );
+    let (again, _) = lab.tool("export_tracks", json!({"epoch": "1", "path": folder})).await;
+    assert_eq!(again["files"][0]["name"], "02.wav", "never over a file");
+    let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
+    assert_eq!(released["released"], 0, "nothing is kept for undo");
     lab.simulator.stop();
 }

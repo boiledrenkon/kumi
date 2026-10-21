@@ -73,11 +73,29 @@ pub fn kinds(daw: Daw) -> Kinds {
             ],
         },
         Daw::Logic => Kinds {
-            read: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo"],
+            // (M4b) a plug-in's parameters as its window's Controls View lists them, a track's Smart Controls and its
+            // automation, as the bridge's `read.rs` takes them (the Stereo Out's plug-ins are `plugin` rows under
+            // `<epoch>:output:1`)
+            read: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"],
             bodies: &["tree", "notes", "timeline", "routing"],
             // Logic keeps no step of its history for a mixer move, the tempo or a bypass (the M3 lab), nor for the cycle
-            // range (M4): those are put back by value, never by Logic's own undo.
-            outside_undo: &["track-volume", "track-pan", "track-mute", "track-solo", "track-arm", "tempo-set", "fx-bypass", "loop-range"],
+            // range (M4), nor (M4b) for a plug-in's parameter or setting (steps of the plug-in window's own undo), a Smart
+            // Control or a send's level: those are put back by Kumi, never by Logic's own undo.
+            outside_undo: &[
+                "track-volume",
+                "track-pan",
+                "track-mute",
+                "track-solo",
+                "track-arm",
+                "tempo-set",
+                "fx-bypass",
+                "loop-range",
+                "fx-param",
+                "fx-params",
+                "fx-preset",
+                "smart-control-set",
+                "send-volume",
+            ],
         },
     }
 }
@@ -372,5 +390,7 @@ mod tests {
     fn each_daw_has_its_own_kinds() {
         assert!(kinds(Daw::Reaper).read.contains(&"envelope") && !kinds(Daw::Reaper).read.contains(&"pattern"));
         assert!(kinds(Daw::Renoise).bodies.contains(&"matrix") && !kinds(Daw::Renoise).bodies.contains(&"arrange"));
+        assert!(["param", "smart", "automation"].iter().all(|kind| kinds(Daw::Logic).read.contains(kind)));
+        assert!(!kinds(Daw::Logic).read.contains(&"strip"), "the bridge reads no strip kind: the Stereo Out is output:1");
     }
 }

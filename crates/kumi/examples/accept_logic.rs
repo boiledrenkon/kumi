@@ -10,12 +10,17 @@
 //! so the recorded one stays as it was), a key command Logic keeps no step of (no row) and one it does (a marker, whose
 //! row only Logic's own undo takes back: taken away through Kumi by its deletion), a region split and its undo, a MIDI
 //! import of 64 notes read back and undone, the cycle set and cleared, a tempo change set and deleted in the Tempo
-//! List, each read back, and everything it made undone through Kumi at the end, with the times.
+//! List, each read back, and everything it made undone through Kumi at the end, with the times. M4 (the second slice):
+//! the Mixer's strips, a plug-in's parameters, a track's Smart Controls and automation read; a Gain inserted on the
+//! Stereo Out and its gain set through the plug-in window's Controls View, read back as a parameter; a send from track 1
+//! to a bus nothing takes (Logic makes an aux for it); a patch from the Library loaded on a software instrument track
+//! (`--patch` names it, "Piano/Steinway Grand Piano" by default); a bounce of bars 1 to 5 under the `--files` folder,
+//! found on disk with its length and deleted after; each undone or taken away, and the project read as before.
 //! It leaves the project as it found it: every change it makes is undone before it ends (the operator's own steps of
 //! M2 aside). It prints a Markdown summary for docs/evidence/ at the end (and writes it to --report, when given). The
 //! bridge must be set up in the home (`kumi --daw logic bridge`) and Accessibility allowed; build the host first:
 //!   cargo build --release -p daw-mcp-server --bins
-//!   cargo run --release -p kumi --example accept_logic -- [--kumi-home <dir>] [--files <dir>] [--report <file>] [--no-operator]
+//!   cargo run --release -p kumi --example accept_logic -- [--kumi-home <dir>] [--files <dir>] [--patch <path>] [--report <file>] [--no-operator]
 use futures::FutureExt;
 use kumi_common::{
     abort::{self, Signal},
@@ -52,13 +57,15 @@ const FOCUS_LIMIT_MS: f64 = 150.0;
 const FOCUS_CALLS: usize = 50;
 /// How long each step with the operator waits for them.
 const OPERATOR_MS: u64 = 90_000;
+/// (M4b) The Library's patch the run loads on a software instrument track, unless `--patch` names another.
+const PATCH: &str = "Piano/Steinway Grand Piano";
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let after = |flag: &str| argv.iter().position(|arg| arg == flag).and_then(|at| argv.get(at + 1)).cloned();
     if argv.iter().any(|arg| arg == "--help" || arg == "-h") {
         eprintln!(
-            "cargo run --release -p kumi --example accept_logic -- [--kumi-home <dir>] [--files <dir>] [--report <file>] [--no-operator]"
+            "cargo run --release -p kumi --example accept_logic -- [--kumi-home <dir>] [--files <dir>] [--patch <path>] [--report <file>] [--no-operator]"
         );
         std::process::exit(2);
     }
@@ -67,6 +74,8 @@ fn main() {
     let report = after("--report").map(PathBuf::from);
     // The folder the save as goes under (M4): never the recorded project's own folder.
     let files = after("--files").map(PathBuf::from);
+    // The Library's patch the second slice loads (M4b).
+    let patch = after("--patch").unwrap_or_else(|| PATCH.to_string());
     let operator = !argv.iter().any(|arg| arg == "--no-operator");
     let (host, build) = host_program();
     if !host.is_file() {
@@ -81,7 +90,7 @@ fn main() {
         }
     };
     let local = tokio::task::LocalSet::new();
-    let code = local.block_on(&runtime, accept_logic(kumi_home, host, operator, report, files));
+    let code = local.block_on(&runtime, accept_logic(kumi_home, host, operator, report, files, patch));
     std::process::exit(code);
 }
 
@@ -142,6 +151,8 @@ struct Accept {
     changes: Rc<RefCell<Vec<ChangeRecord>>>,
     /// Where the save as of M4 writes its copy, when the run was given a folder.
     files: Option<PathBuf>,
+    /// (M4b) The Library's patch the run loads.
+    patch: String,
 }
 
 fn signal() -> Signal {
@@ -182,6 +193,36 @@ fn state_word(state: ChangeState) -> &'static str {
     }
 }
 
+/// (M4b) The ref a change made, from its tool's text: a change tool's own answer names it as `ref`, a plan's as its first
+/// step's.
+fn made_ref(text: &str) -> Option<String> {
+    let answer: Value = serde_json::from_str(text).ok()?;
+    answer["ref"].as_str().or_else(|| answer["done"][0]["ref"].as_str()).map(str::to_owned)
+}
+
+/// (M4b) A WAV file's length in seconds, from its header (its format chunk and the size of its data chunk).
+fn wav_seconds(path: &Path) -> Option<f64> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let (mut at, mut rate, mut block) = (12usize, 0u32, 0u16);
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().ok()?) as usize;
+        let body = at + 8;
+        if id == b"fmt " && body + 14 <= bytes.len() {
+            rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
+            block = u16::from_le_bytes(bytes[body + 12..body + 14].try_into().ok()?);
+        }
+        if id == b"data" {
+            return (rate > 0 && block > 0).then(|| size as f64 / f64::from(rate) / f64::from(block));
+        }
+        at = body + size + size % 2;
+    }
+    None
+}
+
 /// The JSON a tool answered with, from its text blocks.
 fn body_of(result: &CallToolResult) -> Value {
     let text = result
@@ -196,7 +237,14 @@ fn body_of(result: &CallToolResult) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::String(text))
 }
 
-async fn accept_logic(kumi_home: PathBuf, host: PathBuf, operator: bool, report: Option<PathBuf>, files: Option<PathBuf>) -> i32 {
+async fn accept_logic(
+    kumi_home: PathBuf,
+    host: PathBuf,
+    operator: bool,
+    report: Option<PathBuf>,
+    files: Option<PathBuf>,
+    patch: String,
+) -> i32 {
     let stopping = Rc::new(Cell::new(false));
     tokio::task::spawn_local({
         let stopping = stopping.clone();
@@ -262,6 +310,7 @@ async fn accept_logic(kumi_home: PathBuf, host: PathBuf, operator: bool, report:
         status: RefCell::new(Value::Null),
         changes,
         files,
+        patch,
     };
     let code = accept.accept().await.unwrap_or_else(|error| {
         eprintln!("accept-logic: {}", short(&error.message(), 300));
@@ -496,6 +545,11 @@ impl Accept {
         }
         println!("\nM4: a save as, key commands, a region split, a MIDI import, the cycle and the Tempo List, each undone");
         self.m4_kinds().await?;
+        if self.stopping.get() {
+            return Ok(self.exit_code());
+        }
+        println!("\nM4, the second slice: a Gain on the Stereo Out, a send to a new bus, a patch, a bounce, each undone");
+        self.m4b_kinds().await?;
         if !self.operator || self.stopping.get() {
             println!("\n(the steps with an operator at Logic Pro were skipped)");
             return Ok(self.exit_code());
@@ -1181,6 +1235,248 @@ impl Accept {
             &format!(
                 "the project reads as before M4: {tracks_now} tracks, {} regions, {} markers (before: {} tracks, {} regions, {} markers)",
                 after.1, after.2, before.0, before.1, before.2
+            ),
+        );
+        Ok(())
+    }
+
+    /// The rows of a read through the turn's read tool (short refs), or none when it failed.
+    async fn rows(&self, read: &Rc<dyn kumi_runtime::core::contracts::KernelTool>, input: Value) -> Result<Vec<Value>, RuntimeError> {
+        let result = read.execute(input.as_object().cloned().unwrap_or_default(), signal()).await?;
+        let page: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
+        Ok(if result.is_error { vec![] } else { page["items"].as_array().cloned().unwrap_or_default() })
+    }
+
+    /// M4, the second slice: a track's Smart Controls and automation read; a Gain inserted on the Stereo Out (which the
+    /// observation's outputs name: no read lists it) and its gain set through the plug-in window's Controls View, read
+    /// back as a parameter; a send from track 1 to a bus nothing takes (Logic makes an aux for it, which the answer
+    /// names); a patch from the Library on the first software instrument track; a bounce of bars 1 to 5 under the folder
+    /// the run was given, found on disk with its length and deleted after; then everything it made undone through Kumi,
+    /// last first, and the project read as before.
+    async fn m4b_kinds(&self) -> Result<(), RuntimeError> {
+        let observation = self.observe().await?;
+        let (Some(undo), Some(read)) = (tool_named(&observation, "undo_change"), tool_named(&observation, "logic_read")) else {
+            self.say(false, None, "M4b: no undo_change and logic_read tools");
+            return Ok(());
+        };
+        let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
+        let tracks = context["tracks"].as_array().cloned().unwrap_or_default();
+        let heard = self.changes.borrow().len();
+
+        // The new reads: the first track's Smart Controls and automation.
+        if let Some(first) = tracks.first().and_then(|track| track["ref"].as_str()) {
+            for kind in ["smart", "automation"] {
+                let t0 = perf_now();
+                let result =
+                    read.execute(json!({"kind": kind, "parent": first}).as_object().cloned().unwrap_or_default(), signal()).await?;
+                let page: Value = serde_json::from_str(&result.text).unwrap_or(Value::Null);
+                let what = if result.is_error {
+                    format!("read {kind}: {}", short(&result.text, 200))
+                } else {
+                    format!("read {kind} of track 1: {} rows", page["total"])
+                };
+                self.say(!result.is_error, Some(perf_now() - t0), &what);
+            }
+        }
+
+        // A Gain at the end of the Stereo Out, its gain set to -3 dB through the Controls View and read back as a
+        // parameter.
+        let stereo_out = context["outputs"].as_array().into_iter().flatten().find(|output| output["name"] == "Stereo Out").cloned();
+        let mut output_plugins = 0;
+        match stereo_out.as_ref().and_then(|output| output["ref"].as_str().map(str::to_owned)) {
+            None => self.say(
+                false,
+                None,
+                &format!("a Gain on the Stereo Out: the observation names no Stereo Out ({})", short(&context["outputs"].to_string(), 120)),
+            ),
+            Some(stereo_out) => {
+                output_plugins = self.rows(&read, json!({"kind": "plugin", "parent": stereo_out, "limit": 200})).await?.len();
+                let t0 = perf_now();
+                let (is_error, text) = self.run_tool(&observation, "fx_add", json!({"ref": stereo_out, "name": "Gain"})).await?;
+                let gain = made_ref(&text);
+                self.say(
+                    !is_error && gain.is_some(),
+                    Some(perf_now() - t0),
+                    &if is_error {
+                        format!("a Gain on the Stereo Out ({stereo_out}): {}", short(&text, 200))
+                    } else {
+                        format!("a Gain inserted on the Stereo Out ({stereo_out}): {}", gain.as_deref().unwrap_or("no ref"))
+                    },
+                );
+                if let Some(gain) = gain {
+                    let t0 = perf_now();
+                    let (is_error, text) =
+                        self.run_tool(&observation, "fx_param", json!({"ref": gain, "param": "Gain", "value": -3})).await?;
+                    let ms = perf_now() - t0;
+                    let params = self.rows(&read, json!({"kind": "param", "parent": gain, "limit": 200})).await?;
+                    let row = params.iter().find(|row| row["name"] == "Gain").cloned().unwrap_or(Value::Null);
+                    let reads = row["text"].as_str().map(|text| text.replace('\u{2212}', "-"));
+                    let db = reads
+                        .as_deref()
+                        .and_then(|text| text.split_whitespace().next())
+                        .and_then(|n| n.trim_start_matches('+').parse::<f64>().ok());
+                    let what = if is_error {
+                        format!("its Gain set to -3 dB: {}", short(&text, 200))
+                    } else {
+                        format!(
+                            "its Gain set to -3 dB: the Controls View reads {} ({} parameters read)",
+                            reads.as_deref().unwrap_or("nothing"),
+                            params.len()
+                        )
+                    };
+                    self.say(!is_error && db.is_some_and(|db| (db + 3.0).abs() < 0.05), Some(ms), &what);
+                }
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // A send from track 1 to the lowest bus nothing on the tracks takes (a summing stack's, track 1's sends): Logic
+        // makes an aux for a bus nothing takes, which the answer names.
+        match tracks.first().and_then(|track| track["ref"].as_str().map(str::to_owned)) {
+            None => self.say(false, None, "a send: the project has no track"),
+            Some(first) => {
+                let sends_before = self.rows(&read, json!({"kind": "send", "parent": first})).await?;
+                let taken: Vec<String> = tracks
+                    .iter()
+                    .flat_map(|row| row["inputs"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|input| input.as_str().map(str::to_owned))
+                    .chain(sends_before.iter().filter_map(|send| send["destination"].as_str().map(str::to_owned)))
+                    .collect();
+                let bus = (1..=64).find(|bus| !taken.contains(&format!("Bus {bus}"))).unwrap_or(1);
+                let t0 = perf_now();
+                let (is_error, text) = self.run_tool(&observation, "send_add", json!({"ref": first, "bus": bus, "volumeDb": -12})).await?;
+                let ms = perf_now() - t0;
+                let look = self.observe().await?;
+                let first_now = serde_json::from_str::<Value>(&look.context)
+                    .ok()
+                    .and_then(|context| context["tracks"][0]["ref"].as_str().map(str::to_owned));
+                let sends = match (&first_now, tool_named(&look, "logic_read")) {
+                    (Some(first_now), Some(read)) => self.rows(&read, json!({"kind": "send", "parent": first_now})).await?,
+                    _ => vec![],
+                };
+                let made = sends.iter().find(|send| send["destination"] == format!("Bus {bus}").as_str()).cloned();
+                let aux = text.contains("made the aux");
+                let what = if is_error {
+                    format!("a send from track 1 to Bus {bus}: {}", short(&text, 200))
+                } else {
+                    format!(
+                        "a send from track 1 to Bus {bus} at -12 dB: {} send(s) on track 1, this one at {} dB{}",
+                        sends.len(),
+                        made.as_ref().map_or("?".into(), |send| send["level"].to_string()),
+                        if aux { " (Logic Pro made an aux for the bus)" } else { "" }
+                    )
+                };
+                self.say(
+                    !is_error && made.is_some_and(|send| send["level"].as_f64().is_some_and(|db| (db + 12.0).abs() < 0.55)),
+                    Some(ms),
+                    &what,
+                );
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // A patch from the Library on the first software instrument track, its strip read back.
+        let look = self.observe().await?;
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let instrument = context["tracks"].as_array().into_iter().flatten().find(|track| track["kind"] == "instrument").cloned();
+        match instrument {
+            None => self.say(false, None, "a patch: no software instrument track to load it on"),
+            Some(track) => {
+                let name = track["name"].as_str().unwrap_or("?").to_owned();
+                let t0 = perf_now();
+                let (is_error, text) = self.run_tool(&look, "patch_load", json!({"ref": track["ref"], "patch": self.patch})).await?;
+                let ms = perf_now() - t0;
+                let plugins = match tool_named(&look, "logic_read") {
+                    Some(read) => self.rows(&read, json!({"kind": "plugin", "parent": track["ref"]})).await?,
+                    None => vec![],
+                };
+                let names: Vec<&str> = plugins.iter().filter_map(|row| row["name"].as_str()).collect();
+                let what = if is_error {
+                    format!("patch {} on “{name}”: {}", self.patch, short(&text, 200))
+                } else {
+                    format!(
+                        "patch {} on “{name}”: the strip holds {}",
+                        self.patch,
+                        if names.is_empty() { "nothing".into() } else { names.join(", ") }
+                    )
+                };
+                self.say(!is_error && !names.is_empty(), Some(ms), &what);
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+
+        // A bounce of bars 1 to 5 under the folder given: found on disk, its length the range's, then deleted.
+        match &self.files {
+            None => self.say(true, None, "bounce: skipped (no --files folder was given)"),
+            Some(folder) => {
+                let _ = std::fs::create_dir_all(folder);
+                let name = self.status.borrow()["project"]["name"].as_str().unwrap_or("Project").to_owned();
+                let path = folder.join(format!("{name} Kumi M4b bars 1 to 5 {}.wav", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
+                let bpm = context["project"]["tempo"].as_f64().unwrap_or(120.0);
+                let expected = 16.0 * 60.0 / bpm;
+                let rows = self.changes.borrow().len();
+                let t0 = perf_now();
+                let (is_error, text) =
+                    self.run_tool(&look, "bounce", json!({"startBeats": 0, "endBeats": 16, "path": path.to_string_lossy()})).await?;
+                let ms = perf_now() - t0;
+                let seconds = wav_seconds(&path);
+                let no_row = self.changes.borrow().len() == rows;
+                let what = if is_error {
+                    format!("bounce of bars 1 to 5: {}", short(&text, 200))
+                } else {
+                    format!(
+                        "bounce of bars 1 to 5: {} found, {} s long ({expected:.2} s at {bpm} BPM), {}",
+                        path.display(),
+                        seconds.map(|s| format!("{s:.2}")).unwrap_or_else(|| "not".into()),
+                        if no_row { "no row" } else { "a row was made" }
+                    )
+                };
+                self.say(!is_error && no_row && seconds.is_some_and(|s| (s - expected).abs() < 0.05), Some(ms), &what);
+                if std::fs::remove_file(&path).is_ok() {
+                    println!("        (the bounce is deleted, checked)");
+                }
+            }
+        }
+
+        // Everything the second slice made, undone through Kumi, last first: the patch (through Logic's own undo, its
+        // step on top), the send (its aux with it, through Logic's own undo once the patch's step is off), the gain and
+        // the Gain.
+        let mut ids: Vec<String> = Vec::new();
+        for record in self.changes.borrow()[heard..].iter() {
+            if !ids.contains(&record.id) {
+                ids.push(record.id.clone());
+            }
+        }
+        for id in ids.iter().rev() {
+            let Some(row) = self.change(id) else { continue };
+            if !matches!(row.state, ChangeState::Applied | ChangeState::Unsure) {
+                continue;
+            }
+            let t0 = perf_now();
+            let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+            let what = if undone { "undone".to_string() } else { short(&result.text, 200) };
+            self.say(undone, Some(perf_now() - t0), &format!("undo “{}”: {what}", row.title));
+        }
+        let look = self.observe().await?;
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let tracks_now = context["tracks"].as_array().map(Vec::len).unwrap_or(0);
+        let output_plugins_now = match (context["outputs"][0]["ref"].as_str(), tool_named(&look, "logic_read")) {
+            (Some(stereo_out), Some(read)) => self.rows(&read, json!({"kind": "plugin", "parent": stereo_out, "limit": 200})).await?.len(),
+            _ => 0,
+        };
+        self.say(
+            output_plugins_now == output_plugins && tracks_now == tracks.len(),
+            None,
+            &format!(
+                "the project reads as before the second slice: {tracks_now} tracks, {output_plugins_now} plug-ins on the Stereo Out (before: {} tracks, {output_plugins})",
+                tracks.len()
             ),
         );
         Ok(())

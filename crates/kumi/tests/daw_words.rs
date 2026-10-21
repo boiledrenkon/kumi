@@ -258,7 +258,7 @@ case!(a_logic_session_never_speaks_lives_words, async {
         "Cycle bar 5",
         "Kumi closed. Each project's conversation continues next time.",
     ];
-    // (M4) HISTORY's rows for Logic's first M4 slice: a key command only Logic's own undo takes back (kept, in Logic's
+    // (M4, M4b) HISTORY's rows for Logic's two M4 slices: a key command only Logic's own undo takes back (kept, in Logic's
     // words), a split past Kumi's undo (no undo), an import whose undo Logic didn't finish (unsure, Logic's words
     // leading), and the cycle, which Logic's own undo never takes back.
     let history = vec![
@@ -266,6 +266,28 @@ case!(a_logic_session_never_speaks_lives_words, async {
         json!({"id":"c4","family":"clip","title":"Split region “Keys” at bar 3","state":"expired","note":"Kumi no longer holds this change for its undo; Logic Pro's own undo (Cmd-Z in Logic Pro) may.","at":4}),
         json!({"id":"c5","family":"clip","title":"Imported 64 notes on “Keys” at bar 9","state":"unsure","note":"Kumi's undo didn't finish: Logic Pro didn't answer after the change was sent: the helper didn't answer in time","at":5}),
         json!({"id":"c6","family":"locators","title":"Cycle bar 5 to bar 9","state":"applied","note":"Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can.","at":6}),
+    ];
+    tui_states(DawId::Logic, "Logic Pro — Night Drive", focuses.clone(), history)
+        .await
+        .saw(&seen.map(String::from))
+        .assert_none("Logic Pro");
+    // (M4b) HISTORY's rows for the second slice, in the bridge's titles: a Gain on the Stereo Out and its gain set (no
+    // step of Logic's undo), a send to a new bus undone, a patch only Logic's own undo takes back, kept, and Volume
+    // automation written.
+    // (the panel cuts a title at its width)
+    let seen = [
+        "Added “Gain” to “Stereo Out”",
+        "“Gain”'s Gain → -3.0 dB",
+        "Added send from “Vocal” to",
+        "Loaded the patch “Steinway",
+        "Wrote 3 Volume automation",
+    ];
+    let history = vec![
+        json!({"id":"c7","family":"device","title":"Added “Gain” to “Stereo Out”","state":"applied","at":7}),
+        json!({"id":"c8","family":"parameter","title":"“Gain”'s Gain → -3.0 dB on “Stereo Out”","state":"applied","note":"Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can.","at":8}),
+        json!({"id":"c9","family":"mixer","title":"Added send from “Vocal” to Bus 1","state":"undone","at":9}),
+        json!({"id":"c10","family":"device","title":"Loaded the patch “Steinway Grand Piano” on “Keys”","state":"kept","note":"Logic Pro's undo has other steps on top of the patch load, so Kumi can't put the strip back (a patch replaces the whole strip): Cmd-Z in Logic Pro can, step by step","at":10}),
+        json!({"id":"c11","family":"parameter","title":"Wrote 3 Volume automation events on “Vocal”","state":"applied","at":11}),
     ];
     tui_states(DawId::Logic, "Logic Pro — Night Drive", focuses, history).await.saw(&seen.map(String::from)).assert_none("Logic Pro");
 });

@@ -93,6 +93,46 @@ and migration checks do not replace a new real-Live acceptance run.
   on its screen). The M4 gate on this Mac, every check passed after six runs
   that each found something to fix, is recorded in
   `docs/evidence/logic-m4-gate-2026-10-21.md`.
+  M4, the second slice: Kumi's change set
+  declares plug-ins put on a channel strip and taken off it (`fx_add`,
+  `fx_delete`), their parameters set in the plug-in window's Controls View
+  (`fx_param`, `fx_params`) and their settings stepped with its buttons
+  (`fx_preset`), a patch from the Library (`patch_load`), sends (`send_add`,
+  which has Logic make an aux for a bus nothing takes, `send_remove`,
+  `send_volume`), Smart Controls (`smart_control_set`) and automation through
+  the Track Automation Event List (`automation_add`, `automation_change`,
+  `automation_delete`), with REAPER's tool names where the concept is the
+  same, and a bounce and an export as actions (`bounce`, `export_tracks`: the
+  host's tools of the same names, files written, no row, the host titling
+  what they wrote); the reads gain a plug-in's parameters (`param`), a track's
+  Smart Controls (`smart`) and automation (`automation`). The Stereo Out is
+  the bridge's `<epoch>:output:1`, which no read lists: Kumi names it in every
+  observation (`outputs`) and keeps its name when the epoch moves, so its
+  plug-ins are read with it as parent and a Gain goes on it. Logic's tools on
+  every request are REAPER's eight (`fx_add` and `fx_param` among them; a
+  split and an import are `make_changes` steps). The kinds follow the
+  bridge's second slice, whose shapes and recorded scenes they were checked
+  against (every scene replayed through the simulated Logic answers as Logic
+  did, but an export's length and what the producer's own Cmd-Z puts back).
+  The simulated Logic holds each strip's plug-ins (with their
+  Controls View rows and settings; Channel EQ, the Gain and Keys' Piano as
+  the scenes read them), sends, patch and Smart Controls, the Stereo Out's
+  plug-ins and the auxes Logic made, and each track's automation over the
+  recorded project, makes every one of these kinds (and the bypass)
+  statefully, refuses `fx-move` and `send-mode` as the bridge does, and
+  writes a bounce's and an export's audio files where it is asked to; it also names tracks and
+  markers as the recorded scenes read them (a named track is made, then
+  renamed; a new track is named after its channel strip; a marker is named by
+  its place in the Marker List and made 0 beats long). The plug-in configure
+  texts are each DAW's: Live's say to configure a parameter in the device, as
+  before, and Logic's say the Controls View of the plug-in's window, which
+  Kumi opens itself. Logic's instructions carry its terms and ways (regions,
+  the Stereo Out and the auxes Logic makes, Track Stacks, what its own undo
+  keeps no step of, quantize as a parameter, an import's own track, the lists,
+  key commands on the selection). The acceptance run gains the second slice's
+  checks: a Gain on the Stereo Out with its gain set and read back, a send from
+  track 1 to a new bus, a patch loaded, a bounce of bars 1 to 5 found on disk,
+  each undone or taken away.
 
 ## Evidence
 
@@ -129,18 +169,24 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
-- Logic Pro support can't name or rename a marker, insert, remove, move or set a
-  plug-in, or make or set a send: a marker's name cell isn't a text field, the
-  slots' pop-up menus can't be driven from outside and a plug-in's controls
-  aren't reached yet; nor move or colour a track, since the headers can't be
+- Logic Pro support can't name or rename a marker, since a marker's name cell
+  isn't a text field; nor move or colour a track, since the headers can't be
   dragged from outside and the Color palette's swatches are bare positions that
   no header reads back; the bridge refuses each saying why. The first M4 slice
   declares the cycle range, regions, the Tempo and Signature Lists, a MIDI
   import, Track Stacks and a key command, the kinds the bridge makes over the
-  real Logic. Logic has no undo block and keeps no undo step for a fader, pan,
-  mute, solo, arm, tempo, bypass or the cycle, so Kumi puts those back by value;
-  a deleted track or region, a split, an import and a flattened Track Stack come
-  back through Logic's own undo only while that step is on top, and what a key
+  real Logic; nor move a plug-in (Logic drags it) or set a send's mode (a mark
+  Logic draws itself, which nothing outside can read). The second slice's
+  kinds (plug-ins, settings, patches, sends, Smart Controls, automation, a
+  bounce and an export) are declared ahead of this branch's bridge: until the
+  two lanes are merged, it refuses the ones it doesn't make yet, saying why.
+  Logic has no undo block and keeps no undo step for a fader, pan, mute, solo,
+  arm, tempo, bypass or the cycle, nor for a plug-in's parameter or setting
+  (steps of the plug-in window's own undo), a Smart Control or a send's level,
+  so Kumi puts those back by value; a deleted track or region, a split, an
+  import, a flattened Track Stack and a patch loaded come back through Logic's
+  own undo only while that step is on top (a deleted plug-in with its
+  settings, and a send made with the aux Logic made for it), and what a key
   command did only Logic's own undo takes back. A region moves in time only,
   along its track; its edges, a split and an import's place go on whole beats,
   and an import makes a track of its own. The tempo takes whole BPM. Saving
@@ -150,10 +196,9 @@ bridge, the version given is the one in the commit that added it.
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: M4's second slice (sends, plug-in insertion, presets and patches
-  from the Library, Smart Controls, automation, bounce and export, the
-  instructions addendum), and reading a region's notes past the rows the Event
-  List shows on its screen.
+- Logic Pro: the second M4 slice's gate with `accept_logic --files <dir>` on
+  this Mac, and reading a region's notes past the rows the Event List shows on
+  its screen; then M5, listening.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
