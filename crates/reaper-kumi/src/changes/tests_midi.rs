@@ -123,6 +123,19 @@ fn text_and_sysex_are_written_and_nothing_goes_past_the_end_of_the_source() {
 }
 
 #[test]
+fn a_notes_release_velocity_stays_through_a_change_and_its_undo() {
+    // Every note Kumi wrote again ended with velocity 0: a recorded release velocity was lost, and the undo couldn't bring
+    // it back.
+    let lab = midi_lab();
+    state(|s| s.tracks[2].items[0].takes[0].more.raw.as_mut().unwrap()[2].msg = vec![0x80, 38, 64]);
+    let before = raw();
+    let (preview, applied) = lab.make("notes-change", json!({"ref": S1, "changes": [{"index": 0, "velocity": 70}]}));
+    assert!(raw().iter().any(|e| e.pos == 480 && e.msg == [0x80, 38, 64]), "{:?}", raw());
+    lab.undo("notes-change", &preview, &applied).unwrap();
+    assert_eq!(raw(), before, "byte for byte");
+}
+
+#[test]
 fn events_the_producer_changed_since_are_theirs_and_a_change_between_preview_and_apply_is_refused() {
     let lab = midi_lab();
     let (preview, applied) =

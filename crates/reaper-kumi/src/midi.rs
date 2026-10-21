@@ -14,7 +14,8 @@ pub struct Event {
     pub msg: Vec<u8>,
 }
 
-/// A note by what tells it apart: channel (0 to 15), pitch, where it starts and ends, how hard, and whether it is muted.
+/// A note by what tells it apart: channel (0 to 15), pitch, where it starts and ends, how hard, and whether it is muted;
+/// and how hard it was let go (its note-off's velocity, which a recorded note carries).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoteSpec {
     pub channel: u8,
@@ -24,6 +25,7 @@ pub struct NoteSpec {
     pub velocity: u8,
     pub muted: bool,
     pub selected: bool,
+    pub off_velocity: u8,
 }
 
 impl NoteSpec {
@@ -106,12 +108,15 @@ pub fn notes(events: &[Event]) -> Vec<NoteSpec> {
                     velocity: event.msg[2],
                     muted: event.flag & 2 != 0,
                     selected: event.flag & 1 != 0,
+                    off_velocity: 0,
                 },
             ));
         } else if is_off(event) {
             if let Some(list) = open.get_mut(&(channel, pitch)).filter(|l| !l.is_empty()) {
                 let note = list.remove(0);
                 out[note].1.end = event.pos;
+                // (a note-on of velocity 0 ends a note too, let go of with none)
+                out[note].1.off_velocity = if event.msg[0] & 0xF0 == 0x80 { event.msg[2] } else { 0 };
             }
         }
     }
@@ -154,7 +159,7 @@ pub fn edit_notes(events: &[Event], remove: &[NoteSpec], add: &[NoteSpec]) -> Re
     for (n, note) in add.iter().enumerate() {
         let (flag, order) = (flag_of(note), events.len() + n);
         keyed.push(((note.start, 2, order), Event { pos: note.start, flag, msg: vec![0x90 | note.channel, note.pitch, note.velocity] }));
-        keyed.push(((note.end, 0, order), Event { pos: note.end, flag, msg: vec![0x80 | note.channel, note.pitch, 0] }));
+        keyed.push(((note.end, 0, order), Event { pos: note.end, flag, msg: vec![0x80 | note.channel, note.pitch, note.off_velocity] }));
     }
     keyed.sort_by_key(|(key, _)| *key);
     Ok(keyed.into_iter().map(|(_, event)| event).collect())
@@ -165,7 +170,7 @@ mod tests {
     use super::*;
 
     fn note(channel: u8, pitch: u8, start: i64, end: i64) -> NoteSpec {
-        NoteSpec { channel, pitch, start, end, velocity: 90, muted: false, selected: false }
+        NoteSpec { channel, pitch, start, end, velocity: 90, muted: false, selected: false, off_velocity: 0 }
     }
 
     fn take() -> Vec<Event> {
@@ -205,6 +210,25 @@ mod tests {
         // Not there as given: refused, and nothing changes.
         assert!(edit_notes(&events, &[note(0, 61, 0, 480)], &[]).is_err());
         assert!(edit_notes(&events, &[note(0, 60, 0, 481)], &[]).is_err());
+    }
+
+    #[test]
+    fn a_notes_release_velocity_is_read_and_written_back() {
+        // Every note Kumi wrote again ended with velocity 0: a recorded release velocity was lost to a change, a quantize
+        // or a humanize, and its undo.
+        let events = vec![
+            Event { pos: 0, flag: 0, msg: vec![0x90, 60, 90] },
+            Event { pos: 480, flag: 0, msg: vec![0x80, 60, 64] },
+            Event { pos: 480, flag: 0, msg: vec![0x91, 62, 90] },
+            Event { pos: 960, flag: 0, msg: vec![0x91, 62, 0] },
+        ];
+        let read = notes(&events);
+        assert_eq!((read[0].off_velocity, read[1].off_velocity), (64, 0));
+        let mut moved = read[0];
+        moved.start += 10;
+        let out = edit_notes(&events, &read[..1], &[moved]).unwrap();
+        assert!(out.contains(&Event { pos: 480, flag: 0, msg: vec![0x80, 60, 64] }), "{out:?}");
+        assert_eq!(notes(&out)[0].off_velocity, 64);
     }
 
     #[test]
