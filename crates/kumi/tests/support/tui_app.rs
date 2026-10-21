@@ -727,6 +727,24 @@ impl Harness {
             vt.styles[row].get(cell.checked_sub(1)?).cloned()
         })
     }
+    /// The style of the first cell of each row's first `text`, top to bottom.
+    pub fn styles_of(&self, text: &str) -> Vec<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars
+            .iter()
+            .enumerate()
+            .filter_map(|(row, chars)| {
+                let at = chars.concat().find(text)?;
+                let (mut bytes, mut cell) = (0, 0);
+                while bytes < at {
+                    bytes += chars[cell].len();
+                    cell += 1;
+                }
+                vt.styles[row].get(cell).cloned()
+            })
+            .collect()
+    }
     /// The styles of the `cells` cells just before where `text` shows (a tracker line's number beside its cells).
     pub fn styles_before(&self, text: &str, cells: usize) -> Vec<String> {
         self.screen();

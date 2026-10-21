@@ -472,7 +472,7 @@ impl TuiApp {
             column += cell + 1;
         }
         for (track, at, cell) in &shown {
-            screen.put(*at, y + 1, &truncate(&track.name, *cell), &st::DIM);
+            screen.put(*at, y + 1, &truncate(&track.name, *cell), &Style::fg(chip_color(track.color.as_deref())));
         }
         let lines = shown.iter().map(|(track, _, _)| track.cells.len()).max().unwrap_or(0);
         let rows = lines.min(most.max(1) as usize);

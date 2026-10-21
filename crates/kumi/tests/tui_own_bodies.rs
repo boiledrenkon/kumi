@@ -153,7 +153,7 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
             },
             TrackerTrack {
                 name: "Bass".into(),
-                color: None,
+                color: Some("#3c7cf5".into()),
                 cells: vec!["E-2 02 .. .. ..".into(), "OFF .. .. .. ..".into(), "--- .. .. .. ..".into()],
             },
         ],
@@ -173,6 +173,8 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     let lines = h.screen();
     let first = lines.iter().position(|line| line.contains("E-2 02")).expect("the focused track's lines");
     assert!(lines.iter().take(first).any(|line| line.trim_end().ends_with("Bass") || line.contains(" Bass ")), "{}", lines.join("\n"));
+    // Track names in their colours (review U12): the last Bass on screen is the pattern's column, under FOCUS's header.
+    assert_eq!(h.styles_of("Bass").last().and_then(|style| style.split('|').next()), Some("60,124,245"));
 
     // The pattern matrix: each slot's pattern, then each track's part of it (review U9: not the pattern's number in every
     // column): filled, empty, muted, an alias of another pattern's; sections between, the current slot's pattern named.
