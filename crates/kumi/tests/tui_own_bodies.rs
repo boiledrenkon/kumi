@@ -496,6 +496,20 @@ scene!(renoise_dsp, DawId::Renoise, BODY_SHOTS, |h| {
     shows(&h, "FOCUS · DSP").await;
 });
 
+// (review U17) A pitch bend lane is centred on 0, as REAPER says it: the centre a line, bends above it taller and below it
+// shorter; in words, from −8192 to 8191.
+#[test]
+fn a_pitch_lane_is_drawn_and_said_centred_on_0() {
+    let body = json!({"name": "Bend", "length": 4.0, "notes": [], "ccLanes": [
+        {"cc": "pitchbend", "points": [[0.0, 8192], [1.0, 12288], [2.0, 0], [3.0, 16383]]}]});
+    let Some(FocusBody::Notes(view)) = (reaper::DAW.to_body)(&BodyRequest::Notes { item_ref: "r:take:{T}".into() }, &body) else {
+        panic!()
+    };
+    let lane = &view.lanes[0];
+    assert_eq!((lane.min, lane.max, lane.points[0][1], lane.points[2][1]), (-8192., 8191., 0., -8192.));
+    assert_eq!(kumi::tui::app::controller_line(lane, 4.0, 4), "─▇▁█");
+}
+
 scene!(reaper_midi_lanes, DawId::Reaper, BODY_SHOTS, |h| {
     let note = |pitch: i64, start: f64, length: f64, selected: bool| json!({"pitch": pitch, "start": start, "length": length, "velocity": 100, "selected": selected});
     let body = json!({"ref": "r:take:{T1}", "itemRef": "r:item:{I1}", "name": "Bass take", "length": 16.0, "beatsPerBar": 4.0, "noteCount": 4,

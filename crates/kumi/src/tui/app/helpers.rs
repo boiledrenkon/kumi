@@ -380,11 +380,18 @@ pub fn controller_line(lane: &ControllerLane, length: f64, cells: usize) -> Stri
     const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let mut points = lane.points.clone();
     points.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    let centred = lane.min < 0.;
     (0..cells)
         .map(|cell| {
             let at = (cell as f64 + 1.) / cells as f64 * length;
             match points.iter().take_while(|point| point[0] < at).last() {
-                Some([_, value]) => LEVELS[((value / lane.max.max(1.)).clamp(0., 1.) * 7.).round() as usize],
+                // A lane centred on 0 (pitch bend): the centre a line, bars above it up from there and below it down.
+                Some([_, value]) if centred => match value / lane.max.max(1.) {
+                    level if level.abs() < 0.01 => '─',
+                    level if level > 0. => LEVELS[4 + (level.min(1.) * 3.).round() as usize],
+                    level => LEVELS[3 - ((-level).min(1.) * 3.).round() as usize],
+                },
+                Some([_, value]) => LEVELS[(((value - lane.min) / (lane.max - lane.min).max(1.)).clamp(0., 1.) * 7.).round() as usize],
                 None => ' ',
             }
         })

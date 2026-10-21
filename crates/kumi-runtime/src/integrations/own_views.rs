@@ -112,16 +112,17 @@ pub fn tree(track_ref: &str, body: &Value) -> DeviceTree {
     DeviceTree { track_ref: track_ref.into(), devices, owner }
 }
 
-/// A controller lane's name in REAPER's words: "CC 1", "Pitch", "Program", "Channel pressure", "Poly aftertouch".
+/// A controller lane's name in REAPER's words ("CC 1", "Pitch", "Program", "Channel pressure", "Poly aftertouch") and the
+/// lowest value it says: pitch bend is centred on 0, as REAPER says it (−8192 to 8191; the bridge sends 0 to 16383).
 fn lane_name(cc: &Value) -> Option<(String, f64)> {
     Some(match cc {
-        Value::Number(n) => (format!("CC {}", n.as_i64()?), 127.),
+        Value::Number(n) => (format!("CC {}", n.as_i64()?), 0.),
         Value::String(word) => match word.as_str() {
-            "pitchbend" => ("Pitch".into(), 16383.),
-            "program" => ("Program".into(), 127.),
-            "pressure" => ("Channel pressure".into(), 127.),
-            "polypressure" => ("Poly aftertouch".into(), 127.),
-            other => (other.to_owned(), 127.),
+            "pitchbend" => ("Pitch".into(), -8192.),
+            "program" => ("Program".into(), 0.),
+            "pressure" => ("Channel pressure".into(), 0.),
+            "polypressure" => ("Poly aftertouch".into(), 0.),
+            other => (other.to_owned(), 0.),
         },
         _ => return None,
     })
@@ -152,12 +153,12 @@ pub fn notes(item_ref: &str, body: &Value) -> NoteView {
         lanes: list(body, "ccLanes")
             .take(16)
             .filter_map(|lane| {
-                let (name, max) = lane_name(lane.get("cc")?)?;
+                let (name, min) = lane_name(lane.get("cc")?)?;
                 let points = list(lane, "points")
-                    .filter_map(|point| Some([point.get(0)?.as_f64()?, point.get(1)?.as_f64()?]))
+                    .filter_map(|point| Some([point.get(0)?.as_f64()?, point.get(1)?.as_f64()? + min]))
                     .filter(|[at, value]| at.is_finite() && value.is_finite())
                     .collect();
-                Some(ControllerLane { name, max, points })
+                Some(ControllerLane { name, min, max: if min < 0. { -min - 1. } else { 127. }, points })
             })
             .collect(),
     }
@@ -680,7 +681,7 @@ mod tests {
         ]});
         let view = notes("r:take:{T}", &body);
         let lanes: Vec<(&str, f64, usize)> = view.lanes.iter().map(|lane| (lane.name.as_str(), lane.max, lane.points.len())).collect();
-        assert_eq!(lanes, [("CC 1", 127., 3), ("Pitch", 16383., 1)]);
+        assert_eq!(lanes, [("CC 1", 127., 3), ("Pitch", 8191., 1)]);
     }
 
     #[test]

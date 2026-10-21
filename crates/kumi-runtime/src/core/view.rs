@@ -731,10 +731,12 @@ pub struct ClipView {
 }
 
 /// One controller lane of a MIDI take: what it controls ("CC 1", "Pitch") and its values as `[beat, value]` from the
-/// take's start, in the lane's range (`max`: 127, or 16383 for pitch bend).
+/// take's start, in the lane's range (`min` to `max`: 0 to 127, or −8192 to 8191 for pitch bend, centred on 0).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControllerLane {
     pub name: String,
+    #[serde(default)]
+    pub min: f64,
     pub max: f64,
     pub points: Vec<[f64; 2]>,
 }
