@@ -284,17 +284,24 @@ return {synth = synth, brk = brk, t = m, p = p, q = q}
         ]);
         let before_rows = rows.borrow().len();
         let (made, error, ms) = lab
-            .tool("variations", json!({"action": "make", "source": {"instrumentRef": format!("{e}:instrument:{synth}")}, "phrase": {"lines": 16},
+            .tool("variations", json!({"action": "make", "source": {"instrumentRef": format!("{e}:instrument:{synth}")}, "options": {"lines": 16},
                 "takes": [{"direction": "an arp", "lines": arp}], "count": 9, "seed": 11}))
             .await;
         let count = made["takes"].as_array().map_or(0, Vec::len);
         lab.check("9 phrases made", !error && count == 9, format!("{ms} ms: {made}"));
+        let heard = made["takes"].as_array().is_some_and(|takes| takes.iter().all(|take| take["line"].as_str().unwrap_or("").contains("heard:")));
+        lab.check("each phrase take heard (players of its phrase)", heard, made.get("heard").map(Value::to_string).unwrap_or_default());
         lab.check("each take one HISTORY row", rows.borrow().len() - before_rows == count, format!("{} rows", rows.borrow().len() - before_rows));
         let phrases_before = lab.lua(&format!("return phrases({synth})")).await;
         lab.check("9 phrases in Renoise", phrases_before.as_array().map_or(0, Vec::len) == 9, phrases_before.to_string());
         lab.pause().await;
         let (kept, error, _) = lab.tool("variations", json!({"action": "keep", "names": ["V1", "V3", "V5", "V7", "V9"]})).await;
         lab.check("keep 5", !error && kept["rest"] == json!(["V2", "V4", "V6", "V8"]), kept.to_string());
+        let phrases_before = lab.lua(&format!("return phrases({synth})")).await;
+        let marked = phrases_before.as_array().is_some_and(|names| {
+            names.iter().enumerate().all(|(k, name)| name.as_str().unwrap_or("").split('=').next().unwrap_or("").ends_with(" \u{b7} kept") == (k % 2 == 0))
+        });
+        lab.check("the kept 5 marked “· kept” in Renoise", marked, phrases_before.to_string());
         let (changed, error, ms) = lab.tool("variations", json!({"action": "change", "names": ["rest"]})).await;
         lab.check("change the other 4", !error && changed["changed"].as_array().map_or(0, Vec::len) == 4, format!("{ms} ms: {changed}"));
         let phrases_after = lab.lua(&format!("return phrases({synth})")).await;
@@ -319,10 +326,18 @@ return {synth = synth, brk = brk, t = m, p = p, q = q}
         lab.lua("song:redo()").await;
         lab.pause().await;
 
-        // B: variations of the chop as slots of their own, rendered.
+        // B: variations of the chop as slots of their own, rendered, from a slot whose break track is an alias of the chop's (V2):
+        // the takes copy it, never write through it.
+        let aliased = lab
+            .lua(&format!(
+                "local s = song.sequencer local q = #s.pattern_sequence + 1 local p2 = s:insert_new_pattern_at(q) song:pattern(p2).name = 'K Chop alias' song:pattern(p2):track({t}).alias_pattern_index = {p} return {{q = q, p2 = p2}}"
+            ))
+            .await;
+        let (q2, p2) = (aliased["q"].as_u64().unwrap_or(0), aliased["p2"].as_u64().unwrap_or(0));
+        lab.pause().await;
         let e = lab.epoch().await;
         let (made, error, ms) = lab
-            .tool("variations", json!({"action": "make", "source": {"patternRef": format!("{e}:pattern:{p}"), "trackRef": format!("{e}:track:{t}"), "first": 0, "last": 15},
+            .tool("variations", json!({"action": "make", "source": {"patternRef": format!("{e}:seq:{q2}"), "trackRef": format!("{e}:track:{t}"), "first": 0, "last": 15},
                 "anchors": [0, 4], "seed": 23, "takes": [
                     {"direction": "swapped slices", "ops": [{"op": "shuffle", "amount": 0.8}]},
                     {"direction": "rolls moved", "ops": [{"op": "retrig", "amount": 0.4}, {"op": "ghosts", "amount": 0.6}]},
@@ -333,7 +348,9 @@ return {synth = synth, brk = brk, t = m, p = p, q = q}
         let slots = lab.lua("local out = {} local s = song.sequencer for k, p in ipairs(s.pattern_sequence) do out[k] = p .. ':' .. song:pattern(p).name .. (s:sequence_is_start_of_section(k) and ('[' .. s:sequence_section_name(k) .. ']') or '') end return out").await;
         println!("   sequence: {slots}");
         let source_now = lab.lua(&format!("return lines_of({p}, {t}, 16)")).await;
-        lab.check("the source as it was", source_now == source_lines, format!("{source_now}"));
+        lab.check("the chop (the alias's source) as it was", source_now == source_lines, format!("{source_now}"));
+        let alias_now = lab.lua(&format!("return song:pattern({p2}):track({t}).alias_pattern_index")).await;
+        lab.check("the source slot's track still an alias", alias_now == json!(p), alias_now.to_string());
         lab.pause().await;
         let (kept, error, _) = lab.tool("variations", json!({"action": "keep", "names": ["V2"]})).await;
         lab.check("keep V2", !error, kept.to_string());
@@ -343,19 +360,43 @@ return {synth = synth, brk = brk, t = m, p = p, q = q}
         println!("   sequence after the drop: {slots}");
         lab.pause().await;
 
-        // C: Kumi's undo of the kept chop take's change.
-        let id = rows.borrow().iter().rev().find(|row| row.title.contains("V2")).map(|row| row.id.clone());
-        if let Some(id) = id {
+        // C: Kumi's undo of the kept chop take: its mark first, then its slot.
+        let ids: Vec<String> = rows.borrow().iter().rev().filter(|row| row.title.contains("V2 \u{b7} K Chop alias")).map(|row| row.id.clone()).take(2).collect();
+        for (k, id) in ids.iter().enumerate() {
             let (undone, error, _) = lab.tool("undo_change", json!({"change": id})).await;
-            lab.check("Kumi's undo of V2's slot", !error, undone.to_string());
+            lab.check(if k == 0 { "Kumi's undo of V2's kept mark" } else { "Kumi's undo of V2's slot" }, !error, undone.to_string());
+            lab.pause().await;
         }
         let rows_now = rows.borrow().len();
         println!("== {} HISTORY rows", rows_now);
         for row in rows.borrow().iter() {
             println!("   {} {:?} {}", row.id, row.state, short(&row.title, 120));
         }
+        daw.close().await.ok();
+
+        // D: Kumi again (another run, the same folder): the sets are there, "rest" reaches no kept take, numbers go on.
+        let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, &home)), id: Cell::new(0) });
+        let connect: Connect = Rc::new(move |_| {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+        });
+        let again = create_renoise_integration(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home.clone(), connect: Some(connect) });
+        again.start(Signal::new()).await.ok();
+        let observed = again.observe(Signal::new(), None).await.expect("a look at Renoise");
+        let lab = Lab { host: lab.host.clone(), tools: observed.tools.clone(), results: lab.results };
+        let (listed, error, _) = lab.tool("variations", json!({"action": "list", "set": "K Synth"})).await;
+        let kept = listed["takes"].as_array().map_or(0, |takes| takes.iter().filter(|line| line.as_str().unwrap_or("").ends_with("(kept)")).count());
+        lab.check("after a restart of Kumi, the phrase set and its 5 kept takes", !error && kept == 5, listed.to_string());
+        let (refused, error, _) = lab.tool("variations", json!({"action": "drop", "set": "K Synth"})).await;
+        lab.check("\"rest\" reaches no kept take", error && refused.to_string().contains("names no take"), refused.to_string());
+        let e = lab.epoch().await;
+        let (more, error, _) = lab
+            .tool("variations", json!({"action": "make", "source": {"instrumentRef": format!("{e}:instrument:{synth}")}, "options": {"lines": 16}, "listen": false,
+                "takes": [{"from": "V1", "ops": [{"op": "octave", "amount": 1, "up": true}]}], "seed": 12}))
+            .await;
+        lab.check("a make on the same source goes on numbering", !error && more["takes"][0]["take"] == "V10", more.to_string());
         let failed = lab.results.borrow().iter().filter(|(_, ok, _)| !ok).count();
         println!("== {} checks, {failed} failed", lab.results.borrow().len());
-        daw.close().await.ok();
+        again.close().await.ok();
     });
 }
