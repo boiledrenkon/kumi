@@ -187,10 +187,15 @@ pub fn lines_of(picture: &ChangePicture, cols: usize) -> Vec<Vec<Span>> {
             }
             vec![fit(line, cols)]
         }
-        ChangePicture::Automation { parameter, before, after, .. } => {
+        ChangePicture::Automation { parameter, before, after, words, .. } => {
             let plural = |n: usize| format!("{n} point{}", if n == 1 { "" } else { "s" });
             let what = if parameter.is_empty() { String::new() } else { format!("{parameter} · ") };
-            vec![fit(vec![styled(format!("{what}{} → {}", before.len(), plural(after.len())), palette::TEXT)], cols)]
+            let mut lines = vec![fit(vec![styled(format!("{what}{} → {}", before.len(), plural(after.len())), palette::TEXT)], cols)];
+            // What it moves between and where, where the DAW said ("−18 to 0 dB over bars 5–9").
+            if let Some(words) = words {
+                lines.push(fit(vec![styled(words.clone(), palette::DIM)], cols));
+            }
+            lines
         }
         ChangePicture::Mix { before, after } => {
             mix_words(before, after).into_iter().map(|line| fit(vec![styled(line, palette::TEXT)], cols)).collect()
@@ -404,15 +409,20 @@ mod tests {
 
     #[test]
     fn a_lane_says_its_parameter_and_its_points() {
-        let lane = |parameter: &str| ChangePicture::Automation {
+        let said = |parameter: &str, words: Option<&str>| ChangePicture::Automation {
             parameter: parameter.into(),
             min: -15.,
             max: 15.,
             before: vec![],
             after: vec![[0., 0.], [4., -8.]],
+            words: words.map(str::to_owned),
         };
+        let lane = |parameter: &str| said(parameter, None);
         assert_eq!(text(&lines_of(&lane("3 Gain A"), 40)), ["3 Gain A · 0 → 2 points"]);
         assert_eq!(text(&lines_of(&lane(""), 40)), ["0 → 2 points"]);
+        // (review U20) What it moves between and where, where the DAW said.
+        let volume = said("Volume", Some("−8 to 0 dB over bars 5–9"));
+        assert_eq!(text(&lines_of(&volume, 60)), ["Volume · 0 → 2 points", "−8 to 0 dB over bars 5–9"]);
     }
 
     #[test]

@@ -1233,6 +1233,7 @@ fn full_changes() -> Vec<ChangeRecord> {
                 max: 20000.0,
                 before: vec![],
                 after: vec![[0.0, 200.0], [16.0, 8000.0], [32.0, 200.0]],
+                words: None,
             }),
             ..change("c9", ChangeFamily::Parameter, "Automation: Filter Freq on Lead", ChangeState::Applied)
         },
@@ -1243,6 +1244,7 @@ fn full_changes() -> Vec<ChangeRecord> {
                 max: 1.0,
                 before: vec![[0.0, 0.5]],
                 after: vec![[0.0, 0.0], [4.0, 1.0]],
+                words: None,
             }),
             ..change("c10", ChangeFamily::Mixer, "Automation: Volume on Pads", ChangeState::Unsure)
         },

@@ -67,6 +67,9 @@ pub enum ChangePicture {
         max: f64,
         before: Vec<[f64; 2]>,
         after: Vec<[f64; 2]>,
+        /// What it moves between and where, in the DAW's words ("−18 to 0 dB over bars 5–9"), for words in its place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        words: Option<String>,
     },
     /// A channel's fader, pan and sends, before and after.
     Mix { before: MixLevels, after: MixLevels },
@@ -302,7 +305,7 @@ impl ChangePicture {
                     partial: partial || cut,
                 }
             }
-            ChangePicture::Automation { parameter, min, max, before, after } => {
+            ChangePicture::Automation { parameter, min, max, before, after, words } => {
                 let points = |points: Vec<[f64; 2]>| {
                     let mut points: Vec<[f64; 2]> = points.into_iter().filter(|[at, value]| at.is_finite() && value.is_finite()).collect();
                     points.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -311,7 +314,14 @@ impl ChangePicture {
                 if !min.is_finite() || !max.is_finite() || max <= min {
                     return None;
                 }
-                ChangePicture::Automation { parameter: cut(&parameter, MAX_NAME), min, max, before: points(before), after: points(after) }
+                ChangePicture::Automation {
+                    parameter: cut(&parameter, MAX_NAME),
+                    min,
+                    max,
+                    before: points(before),
+                    after: points(after),
+                    words: words.map(|words| cut(&words, MAX_LINE)),
+                }
             }
             ChangePicture::Mix { before, after } => ChangePicture::Mix { before: before.bounded(), after: after.bounded() },
             ChangePicture::Lines { lines, more } => {
@@ -367,12 +377,13 @@ impl ChangePicture {
                 let (before, after, _) = whole_bars(before, after, most);
                 ChangePicture::Notes { length, before, after, partial: true }
             }
-            ChangePicture::Automation { parameter, min, max, before, after } => ChangePicture::Automation {
+            ChangePicture::Automation { parameter, min, max, before, after, words } => ChangePicture::Automation {
                 parameter,
                 min,
                 max,
                 before: thin(before.clone(), half(before.len())),
                 after: thin(after.clone(), half(after.len())),
+                words,
             },
             ChangePicture::Mix { .. } => return None,
             ChangePicture::Lines { lines, more } => {
@@ -714,7 +725,7 @@ fn unit(text: &str) -> String {
 /// Names an automation lane's parameter and draws the lane to the parameter's range, as discovery read them; a lane
 /// with a point outside that range keeps its own.
 pub fn name_lane(picture: &mut ChangePicture, name: &str, low: f64, high: f64) {
-    if let ChangePicture::Automation { parameter, min, max, before, after } = picture {
+    if let ChangePicture::Automation { parameter, min, max, before, after, .. } = picture {
         name.clone_into(parameter);
         if before.iter().chain(after.iter()).all(|point| (low..=high).contains(&point[1])) {
             (*min, *max) = (low, high);
@@ -755,6 +766,7 @@ mod tests {
             max: 1.,
             before: vec![],
             after: (0..1000).map(|i| [i as f64, 0.5]).collect(),
+            words: None,
         };
         let ChangePicture::Automation { after, .. } = points.bounded().unwrap() else { panic!() };
         assert!(after.len() <= MAX_POINTS);
@@ -805,7 +817,8 @@ mod tests {
         let picture = ChangePicture::Values { values: vec![value("Gain", Some(f64::NAN)), value("", Some(1.)), value("Drive", Some(0.5))] };
         assert_eq!(picture.bounded(), Some(ChangePicture::Values { values: vec![value("Drive", Some(0.5))] }));
         assert_eq!(ChangePicture::Values { values: vec![value("Gain", None)] }.bounded(), None);
-        let automation = ChangePicture::Automation { parameter: String::new(), min: 1., max: 1., before: vec![[0., 1.]], after: vec![] };
+        let automation =
+            ChangePicture::Automation { parameter: String::new(), min: 1., max: 1., before: vec![[0., 1.]], after: vec![], words: None };
         assert_eq!(automation.bounded(), None, "an empty range draws nothing");
         let silly = Dynamics { threshold_db: -20., ratio: 0.5, knee_db: 0., makeup_db: 0. };
         assert_eq!(ChangePicture::Dynamics { before: silly.clone(), after: silly, values: vec![] }.bounded(), None);

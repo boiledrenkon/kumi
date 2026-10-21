@@ -1867,4 +1867,6 @@ fn parameter_moves_and_a_lanes_points_are_told_to_history_in_reapers_words() {
     assert_eq!(after.len(), before.len() + 1);
     let added = after.iter().find(|point| point[0] == 0.5).expect("the new point, at its time");
     assert!((added[1].as_f64().unwrap() + 12.0).abs() < 0.01, "in dB, as the producer asked it: {added}");
+    // (review U20) And in words, for a picture drawn as words: what the points move between, in dB, and where.
+    assert_eq!(curve["words"], "-12 to 0 dB over bars 1–2");
 }

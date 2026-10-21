@@ -152,16 +152,34 @@ pub fn curve(answers: &Answers) -> Option<ChangePicture> {
             max: number(drawn, "max")?,
             before,
             after,
+            words: text(drawn, "words").map(minus_text),
         });
     }
     let side = |state: &Value| if state.get("exists") == Some(&Value::Bool(false)) { vec![] } else { pairs(list(state, "points")) };
     let (before, after) = (side(answers.prior()), side(answers.after()));
+    let words = lane_words(if after.is_empty() { &before } else { &after });
     (answers.after().get("points").is_some() || answers.after().get("exists").is_some()).then_some(ChangePicture::Automation {
         parameter: answers.shown("parameter").as_str().unwrap_or_default().to_owned(),
         min: 0.,
         max: 1.,
         before,
         after,
+        words,
+    })
+}
+
+/// What a pattern's automation moves between and where, in words: "10% to 100% over lines 00–24" (its values are of the
+/// parameter's range; its times are lines from 1, which Renoise numbers from 00).
+fn lane_words(points: &[[f64; 2]]) -> Option<String> {
+    let (first, last) = (points.first()?, points.last()?);
+    let (low, high) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), point| (low.min(point[1]), high.max(point[1])));
+    let percent = |value: f64| format!("{}%", plain_number((value * 100.).round()));
+    let range = if percent(low) == percent(high) { percent(low) } else { format!("{} to {}", percent(low), percent(high)) };
+    let line = |time: f64| format!("{:02}", (time - 1.).max(0.).floor() as i64);
+    Some(if line(first[0]) == line(last[0]) {
+        format!("{range} at line {}", line(first[0]))
+    } else {
+        format!("{range} over lines {}–{}", line(first[0]), line(last[0]))
     })
 }
 
@@ -394,7 +412,7 @@ pub fn midi(answers: &Answers) -> Option<ChangePicture> {
     for point in before.iter_mut().chain(after.iter_mut()) {
         point[0] -= first;
     }
-    Some(ChangePicture::Automation { parameter, min, max, before, after })
+    Some(ChangePicture::Automation { parameter, min, max, before, after, words: None })
 }
 
 // ----- a track's devices -----
@@ -550,7 +568,8 @@ mod tests {
     fn a_lane_is_drawn_from_the_bridges_curve_or_a_patterns_automation() {
         let (preview, applied) = answers(
             json!({"prior": {"points": [[0.0, 0.5, 0, 0.0, false]]}}),
-            json!({"display": {"curve": {"parameter": "Volume", "min": -60.0, "max": 12.0, "before": [[60.0, -6.0]], "after": [[60.0, -6.0], [62.0, 0.0]]}}}),
+            json!({"display": {"curve": {"parameter": "Volume", "min": -60.0, "max": 12.0, "before": [[60.0, -6.0]], "after": [[60.0, -6.0], [62.0, 0.0]],
+                "words": "-6 to 0 dB over bars 31–32"}}}),
         );
         assert_eq!(
             curve(&Answers { preview: &preview, applied: &applied }),
@@ -559,18 +578,22 @@ mod tests {
                 min: -60.,
                 max: 12.,
                 before: vec![[0., -6.]],
-                after: vec![[0., -6.], [2., 0.]]
+                after: vec![[0., -6.], [2., 0.]],
+                words: Some("−6 to 0 dB over bars 31–32".into()),
             })
         );
         let (preview, applied) = answers(
             json!({"prior": {"exists": false}}),
             json!({"applied": {"exists": true, "playmode": "linear", "points": [{"time": 1, "value": 0.0}, {"time": 33, "value": 1.0}]}}),
         );
-        let Some(ChangePicture::Automation { min, max, before, after, .. }) = curve(&Answers { preview: &preview, applied: &applied })
+        let Some(ChangePicture::Automation { min, max, before, after, words, .. }) =
+            curve(&Answers { preview: &preview, applied: &applied })
         else {
             panic!()
         };
         assert_eq!((min, max, before.len(), after), (0., 1., 0, vec![[1., 0.], [33., 1.]]));
+        // (review U20) In words too: the span of its values and where, by Renoise's line numbers.
+        assert_eq!(words.as_deref(), Some("0% to 100% over lines 00–32"));
         // The parameter, as the display names it.
         let named = json!({"display": {"parameter": "Gain"}, "applied": {"exists": true, "points": [{"time": 1, "value": 0.5}]}});
         let Some(ChangePicture::Automation { parameter, .. }) = curve(&Answers { preview: &preview, applied: &named }) else { panic!() };
@@ -694,7 +717,8 @@ mod tests {
                 min: -8192.,
                 max: 8191.,
                 before: vec![],
-                after: vec![[0., 0.], [1., 4096.], [2., -8192.]]
+                after: vec![[0., 0.], [1., 4096.], [2., -8192.]],
+                words: None,
             })
         );
         // Events of two lanes: no one lane to draw.

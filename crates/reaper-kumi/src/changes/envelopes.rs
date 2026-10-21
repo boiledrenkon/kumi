@@ -612,6 +612,7 @@ fn drawn_curve(ctx: &Ctx, lane: &Lane, units: Units, before: &[EnvPoint], after:
         let last = points.len() - 1;
         (0..DRAWN_POINTS).map(|i| shown(&points[i * last / (DRAWN_POINTS - 1)])).collect()
     };
+    let words = curve_words(ctx, units, if after.is_empty() { before } else { after });
     let (before, after) = (side(before), side(after));
     // A lane in units of its own (an FX parameter of no known range): the range its points span.
     let (min, max) = if floor.is_finite() {
@@ -621,7 +622,34 @@ fn drawn_curve(ctx: &Ctx, lane: &Lane, units: Units, before: &[EnvPoint], after:
         (values().fold(f64::INFINITY, f64::min), values().fold(f64::NEG_INFINITY, f64::max))
     };
     let (min, max) = if max > min { (min, max) } else { (min - 1.0, min + 1.0) };
-    json!({"parameter": rows::clip(&ctx.reaper.envelope_name(lane.at.envelope)), "min": min, "max": max, "before": before, "after": after})
+    json!({"parameter": rows::clip(&ctx.reaper.envelope_name(lane.at.envelope)), "min": min, "max": max, "before": before, "after": after, "words": words})
+}
+
+/// What a lane's points move between and where, as the producer reads them: "-18 to 0 dB over bars 5–9".
+fn curve_words(ctx: &Ctx, units: Units, points: &[EnvPoint]) -> Option<String> {
+    let (first, last) = (points.first()?, points.last()?);
+    let (low, high) = points
+        .iter()
+        .map(|point| from_raw(ctx.reaper, units, point.value))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| (low.min(value), high.max(value)));
+    let said = |value: f64| match units {
+        Units::Db(_) if value <= -150.0 => "-inf".to_string(),
+        _ => marks::trimmed(value),
+    };
+    let unit = match units {
+        Units::Db(_) => " dB",
+        Units::Semitones => " semitones",
+        Units::Tempo => " BPM",
+        _ => "",
+    };
+    let range = if said(low) == said(high) { format!("{}{unit}", said(low)) } else { format!("{} to {}{unit}", said(low), said(high)) };
+    let (from, to) = (marks::bar_text(ctx.reaper, ctx.proj, first.time), marks::bar_text(ctx.reaper, ctx.proj, last.time));
+    let bar = |text: &str| text.strip_prefix("bar ").filter(|n| n.parse::<i64>().is_ok()).map(str::to_owned);
+    Some(match (bar(&from), bar(&to)) {
+        _ if from == to => format!("{range} at {from}"),
+        (Some(a), Some(b)) => format!("{range} over bars {a}–{b}"),
+        _ => format!("{range} from {from} to {to}"),
+    })
 }
 
 fn lane_target(ctx: &Ctx, lane: &Lane) -> Done<Value> {

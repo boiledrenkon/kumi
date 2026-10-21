@@ -8,7 +8,7 @@
                                                                                   NOW
                                                                                   ✓ Automation of Filter Cutoff on “B…
                                                                                   Cutoff · 0 → 4 points
-                         ██                          ▀▀
+                         ██                          ▀▀                           10% to 100% over lines 00–24
                          ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██
                          ██▀█▄   ██  ██  ██  ██  ██  ██
                          ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀
@@ -21,7 +21,7 @@
                              “What's on this track?”                              ✓ Automation of Filter Cutoff   undo
                              “Set the tempo to 124”                                 on “Bass” in “Drop”: 4 points, li…
                        “Why might my low end sound muddy?”                          Cutoff · 0 → 4 points
-
+                                                                                    10% to 100% over lines 00–24
      Kumi keeps each song's conversations: /conversations goes back to one.
 
 

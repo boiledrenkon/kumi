@@ -637,7 +637,8 @@ scene!(picture_lines, DawId::Renoise, PICTURE_SHOTS, |h| {
 
 scene!(picture_curve, DawId::Reaper, PICTURE_SHOTS, |h| {
     let applied = json!({"display": {"curve": {"parameter": "Volume", "min": -60.0, "max": 12.0,
-        "before": [[64.0, -6.0], [72.0, -6.0]], "after": [[64.0, -6.0], [66.0, -18.0], [68.0, 0.0], [70.0, -12.0], [72.0, -6.0]]}}});
+        "before": [[64.0, -6.0], [72.0, -6.0]], "after": [[64.0, -6.0], [66.0, -18.0], [68.0, 0.0], [70.0, -12.0], [72.0, -6.0]],
+        "words": "-18 to 0 dB over bars 33–37"}}});
     let picture = own_pictures::curve(&answers(&json!({}), &applied));
     opened(&h, drawn("c1", "parameter", "Added 3 points to “Pad”'s Volume envelope", picture)).await;
 });

@@ -8,7 +8,7 @@
                                                                                   NOW
                                                                                   ✓ Added 3 points to “Pad”'s Volume …
                                                                                   Volume · 2 → 5 points
-                         ██                          ▀▀
+                         ██                          ▀▀                           −18 to 0 dB over bars 33–37
                          ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██
                          ██▀█▄   ██  ██  ██  ██  ██  ██
                          ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀
@@ -21,7 +21,7 @@
                              “What's on this track?”                              ✓ Added 3 points to “Pad”'s     undo
                              “Set the tempo to 124”                                 Volume envelope
                        “Why might my low end sound muddy?”                          Volume · 2 → 5 points
-
+                                                                                    −18 to 0 dB over bars 33–37
     Kumi keeps each project's conversations: /conversations goes back to one.
 
 
