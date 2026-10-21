@@ -1317,9 +1317,16 @@ impl ReaperScript {
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| ("bad-params".to_string(), message.to_string());
         if let Some(reference) = params.get("ref").and_then(Value::as_str) {
-            if let Some((track, at)) = Self::find_fx(state, reference) {
-                let mut row = Self::fx_row(&state.fx[&track][at], at);
-                row["trackRef"] = track.into();
+            if let Some((owner, at)) = Self::find_fx(state, reference) {
+                let mut row = Self::fx_row(&state.fx[&owner][at], at);
+                // (a take's FX says its take, and the track its item is on)
+                match state.midi.iter().find(|item| format!("r:take:{}", item.take) == owner) {
+                    Some(item) => {
+                        row["takeRef"] = owner.into();
+                        row["trackRef"] = item.track.clone().into();
+                    }
+                    None => row["trackRef"] = owner.into(),
+                }
                 return Ok(json!({"items": [row], "epoch": epoch}));
             }
             if let Some(at) = Self::find_midi(state, reference).filter(|_| reference.starts_with("r:item:")) {

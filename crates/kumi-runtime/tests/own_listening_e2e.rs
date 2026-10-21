@@ -1012,6 +1012,52 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         .await;
 }
 
+/// (#361 review K23) An FX's track is the one its row names: a tune reads that track's chain, not every track's, however
+/// far down the project it is; a take's FX is said to be one, not lost.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tune_finds_its_fxs_track_from_the_fx_and_says_a_takes_fx_is_one() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(24, 0);
+            let eq = script.add_fx("r:track:{T0024}", "ReaEQ");
+            let (_, take) = script.add_midi_item("r:track:{T0003}", "Lead", 0., 8., &eighths(0., 100, 80));
+            let take_eq = script.add_fx(&take, "ReaEQ");
+            script.listening().set_steps(0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let goal = json!({"goal": {"loudness": -14, "problems": false}, "track": "Track 24", "from_beat": 0, "beats": 2});
+            assert!(!tool(&observed, "judge").execute(object(goal), Signal::new()).await.unwrap().is_error);
+            let asked_before = script.asked().len();
+            let tuned = tool(&observed, "tune")
+                .execute(
+                    object(json!({"device": eq, "how": "search", "knobs": ["Gain-Band 2", "Gain-Band 3"], "from_beat": 0, "beats": 2})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!tuned.is_error, "{}", tuned.text);
+            let chains: std::collections::BTreeSet<String> = script.asked()[asked_before..]
+                .iter()
+                .filter(|(method, params)| method == "read" && params["kind"] == "fx")
+                .filter_map(|(_, params)| params["parent"].as_str().map(str::to_owned))
+                .collect();
+            assert_eq!(chains, ["r:track:{T0024}".to_string()].into(), "only the FX's own track's chain");
+            let goal = json!({"goal": {"loudness": -14, "problems": false}, "track": "Track 3", "from_beat": 0, "beats": 2});
+            assert!(!tool(&observed, "judge").execute(object(goal), Signal::new()).await.unwrap().is_error);
+            let refused = tool(&observed, "tune")
+                .execute(object(json!({"device": take_eq, "how": "search", "knobs": ["Gain-Band 2", "low cut"]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(refused.text.contains("on an item's take"), "{}", refused.text);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn reaper_measures_sounds_lays_out_the_form_and_tunes_a_reaeq_on_scratch_copies() {
     tokio::task::LocalSet::new()

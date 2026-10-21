@@ -1708,8 +1708,9 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             return Ok(Err(format!("{} can't make scratch copies of a track for Kumi just now.", self.app())));
         }
         let long = self.link.book.borrow().lengthen(&json!({"ref": device}))["ref"].as_str().unwrap_or(device).to_owned();
-        let Some((track, chain)) = self.track_of_device(&long, &signal).await? else {
-            return Ok(Err("Kumi couldn't find the device's track; read it again.".into()));
+        let (track, chain) = match self.track_of_device(&long, &signal).await? {
+            Ok(found) => found,
+            Err(why) => return Ok(Err(why)),
         };
         let Some(place) = chain.iter().find(|row| self.same_place(&row.reference, &long)).map(|row| row.index) else {
             return Ok(Err("Kumi couldn't find the device on its track; read it again.".into()));
@@ -1783,9 +1784,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
 
     async fn track_devices(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError> {
         let long = self.link.book.borrow().lengthen(&json!({"ref": device}))["ref"].as_str().unwrap_or(device).to_owned();
-        let Some((_, chain)) = self.track_of_device(&long, &signal).await? else {
-            return Err(RuntimeError::Observation("Kumi couldn't find the device's track; read it again.".into()));
-        };
+        let (_, chain) = self.track_of_device(&long, &signal).await?.map_err(RuntimeError::Observation)?;
         let at = chain.iter().position(|row| self.same_place(&row.reference, &long)).unwrap_or(0);
         Ok((chain.iter().map(seen).collect(), at))
     }
@@ -2095,24 +2094,31 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// The track a device is on, and that track's chain: by the device's own ref where it names its track (Renoise's
-    /// places), else found among the tracks' chains.
-    async fn track_of_device(&self, device: &str, signal: &Signal) -> Result<Option<(String, Vec<DeviceRow>)>, RuntimeError> {
+    /// places), else by its row (REAPER's FX row says the track whose chain it's on, and the take for a take's FX). Why
+    /// not, in words.
+    async fn track_of_device(&self, device: &str, signal: &Signal) -> Result<Result<(String, Vec<DeviceRow>), String>, RuntimeError> {
+        const NOT_FOUND: &str = "Kumi couldn't find the device's track; read it again.";
         let named = self.link.book.borrow().scheme.track_of(device);
-        let candidates: Vec<String> = match named {
-            Some(track) => vec![track],
-            None => match self.track_rows(signal).await? {
-                Ok(tracks) => tracks.into_iter().map(|track| track.reference).collect(),
-                Err(_) => return Ok(None),
-            },
-        };
-        for track in candidates.into_iter().take(512) {
-            if let Ok(devices) = self.devices(&track, signal).await? {
-                if devices.iter().any(|row| self.same_place(&row.reference, device)) {
-                    return Ok(Some((track, devices)));
+        let track = match named {
+            Some(track) => track,
+            None => {
+                let row = match self.link.call("read", self.read_placed(json!({"ref": device})), signal.clone()).await? {
+                    Ok(read) => read.pointer("/items/0").cloned().unwrap_or(Value::Null),
+                    Err(_) => return Ok(Err(NOT_FOUND.into())),
+                };
+                if row.get("takeRef").and_then(Value::as_str).is_some() {
+                    return Ok(Err("That FX is on an item's take: Kumi tunes the FX in a track's chain, not a take's.".into()));
+                }
+                match text(&row, "trackRef") {
+                    Some(track) => track,
+                    None => return Ok(Err(NOT_FOUND.into())),
                 }
             }
+        };
+        match self.devices(&track, signal).await? {
+            Ok(devices) if devices.iter().any(|row| self.same_place(&row.reference, device)) => Ok(Ok((track, devices))),
+            _ => Ok(Err(NOT_FOUND.into())),
         }
-        Ok(None)
     }
 }
 
