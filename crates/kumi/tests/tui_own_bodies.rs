@@ -55,6 +55,7 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
     // The routing window: the track's sends, with their levels and taps.
     *c.own.borrow_mut() = Some(FocusBody::Routing(RoutingView {
         track_ref: "r:track:{B}".into(),
+        name: Some("Bass".into()),
         routes: vec![
             Route {
                 kind: RouteKind::Send,
@@ -744,3 +745,45 @@ case!(an_unnamed_reaper_take_is_an_untitled_take, async {
     h.close().await;
     work_with(DawId::Ableton);
 });
+
+// (review K2) REAPER's routing window for a track that isn't the selected one: the focus names no track on purpose (the
+// selected track's name isn't the window's), and FOCUS heads the routing with the name its body gives, never panics.
+case!(reapers_routing_window_for_another_track_draws_under_its_own_name, async {
+    work_with(DawId::Reaper);
+    let c = Rc::new(Control::default());
+    let body = json!({"ref": "r:track:{V}", "name": "Vocals", "parentSend": true,
+        "routes": [{"category": 0, "otherName": "Plate", "volumeDb": -9.0, "mode": 0, "mute": false}]});
+    *c.own.borrow_mut() = (reaper::DAW.to_body)(&BodyRequest::Routing { track_ref: "r:track:{V}".into() }, &body);
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let bridge = json!({"view": "routing", "selection": {"track": {"name": "Bass", "type": "audio"}, "trackRef": "r:track:{B}",
+        "routingTrackRef": "r:track:{V}"}});
+    let focus = (reaper::DAW.fill_focus)(&bridge);
+    assert!(focus.track.is_none(), "the focus names no track for another track's routing window");
+    h.emit(json!({"type": "focus", "focus": serde_json::to_value(focus).unwrap()}));
+    shows(&h, "→ Plate · −9 dB · post-fader").await;
+    h.has("Vocals");
+    assert!(!has(&h.screen(), "Bass"), "not the selected track's name");
+    h.close().await;
+});
+
+/// (review K10) REAPER's arrange comes back once its MIDI editor or an FX window loses the focus: the body follows the
+/// editor going away, as it follows one coming.
+#[test]
+fn reapers_arrange_comes_back_after_the_midi_editor_or_an_fx_window() {
+    use kumi::tui::app::{touched_next, Touched};
+    work_with(DawId::Reaper);
+    let focus = |view: &str| -> DawFocus {
+        (reaper::DAW.fill_focus)(&json!({"view": view, "selection": {"track": {"name": "Bass", "type": "midi"}, "trackRef": "r:track:{B}",
+            "takeRef": "r:take:{T}", "itemRef": "r:item:{I}", "fxRef": "r:fx:{F}", "fxName": "ReaEQ"}}))
+    };
+    let (arrange, midi, fx) = (focus("arrange"), focus("midi"), focus("fx"));
+    assert_eq!(touched_next(None, Some(&arrange), None), Some(Touched::Timeline));
+    let editing = touched_next(Some(&arrange), Some(&midi), Some(Touched::Timeline));
+    assert_eq!(touched_next(Some(&midi), Some(&arrange), editing), Some(Touched::Timeline), "MIDI editor → arrange");
+    let tree = touched_next(Some(&arrange), Some(&fx), Some(Touched::Timeline));
+    assert_eq!(tree, Some(Touched::Tree));
+    assert_eq!(touched_next(Some(&fx), Some(&arrange), tree), Some(Touched::Timeline), "FX window → arrange");
+    assert_eq!(touched_next(Some(&arrange), Some(&arrange), Some(Touched::Timeline)), Some(Touched::Timeline), "nothing moved");
+}

@@ -162,6 +162,12 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
             || (same_track && (after.device != before.device || after.chain != before.chain || after.track_ref != before.track_ref)))
     {
         Touched::Tree
+    } else if editor(&after) != editor(&before)
+        && !editor(&after).is_some_and(|kind| matches!(kind, ViewKind::NoteEditor | ViewKind::DeviceChain))
+    {
+        // The editor went away, or to one with no body of its own: what the view shows (REAPER's arrange after its MIDI
+        // editor or an FX window).
+        shown
     } else if let Some(own) = own.filter(|_| item(&after) != item(&before) || after.track_ref != before.track_ref) {
         own
     } else {

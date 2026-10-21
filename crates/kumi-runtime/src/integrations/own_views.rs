@@ -407,7 +407,8 @@ pub fn routing(track_ref: &str, body: &Value) -> RoutingView {
             channel => format!("{device} · channel {channel}"),
         }
     });
-    RoutingView { track_ref: track_ref.into(), routes, parent_send: body.get("parentSend").and_then(Value::as_bool), midi_out }
+    let name = body.get("name").and_then(Value::as_str).map(str::to_owned);
+    RoutingView { track_ref: track_ref.into(), name, routes, parent_send: body.get("parentSend").and_then(Value::as_bool), midi_out }
 }
 
 /// The mixer's strips (REAPER's with their meters; Renoise's without).
