@@ -706,6 +706,12 @@ fn a_parameter_written_on_a_track_in_touch_mode_records_nothing_and_the_override
     lab.make("fx-bypass", json!({"ref": fx_ref("{K-MAIN}"), "bypass": true}));
     lab.make("fx-wet", json!({"ref": fx_ref("{K-MAIN}"), "wet": 0.5}));
     assert_eq!(envelopes(), before);
+    // The wet nudge that makes REAPER keep a point of a pin map or a modulation is a write too (review R5).
+    let (pins_preview, pins) = lab.make("fx-pins", json!({"ref": fx_ref("{K-MAIN}"), "pins": [{"pin": 1, "channels": [2]}]}));
+    lab.undo("fx-pins", &pins_preview, &pins).unwrap();
+    lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    assert_eq!(envelopes(), before, "the nudge recorded nothing");
+    assert_eq!(state(|s| s.automation_override), -1);
     // A global override in latch mode is the producer's: it is put back as it was.
     state(|s| s.automation_override = 4);
     lab.make("fx-param", json!({"ref": fx_ref("{K-MAIN}"), "param": "Gain", "normalized": 0.2}));
