@@ -366,6 +366,22 @@ test("samples: a slice can't be deleted (its marker can); the sliced sample's de
   ok(math.abs(sample(1, 3).volume - 0.25) < 1e-9, "the slice's own settings")
 end)
 
+test("samples: the undo of a sliced sample's delete refuses once the producer put a sample into the instrument (#361 N-S21)", function()
+  local env, peer = setup()
+  local master = mock.song:instrument(1):sample(1)
+  master:insert_slice_marker(200)
+  master:insert_slice_marker(600)
+  mock.data.undo.stack = {}
+  local record = change(peer, "sample-delete", { ref = sref(place(peer), 1, 1) })
+  eq(sample_names(1), "")
+  mock.song:instrument(1):insert_sample_at(1).name = "Vocal" -- the producer drops a vocal in
+  H.tick(2)
+  local refused = restore(peer, "sample-delete", record)
+  failure(refused, "changed")
+  ok(refused.error.message:find("holds other samples", 1, true), refused.error.message)
+  eq(sample_names(1), "Vocal", "the producer's sample stays, alone")
+end)
+
 -- sample-slices
 
 test("samples: slice markers inserted, moved and deleted through Renoise's calls; the undo puts the markers and a deleted slice's settings back", function()

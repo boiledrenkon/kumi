@@ -688,6 +688,11 @@ local function delete_restore(song, env, restore, desc)
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then
     fail("changed", q(places_.instrument_label(i, instrument)) .. " is sliced now: Renoise takes no other samples in it")
   end
+  -- (a sliced sample is its instrument's only one: its slices come back only into an instrument that holds no other)
+  if material.markers and #instrument.samples > 0 then
+    fail("changed", string.format("%s was sliced, and %s holds other samples now: its slices can't come back beside them, so Kumi left it",
+      label, q(places_.instrument_label(i, instrument))))
+  end
   if material.file and not io.exists(material.file) then fail("failed", "the audio Kumi kept is gone (Renoise empties its temporary folder as it quits)") end
   song:describe_undo(desc)
   local sample = instrument:insert_sample_at(at)
@@ -699,7 +704,11 @@ local function delete_restore(song, env, restore, desc)
   if env.back then env.back("samples", i, nil, material.after, at) end
   local lost = put_settings(env, sample, material, true)
   if material.markers then
-    pcall(function() sample.slice_markers = material.markers end)
+    local sliced = pcall(function() sample.slice_markers = material.markers end)
+    if not sliced or #sample.slice_markers ~= #material.markers then
+      pcall(delete_sample, instrument, at)
+      fail("failed", "Renoise wouldn't slice " .. label .. " again: nothing was put back")
+    end
     for k, kept in ipairs(material.slices or {}) do
       local alias = instrument.samples[at + k] and instrument:sample(at + k)
       if alias and alias.is_slice_alias then lost = lost + put_settings(env, alias, kept, false) end
