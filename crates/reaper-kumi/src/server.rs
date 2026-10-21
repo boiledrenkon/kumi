@@ -14,7 +14,7 @@ use daw_bridge::auth::Secret;
 use daw_bridge::files::{self, Discovery, Reference, DISCOVERY_SCHEMA};
 use daw_bridge::handshake::{self, Offer, ServerAction, ServerConnection};
 use daw_bridge::wire::{self, code, Event, Frame, Identity, Project, Request, MAX_AUTHENTICATED, MAX_UNAUTHENTICATED, PROTOCOL};
-use daw_bridge::{install, loopback, Daw};
+use daw_bridge::{loopback, paths, Daw};
 use serde_json::{json, Value};
 
 use crate::extension::{Outbox, ProjectSummary, Snapshot, BRIDGE_VERSION};
@@ -86,7 +86,7 @@ const LISTENING_EVENTS: [&str; 1] = [crate::listening::SWEPT];
 
 /// Where the reference file lives for a resource folder.
 pub fn reference_path(resource: &Path) -> PathBuf {
-    resource.join("UserPlugins").join(install::REAPER_REFERENCE)
+    resource.join("UserPlugins").join(paths::REAPER_REFERENCE)
 }
 
 /// The connections, shared by the socket threads and the main thread.

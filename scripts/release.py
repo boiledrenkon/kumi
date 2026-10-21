@@ -53,8 +53,11 @@ if native is None:
 # A change under these, besides tests and Markdown, is a new bridge for Live to load. The host links kumi-common.
 BRIDGE = ("crates/ableton-mcp-server/", "crates/kumi-common/", "remote-script/", "protocol/", "apps/live-extension/",
           "vendor/willington/")
-# The same for REAPER's extension, which links daw-bridge, and for Renoise's tool (their tests and examples aside too).
-REAPER = (native.REAPER_CRATE + "/", "crates/daw-bridge/")
+# The same for REAPER's extension, and the parts of daw-bridge it links (its own wire, handshake, auth, discovery and
+# files: `rg daw_bridge:: crates/reaper-kumi/src`, and what those use), and for Renoise's tool (their tests and examples
+# aside too). The rest of daw-bridge (the lifecycle, detection, the doctor, installing) is Kumi's alone.
+REAPER = (native.REAPER_CRATE + "/", "crates/daw-bridge/Cargo.toml", *(f"crates/daw-bridge/src/{name}.rs" for name in (
+    "lib", "auth", "contract", "daw", "files", "frame", "handshake", "loopback", "owner", "paths", "wire")))
 RENOISE = (native.RENOISE_TOOL_SOURCE + "/",)
 REAPER_CARGO = native.REAPER_CRATE + "/Cargo.toml"
 RENOISE_VERSION = native.RENOISE_TOOL_SOURCE + "/payload/version.lua"

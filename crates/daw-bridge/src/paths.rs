@@ -4,6 +4,9 @@ use crate::daw::Daw;
 use std::path::{Path, PathBuf};
 
 /// Kumi's folder: KUMI_HOME when set and not empty, else `.kumi` in the user's home.
+/// The reference file beside REAPER's extension in UserPlugins: Kumi's lifecycle writes it and the extension reads it.
+pub const REAPER_REFERENCE: &str = "kumi-bridge-reference.json";
+
 pub fn kumi_home() -> Option<PathBuf> {
     kumi_home_from(&|name| std::env::var(name).ok(), home::home_dir())
 }

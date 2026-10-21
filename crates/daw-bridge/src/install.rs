@@ -9,8 +9,9 @@ pub const RENOISE_TOOL_ID: &str = "com.kumi.Bridge";
 pub const RENOISE_TOOL_FOLDER: &str = "com.kumi.Bridge.xrnx";
 /// Inside the Renoise tool's folder.
 pub const RENOISE_REFERENCE: &str = "bridge-reference.json";
-/// Beside REAPER's extension in UserPlugins (REAPER loads only `reaper_*` libraries, so it ignores this).
-pub const REAPER_REFERENCE: &str = "kumi-bridge-reference.json";
+/// Beside REAPER's extension in UserPlugins (REAPER loads only `reaper_*` libraries, so it ignores this). In `paths`,
+/// which the extension links (it finds its reference by this name).
+pub use crate::paths::REAPER_REFERENCE;
 
 /// REAPER loads `reaper_*.dylib|dll|so` from UserPlugins: one file per platform (macOS's is universal).
 pub fn reaper_extension_name(os: Os) -> &'static str {

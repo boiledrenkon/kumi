@@ -241,6 +241,12 @@ class DawSorting(unittest.TestCase):
                      "crates/reaper-kumi/examples/accept_reaper.rs", "crates/reaper-kumi/sdk/SOURCE.md",
                      "crates/daw-bridge/tests/vectors.rs", "crates/daw-mcp-server/src/host.rs", "daws/renoise/tests/test_changes.lua"):
             self.assertFalse(release.ships_reaper(path), path)
+        # daw-bridge's parts the extension doesn't link are Kumi's alone: a fix there is no new extension.
+        for path in ("crates/daw-bridge/src/lifecycle.rs", "crates/daw-bridge/src/detect.rs", "crates/daw-bridge/src/doctor.rs",
+                     "crates/daw-bridge/src/install.rs", "crates/daw-bridge/src/probe.rs"):
+            self.assertFalse(release.ships_reaper(path), path)
+        for path in ("crates/daw-bridge/src/handshake.rs", "crates/daw-bridge/src/owner.rs", "crates/daw-bridge/Cargo.toml"):
+            self.assertTrue(release.ships_reaper(path), path)
         for path in ("daws/renoise/com.kumi.Bridge.xrnx/payload/changes.lua", "daws/renoise/com.kumi.Bridge.xrnx/manifest.xml",
                      "daws/renoise/com.kumi.Bridge.xrnx/main.lua"):
             self.assertTrue(release.ships_renoise(path), path)
