@@ -117,6 +117,9 @@ pub fn apply(changes: &mut Changes, ctx: &mut Ctx, params: &Value) -> Answer {
         return Err(super::busy("Logic Pro went behind before the command could be posted; nothing changed"));
     }
     front::post(ctx.ax, &chord)?;
+    // A key command can change anything Logic shows, so what was read of the project before it is stale: the M4 gate's
+    // marker read, answered from the two-second list cache, missed the marker Create Marker had made.
+    ctx.project.forget();
     // The M4 gate read the title once, 500 ms after the chord, and took a marker's step for none: read until it moves
     // (once over a recorded scene, whose reads come in the order the real run made them).
     let mut after = None;

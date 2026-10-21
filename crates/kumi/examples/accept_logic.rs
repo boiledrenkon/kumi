@@ -789,7 +789,7 @@ impl Accept {
     /// then everything it made undone through Kumi, last first, and the project read as before.
     async fn m4_kinds(&self) -> Result<(), RuntimeError> {
         let observation = self.observe().await?;
-        let (Some(plan), Some(undo)) = (tool_named(&observation, "make_changes"), tool_named(&observation, "undo_change")) else {
+        let (Some(plan), Some(_)) = (tool_named(&observation, "make_changes"), tool_named(&observation, "undo_change")) else {
             self.say(false, None, "M4: no make_changes and undo_change tools");
             return Ok(());
         };
@@ -833,6 +833,14 @@ impl Accept {
         if self.stopping.get() {
             return Ok(());
         }
+        // The save as made the copy the project: the tools from here on are a fresh observation's, since a plan from
+        // the one before is refused as made for the project before it changed (the M4 gate's Select All).
+        let observation = self.observe().await?;
+        let (Some(plan), Some(undo)) = (tool_named(&observation, "make_changes"), tool_named(&observation, "undo_change")) else {
+            self.say(false, None, "M4: no make_changes and undo_change tools after the save as");
+            return Ok(());
+        };
+        let run_plan = |steps: Value| plan.execute(json!({"steps": steps}).as_object().cloned().unwrap_or_default(), signal());
 
         // A key command Logic keeps no step of: no row.
         let rows = self.changes.borrow().len();
