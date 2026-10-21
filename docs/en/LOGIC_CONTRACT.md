@@ -45,7 +45,7 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | `smart` | ref, trackRef, index, name, value (0 to 1), text | the Smart Controls pane (opened for the read and closed after) for the track, selected for the read and the selection put back; needs `parent` (the track); a track whose strip has nothing the pane maps (an audio track with only a Channel EQ on it) shows the pane's header over no controls and reads no rows, while a pane that hasn't drawn its header is `failed` |
 | `automation` | ref, trackRef, index, parameter, number, events (positionBeats, value) | the Track Automation Event List of the track (its key command, command 1032, Control-Command-E in the factory set, opens it as a window of its own for the selected track; closed after): its "Fader" rows grouped by parameter, the parameter's name from the Length/Info cell, its number from Num, each event's value (0 to 127) from Val; needs `parent` (the track) |
 | `marker` | ref, position, name, length (beats), text | the Marker List |
-| `recent` | index (from 1, most recent first), name, path (`null` when not known), open | File > Open Recent's items (read without opening the menu: each is `_openRecentDocument:`, titled with the project's file name); `path` from the project's window for the one open, else Spotlight's when it finds one project of that name (see "Recent projects") |
+| `recent` | index (from 1, most recent first), name, path (`null` when not known), open | File > Open Recent's items (read without opening the menu: each is `_openRecentDocument:`, titled with the project's file name); `open` on the first item of the open project's file name alone, its `path` from the project's window; another item's from Spotlight when it finds one project of that name besides the open one (see "Recent projects") |
 | `tempo` | bpm, tempos (position, bpm), signatures (position, time, key) | the Tempo List (`tempos` is every event of it, the first the project's tempo at its start, then each change of tempo by position) and the Signature List |
 
 What the bridge reads outside Logic's windows (the preferences, Spotlight, a file on disk) goes through one seam
@@ -88,9 +88,13 @@ the List Editors; a pane the producer has open stays open. The answer is one fra
 Logic keeps its recent projects in macOS's shared file list, which macOS keeps from other processes ("Operation not
 permitted"), and its preferences hold no project path (518 keys on the lab's Mac; `DefaultDir1` to `4` are the open
 and save panels' last folders). File > Open Recent shows them, and Accessibility reads its items without opening the
-menu, but an item carries the project's file name alone (`AXTitle`; no URL, document or help). So `read {kind:
+menu, but an item carries the project's file name alone (`AXTitle`; no URL, document or help: its title, identifier
+and frame are all Accessibility shows of it on Logic Pro 12.3.1). So the open project can't be matched by its whole
+path: it is the first item of its file name (the menu starts with the latest, and opening a project puts it there),
+and only that item is `open`; another of the same name (a project of that name in another folder) isn't. `read {kind:
 "recent"}` answers the items in order with `path` where the bridge can know it: the project open now (its window's
-document), and a project Spotlight finds by that file name, once, outside any other package and the Trash. Spotlight
+document), and a project Spotlight finds by that file name, once, outside any other package and the Trash and besides
+the open one; two items of one name besides the open one can't be told apart, so neither has a path. Spotlight
 answers only for folders the bridge's process may read, so a project under `~/Music` (Logic's own folder) is never
 found unless it is the one open: on the lab's Mac the eight recent projects read with Scratch's path from its window
 and the seven gate copies' from Spotlight (they sit in a shared folder outside the home), in 101 ms (66 ms for a
