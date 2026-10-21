@@ -61,6 +61,8 @@ pub struct OwnDaw {
     /// What `daw-mcp-server --daw` takes: "reaper", "renoise".
     pub host_flag: &'static str,
     pub instructions: &'static str,
+    /// What a clear mechanical mistake looks like in this DAW, for the shared rules (`own_rules`): examples, in its words.
+    pub mechanical: &'static str,
     /// The model's read tool: its name, what it says and the kinds it takes.
     pub read_tool: &'static str,
     pub read_description: &'static str,
@@ -1557,12 +1559,25 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
     shown
 }
 
-/// The instructions a DAW's turns carry: its own, its changes', and what catch-up's summary is.
+/// The instructions a DAW's turns carry: its own, the rules every DAW shares, its changes', and what catch-up's summary is.
 pub fn instructions_of(daw: &OwnDaw) -> String {
     let place = daw.profile.words.place;
     format!(
-        "{} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
-        daw.instructions, daw.changes.instructions
+        "{} {} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
+        daw.instructions,
+        own_rules(daw),
+        daw.changes.instructions
+    )
+}
+
+/// The rules Kumi works by in every DAW whose bridge is its own (core's, the same everywhere), in the DAW's words; the DAW
+/// gives only its facts (its setup's fields in its instructions, its mechanical mistakes in `OwnDaw::mechanical`). Two equal
+/// routes are a mistake to fix; a route through FX is the producer's sound, so a choice to ask about.
+pub fn own_rules(daw: &OwnDaw) -> String {
+    let app = daw.profile.words.app;
+    format!(
+        "The look's setup is how this producer set {app} up: follow it rather than {app}'s factory defaults. When the producer reports a problem: a clear mechanical mistake with one obvious fix ({}) gets that fix as one change, said with what you did and how to take it back (Kumi's undo or {app}'s own); when the fix means choosing between the producer's own routes or settings (one route running through FX, two settings they may have meant), name them exactly and ask one question. Never ask only because nothing is selected. Never change {app}'s preferences, key bindings, mouse modifiers or theme. Describe each change in words, naming what it touched and where. Offer alternatives as separate takes, each undoable, and never make a whole song or part unasked.",
+        daw.mechanical
     )
 }
 

@@ -118,17 +118,42 @@ fn the_packs_rules_read_as_meant() {
     assert!(!renoise.contains("LPB and hex") && renoise.contains("line numbers in decimal"));
 }
 
-/// A problem with one clear mechanical cause is fixed, not only explained: as one undoable change, said with how to take it
-/// back; a question comes first only for a musical choice (the P30 smoke: Kumi found the duplicate route and asked).
+/// The rules every own DAW shares are core's (PR #400 review D24): written once (in `own_rules`), in each DAW's
+/// composed instructions exactly once and in the DAW's words, and in neither DAW's own text. A mechanical mistake with one
+/// obvious fix is fixed undoably and said so; a choice between the producer's own routes or settings (one route through
+/// FX) is named and asked once (D19, D23); nothing is asked only because nothing is selected (D14).
 #[test]
-fn a_mechanical_cause_is_fixed_and_a_musical_choice_asked() {
+fn the_shared_rules_are_written_once_and_composed_into_each_daw() {
+    const RULES: [&str; 8] = [
+        "factory defaults",
+        "a clear mechanical mistake with one obvious fix",
+        "how to take it back (Kumi's undo or",
+        "one route running through FX",
+        "name them exactly and ask one question",
+        "Never ask only because nothing is selected",
+        "Describe each change in words",
+        "Offer alternatives as separate takes",
+    ];
+    let source = |file: &str| std::fs::read_to_string(format!("{}/src/integrations/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let sources = [source("own_bridge.rs"), source("reaper.rs"), source("renoise.rs")];
+    for rule in RULES.iter().skip(1) {
+        let written: usize = sources.iter().map(|text| text.matches(rule).count()).sum();
+        assert_eq!(written, 1, "“{rule}” is written once, in own_rules");
+    }
     for daw in [&reaper::DAW, &renoise::DAW] {
-        let text = instructions_of(daw);
-        let rule = &text[text.find("one clear mechanical cause").unwrap_or_else(|| panic!("{}: the rule", daw.profile.words.app))..];
-        let rule = &rule[..rule.find(". ").unwrap_or(rule.len())];
-        for words in ["fix it as one change", "how to take it back", "musical choice", "track reaching the master twice"] {
-            assert!(rule.contains(words), "{}: {words} in “{rule}”", daw.profile.words.app);
+        let app = daw.profile.words.app;
+        let composed = instructions_of(daw);
+        for rule in RULES {
+            assert_eq!(composed.matches(rule).count(), 1, "{app}'s instructions hold “{rule}” once");
+            assert!(!daw.instructions.contains(rule) && !daw.changes.instructions.contains(rule), "{app}'s own text repeats “{rule}”");
         }
+        // In the DAW's words, with its own examples of a mechanical mistake (equal routes among them, D23).
+        for words in
+            [format!("set {app} up"), format!("{app}'s own"), format!("Never change {app}'s preferences"), daw.mechanical.to_owned()]
+        {
+            assert!(composed.contains(&words), "{app}: {words}");
+        }
+        assert!(daw.mechanical.contains("equal routes"), "{app}: equal routes are the mechanical case");
     }
     let lines = renoise::DAW.changes.kinds.iter().find(|kind| kind.tool == "notes_write").unwrap().description;
     assert!(lines.contains("09xx") && lines.contains("0Sxx"), "notes_write says the older spellings are written as 0Sxx");
