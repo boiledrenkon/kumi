@@ -67,6 +67,9 @@ struct State {
     next_copy: u32,
     /// Copies kept as the producer's tracks (`scratch-keep`): their name, by ref.
     kept: HashMap<String, String>,
+    /// Kept copies muted since (`track-mute` on one): the bridges fence a kept track's mute, so Kumi's undo of keeping it
+    /// refuses while it's muted.
+    kept_muted: std::collections::HashSet<String>,
     /// Refs whose audio is MIDI (REAPER) or that have no sample data (Renoise).
     silent_refs: Vec<String>,
     /// What the next job notes, whatever its end.
@@ -149,6 +152,7 @@ impl SimListening {
                 audition_works: true,
                 next_copy: 0,
                 kept: HashMap::new(),
+                kept_muted: Default::default(),
                 silent_refs: vec![],
                 next_notes: vec![],
                 next_tempo: None,
@@ -336,7 +340,9 @@ impl SimListening {
         if method == "change_restore" {
             let reference = params["created"]["ref"].as_str().unwrap_or_default().to_string();
             let Some(name) = state.kept.get(&reference) else { return Err(("gone".into(), "the kept track isn't there any more".into())) };
-            if params["applied"]["name"].as_str() != Some(name.as_str()) && params["discard"] != true {
+            if (params["applied"]["name"].as_str() != Some(name.as_str()) || state.kept_muted.contains(&reference))
+                && params["discard"] != true
+            {
                 return Err(("changed".into(), format!("“{name}” changed since Kumi kept it")));
             }
             state.kept.remove(&reference);
@@ -371,6 +377,43 @@ impl SimListening {
                 state.kept.insert(reference.clone(), name.clone());
                 Ok(json!({"epoch": epoch, "applied": {"name": name}, "created": {"ref": reference, "kind": "track"}, "display": display,
                     "undo": {"desc": desc, "entry": true}}))
+            }
+        }
+    }
+
+    /// Whether a ref is a copy kept as a track.
+    pub fn is_kept(&self, reference: &str) -> bool {
+        self.state.lock().unwrap().kept.contains_key(reference)
+    }
+
+    /// Whether a kept copy is muted.
+    pub fn kept_muted(&self, reference: &str) -> bool {
+        self.state.lock().unwrap().kept_muted.contains(reference)
+    }
+
+    /// `track-mute {ref, mute}` on a copy kept as a track: one step of the DAW's undo, put back while it's as applied.
+    pub fn mute_kept(&self, method: &str, params: &Value, epoch: &str) -> Answer {
+        let mut state = self.state.lock().unwrap();
+        let source = if method == "change_restore" { &params["target"] } else { &params["input"] };
+        let reference = source["ref"].as_str().unwrap_or_default().to_string();
+        let name =
+            state.kept.get(&reference).cloned().ok_or_else(|| ("gone".to_string(), "the kept track isn't there any more".to_string()))?;
+        let now = state.kept_muted.contains(&reference);
+        let wanted = if method == "change_restore" { params["prior"]["mute"] == true } else { params["input"]["mute"] == true };
+        let title = format!("{name} {}", if wanted { "muted" } else { "unmuted" });
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        match method {
+            "change_preview" => Ok(json!({"epoch": epoch, "target": {"ref": reference, "kind": "track"}, "prior": {"mute": now},
+                "fence": {"mute": now}, "display": {"title": title}})),
+            _ => {
+                if wanted {
+                    state.kept_muted.insert(reference.clone());
+                } else {
+                    state.kept_muted.remove(&reference);
+                }
+                let mut answer = json!({"epoch": epoch, "display": {"title": title}, "undo": {"desc": desc, "entry": true}});
+                answer[if method == "change_restore" { "restored" } else { "applied" }] = json!({"mute": wanted});
+                Ok(answer)
             }
         }
     }

@@ -1133,6 +1133,14 @@ impl ReaperScript {
                 return Some(Err(("stale".into(), message)));
             }
         }
+        // (M5) A copy kept as a track, muted: the listening side knows the kept copies.
+        let muted = if method == "change_restore" { &params["target"]["ref"] } else { &params["input"]["ref"] };
+        if method.starts_with("change_")
+            && params["kind"] == "track-mute"
+            && muted.as_str().is_some_and(|kept| self.listening.is_kept(kept))
+        {
+            return Some(self.listening.mute_kept(method, params, &epoch));
+        }
         // (M5) A scratch copy kept as a track: the listening side knows the copies.
         if method.starts_with("change_") && params["kind"] == "scratch-keep" {
             let answer = self.listening.keep(method, params, &epoch);

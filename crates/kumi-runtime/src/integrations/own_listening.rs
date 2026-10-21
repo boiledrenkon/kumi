@@ -268,9 +268,9 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     pub(super) parts: RefCell<HashMap<String, Part>>,
     /// Kumi's listens played out loud (from, to, in ms): what the producer heard of Kumi's work.
     pub(super) played: RefCell<std::collections::VecDeque<(i64, i64)>>,
-    /// The change that kept the last goal's best on a track of its own: taken back when a better one replaces it, by
-    /// this goal or a resumed one.
-    pub(super) goal_best: RefCell<Option<String>>,
+    /// The changes that kept the last goal's best on a track of its own (its keep, then the mute a paused goal put on it):
+    /// taken back, the last first, when a better one replaces it, by this goal or a resumed one.
+    pub(super) goal_best: RefCell<Vec<String>>,
     /// A render stopping Kumi's own play was said in this run (a new answer's run says it again).
     pub(super) stop_told: Cell<bool>,
     /// The last render's notes, told as it ended: the engine passing them on doesn't tell them again.

@@ -1055,6 +1055,57 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         .await;
 }
 
+/// (#361 review K28) A paused goal's best waits muted beside the producer's untouched track (the part never plays twice),
+/// and says so; a better best still replaces it. A finished goal, its candidates tidied, plays its best.
+#[tokio::test(flavor = "current_thread")]
+async fn a_paused_goals_best_waits_muted_beside_the_untouched_track() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_fx("r:track:{T0002}", "ReaEQ");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate { track: "Track 2".into(), clip: None, label: None, mix: None }],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let rig = reaper.goal(&request, Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name == "Gain-Band 2").cloned().collect();
+            let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![0.7], fresh: None };
+            rig.generation(&[trial], Signal::new(), None).await.unwrap();
+            // Paused: no tidy before the best is kept.
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let first = script.listening().kept();
+            assert!(script.listening().kept_muted(&first[0].0), "the best waits muted");
+            assert!(
+                told.borrow().iter().any(|title| title.starts_with("“Kumi · Goal best” waits muted beside “Track 2”")),
+                "{:?}",
+                told.borrow()
+            );
+            // Finished: the candidates tidied (muted for an A/B), and the best, replacing the last, plays.
+            assert!(rig.tidy(&[slots[0].name.clone()], Signal::new()).await.unwrap().is_empty());
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let second = script.listening().kept();
+            assert_eq!(second.len(), 1, "the last best went, its mute taken back first: {second:?} {:?}", told.borrow());
+            assert!(!script.listening().kept_muted(&second[0].0), "a finished goal's best plays");
+            rig.close().await.unwrap();
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 review K26) A goal's slot is its track by REAPER's GUID, not by a name that moves: a track inserted above an
 /// unnamed "Track 2" makes it "Track 3", and the winner still settles on the track the goal searched.
 #[tokio::test(flavor = "current_thread")]

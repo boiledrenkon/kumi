@@ -22,7 +22,11 @@ use kumi_common::{
     js::number::to_fixed,
 };
 use serde_json::{json, Value};
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    rc::Rc,
+};
 
 /// The most knobs a slot offers the search: a device's first ones, and in all.
 const KNOBS_PER_DEVICE: usize = 128;
@@ -79,6 +83,8 @@ pub(super) struct OwnGoalRig<S: RefScheme + 'static> {
     focus: Option<Focus>,
     screen: Option<Screen>,
     heard: RefCell<IndexMap<String, Cached>>,
+    /// The finished goal's candidates were tidied (the top ones muted for an A/B): its best plays on its own.
+    tidied: Cell<bool>,
     /// The safety limiters this rig put on candidates: each track (its ref as the book follows it), its name, and the
     /// limiter's place in its chain. Taken back if the goal never opens.
     limiters: RefCell<Vec<(String, String, u64)>>,
@@ -134,6 +140,7 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
             focus: request.focus,
             screen: None,
             heard: RefCell::new(IndexMap::new()),
+            tidied: Cell::new(false),
             limiters: RefCell::new(vec![]),
         };
         renderer.tell_app(&format!(
@@ -664,11 +671,12 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
             }
             // The last best goes (Kumi's undo of keeping it, whichever goal kept it), then a fresh copy of the slot at these
             // values is kept. One the producer worked on since stays theirs (the bridge refuses the undo).
-            let previous = r.goal_best.borrow_mut().take();
-            if let Some(previous) = previous {
-                if let Err(why) = r.undo(&previous).await {
+            let previous = r.goal_best.take();
+            for id in previous.iter().rev() {
+                if let Err(why) = r.undo(id).await {
                     let why = why.trim_end_matches('.');
                     r.tell_app(&format!("The last “{BEST}” stays where it is ({why}); the new best goes on a track of its own"));
+                    break;
                 }
             }
             let args = json!({"action": "make", "ref": track, "count": 1, "label": "Kumi: goal best"});
@@ -703,10 +711,22 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
             // The make goes either way: a copy kept as a track stays (the bridge leaves it), and the make no longer counts
             // as standing.
             r.drop_make(&scratch, steps).await;
-            match kept {
-                Ok((id, _)) => *r.goal_best.borrow_mut() = Some(id),
+            let mut kept = match kept {
+                Ok((id, _)) => vec![id],
                 Err(why) => return Ok(Err(why)),
+            };
+            // A paused goal's candidates weren't tidied: the producer's track still plays as it was, so the best waits
+            // muted beside it rather than playing the part twice. (A finished goal muted its candidates for an A/B.)
+            if !self.tidied.get() {
+                match r.change("track_mute", json!({"ref": copy, "mute": true}), signal.clone()).await {
+                    Ok((id, _)) => {
+                        kept.push(id);
+                        r.tell_app(&format!("“{BEST}” waits muted beside “{slot}”, which plays as it was: unmute it to hear the best"));
+                    }
+                    Err(_) => r.tell_app(&format!("“{BEST}” plays beside “{slot}”: mute one of them to hear the other alone")),
+                }
             }
+            *r.goal_best.borrow_mut() = kept;
             // The winner is heard: the render it scored from at these very values, out loud.
             let values_key = values.iter().map(|value| to_fixed(*value, 4)).collect::<Vec<_>>().join(",");
             let heard = {
@@ -749,6 +769,7 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
         }
     }
     async fn tidy(&self, top: &[String], given: Signal) -> Result<Vec<String>, RuntimeError> {
+        self.tidied.set(true);
         let r = &self.renderer;
         let signal = abort::any([given, r.lifetime()]);
         let mut said = vec![];
