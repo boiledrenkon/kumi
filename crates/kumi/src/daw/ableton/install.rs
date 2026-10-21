@@ -103,6 +103,9 @@ pub fn bridge_command(app: &str, home: &str) -> tokio::process::Command {
         .env("KUMI_BRIDGE_AFTER", "1")
         .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
         .env("KUMI_HOME", home)
+        // Live's bridge, whatever DAW the producer chose for sessions (a Kumi of before #361 ignores it; one of #361's
+        // took it).
+        .env_remove("KUMI_DAW")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -404,6 +407,7 @@ pub async fn checkout_bridge(repo: &str) -> i32 {
     command
         .args(["bridge", "--yes"])
         .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
+        .env_remove("KUMI_DAW")
         .current_dir(repo)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

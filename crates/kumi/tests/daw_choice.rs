@@ -90,9 +90,14 @@ fn bridge_sets_up_the_bridge_of_the_daw_asked_for_and_lives_otherwise() {
         r#"{"mode":"bridge","yes":true,"allowDirty":false,"daw":"reaper"}"#
     );
     assert_eq!(config(&["bridge", "--daw=renoise"], &env), config(&["--daw", "renoise", "bridge"], &env));
-    let mut chosen = env.clone();
-    chosen.insert("KUMI_DAW".into(), "renoise".into());
-    assert!(config(&["bridge"], &chosen).unwrap().contains(r#""daw":"renoise""#));
+    // KUMI_DAW chooses the DAW sessions work with, never whose bridge `kumi bridge` sets up: Live's update ends with
+    // `kumi bridge`, and every fix Kumi gives for Live says it (review L1). Nor does one Kumi doesn't know stop it (L10).
+    for chosen in ["renoise", "reaper", "logic"] {
+        let mut chosen_env = env.clone();
+        chosen_env.insert("KUMI_DAW".into(), chosen.into());
+        assert_eq!(config(&["bridge", "--yes"], &chosen_env), config(&["bridge", "--yes"], &env), "KUMI_DAW={chosen}");
+        assert_eq!(config(&["--daw", "reaper", "bridge"], &chosen_env), config(&["--daw", "reaper", "bridge"], &env));
+    }
     assert!(config(&["--daw", "logic", "bridge"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
     assert_eq!(config(&["--daw", "reaper", "bridge", "--force"], &env).unwrap_err(), "Use: bridge [--yes] [--allow-dirty].");
 }
