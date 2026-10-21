@@ -4,9 +4,10 @@
 //! write. What Logic wrote is found on disk and read back from its header ([`crate::disk`]).
 //!
 //! The bounce goes through File > Bounce > Project or Section… (Logic's own Bounce dialog: its destination list with
-//! Uncompressed alone checked, the file type and bit depth pop-ups, Normalize off, the Start and End positions'
-//! segments stepped), then the save panel through its service as `project_save`'s save as goes, and the file is
-//! waited for on disk and its header read. The export goes through File > Export > All Tracks as Audio Files…, an
+//! Uncompressed alone checked, the file type and bit depth pop-ups, Normalize off, Add to Project and Add to Apple
+//! Music Library off, the Start and End positions' segments stepped), then the save panel through its service as
+//! `project_save`'s save as goes, and the file is waited for on disk and its header read. With Add to Project off a
+//! bounce leaves Logic's undo as it found it. The export goes through File > Export > All Tracks as Audio Files…, an
 //! open panel that takes a folder (its options left as the producer set them): the folder's new files are the answer.
 
 use std::path::{Component, Path, PathBuf};
@@ -266,7 +267,37 @@ fn set_position(ctx: &mut Ctx, root: &Root, group_path: &str, to: Position) -> D
     Ok(at)
 }
 
-/// Fills the Bounce dialog: Uncompressed alone, its file type and bit depth, Normalize off, the range.
+/// What the Bounce dialog would do besides writing the file, which a bounce of Kumi's leaves out: Add to Project puts
+/// the file in the project's audio, a step of Logic's undo ("Bounce Project") on top of any Kumi's restore would take
+/// back with Logic's own undo; Add to Apple Music Library puts it in the Music app.
+const LEFT_OUT: [&str; 2] = ["Add to Project", "Add to Apple Music Library"];
+
+/// Unchecks the dialog's Add to Project and Add to Apple Music Library, read back.
+fn leave_out(ctx: &mut Ctx, root: &Root) -> Done<()> {
+    let checked = |ctx: &mut Ctx| -> Done<Vec<(String, String)>> {
+        let tree = dialog_tree(ctx, root)?;
+        let strings = &ctx.project.strings;
+        let mut on = vec![];
+        for label in LEFT_OUT {
+            if let Some(check) = tree.find(&|n| n.role == "AXCheckBox" && (strings.is(&n.title, label) || strings.is(&n.desc, label))) {
+                if check.is_on() {
+                    on.push((label.to_string(), check.path.clone()));
+                }
+            }
+        }
+        Ok(on)
+    };
+    for (_, path) in checked(ctx)? {
+        nudge::wrote(ctx.ax.action(root, &path, "AXPress", 150))?;
+    }
+    if let Some((label, _)) = checked(ctx)?.first() {
+        return Err(super::uncertain(format!("the Bounce dialog keeps {label} checked after Kumi unchecked it")));
+    }
+    Ok(())
+}
+
+/// Fills the Bounce dialog: Uncompressed alone, its file type and bit depth, Normalize off, Add to Project and Add to
+/// Apple Music Library off, the range.
 fn fill(ctx: &mut Ctx, root: &Root, ask: &Bounce, beats_per_bar: u32) -> Done<()> {
     let tree = dialog_tree(ctx, root)?;
     // The destinations: Uncompressed checked and its row selected (the pop-ups show the selected row's format), the
@@ -296,6 +327,7 @@ fn fill(ctx: &mut Ctx, root: &Root, ask: &Bounce, beats_per_bar: u32) -> Done<()
     let tree = dialog_tree(ctx, root)?;
     let normalize = popup_among(&tree, &NORMALIZE).map(|n| n.path.clone()).ok_or_else(|| failed("the Bounce dialog shows no Normalize"))?;
     choose(ctx, root, &normalize, "Off")?;
+    leave_out(ctx, root)?;
     // The range: Start before End when it moves earlier, End first when it moves later.
     let tree = dialog_tree(ctx, root)?;
     let groups: Vec<String> =

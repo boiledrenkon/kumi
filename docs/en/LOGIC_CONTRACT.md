@@ -221,11 +221,18 @@ each change in the plan stays its own step of Logic's undo.
 bridge as `project_save` is (no change, no row, no undo step). `bounce` goes through File > Bounce > Project or
 Section…: Logic's Bounce dialog with Uncompressed alone checked (its row selected, so the File Type and Bit Depth
 pop-ups are its own), the format's file type and bit depth (`wav24` by default, `wav16`, `wav32f`, `aiff24`),
-Normalize Off, the Start and End positions' segments stepped, OK; then the save panel through its service (the
-folder by the go-to sheet, the name), and the file is waited for on disk and its header read (`{epoch, bounced,
-format, bytes, seconds, rate, channels, bits, startBeats, endBeats}`; `uncertain` when its length isn't the
-range's at the project's tempo). `path` is a whole path to a `.wav` (or `.aif`) that isn't there yet, in a folder
-that is. `export_tracks` goes through File > Export > All Tracks as Audio Files…, an open panel that takes a
+Normalize Off, Add to Project and Add to Apple Music Library unchecked, the Start and End positions' segments
+stepped, OK; then the save panel through its service (the folder by the go-to sheet, the name), and the file is
+waited for on disk and its header read (`{epoch, bounced, format, bytes, seconds, rate, channels, bits, startBeats,
+endBeats}`; `uncertain` when its length isn't the range's at the project's tempo). `path` is a whole path to a `.wav`
+(or `.aif`) that isn't there yet, in a folder that is. Add to Project, which the dialog had checked, puts the file in
+the project's audio, and that is a step of Logic's undo ("Bounce Project") on top of whatever Kumi did before: a
+Kumi step taken back through Logic's own undo (a split, a patch) was then refused, its Edit menu saying "Undo Bounce
+Project". With it unchecked a bounce changes nothing in the project and leaves Logic's undo as it was (a split, a
+bounce, then the split undone through Logic's undo: recorded). The dialog keeps these choices for the next bounce, as
+it keeps the format. A bounce holds whatever Logic plays, the metronome's click included while the control bar's
+Metronome Click is on (bars 6 and 7 of Scratch, where no region plays, bounced at a peak of 0.42 with the click on):
+`bounce` leaves the click as the producer set it. `export_tracks` goes through File > Export > All Tracks as Audio Files…, an open panel that takes a
 folder (its options are left as the producer set them): the folder (which must be there) is reached by the go-to
 sheet, Export pressed, and the answer lists the files Logic wrote there (`{epoch, folder, files: [{name, bytes,
 seconds}]}`). What the bridge looks at on disk goes through one seam (`src/disk.rs`), so a recorded scene keeps

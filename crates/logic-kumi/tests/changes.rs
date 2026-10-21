@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 53] = [
+const SCENES: [&str; 54] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -79,6 +79,7 @@ const SCENES: [&str; 53] = [
     "change-undo-m4b",
     "read-smart-none",
     "change-fx-param-exact",
+    "change-bounce-undo",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -1027,7 +1028,7 @@ fn the_mix_is_bounced_through_logics_bounce_dialog_and_found_on_disk_and_never_o
     let replayed = replay("change-bounce");
     let bounces = of(&replayed, "bounce");
     let bounced = bounces[0].result().clone();
-    assert_eq!(bounced["bounced"], "/Users/me/programs/kumi-lanes/m4-files/m4b/Scratch bounce.wav");
+    assert_eq!(bounced["bounced"], "/Users/me/programs/kumi-lanes/m5-files/m4b/Scratch bounce.wav");
     assert_eq!(
         (bounced["format"].as_str(), bounced["rate"].as_u64(), bounced["channels"].as_u64(), bounced["bits"].as_u64()),
         (Some("wav24"), Some(44100), Some(2), Some(24))
@@ -1088,4 +1089,35 @@ fn a_parameter_lands_on_the_number_asked_when_its_steps_allow() {
     assert_eq!(restores[0].result()["restored"]["params"][0]["text"], "0.0 dB");
     assert_eq!(restores[1].result()["restored"]["deleted"], "1:plugin:0.1.1");
     assert_eq!(of(&replayed, "read")[1].result()["items"], json!([]));
+}
+
+#[test]
+fn a_bounce_adds_nothing_to_the_project_so_logics_own_undo_still_takes_back_kumis_step_under_it() {
+    // The Bounce dialog's Add to Project put the file in the project's audio, a step of Logic's undo ("Bounce
+    // Project") on top of Kumi's: Kumi unchecks it (and Add to Apple Music Library) before OK.
+    let bounce = replay("change-bounce");
+    let unchecked = bounce_scene_presses("change-bounce");
+    assert!(unchecked.iter().any(|(path, before, after)| path == "3.4" && *before == 1 && *after == 0), "{unchecked:?}");
+    assert_eq!(of(&bounce, "bounce")[0].result()["seconds"], 3.0);
+    // A split, a bounce, then the split taken back through Logic's own undo, which still has the split on top.
+    let replayed = replay("change-bounce-undo");
+    assert_eq!(of(&replayed, "bounce")[0].result()["seconds"], 1.5);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["pressed"].as_str(), restored["undo"]["how"].as_str()), (Some("Undo Split Regions"), Some("undo")));
+    assert_eq!(of(&replayed, "read")[0].result()["items"].as_array().unwrap().len(), 1, "the region whole again");
+}
+
+/// The presses a scene made in the Bounce dialog: each one's path and its value before and after.
+fn bounce_scene_presses(name: &str) -> Vec<(String, i64, i64)> {
+    load(name)
+        .calls
+        .iter()
+        .filter(|call| {
+            call.op == "action"
+                && call.params.get("root").and_then(|r| r.get("title")).and_then(Value::as_str).is_some_and(|t| t.starts_with("Bounce"))
+        })
+        .filter_map(|call| {
+            Some((call.params.get("path")?.as_str()?.to_string(), call.reply.get("before")?.as_i64()?, call.reply.get("after")?.as_i64()?))
+        })
+        .collect()
 }
