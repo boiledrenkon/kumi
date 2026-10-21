@@ -1001,9 +1001,11 @@ function M.touched_patterns(env, marks, pattern_now)
   if type(marks) ~= "table" then return touched end
   for key, mark in pairs(marks) do
     local p = tonumber(key)
-    local now = pattern_now and pattern_now(p) or nil
-    local since = now and mark and env.pattern_touched_since and env.pattern_touched_since(now, mark)
-    if since ~= false then touched[p] = true end
+    if p then
+      local now = pattern_now and pattern_now(p) or nil
+      local since = now and mark and env.pattern_touched_since and env.pattern_touched_since(now, mark)
+      if since ~= false then touched[p] = true end
+    end
   end
   return touched
 end
