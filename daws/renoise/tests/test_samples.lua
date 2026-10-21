@@ -221,6 +221,21 @@ local function wav_file(name, size)
   return path
 end
 
+test("samples: lossy audio counts as what it decodes to against the load bound: a 9 MB MP3 is refused, a 9 MB WAV isn't (#361 N-S25)", function()
+  local env, peer = setup()
+  local mp3 = mock.temp_dir .. "/Mix.mp3"
+  local f = assert(io.open(mp3, "wb"))
+  f:write("ID3" .. string.rep("m", 9 * 1024 * 1024))
+  f:close()
+  local epoch = place(peer)
+  local refused = call(peer, "change_preview", { kind = "sample-load", input = { ref = iref(epoch, 1), path = mp3 }, epoch = epoch })
+  failure(refused, "failed")
+  ok(refused.error.message:find("decodes", 1, true), refused.error.message)
+  local fine = call(peer, "change_preview", { kind = "sample-load", input = { ref = iref(epoch, 1), path = wav_file("Big", 9 * 1024 * 1024) }, epoch = epoch })
+  ok(fine.result, json.encode(fine.error or {}))
+  os.remove(mp3)
+end)
+
 test("samples: Kumi's undo of a sample it loaded refuses once the producer retuned it; of an instrument it made, once they worked in it (#361 N-S1)", function()
   local env, peer = setup()
   local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap", 4096), index = 1 })

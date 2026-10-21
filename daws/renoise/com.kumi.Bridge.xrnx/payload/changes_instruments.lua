@@ -21,8 +21,11 @@ M.SCAN_BUDGET = 300000
 -- The most an instrument Kumi deletes may hold (its samples' bytes, as Renoise keeps them in memory), so that saving it and
 -- loading it back stay well inside one callback (measured: see the notes).
 M.MAX_INSTRUMENT_BYTES = 64 * 1024 * 1024
--- The biggest file Kumi loads in one callback.
+-- The biggest file Kumi loads in one callback (measured on WAV and FLAC); lossy audio decodes to about ten times its size in
+-- that callback, so it counts as that much (an 8 MB MP3 is about as much as the bound).
 M.MAX_LOAD_BYTES = 96 * 1024 * 1024
+local DECODES = { mp3 = 12, ogg = 12, m4a = 12, mp4 = 12 }
+function M.load_cost(bytes, extension) return bytes * (DECODES[extension] or 1) end
 -- The most swaps one move makes (each renumbers the notes of the whole song).
 M.MAX_MOVE_SWAPS = 64
 -- The most notes a delete keeps: its undo writes them back in the callback that loads the instrument (seven fields a note, about
@@ -773,8 +776,9 @@ local function load_path(input, kinds)
   if not kinds[extension] then bad("Renoise loads instruments (.xrni), multi-samples (.sfz) and sample files (.wav, .flac, .aif, .ogg, .mp3) here; not ." .. extension) end
   -- (a file that isn't what its name says would make Renoise show an error dialog and wait for a person: its first bytes tell)
   if not M.looks_like(path, extension) then bad(path .. " isn't a ." .. extension .. " file Renoise can load (its contents say otherwise)") end
-  if stat and stat.size and stat.size > M.MAX_LOAD_BYTES then
-    fail("failed", string.format("%s is %.0f MB, more than Kumi loads in one go (%d MB): load it in Renoise", path, stat.size / 1048576, M.MAX_LOAD_BYTES / 1048576))
+  if stat and stat.size and M.load_cost(stat.size, extension) > M.MAX_LOAD_BYTES then
+    local lossy = M.load_cost(1, extension) > 1 and string.format(" (.%s decodes to about %d times its size)", extension, M.load_cost(1, extension)) or ""
+    fail("failed", string.format("%s is %.0f MB%s, more than Kumi loads in one go (%d MB): load it in Renoise", path, stat.size / 1048576, lossy, M.MAX_LOAD_BYTES / 1048576))
   end
   return path, extension
 end

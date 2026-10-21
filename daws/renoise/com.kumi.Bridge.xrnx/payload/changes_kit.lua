@@ -57,9 +57,9 @@ local function kit_of(input)
   local samples, bytes, any_group = {}, 0, false
   for k, given in ipairs(list) do
     if type(given) ~= "table" then bad("each sample is {path, name?, note?, root?, velocity?, muteGroup?, volumeDb?}") end
-    local path = instruments_.load_path({ path = given.path }, SOUND_FILES)
+    local path, extension = instruments_.load_path({ path = given.path }, SOUND_FILES)
     local stat = io.stat(path)
-    bytes = bytes + (stat and stat.size or 0)
+    bytes = bytes + instruments_.load_cost(stat and stat.size or 0, extension)
     local name = given.name
     if name ~= nil and (type(name) ~= "string" or #name > 256 or name:find("[%c]")) then bad("a sample's name is one line of text") end
     local sample = { path = path, name = (name ~= nil and name ~= "") and name or file_title(path) }
