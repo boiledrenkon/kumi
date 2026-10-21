@@ -1115,8 +1115,12 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if restore.prior["exists"] == true && now == restore.prior["state"] {
         return Ok(Restored { restored: now, display: json!({"title": format!("{label} is as it was")}), unwritten: true });
     }
-    if !restore.discard && now != restore.applied["state"] {
-        return Err(changed(format!("{label} has been changed in REAPER since Kumi showed it")));
+    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since)
+    if now != restore.applied["state"] {
+        return Err(changed(format!(
+            "{label} has been changed in REAPER since Kumi showed it: putting it back as it was would write over those changes \
+             too (its points and items), so Kumi leaves it, even with discard"
+        )));
     }
     let mut display = json!({"title": format!("{label} put back as it was")});
     if restore.prior["exists"] == true {

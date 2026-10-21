@@ -199,15 +199,18 @@ pub fn glue_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
-    if !restore.discard {
-        if present.len() < glued.len() {
-            return Err(changed(
-                "what the glue made has been deleted in REAPER since: the items aren't brought back over the producer's edits",
-            ));
-        }
-        if present.iter().any(|(item, entry)| chunks::item_print(reaper, *item).as_deref() != entry[1].as_str()) {
-            return Err(changed("what the glue made has been changed in REAPER since Kumi glued"));
-        }
+    // (discard too: the glued item goes and the originals come back whole, which would take the producer's edits since)
+    if present.len() < glued.len() {
+        return Err(changed(
+            "what the glue made has been deleted in REAPER since: the items aren't brought back over the producer's edits, even \
+             with discard",
+        ));
+    }
+    if present.iter().any(|(item, entry)| chunks::item_print(reaper, *item).as_deref() != entry[1].as_str()) {
+        return Err(changed(
+            "what the glue made has been changed in REAPER since Kumi glued: taking it away would take those changes too, so \
+             Kumi leaves it, even with discard",
+        ));
     }
     for (item, _) in &present {
         if let Some(track) = reaper.item_track(*item) {
@@ -330,7 +333,6 @@ pub fn render_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         let guid = k["guid"].as_str().unwrap_or_default();
         match items::item_by_guid(ctx, guid) {
             Some(item) => found.push((item, guid.to_string(), k["chunk"].as_str().unwrap_or_default())),
-            None if restore.discard => {}
             None => return Err(gone("an item that was rendered isn't in the project any more")),
         }
     }
@@ -343,8 +345,12 @@ pub fn render_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
-    if !restore.discard && found.iter().zip(&now).any(|((_, guid, _), print)| *print != print_in(&restore.applied["prints"], guid)) {
-        return Err(changed("an item that was rendered has been changed in REAPER since"));
+    // (discard too: each item's whole state from before goes back, which would take the producer's edits since with it)
+    if found.iter().zip(&now).any(|((_, guid, _), print)| *print != print_in(&restore.applied["prints"], guid)) {
+        return Err(changed(
+            "an item that was rendered has been changed in REAPER since: putting it back as it was would write over those \
+             changes too, so Kumi leaves it, even with discard",
+        ));
     }
     for (item, _, chunk) in &found {
         items::put_chunk(ctx, *item, chunk)?;

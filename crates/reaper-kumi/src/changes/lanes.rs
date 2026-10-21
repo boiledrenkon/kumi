@@ -789,8 +789,12 @@ pub fn comp_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
-    if !restore.discard && Some(print.as_str()) != restore.applied["print"].as_str() {
-        return Err(changed(format!("{name} has been changed in REAPER since Kumi comped it")));
+    // (discard too: the undo writes the whole track back, which would take the producer's edits since with it)
+    if Some(print.as_str()) != restore.applied["print"].as_str() {
+        return Err(changed(format!(
+            "{name} has been changed in REAPER since Kumi comped it: putting the track back as it was before the comp would \
+             write over those changes too (its lanes, items, FX, automation and routing), so Kumi leaves it, even with discard"
+        )));
     }
     let selected = reaper.track_value(found.track, "I_SELECTED") != 0.0;
     if !reaper.set_track_chunk(found.track, chunk) {

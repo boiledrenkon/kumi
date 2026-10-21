@@ -231,8 +231,11 @@ fn a_comp_is_refused_on_a_changed_track_and_with_nothing_to_comp_and_its_undo_fe
     let (preview, applied) = lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5}));
     state(|s| s.tracks[1].mute = true);
     assert_eq!(code(lab.undo("lane-comp", &preview, &applied)), "changed");
-    lab.undo_with("lane-comp", &preview, &applied, true).unwrap();
-    assert_eq!(state(|s| s.tracks[1].lane_names.len()), 2, "discard puts the track back anyway");
+    // Discard too: the whole track from before the comp would write over the producer's edits (review R4).
+    let lanes = state(|s| s.tracks[1].lane_names.len());
+    let (code_, why) = lab.undo_with("lane-comp", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(state(|s| s.tracks[1].lane_names.len()), lanes, "the track is left as the producer has it");
 }
 
 #[test]

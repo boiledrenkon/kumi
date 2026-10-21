@@ -412,8 +412,9 @@ fn keepable_chunk(ctx: &Ctx, item: Item, verb: &str) -> Done<String> {
     Ok(chunk)
 }
 
-/// Puts an item back as it was before a change, while it is as the change left it (`applied.print`); with `discard`,
-/// whatever it holds now. Back already when its print is `prior.print`.
+/// Puts an item back as it was before a change, while it is as the change left it (`applied.print`), discard or not:
+/// the item's whole state goes back, which would take the producer's edits since with it. Back already when its print
+/// is `prior.print`.
 pub(super) fn snapshot_restore(ctx: &Ctx, restore: &Restore, words: &str) -> Done<Restored> {
     let material = restore.material.ok_or_else(|| bad("material: the item from before the change"))?;
     let chunk = material["chunk"].as_str().ok_or_else(|| bad("material: the item's state"))?;
@@ -427,8 +428,12 @@ pub(super) fn snapshot_restore(ctx: &Ctx, restore: &Restore, words: &str) -> Don
             unwritten: true,
         });
     }
-    if !restore.discard && Some(print.as_str()) != restore.applied["print"].as_str() {
-        return Err(changed(format!("{} has been changed in REAPER since Kumi {words}", items::label(ctx, found.item))));
+    if Some(print.as_str()) != restore.applied["print"].as_str() {
+        return Err(changed(format!(
+            "{} has been changed in REAPER since Kumi {words}: putting the item back as it was would write over those changes \
+             too (its takes, their FX and envelopes), so Kumi leaves it, even with discard",
+            items::label(ctx, found.item)
+        )));
     }
     items::put_chunk(ctx, found.item, chunk)?;
     // (named as it is put back: its active take may be another again)

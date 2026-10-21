@@ -1118,11 +1118,15 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
     assert_eq!(count(), 0, "out of the track's list again");
     let again = lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(again["undo"]["entry"], false);
-    // The producer drew a point since: refused; discard puts it back hidden and empty.
+    // The producer drew a point since: refused, discard or not (the envelope's state from before would take their point).
     let (preview, applied) = lab.make("envelope-show", input.clone());
     state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().push(FakePoint::at(3.0, 0.5))));
     assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap_err().0, "changed");
-    lab.discard("envelope-show", &preview, &applied).unwrap();
+    let (code, why) = lab.discard("envelope-show", &preview, &applied).unwrap_err();
+    assert!(code == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(count(), 1, "the producer's point stays");
+    state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().pop()));
+    lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(count(), 0);
     // The fence: shown by the producer between the preview and the apply.
     let preview = lab.preview("envelope-show", input.clone()).unwrap();

@@ -323,9 +323,10 @@ fn a_split_is_undone_only_while_both_parts_are_as_it_left_them() {
     let (preview, applied) = lab.make("item-split", json!({"ref": K1, "position": 1.0}));
     state(|s| s.tracks[1].items[0].extra.insert("D_VOL".into(), 0.5));
     assert_eq!(code(lab.undo("item-split", &preview, &applied)), "changed");
-    // discard puts it back anyway.
-    lab.undo_with("item-split", &preview, &applied, true).unwrap();
-    assert_eq!(item("{ITEM-K1}").unwrap().1.length, 2.0);
+    // Discard too: the whole item from before would write over the producer's volume (review R4).
+    let (code_, why) = lab.undo_with("item-split", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.extra.get("D_VOL"), Some(&0.5), "the producer's edit stays");
 }
 
 #[test]
