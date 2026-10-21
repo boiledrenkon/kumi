@@ -1,8 +1,10 @@
 //! (M6) Logic Pro's equaliser's and compressor's curves, for HISTORY's pictures, from the rows its plug-in window's
 //! Controls View lists (the bridge's `param` read): Channel EQ's eight bands (Low Cut, Low Shelf, Peak 1 to 4, High
 //! Shelf, High Cut, each its On/Off, Frequency, Gain or Slope and Q-Factor, as the M4b scenes read them: "75.0 Hz",
-//! "+3.0 dB", "0.71", "12 dB/Oct") and the Compressor's static curve (Threshold, Ratio, Knee and its make-up gain). A
-//! change of one of these parameters is drawn as Live's EQ and compressor changes are: before and after.
+//! "+3.0 dB", "0.71", "12 dB/Oct") and the Compressor's static curve from four of the 25 rows its Controls View lists,
+//! as the bridge's read-param-compressor scene read them on Logic Pro 12.3.1 (Scratch's Keys): Threshold ("-17.5 dB"),
+//! Ratio ("3.9:1"), Knee ("0.7", a value the view shows with no control, so its row has the text alone) and Make Up
+//! ("0.0 dB"). A change of one of these parameters is drawn as Live's EQ and compressor changes are: before and after.
 use super::own_bridge::OwnCurves;
 use crate::core::picture::{amount, CurveReader, Dynamics, EqBand, EqShape, ParameterRow};
 
@@ -17,10 +19,10 @@ const BANDS: [(&str, EqShape, bool); 8] = [
     ("High Shelf", EqShape::HighShelf, true),
     ("High Cut", EqShape::HighCut, false),
 ];
-/// The Compressor's make-up gain, by the names Logic's versions give it (never a bare "Gain": the Gain plug-in's, which
-/// the listening's gain stage turns often, is no compressor's).
-const MAKE_UP: [&str; 3] = ["Make Up", "Make Up Gain", "Makeup"];
-/// A unitless Knee (Logic's runs 0 to 1, hard to soft) drawn as up to this much soft knee.
+/// The Compressor's make-up gain, as its Controls View names it (never a bare "Gain": the Gain plug-in's, which the
+/// listening's gain stage turns often, is no compressor's, and the Compressor's own "Gain" is its side chain filter's).
+const MAKE_UP: &str = "Make Up";
+/// A unitless Knee (Logic shows "0.7"; it runs 0 to 1, hard to soft) drawn as up to this much soft knee.
 const SOFT_KNEE_DB: f64 = 20.0;
 
 /// Logic's Channel EQ and Compressor, by their parameters' names and the words Logic shows for them.
@@ -77,7 +79,7 @@ impl CurveReader for LogicCurves {
             Some(text) if text.to_ascii_lowercase().contains("db") => shown(knee),
             _ => (shown(knee).clamp(0.0, 1.0)) * SOFT_KNEE_DB,
         });
-        let makeup_db = MAKE_UP.iter().find_map(|name| find(rows, name)).map(shown).unwrap_or(0.0);
+        let makeup_db = find(rows, MAKE_UP).map(shown).unwrap_or(0.0);
         Some(Dynamics { threshold_db: shown(threshold), ratio: ratio.max(1.0), knee_db, makeup_db })
     }
 }
@@ -89,8 +91,7 @@ pub fn curve_parameter(name: &str) -> bool {
         name.strip_prefix(band)
             .and_then(|rest| rest.strip_prefix(' '))
             .is_some_and(|what| matches!(what, "On/Off" | "Frequency" | "Gain" | "Q-Factor" | "Slope"))
-    }) || ["Threshold", "Ratio", "Knee"].contains(&name)
-        || MAKE_UP.contains(&name)
+    }) || ["Threshold", "Ratio", "Knee", MAKE_UP].contains(&name)
 }
 
 /// What Logic gives the shared integration for its changes' curves.
@@ -152,18 +153,87 @@ mod tests {
         assert!(LogicCurves.dynamics(&channel_eq("0.0 dB")).is_none());
     }
 
-    #[test]
-    fn the_compressors_curve_is_its_threshold_ratio_knee_and_make_up() {
-        let rows = [
-            row("Threshold", 400.0, "-20.0 dB"),
-            row("Ratio", 10.0, "2.0:1"),
-            ParameterRow { name: "Knee".into(), value: 0.5, min: 0.0, max: 1.0, text: Some("0.5".into()) },
-            row("Attack", 150.0, "15.0 ms"),
-            row("Make Up", 330.0, "3.0 dB"),
+    /// The Compressor's Controls View as the bridge's read-param-compressor scene read it on Logic Pro 12.3.1 (Scratch's
+    /// Keys), each row as the integration takes it from the read (a row with no value, a menu's or a value shown with no
+    /// control, keeps its text): name, value, range and text, with its Threshold as given.
+    fn compressor(threshold: (f64, &str)) -> Vec<ParameterRow> {
+        const ROWS: [(&str, Option<f64>, Option<(f64, f64)>, &str); 25] = [
+            ("Threshold", Some(65.0), Some((0.0, 100.0)), "-17.5 dB"),
+            ("Ratio", Some(34.0), Some((0.0, 85.0)), "3.9:1"),
+            ("Attack", Some(45.0), Some((0.0, 100.0)), "35.0 ms"),
+            ("Release", Some(50.0), Some((0.0, 119.0)), "91.0 ms"),
+            ("Make Up", Some(40.0), Some((0.0, 110.0)), "0.0 dB"),
+            ("Knee", None, None, "0.7"),
+            ("Peak/RMS", None, None, "RMS"),
+            ("Auto Gain", None, None, "-12 dB"),
+            ("Distortion", None, None, "Off"),
+            ("Circuit Type", None, None, "Studio VCA"),
+            ("Side Chain Detection", Some(0.0), Some((0.0, 1.0)), "Max"),
+            ("Limiter Threshold", Some(100.0), Some((0.0, 100.0)), "0.0 dB"),
+            ("Limiter On", Some(0.0), Some((0.0, 1.0)), "off"),
+            ("Auto Release", Some(1.0), Some((0.0, 1.0)), "on"),
+            ("State", None, None, "Off"),
+            ("Mode", None, None, "LP"),
+            ("Frequency", Some(105.0), Some((0.0, 123.0)), "7040.0 Hz"),
+            ("Q", Some(6.0), Some((0.0, 20.0)), "1.00"),
+            ("Gain", None, None, "0.0 dB"),
+            ("Mix", Some(118.0), Some((0.0, 200.0)), "59.0 %"),
+            ("Gain Reduction", None, None, "0.0 dB"),
+            ("Input Gain", Some(60.0), Some((0.0, 120.0)), "0.0 dB"),
+            ("Output Gain", Some(58.0), Some((0.0, 120.0)), "-1.0 dB"),
+            ("Display Select", Some(0.0), Some((0.0, 1.0)), "Meter"),
+            ("View Select", None, None, "Output"),
         ];
-        assert_eq!(LogicCurves.dynamics(&rows), Some(Dynamics { threshold_db: -20.0, ratio: 2.0, knee_db: 10.0, makeup_db: 3.0 }));
-        assert!(LogicCurves.dynamics(&[row("Threshold", 400.0, "-20.0 dB")]).is_none(), "no ratio, no compressor");
-        assert!(LogicCurves.eq_bands(&rows).is_none());
+        ROWS.iter()
+            .map(|(name, value, range, text)| {
+                let (value, text) = if *name == "Threshold" { (Some(threshold.0), threshold.1) } else { (*value, *text) };
+                let (min, max) = range.unwrap_or((0.0, 0.0));
+                ParameterRow { name: (*name).into(), value: value.unwrap_or(0.0), min, max, text: Some(text.into()) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_compressors_curve_is_its_threshold_ratio_knee_and_make_up_as_its_controls_view_shows_them() {
+        let rows = compressor((65.0, "-17.5 dB"));
+        // Knee "0.7" of a run from 0 to 1 is 14 dB of soft knee; the side chain filter's Gain is no make-up.
+        assert_eq!(LogicCurves.dynamics(&rows), Some(Dynamics { threshold_db: -17.5, ratio: 3.9, knee_db: 14.0, makeup_db: 0.0 }));
+        assert!(LogicCurves.eq_bands(&rows).is_none(), "its Frequency is the side chain filter's, not a band's");
+        assert!(LogicCurves.dynamics(&rows[..1]).is_none(), "no ratio, no compressor");
+        assert!(
+            LogicCurves.dynamics(&[row("Threshold", 400.0, "-20.0 dB"), row("Ratio", 10.0, "3")]).is_none(),
+            "a ratio without its ':1'"
+        );
+        // A ratio Logic shows as infinite is a limiter's.
+        let limiting: Vec<ParameterRow> = rows
+            .iter()
+            .cloned()
+            .map(|row| if row.name == "Ratio" { ParameterRow { text: Some("∞:1".into()), ..row } } else { row })
+            .collect();
+        assert_eq!(LogicCurves.dynamics(&limiting).map(|curve| curve.ratio), Some(100.0));
+    }
+
+    #[test]
+    fn a_change_of_the_compressors_threshold_draws_its_curve_before_and_after() {
+        // Kumi's fx_param took the Threshold from -17.5 dB to -24.0 dB (raw 65 to 52) on Logic Pro 12.3.1.
+        let moved = PictureValue {
+            name: "Threshold".into(),
+            from: Some(65.0),
+            to: Some(52.0),
+            from_text: Some("-17.5 dB".into()),
+            to_text: Some("-24.0 dB".into()),
+            ..Default::default()
+        };
+        let drawn = curves(&LogicCurves, &compressor((52.0, "-24.0 dB")), &[("c2".into(), vec![moved])]);
+        let [(id, crate::core::picture::ChangePicture::Dynamics { before, after, values })] = drawn.as_slice() else { panic!("{drawn:?}") };
+        assert_eq!((id.as_str(), before.threshold_db, after.threshold_db, values.len()), ("c2", -17.5, -24.0, 1));
+        assert_eq!((before.ratio, after.ratio, after.knee_db, after.makeup_db), (3.9, 3.9, 14.0, 0.0));
+        for name in ["Threshold", "Ratio", "Knee", "Make Up"] {
+            assert!(curve_parameter(name), "{name}");
+        }
+        for name in ["Limiter Threshold", "Gain", "Input Gain", "Output Gain", "Mix", "Make Up Gain"] {
+            assert!(!curve_parameter(name), "{name}");
+        }
     }
 
     #[test]
