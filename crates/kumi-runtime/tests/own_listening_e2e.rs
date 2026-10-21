@@ -642,6 +642,54 @@ async fn a_renoise_goal_settles_its_winner_as_one_device_params_change_that_kumi
         .await;
 }
 
+/// (#361 review K17) A song with tempo commands: each render plays them into Renoise's transport. The producer's tempo
+/// is set back once for a whole goal (before its best plays out loud), as one step of Renoise's undo that Kumi says.
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_goal_sets_the_tempo_its_renders_moved_back_once_and_says_it_is_an_undo_step() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.add_device(4, "EQ 10");
+            script.set_render_bpm(Some(140.));
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate { track: "Bass".into(), clip: None, label: Some("bass".into()), mix: None }],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let rig = renoise.goal(&request, Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name.starts_with("Gain 2 ")).cloned().collect();
+            for value in [1., 2., 3.] {
+                let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![value], fresh: None };
+                rig.generation(&[trial], Signal::new(), None).await.unwrap();
+            }
+            let tempo_steps =
+                || script.asked().into_iter().filter(|(method, params)| method == "change_apply" && params["kind"] == "song-bpm").count();
+            assert_eq!(tempo_steps(), 0, "not while the search renders");
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[3.], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            assert_eq!(tempo_steps(), 1, "once, before the best plays out loud");
+            assert_eq!(script.song()["bpm"], 128.0, "the producer's tempo");
+            assert!(rig.close().await.unwrap().is_empty(), "nothing more to set back");
+            assert_eq!(tempo_steps(), 1);
+            let said = told.borrow().iter().filter(|title| title.contains("tempo back")).cloned().collect::<Vec<_>>();
+            assert_eq!(said, ["Kumi set the tempo back to 128 BPM, LPB 4 (1 step in Renoise's undo)."]);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// A two-bar 8th-note part: on the beat at `on`, off it at `off`, `late` beats behind the 8th.
 fn eighths(late: f64, on: i64, off: i64) -> Vec<(i64, f64, f64, i64)> {
     let mut notes: Vec<(i64, f64, f64, i64)> = (0..16)

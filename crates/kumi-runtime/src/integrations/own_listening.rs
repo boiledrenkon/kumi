@@ -271,6 +271,19 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     pub(super) stop_told: Cell<bool>,
     /// The last render's notes, told as it ended: the engine passing them on doesn't tell them again.
     told_notes: RefCell<Vec<String>>,
+    /// The tempo renders played into the transport (Renoise's play the song's tempo commands), still to be set back: the
+    /// producer's and the transport's now. Set back once, before the DAW plays the song out loud or as the call or the
+    /// goal ends: each setting is a step of the DAW's undo.
+    tempo_back: RefCell<Option<TempoBack>>,
+}
+
+/// The producer's tempo (BPM, LPB) and the transport's as the last render left it.
+#[derive(Clone, Copy)]
+struct TempoBack {
+    bpm: f64,
+    lpb: u64,
+    now_bpm: f64,
+    now_lpb: u64,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -389,6 +402,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             goal_best: RefCell::default(),
             stop_told: Cell::new(false),
             told_notes: RefCell::default(),
+            tempo_back: RefCell::default(),
         }
     }
 
@@ -784,26 +798,20 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             }
         }
         // A render that played the song's tempo commands into its transport (Renoise's does): the tempo goes back to what
-        // the producer had, quietly, as the bridge puts their mutes back.
+        // the producer had, once for the call or the goal (`put_tempo_back`).
         if let (Some(bpm), Some(lpb)) =
             (done.pointer("/tempo/before/bpm").and_then(Value::as_f64), done.pointer("/tempo/before/lpb").and_then(Value::as_u64))
         {
-            let mut back = vec![];
-            if done.pointer("/tempo/bpm").and_then(Value::as_f64).is_some_and(|now| (now - bpm).abs() > 1e-6) {
-                back.push(
-                    self.plan.history.quietly(None, self.change("song_bpm", json!({"bpm": bpm}), self.cleanup_signal())).await.is_ok(),
-                );
-            }
-            if done.pointer("/tempo/lpb").and_then(Value::as_u64).is_some_and(|now| now != lpb) {
-                back.push(
-                    self.plan.history.quietly(None, self.change("song_lpb", json!({"lpb": lpb}), self.cleanup_signal())).await.is_ok(),
-                );
-            }
-            if !back.is_empty() && back.iter().all(|done| *done) {
-                notes.push(format!(
-                    "Kumi set the tempo back to {} BPM, LPB {lpb}.",
-                    kumi_common::js::number::to_string((bpm * 100.).round() / 100.)
-                ));
+            let now_bpm = done.pointer("/tempo/bpm").and_then(Value::as_f64).unwrap_or(bpm);
+            let now_lpb = done.pointer("/tempo/lpb").and_then(Value::as_u64).unwrap_or(lpb);
+            let mut back = self.tempo_back.borrow_mut();
+            match back.as_mut() {
+                // (the transport as the last render left it: the producer's tempo is still the one to set back)
+                Some(kept) if (kept.now_bpm - bpm).abs() <= 1e-6 && kept.now_lpb == lpb => {
+                    (kept.now_bpm, kept.now_lpb) = (now_bpm, now_lpb);
+                }
+                // (the producer set a tempo since, or the first render to move it)
+                _ => *back = Some(TempoBack { bpm, lpb, now_bpm, now_lpb }),
             }
         }
         // (told as well: not every tool's reply carries a render's notes)
@@ -821,10 +829,42 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Ok(Ok((files, notes)))
     }
 
+    /// Sets back the tempo renders played into the transport, as one setting of each that moved (quietly: Kumi's undo
+    /// never takes it back): what to tell, with the steps it left in the DAW's undo. Nothing when no render moved it.
+    pub(super) async fn put_tempo_back(&self) -> Option<String> {
+        let back = self.tempo_back.borrow_mut().take()?;
+        let mut done = vec![];
+        if (back.now_bpm - back.bpm).abs() > 1e-6 {
+            done.push(
+                self.plan.history.quietly(None, self.change("song_bpm", json!({"bpm": back.bpm}), self.cleanup_signal())).await.is_ok(),
+            );
+        }
+        if back.now_lpb != back.lpb {
+            done.push(
+                self.plan.history.quietly(None, self.change("song_lpb", json!({"lpb": back.lpb}), self.cleanup_signal())).await.is_ok(),
+            );
+        }
+        if done.is_empty() || !done.iter().all(|done| *done) {
+            return None;
+        }
+        let note = format!(
+            "Kumi set the tempo back to {} BPM, LPB {} ({} step{} in {}'s undo).",
+            kumi_common::js::number::to_string((back.bpm * 100.).round() / 100.),
+            back.lpb,
+            done.len(),
+            if done.len() == 1 { "" } else { "s" },
+            self.app()
+        );
+        self.tell_app(&note);
+        Some(note)
+    }
+
     /// Plays a render out loud where the producer listens (its part, at most `PLAYED_SECONDS`), without waiting: whether
     /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't. A track's
     /// render from before its fader (`track`, its ref) plays at its fader's level, as Kumi measured it, not louder.
     pub(super) async fn play(&self, render: &Render, track: Option<&str>) -> (bool, Option<String>) {
+        // (the song plays at the producer's tempo)
+        self.put_tempo_back().await;
         // (tried whatever the flags said last: REAPER opens its audio device for a preview itself, and says why not)
         let seconds = render.seconds.unwrap_or(PLAYED_SECONDS).min(PLAYED_SECONDS);
         let mut args = json!({"file": render.file, "fromSeconds": render.start, "seconds": seconds});
@@ -919,6 +959,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let first = named.iter().filter(|_| aloud).find(|(_, name, _)| !self.copies.borrow().contains_key(name));
         let audible = match first.and_then(|(_, name, track)| Some((captured.get(name)?, track.as_deref()))) {
             Some((render, track)) => {
+                notes.extend(self.put_tempo_back().await);
                 let (played, said) = self.play(render, track).await;
                 if played {
                     self.tell_app(&format!("Playing {} out loud", self.bars(window)));
@@ -2195,7 +2236,9 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     /// An audition (the audition tool's work), as the session's match run asks for it.
     pub async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
         let _held = self.hold(&signal).await?;
-        self.listening.audition(request, signal).await
+        let auditioned = self.listening.audition(request, signal).await;
+        self.renderer.put_tempo_back().await;
+        auditioned
     }
 
     /// The audio file a ref stands for (an item's, a sample's, a pattern rendered); None for a file.
@@ -2218,6 +2261,12 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     /// The listen tool's hearing of the project: what plays now (REAPER, while it plays), or a stretch rendered offline
     /// and played out loud after.
     pub async fn hear(&self, request: &HearRequest, original: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
+        let heard = self.hear_now(request, original).await;
+        self.renderer.put_tempo_back().await;
+        heard
+    }
+
+    async fn hear_now(&self, request: &HearRequest, original: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
         let renderer = &self.renderer;
         if let Some(why) = renderer.why_not() {
             return Ok(Err(why));
@@ -2412,10 +2461,12 @@ impl<S: RefScheme + 'static> KernelTool for ListeningTool<S> {
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let _held = self.owner.hold(&signal).await?;
-        match self.owner.listening.call(self.name, input, signal).await {
+        let result = match self.owner.listening.call(self.name, input, signal).await {
             Some(result) => result,
             None => Ok(ToolResult::error(format!("{} isn't a listening tool", self.name))),
-        }
+        };
+        self.owner.renderer.put_tempo_back().await;
+        result
     }
 }
 

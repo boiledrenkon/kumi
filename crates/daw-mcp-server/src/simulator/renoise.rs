@@ -72,6 +72,9 @@ struct State {
     lines: std::collections::HashMap<(u64, u64), Vec<Value>>,
     /// The DSP chains a test put on tracks (`add_device`): read and changed as the tool does (M5).
     chains: Chains,
+    /// The song's tempo commands, when a test gives it some: each render plays them into the transport and leaves its
+    /// tempo at this BPM (no undo step), as Renoise's does.
+    render_bpm: Option<f64>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -213,6 +216,7 @@ impl RenoiseScript {
                 statuses: vec![],
                 lines: Default::default(),
                 chains: Chains::default(),
+                render_bpm: None,
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -440,6 +444,11 @@ impl RenoiseScript {
     /// M6: the producer sets the tempo in Renoise.
     pub fn set_bpm(&self, bpm: f64) {
         self.state.lock().unwrap().song["bpm"] = bpm.into();
+    }
+
+    /// The song's tempo commands: each render from here leaves the transport at this BPM.
+    pub fn set_render_bpm(&self, bpm: Option<f64>) {
+        self.state.lock().unwrap().render_bpm = bpm;
     }
 
     /// M6: the digest the tool answered for the demo song, with what was changed since (each track's volume, mute, name and
@@ -804,7 +813,11 @@ impl RenoiseScript {
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
         if LISTENING_METHODS.contains(&method) {
             let (epoch, run_start) = {
-                let state = self.state.lock().unwrap();
+                let mut state = self.state.lock().unwrap();
+                if let Some(after) = state.render_bpm.filter(|_| method == "render_start") {
+                    let before = std::mem::replace(&mut state.song["bpm"], after.into());
+                    self.listening.tempo_next(json!({"before": {"bpm": before, "lpb": 4}, "bpm": after, "lpb": 4}));
+                }
                 (state.epoch, state.run_start)
             };
             let params = &match carried_tracks(params, epoch, run_start, None) {

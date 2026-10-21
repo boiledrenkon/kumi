@@ -29,6 +29,8 @@ struct Job {
     marks: Option<Value>,
     error: Option<(String, String)>,
     notes: Vec<String>,
+    /// The tempo a render left in the transport, as it tells it when done (Renoise's).
+    tempo: Option<Value>,
 }
 
 struct State {
@@ -69,6 +71,8 @@ struct State {
     silent_refs: Vec<String>,
     /// What the next job notes, whatever its end.
     next_notes: Vec<String>,
+    /// What the next render tells of the tempo it played into the transport.
+    next_tempo: Option<Value>,
     /// The marks the next capture answers (where the playhead was at its first frame and at each jump).
     capture_marks: Option<Value>,
     /// What part of its source an item plays (REAPER): offset and length in the file, its play rate, reversed.
@@ -145,6 +149,7 @@ impl SimListening {
                 kept: HashMap::new(),
                 silent_refs: vec![],
                 next_notes: vec![],
+                next_tempo: None,
                 capture_marks: None,
                 item_part: None,
             })),
@@ -178,6 +183,12 @@ impl SimListening {
 
     pub fn set_tempo(&self, tempo: f64) {
         self.state.lock().unwrap().tempo = tempo;
+    }
+
+    /// What the next render tells of the tempo it played into the transport ({before: {bpm, lpb}, bpm, lpb}): Renoise's
+    /// render plays the song's tempo commands and leaves the transport where they took it.
+    pub fn tempo_next(&self, tempo: Value) {
+        self.state.lock().unwrap().next_tempo = Some(tempo);
     }
 
     /// A track's level (0: silent).
@@ -408,6 +419,7 @@ impl SimListening {
         if state.jobs.values().any(|job| !matches!(job.state, "done" | "failed" | "cancelled")) {
             return Err(("busy".into(), format!("{} is rendering for Kumi; nothing changed", Self::app(state))));
         }
+        let tempo = state.next_tempo.take();
         let id = params["jobId"].as_str().ok_or_else(|| bad("jobId is missing"))?.to_string();
         let range = &params["range"];
         let (from, beats) = (range["fromBeat"].as_f64().unwrap_or(0.), range["beats"].as_f64().unwrap_or(0.));
@@ -485,7 +497,7 @@ impl SimListening {
                 },
             );
         }
-        state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes });
+        state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes, tempo });
         Ok(answer)
     }
 
@@ -503,7 +515,9 @@ impl SimListening {
         let marks = state.capture_marks.take().unwrap_or_else(|| json!([[0, 10.0, 20.0, true]]));
         let files = vec![("master".to_string(), path, 0., seconds, DEFAULT_LEVEL, "master")];
         let notes = std::mem::take(&mut state.next_notes);
-        state.jobs.insert(id, Job { kind: "capture", state: "running", polls: 0, files, marks: Some(marks), error: None, notes });
+        state
+            .jobs
+            .insert(id, Job { kind: "capture", state: "running", polls: 0, files, marks: Some(marks), error: None, notes, tempo: None });
         Ok(answer)
     }
 
@@ -566,6 +580,9 @@ impl SimListening {
                 .collect();
             if let Some(marks) = &job.marks {
                 answer["marks"] = marks.clone();
+            }
+            if let Some(tempo) = &job.tempo {
+                answer["tempo"] = tempo.clone();
             }
         }
         if !job.notes.is_empty() {

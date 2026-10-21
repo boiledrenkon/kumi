@@ -759,6 +759,6 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
     }
     async fn close(&self) -> Result<Vec<String>, RuntimeError> {
         self.drop_copies().await;
-        Ok(vec![])
+        Ok(self.renderer.put_tempo_back().await.into_iter().collect())
     }
 }
