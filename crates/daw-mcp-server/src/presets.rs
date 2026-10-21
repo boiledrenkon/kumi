@@ -930,10 +930,12 @@ fn doofer_macro(mut document: xml::Document, top: &str, input: &Value, device: &
     let mut applied = Map::new();
     prior.insert("macro".into(), m.into());
     applied.insert("macro".into(), m.into());
-    // (the container's lanes as previewed and as left: its mappings are places in them)
-    let chains = Value::Array((0..lanes_of(top)).map(|lane| chain_print(slot_, &[], lane)).collect());
-    prior.insert("chains".into(), chains.clone());
-    applied.insert("chains".into(), chains);
+    // (the container's lanes as previewed and as left, for an edit of its mappings: they are places in them)
+    if mappings.is_some() {
+        let chains = Value::Array((0..lanes_of(top)).map(|lane| chain_print(slot_, &[], lane)).collect());
+        prior.insert("chains".into(), chains.clone());
+        applied.insert("chains".into(), chains);
+    }
     if let Some(name) = name {
         prior.insert("name".into(), macro_.and_then(|e| e.child_text("Name")).unwrap_or_else(|| format!("Macro {m}")).into());
         applied.insert("name".into(), name.into());
@@ -1798,10 +1800,18 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             // What the producer did with it since Kumi added it (its knobs, its switch, a plug-in's state) is theirs, and so
             // are the aims they gave meta devices at it: Kumi takes it out only on discard, and says what goes with it.
             let turned = kept.applied.get("content").and_then(Value::as_str).is_some_and(|added| added != content);
-            if (turned || !aimed.is_empty()) && !kept.discard {
+            // (what Renoise wrote for it couldn't be read back after the add: what the producer did since can't be told)
+            let unknown = kept.applied.get("contentUnknown") == Some(&Value::Bool(true));
+            if (turned || unknown || !aimed.is_empty()) && !kept.discard {
                 let mut why = vec![];
                 if turned {
                     why.push(format!("{} was changed in Renoise since Kumi added it", q(&label)));
+                }
+                if unknown {
+                    why.push(format!(
+                        "Kumi couldn't read what {} held right after adding it, so it can't tell whether it was changed since",
+                        q(&label)
+                    ));
                 }
                 if !aimed.is_empty() {
                     why.push(format!("{} aim{} at it now", aimed.join(" and "), if aimed.len() == 1 { "s" } else { "" }));
@@ -2481,8 +2491,9 @@ impl crate::host::Host {
     }
 
     /// A doofer-device-add's apply answer with what the device added holds as Renoise wrote it (`applied.edit.content`, read
-    /// back right after): Kumi's undo compares it, and leaves a device the producer worked on since. Unchanged for any other
-    /// kind, or when it can't be read.
+    /// back right after): Kumi's undo compares it, and leaves a device the producer worked on since. Read again once when the
+    /// first read fails; read neither time, it says so (`contentUnknown`), and the undo can't tell. Unchanged for any other
+    /// kind.
     pub(crate) async fn with_added_content(&self, record: &crate::changes::Record, mut answer: Value) -> Value {
         if record.kind != "doofer-device-add" || !host_makes(self.daw(), &record.kind, &record.input) {
             return answer;
@@ -2490,10 +2501,21 @@ impl crate::host::Host {
         let Some(at) = answer.pointer("/applied/edit/at").map(list_of).filter(|at| !at.is_empty()) else { return answer };
         let mut params = read_params(&record.input, &record.kind);
         crate::changes::place(&mut params, record.epoch.as_deref(), record.input_layout);
-        let Ok(read) = self.call("preset_read", params, &record.instance, crate::changes::CHANGE_TIMEOUT).await else { return answer };
-        let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
-        if let (Some(content), Some(edit)) = (content_at(text, &at), answer.pointer_mut("/applied/edit")) {
-            edit["content"] = content.into();
+        let mut content = None;
+        for _ in 0..2 {
+            let Ok(read) = self.call("preset_read", params.clone(), &record.instance, crate::changes::CHANGE_TIMEOUT).await else {
+                continue;
+            };
+            content = content_at(read.get("presetData").and_then(Value::as_str).unwrap_or_default(), &at);
+            if content.is_some() {
+                break;
+            }
+        }
+        if let Some(edit) = answer.pointer_mut("/applied/edit") {
+            match content {
+                Some(content) => edit["content"] = content.into(),
+                None => edit["contentUnknown"] = true.into(),
+            }
         }
         answer
     }

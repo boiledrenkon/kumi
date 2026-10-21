@@ -86,8 +86,7 @@ fn a_macro_is_named_set_and_mapped_and_only_its_lines_change() {
     assert_eq!(gone, ["<Value>50</Value>", "<Name>Macro 1</Name>"]);
     assert_eq!(new, ["<Value>75</Value>", "<Name>Drive</Name>"]);
     assert_eq!(edited.title, "Doofer on Bass: macro 1 named \u{201c}Drive\u{201d}, at 75 %");
-    let chains = json!([{"owners": [], "lane": 0, "types": ["Eq5Device", "GainerDevice"]}]);
-    assert_eq!(edited.prior, json!({"macro": 1, "chains": chains, "name": "Macro 1", "value": 50.0}));
+    assert_eq!(edited.prior, json!({"macro": 1, "name": "Macro 1", "value": 50.0}), "no lanes for an edit of no mappings");
     // Mapped to the Gainer's gain (place 2, its parameter 1, by name too) over half its range, logarithmically.
     let mapped = ok(
         "doofer-macro",
@@ -710,4 +709,29 @@ fn a_preview_holds_the_lanes_it_addresses_so_an_apply_after_a_device_was_dropped
         let applied = ok(kind, input, &dropped, "Doofer");
         assert_ne!(comparable(&previewed.prior), comparable(&applied.prior), "{kind}: place 2 is the EQ now, not the Gainer");
     }
+    // A macro's name, value or how many show depend on no place: dropped in or not, the apply goes on.
+    let renamed = json!({"macro": 1, "name": "Drive", "value": 60, "activeMacros": 2});
+    assert_eq!(
+        comparable(&ok("doofer-macro", renamed.clone(), DOOFER, "Doofer").prior),
+        comparable(&ok("doofer-macro", renamed, &dropped, "Doofer").prior)
+    );
+}
+
+#[test]
+fn kumis_undo_of_a_device_it_added_cant_tell_when_renoises_write_couldnt_be_read_back() {
+    let added = ok("doofer-device-add", json!({"path": "Gainer", "at": [3]}), DOOFER, "Doofer");
+    let text = added.document.to_xml();
+    let shape = shape_of(&text);
+    let mut applied = added.applied.clone();
+    applied["contentUnknown"] = true.into();
+    let undo_from = |discard: bool| {
+        undo(
+            &Kept { kind: "doofer-device-add", prior: &added.prior, applied: &applied, shape: &shape, discard },
+            &text,
+            &shape,
+            &device("Doofer"),
+        )
+    };
+    assert!(matches!(undo_from(false), Err(Refusal::Changed(m)) if m.contains("couldn't read what")));
+    assert_eq!(written(undo_from(true)), DOOFER);
 }
