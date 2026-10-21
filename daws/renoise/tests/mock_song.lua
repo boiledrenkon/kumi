@@ -1010,7 +1010,10 @@ function M.make_song(options)
         return list
       end,
       alias_pattern_index = function() return data.alias end,
-      is_alias = function() return data.alias > 0 end,
+      is_alias = function()
+        M.alias_reads = (M.alias_reads or 0) + 1 -- (counted: how often a read of the song asks, as a test does)
+        return data.alias > 0
+      end,
       is_empty = function()
         for _, l in pairs(data.lines) do
           if not line(l).is_empty then return false end

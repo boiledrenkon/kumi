@@ -302,23 +302,30 @@ local function keep_program(env, instrument, i, program, index, deleted)
   return places_.place_of(env, "phrase", { i, plays }), instrument.phrase_program
 end
 
--- The program on the phrase now at `on`, unless the producer chose another since the change left it at `after`.
-local function program_back(instrument, on, after)
+-- Whether the program is as Kumi's change left it (`after`), or names no phrase: unless the producer chose another since,
+-- Kumi's undo may put it back.
+local function program_unchosen(instrument, after)
+  local program = instrument.phrase_program
+  return program == 0 or program > #instrument.phrases or (after ~= nil and program == after)
+end
+
+-- The program on the phrase now at `on`, unless the producer chose another since the change left it at `after`. `unchosen`:
+-- program_unchosen as read before the undo wrote anything (a delete may move the program itself).
+local function program_back(instrument, on, after, unchosen)
   if not on then return end
   pcall(function()
-    local program = instrument.phrase_program
-    if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and program ~= on
-      and (program == 0 or program > #instrument.phrases or (after ~= nil and program == after)) then
+    if unchosen == nil then unchosen = program_unchosen(instrument, after) end
+    if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and unchosen and instrument.phrase_program ~= on then
       instrument.phrase_program = on
     end
   end)
 end
 
 -- The program on the phrase kept as `place` (keep_program's), wherever that is now.
-local function program_back_to(env, instrument, i, place, after)
+local function program_back_to(env, instrument, i, place, after, unchosen)
   if type(place) ~= "table" then return end
   local now = places_.follow(env, place)
-  if now and now[1] == i then program_back(instrument, now[2], after) end
+  if now and now[1] == i then program_back(instrument, now[2], after, unchosen) end
 end
 M.program_of, M.keep_program, M.program_back_to = program_of, keep_program, program_back_to
 
@@ -410,10 +417,12 @@ local function remove_made(song, env, restore, desc, kind)
     local use = in_use(song, objects.instrument, objects.phrase, n[2], (restore.applied or {}).program)
     if use then fail("changed", label .. " " .. use .. " since Kumi made it: Kumi left it, so nothing that plays it is lost") end
   end
+  -- (the program back on the phrase it played when Kumi made this one: Renoise moves it as it deletes one, so whether the
+  -- producer chose another since is read before the delete)
+  local unchosen = program_unchosen(objects.instrument, material.programAfter)
   song:describe_undo(desc)
   objects.instrument:delete_phrase_at(n[2])
-  -- (the program back on the phrase it played when Kumi made this one: Renoise moves it as it deletes one)
-  program_back_to(env, objects.instrument, n[1], material.program, material.programAfter)
+  program_back_to(env, objects.instrument, n[1], material.program, material.programAfter, unchosen)
   base.note_restored_at(env.journal, kind, places_.journal_place("phrase", n))
   return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
 end
@@ -597,6 +606,11 @@ local function delete_restore(song, env, restore, desc)
     end
   end
   if #instrument.phrases >= 126 then fail("changed", "the instrument has 126 phrases now: there's no room to put it back") end
+  -- (the patterns its cleared 0Z commands were in, and whose lines changed since: read before anything is written, as Kumi's
+  -- own insert renumbers 0Z commands too)
+  local zero_z = type(material.zeroZ) == "table" and #material.zeroZ > 0
+  local pattern_now = zero_z and import("changes_material").pool_now(song, env, material.pool) or nil
+  local touched = zero_z and base.touched_patterns(env, material.touches, pattern_now) or {}
   song:describe_undo(desc)
   local phrase = instrument:insert_phrase_at(at)
   local notes = {}
@@ -628,11 +642,8 @@ local function delete_restore(song, env, restore, desc)
   end
   -- The 0Z commands Renoise cleared, written again naming it where they still are empty (the patterns followed through the pool,
   -- the tracks through the layout).
-  if type(material.zeroZ) == "table" and #material.zeroZ > 0 then
-    local pattern_now = import("changes_material").pool_now(song, env, material.pool)
+  if zero_z then
     local skipped = 0
-    -- (a pattern whose lines changed since may have had rows inserted or deleted: its cells have no place Kumi can tell)
-    local touched = base.touched_patterns(env, material.touches, pattern_now)
     for _, cell in ipairs(material.zeroZ) do
       local p = pattern_now and not touched[cell.p] and pattern_now(cell.p) or nil
       local t = cell.t

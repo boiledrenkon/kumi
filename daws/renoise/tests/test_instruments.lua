@@ -425,6 +425,20 @@ test("instruments: Kumi's undo of a delete leaves out the notes of a pattern who
   ok(undone.result.display.note:find("2 weren't put back", 1, true), undone.result.display.note)
 end)
 
+test("instruments: Kumi's undo of a delete puts its notes back where its own insert renumbers notes and tells the lines (#361 N-N17)", function()
+  local env, peer = setup()
+  note_at(1, 1)
+  note_at(3, 2) -- (Pad's note: Kumi's insert renumbers it)
+  mock.renumber_touches = true
+  local record = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  local undone = restore(peer, "instrument-delete", record)
+  mock.renumber_touches = nil
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(note_value(1), 1, "its note plays it again")
+  eq(note_value(3), 2, "Pad's note follows Pad")
+  ok(not (undone.result.display.note or ""):find("weren't put back", 1, true), tostring(undone.result.display.note))
+end)
+
 test("instruments: an instrument too big to keep isn't deleted, and the only instrument can't be", function()
   local env, peer = setup()
   instrument(2).samples[1].buffer.frames = 200 * 1024 * 1024

@@ -149,6 +149,47 @@ test("phrases: a phrase made at or before the program, and Kumi's undo of a dele
   eq(bass.phrase_program, 1)
 end)
 
+test("phrases: Kumi's undo of a phrase delete writes its 0Z back where its own insert renumbers 0Z commands and tells the lines (#361 N-N17)", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  bass:insert_phrase_at(3).name = "P3"
+  for k = 1, 3 do
+    mock.ops.set_note(1, 1, k, 1, { note = 48, instrument = 1 })
+    mock.ops.set_effect(1, 1, k, 1, 256 + 35, k)
+  end
+  mock.data.undo.stack = {}
+  mock.renumber_touches = true
+  local record = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 2) })
+  local undone = restore(peer, "phrase-delete", record)
+  mock.renumber_touches = nil
+  ok(undone.result, json.encode(undone.error or {}))
+  local function zero_z(k) return mock.song:pattern(1):track(1):line(k):effect_column(1).number_string .. mock.song:pattern(1):track(1):line(k):effect_column(1).amount_string end
+  eq(zero_z(2), "0Z02", "written again, naming it")
+  eq(zero_z(3), "0Z03")
+end)
+
+test("phrases: Kumi's undo of a phrase it made puts the program back on its phrase when Renoise's delete moved it off", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  bass:insert_phrase_at(3).name = "P3"
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  mock.data.undo.stack = {}
+  local function playing() return bass:phrase(bass.phrase_program).name end
+  local added = change(peer, "phrase-add", { ref = iref(place(peer), 2), name = "New" })
+  eq(#bass.phrases, 4)
+  eq(playing(), "P2")
+  -- (Renoise moves the program as it deletes the phrase above it: 2, delete 4 -> 3, measured)
+  mock.program_after_delete = function(program, ph) if program == 2 and ph == 4 then return 3 end end
+  local undone = restore(peer, "phrase-add", added)
+  mock.program_after_delete = nil
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#bass.phrases, 3)
+  eq(playing(), "P2", "the program plays the phrase it played")
+end)
+
 test("phrases: a new phrase's loop is checked against the 32 lines Renoise makes it with (#361 N-N4)", function()
   local env, peer = setup()
   local record, done = change(peer, "phrase-add", { ref = iref(place(peer), 2), loopEnd = 24 })

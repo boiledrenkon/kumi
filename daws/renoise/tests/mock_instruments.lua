@@ -213,12 +213,25 @@ end
 -- Pattern data that names instruments: renumbered as Renoise renumbers it.
 
 local function each_note(fn)
-  for _, pattern in ipairs(M.data.patterns) do
-    for _, pattern_track in pairs(pattern.tracks) do
-      for _, l in pairs(pattern_track.lines or {}) do
-        for c, note in pairs(l.notes or {}) do fn(note, l, c) end
+  for p, pattern in ipairs(M.data.patterns) do
+    for t, pattern_track in pairs(pattern.tracks) do
+      for k, l in pairs(pattern_track.lines or {}) do
+        for c, note in pairs(l.notes or {}) do fn(note, l, c, p, t, k) end
       end
     end
+  end
+end
+
+-- (a test's Renoise whose renumbering of notes and 0Z commands tells the patterns' line notifiers, as an edit does: not
+-- measured, #361 N-N17)
+local function tell_lines(p, t, k)
+  if not M.renumber_touches then return end
+  local pattern = M.data.patterns[p]
+  local notifiers = {}
+  for i, fn in ipairs(pattern.notifiers or {}) do notifiers[i] = fn end
+  for _, fn in ipairs(notifiers) do
+    local ok, err = pcall(fn, { pattern = p, track = t, line = k })
+    if not ok then M.errors[#M.errors + 1] = "notifier: " .. tostring(err) end
   end
 end
 
@@ -229,18 +242,18 @@ local function renumber_phrases(instrument, type_, ph)
   local v
   for k, candidate in ipairs(M.data.instruments) do if candidate == instrument then v = k - 1 end end
   if v == nil then return end
-  for _, pattern in ipairs(M.data.patterns) do
-    for _, pattern_track in pairs(pattern.tracks) do
-      for _, l in pairs(pattern_track.lines or {}) do
+  for p, pattern in ipairs(M.data.patterns) do
+    for t, pattern_track in pairs(pattern.tracks) do
+      for k, l in pairs(pattern_track.lines or {}) do
         local plays = false
         for _, note in pairs(l.notes or {}) do if note.instrument == v then plays = true end end
         if plays then
           local function move(get, set)
             local number, amount = get()
             if number ~= ZERO_Z then return end
-            if type_ == "remove" and amount == ph then set(0, 0)
-            elseif type_ == "remove" and amount > ph then set(number, amount - 1)
-            elseif type_ == "insert" and amount >= ph then set(number, amount + 1) end
+            if type_ == "remove" and amount == ph then set(0, 0) tell_lines(p, t, k)
+            elseif type_ == "remove" and amount > ph then set(number, amount - 1) tell_lines(p, t, k)
+            elseif type_ == "insert" and amount >= ph then set(number, amount + 1) tell_lines(p, t, k) end
           end
           for _, effect in pairs(l.effects or {}) do
             move(function() return effect.number, effect.amount end, function(n, a) effect.number, effect.amount = n, a end)
@@ -256,15 +269,15 @@ end
 
 local function renumber(type_, a, b)
   -- (instrument values count from 0; 255 is none)
-  each_note(function(note, l, c)
+  each_note(function(note, l, c, p, t, k)
     local v = note.instrument
     if v == 255 or v == nil then return end
     if type_ == "insert" then
-      if v >= a - 1 then note.instrument = v + 1 end
+      if v >= a - 1 then note.instrument = v + 1 tell_lines(p, t, k) end
     elseif type_ == "remove" then
-      if v == a - 1 then l.notes[c] = note_data({}) elseif v > a - 1 then note.instrument = v - 1 end
+      if v == a - 1 then l.notes[c] = note_data({}) tell_lines(p, t, k) elseif v > a - 1 then note.instrument = v - 1 tell_lines(p, t, k) end
     elseif type_ == "swap" then
-      if v == a - 1 then note.instrument = b - 1 elseif v == b - 1 then note.instrument = a - 1 end
+      if v == a - 1 then note.instrument = b - 1 tell_lines(p, t, k) elseif v == b - 1 then note.instrument = a - 1 tell_lines(p, t, k) end
     end
   end)
 end
@@ -1434,6 +1447,11 @@ function M.instrument_proxy(i)
       write(instrument, "phrase_program", #instrument.phrases == 0 and 0 or math.max(1, ph - 1))
     elseif program > ph then
       write(instrument, "phrase_program", program - 1)
+    end
+    -- (a test's Renoise that moves the program as it was also seen to, off its phrase: program 2, delete 4 -> 3, lab 2026-10-21)
+    if M.program_after_delete then
+      local moved = M.program_after_delete(program, ph, #instrument.phrases)
+      if moved then write(instrument, "phrase_program", moved) end
     end
   end
   fields.can_insert_phrase_mapping_at = function(_, m) return m >= 1 and m <= #instrument.mappings + 1 end

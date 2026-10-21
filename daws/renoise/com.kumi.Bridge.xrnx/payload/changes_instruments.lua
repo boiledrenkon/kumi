@@ -687,6 +687,9 @@ local function delete_restore(song, env, restore, desc)
   if not pattern_now and #(material.notes or {}) > 0 then
     fail("stale", string.format("the song's patterns changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where its notes go: nothing was put back", q(label)))
   end
+  -- (a pattern whose lines changed since may have had rows inserted or deleted: its notes have no place Kumi can tell; read
+  -- before anything is written, as Kumi's own insert renumbers notes too)
+  local touched = base.touched_patterns(env, material.touches, pattern_now)
   local before = song.selected_instrument_index
   song:describe_undo(desc)
   song:insert_instrument_at(at)
@@ -702,9 +705,6 @@ local function delete_restore(song, env, restore, desc)
     return (env.shifted(t, restore.layout))
   end
   local skipped = 0
-  -- (a pattern whose lines changed since may have had rows inserted or deleted: its notes have no place Kumi can tell; looked at
-  -- before anything is written, as Kumi's own writes count too)
-  local touched = base.touched_patterns(env, material.touches, pattern_now)
   for _, note in ipairs(material.notes or {}) do
     local p = pattern_now and pattern_now(note.p) or nil
     local t = moved(note.t)
