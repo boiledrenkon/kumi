@@ -276,7 +276,7 @@ end
 local function parameter(data, set)
   data.value_observable = data.value_observable or M.observable()
   local proxy = object("renoise.DeviceParameter", {
-    name = data.name, name_observable = data.name_observable or M.observable(),
+    name_observable = data.name_observable or M.observable(),
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
     value_quantum = data.quantum or 0,
     value_observable = data.value_observable or M.observable(),
@@ -285,6 +285,11 @@ local function parameter(data, set)
     -- (M4 n-song: whether a pattern has automation of it, as the song's data says now; every parameter can be automated
     -- unless a test says otherwise)
     is_automated = function() return data.automated == true end,
+    -- (counted: how many names a request reads, as a test asks)
+    name = function()
+      M.parameter_name_reads = (M.parameter_name_reads or 0) + 1
+      return data.name
+    end,
     is_automatable = function() return data.automatable ~= false end,
     value = function() return data.value end,
     value_string = function() return data.string and data.string(data.value) or string.format("%.2f", data.value) end,

@@ -63,9 +63,12 @@ local function asks_of(song, device, values, label)
   if #values > MAX_VALUES then bad(string.format("values: at most %d in one change (%d given)", MAX_VALUES, #values)) end
   local dests = destinations_by_number(device)
   local asks, seen = {}, {}
+  -- (the device's names read once for all the values: a plug-in has thousands of parameters)
+  local names
   for i, value in ipairs(values) do
     if type(value) ~= "table" then bad(string.format("values[%d]: {param, value | valueString}", i)) end
-    local k = devices_.parameter_number(device, value.param)
+    if type(value.param) == "string" and not names then names = devices_.parameter_names(device) end
+    local k = devices_.parameter_number(device, value.param, names)
     local parameter = device:parameter(k)
     if seen[k] then bad(string.format("%s is given twice (values %d and %d)", parameter.name, seen[k], i)) end
     seen[k] = i

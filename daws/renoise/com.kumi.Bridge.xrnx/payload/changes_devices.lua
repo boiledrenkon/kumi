@@ -208,30 +208,47 @@ param_spec.wanted_at = function(loc, input)
   return param_spec.wanted(loc.object, input)
 end
 
--- Which parameter of a device a request means: its number from 1, or its name (any case).
-local function parameter_number(device, wanted)
+-- A device's parameter names, read from Renoise once: each by number, lowercased, and the numbers of each exact name. A request
+-- that names many parameters reads them once (a plug-in has thousands), not once a name and pass.
+local function parameter_names(device)
+  local list, lowered, exact = {}, {}, {}
+  for k = 1, #device.parameters do
+    local name = device:parameter(k).name
+    list[k], lowered[k] = name, name:lower()
+    exact[lowered[k]] = exact[lowered[k]] or {}
+    table.insert(exact[lowered[k]], k)
+  end
+  return { list = list, lowered = lowered, exact = exact }
+end
+
+-- Which parameter of a device a request means: its number from 1, or its name (any case). `names`: the device's, read once
+-- (parameter_names) when a request names several.
+local function parameter_number(device, wanted, names)
   local count = #device.parameters
   if type(wanted) == "number" then
     if wanted ~= math.floor(wanted) or wanted < 1 or wanted > count then bad(string.format("param is a number from 1 to %d", count)) end
     return wanted
   end
   if type(wanted) ~= "string" or wanted == "" then bad("param: a parameter's number (from 1) or its name, with a device ref") end
+  names = names or parameter_names(device)
   -- (the name as written, or else the start of one name: EQ 5 names its gains "Gain 1 (100 Hz)", which follow the frequency)
   local lower = wanted:lower()
-  for _, exact in ipairs({ true, false }) do
-    local found
-    for k = 1, count do
-      local name = device:parameter(k).name:lower()
-      if (exact and name == lower) or (not exact and name:sub(1, #lower) == lower) then
-        if found then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
-        found = k
-      end
-    end
-    if found then return found end
+  local hits = names.exact[lower]
+  if hits then
+    if #hits > 1 then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+    return hits[1]
   end
-  local names = {}
-  for k = 1, math.min(count, 24) do names[k] = device:parameter(k).name end
-  bad(string.format("this device has no parameter %q (it has %s%s)", wanted, table.concat(names, ", "), count > 24 and ", ..." or ""))
+  local found
+  for k, name in ipairs(names.lowered) do
+    if name:sub(1, #lower) == lower then
+      if found then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+      found = k
+    end
+  end
+  if found then return found end
+  local shown = {}
+  for k = 1, math.min(count, 24) do shown[k] = names.list[k] end
+  bad(string.format("this device has no parameter %q (it has %s%s)", wanted, table.concat(shown, ", "), count > 24 and ", ..." or ""))
 end
 
 -- A parameter is named by its ref, or by its device's ref and `param`.
@@ -286,6 +303,7 @@ base.register(param_spec)
 
 -- (M4 n-devices: device-params, several parameters of one device, asks and checks them as device-param does)
 M.param_spec, M.parameter_number, M.points_at, M.receiver_check = param_spec, parameter_number, points_at, receiver_check
+M.parameter_names = parameter_names
 M.parameter_shown = parameter_shown
 M.track_of_value, M.value_of_track = track_of_value, value_of_track
 

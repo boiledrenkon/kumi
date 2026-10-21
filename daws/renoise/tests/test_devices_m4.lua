@@ -1906,3 +1906,17 @@ test("devices m4: after Renoise's own undo and redo of a device chain, Kumi's un
   H.tick(2)
   failure(restore(peer, "device-chain-load", again), "gone")
 end)
+
+test("devices m4: device-params reads a big plug-in's parameter names once a request, not once a name (#361 N-N6)", function()
+  local list = {}
+  for k = 1, 400 do list[k] = { "Knob " .. k, 0.5 } end
+  local big = { name = "Big Synth FX", path = "Audio/Effects/AU/aufx:big :kumi", params = params_of(list) }
+  local _, peer = setup({ { name = "Kick" }, { name = "Bass", devices = { big } } })
+  local epoch = place(peer)
+  local values = {}
+  for k = 1, 60 do values[k] = { param = "Knob " .. (k * 5), value = 0.25 } end
+  mock.parameter_name_reads = 0
+  local previewed = preview(peer, "device-params", { ref = epoch .. ":device:2.2", values = values })
+  ok(previewed, "previewed")
+  ok(mock.parameter_name_reads < 2 * 400, "names read about once each: " .. mock.parameter_name_reads)
+end)
