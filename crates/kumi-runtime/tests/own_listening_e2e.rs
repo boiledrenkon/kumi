@@ -1055,6 +1055,35 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         .await;
 }
 
+/// (#361 review K41) A judged run's render that heard only silence asks what's in the part, not whether REAPER's audio
+/// runs (an offline render needs none); the listen tool says a render stops the DAW's playback.
+#[tokio::test(flavor = "current_thread")]
+async fn an_offline_renders_silence_and_the_listen_tool_are_said_as_rendering_is() {
+    use kumi_runtime::core::daw::DawProfile;
+    for profile in [DawProfile::REAPER, DawProfile::RENOISE] {
+        assert!(profile.vocab.listen_method.contains("a render stops"), "{}", profile.vocab.listen_method);
+    }
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            script.listening().set_master_level(0.);
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let judged = tool(&observed, "judge")
+                .execute(object(json!({"goal": {"loudness": -14}, "from_beat": 0, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(judged.text.contains("heard only silence"), "{}", judged.text);
+            assert!(!judged.text.contains("audio running"), "{}", judged.text);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 review K28) A paused goal's best waits muted beside the producer's untouched track (the part never plays twice),
 /// and says so; a better best still replaces it. A finished goal, its candidates tidied, plays its best.
 #[tokio::test(flavor = "current_thread")]

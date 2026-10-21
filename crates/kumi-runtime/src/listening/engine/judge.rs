@@ -1096,12 +1096,15 @@ impl Listening {
         let mut heard_main = measure(main.file.clone(), main.start).await?;
         // Silence isn't a mix within tolerance: it reads nothing, and what that means is the caller's to say.
         let silent = heard_main.measures.integrated.is_none_or(|loudness| loudness < -70.).then(|| {
+            let profile = self.host.profile();
+            // (a render offline needs no audio device: only what's in the part)
+            let running =
+                if profile.caps.renders_to_listen { String::new() } else { format!("{}'s audio running, and is ", profile.words.app) };
             format!(
-                "Kumi heard only silence from {}{}. Is {}'s audio running, and is something playing there in the {}?",
+                "Kumi heard only silence from {}{}. Is {running}something playing there in the {}?",
                 track.unwrap_or("the mix"),
                 if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(" ")) },
-                self.host.profile().words.app,
-                self.host.profile().words.timeline
+                profile.words.timeline
             )
         });
         // On a run over the mix with a focus, the mix as it comes into Main's chain, when Kumi Ears heard it there: the

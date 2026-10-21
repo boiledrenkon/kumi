@@ -311,6 +311,14 @@ pub(super) fn notes_of(value: &Value) -> Vec<String> {
     value.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(sentence).collect()
 }
 
+/// How far a listening job is, in the producer's words: a render's, or a capture of what the DAW plays.
+fn progress_words(app: &str, kind: Option<&str>, percent: i64) -> String {
+    match kind {
+        Some("capture") => format!("Hearing what {app} plays · {percent}%"),
+        _ => format!("Rendering in {app} · {percent}%"),
+    }
+}
+
 /// A reason with what the bridge noted after it, in parentheses.
 fn with_notes(said: String, notes: &[String]) -> String {
     if notes.is_empty() {
@@ -750,7 +758,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                     let percent = (progress * 100.).round() as i64;
                     if began.elapsed() > Duration::from_secs(3) && told != Some(percent) {
                         told = Some(percent);
-                        self.tell_app(&format!("Rendering in {} · {percent}%", self.app()));
+                        self.tell_app(&progress_words(self.app(), status.get("kind").and_then(Value::as_str), percent));
                     }
                 }
             }
@@ -2526,6 +2534,13 @@ mod tests {
 
     fn knob(name: &str, raw: f64) -> DeviceKnob {
         DeviceKnob { reference: format!("p:{name}"), name: name.into(), raw, min: 0., max: 1., items: vec![], scale: None }
+    }
+
+    /// (#361 review K41) A capture of what REAPER plays isn't called a render.
+    #[test]
+    fn a_jobs_progress_says_what_it_is() {
+        assert_eq!(progress_words("REAPER", Some("capture"), 40), "Hearing what REAPER plays · 40%");
+        assert_eq!(progress_words("REAPER", Some("render"), 40), "Rendering in REAPER · 40%");
     }
 
     #[test]
