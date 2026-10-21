@@ -843,7 +843,7 @@ local function drop_restore(song, env, restore, desc)
   local patterns = {}
   for i, item in ipairs(applied.items) do
     if not item.gone then
-      local p = before[item.slot]
+      local p = before and before[item.slot]
       if type(p) ~= "number" or p > #song.patterns then fail("gone", string.format("the pattern slot %d played isn't in the song any more", item.slot)) end
       patterns[i] = p
     end
