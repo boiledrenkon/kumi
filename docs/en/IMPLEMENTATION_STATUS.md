@@ -326,10 +326,13 @@ bridge, the version given is the one in the commit that added it.
   and `watch_me`, run over the simulated Logic (the snapshot is kept in the
   project store under the project's place, `logic-<id>`, beside its
   conversations, saved again every five minutes and after Kumi's own changes);
-  the gate runs them against the real Logic. A snapshot of Scratch is the
-  bridge's bulk read there, 2.7 s by its measure, the Mixer and the List
-  Editors opening once for a moment as the bridge reads the strips, the markers
-  and the Tempo and Signature Lists.
+  the M6 gate on this Mac, every check passed on its third run and recorded in
+  `docs/evidence/logic-m6-gate-2026-10-21.md`, ran the bulk snapshot (2.8 s on
+  Scratch, against 4.9 s for six paged reads, the Mixer and the List Editors
+  opening once for a moment), `watch_me`, instant phrases, the metronome, a
+  sample into a Sampler track, the recent projects, middle C and the curves of
+  Channel EQ and the Compressor on the real Logic; catch-up as a project opens
+  still waits for a run of its own there.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
