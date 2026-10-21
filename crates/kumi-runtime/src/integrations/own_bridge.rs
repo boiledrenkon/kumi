@@ -11,7 +11,7 @@ use crate::{
         phrases::{Intent, PhraseTrack},
         place::{is_project_id, unsaved, Place},
         plan::make_changes,
-        refs::{Book, RefScheme, Shift},
+        refs::{Book, Moved, RefScheme, Shift},
         view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
     integrations::{
@@ -149,7 +149,22 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// Each change of the DAW's playing the focus watch saw (when, playing), oldest first: whether the producer heard
     /// one of Kumi's changes.
     heard: Rc<RefCell<std::collections::VecDeque<(i64, bool)>>>,
+    /// Pins from FOCUS where refs are positions (Renoise's): each by the refs it was pinned with (the TUI sends those every
+    /// turn), carried through the track shifts since Kumi first saw it; None for one whose object was deleted.
+    pins: Rc<RefCell<indexmap::IndexMap<(String, String), Option<Carried>>>>,
 }
+
+/// A pinned node's refs as they are now, and the epoch and layout they're at: at any other, a shift went by uncarried.
+#[derive(Clone, Debug)]
+struct Carried {
+    track_ref: String,
+    node_ref: String,
+    epoch: Option<String>,
+    layout: Option<u64>,
+}
+
+/// How many pins an integration follows (the oldest goes first).
+const PINS_KEPT: usize = 64;
 
 /// How often the snapshot keeper looks whether it's time.
 const KEEPER_MS: u64 = 1_000;
@@ -226,6 +241,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         listening,
         flags_at: Cell::new(None),
         heard: Rc::default(),
+        pins: Rc::default(),
     })
 }
 
@@ -356,7 +372,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             self.changes.retire_all(Ending::Restart);
         }
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
-        let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
+        let (book, layout, epoch, pins) = (self.book.clone(), self.layout.clone(), self.epoch.clone(), self.pins.clone());
         let changes = Rc::downgrade(&self.changes);
         let listening = Rc::downgrade(&self.listening);
         let unlisten = endpoint.on_live_event(Rc::new(move |event| {
@@ -400,8 +416,30 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             match layout.get() {
                 // The next shift: the names follow it.
                 Some(before) if now == before + 1 => {
-                    book.borrow_mut().shift(&Shift { tracks_made: places("made"), tracks_gone: places("gone"), ..Shift::default() });
+                    let shift = Shift { tracks_made: places("made"), tracks_gone: places("gone"), ..Shift::default() };
+                    book.borrow_mut().shift(&shift);
                     layout.set(Some(now));
+                    // The pins at the layout before follow what they named; one whose object went is told so.
+                    let book = book.borrow();
+                    let moved = |reference: &str| {
+                        if reference.is_empty() {
+                            return Some(String::new());
+                        }
+                        match book.scheme.moved(&shift, reference) {
+                            Moved::Same => Some(reference.to_owned()),
+                            Moved::To(now) => Some(now),
+                            Moved::Gone => None,
+                        }
+                    };
+                    for pin in pins.borrow_mut().values_mut() {
+                        let Some(carried) = pin.as_mut().filter(|carried| carried.layout == Some(before)) else { continue };
+                        match (moved(&carried.track_ref), moved(&carried.node_ref)) {
+                            (Some(track_ref), Some(node_ref)) => {
+                                (carried.track_ref, carried.node_ref, carried.layout) = (track_ref, node_ref, Some(now));
+                            }
+                            _ => *pin = None,
+                        }
+                    }
                 }
                 // One the book is already past (taken from an answer, or after events were lost): nothing to move.
                 Some(before) if now <= before => {}
@@ -444,6 +482,50 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let args = args.as_object().cloned().unwrap_or_default();
         let bounded = abort::any([signal, abort::timeout(CALL_MS)]);
         stopped_or(endpoint.call(tool, args, bounded.clone()).await.map(|result| answer_of(&result)), &bounded)
+    }
+
+    /// A pin as the model sees it, in the turn's short refs. Where refs are positions, its refs are carried through the
+    /// track shifts since Kumi first saw it, so they name what was pinned where it is now; once a shift went by that Kumi
+    /// couldn't follow (a gap in the layouts, another epoch), or what was pinned was deleted, the pin is told by its name
+    /// only, and no ref of it lands on whatever sits at its old place.
+    fn pin_now(&self, pin: &PinnedNode) -> Value {
+        let mut book = self.book.borrow_mut();
+        if !book.scheme.positional() {
+            return book.shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
+        }
+        let (epoch, layout) = (self.epoch.borrow().clone(), self.layout.get());
+        let mut pins = self.pins.borrow_mut();
+        let key = (pin.track_ref.clone(), pin.r#ref.clone());
+        // Where it is now, else whether it was deleted (true) or a shift went by uncarried (false).
+        let place: Result<Carried, bool> = match pins.get(&key) {
+            Some(Some(carried)) if carried.epoch == epoch && carried.layout == layout => Ok(carried.clone()),
+            Some(Some(_)) => Err(false),
+            Some(None) => Err(true),
+            // First seen: where it was pinned is where it is, if it's of this epoch.
+            None if epoch.as_deref().is_some_and(|now| pin.r#ref.split_once(':').is_some_and(|(of, _)| of == now)) => {
+                let first = Carried { track_ref: pin.track_ref.clone(), node_ref: pin.r#ref.clone(), epoch: epoch.clone(), layout };
+                if pins.len() >= PINS_KEPT {
+                    pins.shift_remove_index(0);
+                }
+                pins.insert(key, Some(first.clone()));
+                Ok(first)
+            }
+            None => Err(false),
+        };
+        let on = pin.track.as_deref().map(|track| format!(" on “{track}”")).unwrap_or_default();
+        let told = |gone: String| json!({"gone": gone, "name": pin.name, "node": pin.node, "track": pin.track});
+        match place {
+            Ok(carried) => {
+                let mut now = pin.clone();
+                (now.track_ref, now.r#ref) = (carried.track_ref, carried.node_ref);
+                book.shorten(&serde_json::to_value(now).unwrap_or(Value::Null))
+            }
+            Err(false) => told(format!(
+                "The producer pinned “{}”{on} in FOCUS, and {} has renumbered its tracks since in a way Kumi couldn't follow: find it by its name before acting on it, and say so.",
+                pin.name, self.daw.profile.words.app
+            )),
+            Err(true) => told(format!("The producer pinned “{}”{on} in FOCUS, and it was deleted since: say so, and ask what they mean.", pin.name)),
+        }
     }
 
     /// Refs a new epoch made stale go: a positional DAW's refs carry their epoch; a stable DAW's never change.
@@ -898,7 +980,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         // What the producer pinned in FOCUS (an FX, a DSP device), in the turn's short refs.
         if let Some(pin) = pinned {
-            context["pinned"] = self.book.borrow_mut().shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
+            context["pinned"] = self.pin_now(pin);
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         // M6: what changed while Kumi wasn't looking, while this project stays open.

@@ -365,6 +365,19 @@ async fn find_sounds_in_each_daw_holds_only_the_sounds_offered_there() {
         .await;
 }
 
+/// my_sets finds the producer's Live Sets (the library reads only .als): REAPER and Renoise aren't offered it as their own
+/// projects or songs.
+#[test]
+fn my_sets_is_offered_only_where_kumi_reads_the_daws_projects() {
+    let access = Rc::new(Learned { presets: vec![] });
+    let offered = |profile: &DawProfile| {
+        library_tools_for(profile, access.clone(), LibraryToolsOptions::default()).iter().any(|tool| tool.name() == "my_sets")
+    };
+    assert!(offered(&DawProfile::ABLETON));
+    assert!(!offered(&DawProfile::REAPER));
+    assert!(!offered(&DawProfile::RENOISE));
+}
+
 /// Every step find_presets names for loading a DAW's presets is one of that DAW's change steps.
 #[test]
 fn find_presets_names_only_steps_the_daw_has_and_lives_text_stays() {

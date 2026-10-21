@@ -566,9 +566,13 @@ pub fn library_tools_for(profile: &DawProfile, library: Rc<dyn LibraryAccess>, o
     // Presets are a DAW's own (Live's Browser items and preset files, REAPER's and Renoise's library files): not for a DAW
     // Kumi doesn't know.
     let presets = profile.caps.presets;
+    // The producer's own projects are Live Sets (the library reads only .als): not offered as REAPER projects or Renoise
+    // songs until Kumi reads those files.
+    let own_projects = !matches!(profile.id, Some(DawId::Reaper | DawId::Renoise));
     [FIND_SOUNDS_TOOL, FIND_PRESETS_TOOL, MY_SETS_TOOL]
         .into_iter()
         .filter(|name| *name != FIND_PRESETS_TOOL || presets)
+        .filter(|name| *name != MY_SETS_TOOL || own_projects)
         .map(|name| {
             let definition = definitions.iter().find(|d| d.name == name).unwrap();
             Rc::new(LibraryTool {
