@@ -535,3 +535,18 @@ fn kumis_undo_of_a_deleted_meta_device_puts_it_back_aimed_where_it_was() {
     assert_eq!(value_of(devices_in(slot(&document).unwrap(), DOOFER_TYPE, 0)[0], "DestEffect"), Some(2.0), "still the Gainer");
     assert_eq!(back, before);
 }
+
+#[test]
+fn kumis_undo_of_a_device_delete_puts_its_mappings_back_in_their_order() {
+    // Macro 1 maps the EQ's first two parameters, then the Gainer's first.
+    let mapped = ok(
+        "doofer-macro",
+        json!({"macro": 1, "mappings": [{"device": 1, "param": 1}, {"device": 1, "param": 2}, {"device": 2, "param": 1}]}),
+        DOOFER,
+        "Doofer",
+    )
+    .document
+    .to_xml();
+    let deleted = ok("doofer-device-delete", json!({"at": [1]}), &mapped, "Doofer");
+    assert_eq!(written(undone("doofer-device-delete", &deleted, &deleted.document.to_xml(), "Doofer", false)), mapped);
+}

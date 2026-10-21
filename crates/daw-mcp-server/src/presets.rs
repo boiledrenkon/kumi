@@ -424,12 +424,14 @@ fn macros_of(container: &Element, kind: &str) -> Vec<(usize, usize)> {
 }
 
 /// The mappings of the container into `lane`: each device index n becomes `follow(n)`, or the mapping goes (None).
-/// Answers what went: [{macro, at, xml}].
+/// Answers what went: [{macro, at, xml}], `at` its place in the macro's list before any went, ascending in each macro
+/// (so putting them back in that order, each at its `at`, gives the list it was).
 fn remap(container: &mut Element, kind: &str, lane: usize, follow: &dyn Fn(usize) -> Option<usize>) -> Vec<Value> {
     let mut gone = vec![];
     for (m, at) in macros_of(container, kind) {
         let Some(mappings) = container.element_mut(at).and_then(|macro_| macro_.child_mut("Mappings")) else { continue };
         let mut k = 0;
+        let mut removed = 0;
         while k < mappings.element_count() {
             let mapping = mappings.element(k).expect("in range");
             let chain = number(mapping.child("DestChainIndex")).unwrap_or(0.0) as i64;
@@ -437,8 +439,9 @@ fn remap(container: &mut Element, kind: &str, lane: usize, follow: &dyn Fn(usize
             if chain == lane as i64 && device >= 0 {
                 match follow(device as usize) {
                     None => {
-                        let removed = mappings.remove_element(k).expect("in range");
-                        gone.push(json!({"macro": m, "at": k, "xml": removed.to_xml()}));
+                        let element = mappings.remove_element(k).expect("in range");
+                        gone.push(json!({"macro": m, "at": k + removed, "xml": element.to_xml()}));
+                        removed += 1;
                         continue;
                     }
                     Some(n) if n as i64 != device => {
@@ -1667,7 +1670,7 @@ pub fn undo(kept: &Kept, text: &str, shape_now: &str, device: &Device) -> Result
             insert_at(slot_mut(&mut document), &locus, element);
             let container = element_at_mut(slot_mut(&mut document), &locus.container).expect("resolved");
             let kind = type_of(container, locus.container.is_empty()).to_string();
-            // Its mappings, each at its place in its macro's list again.
+            // Its mappings, each at its place in its macro's list again (kept in ascending order of those places).
             for gone in kept.prior["mappings"].as_array().into_iter().flatten() {
                 let m = gone["macro"].as_u64().unwrap_or(0);
                 let k = gone["at"].as_u64().unwrap_or(0) as usize;
