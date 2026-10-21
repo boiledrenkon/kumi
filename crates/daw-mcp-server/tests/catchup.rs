@@ -178,6 +178,37 @@ async fn watching_tells_what_the_producer_added_and_the_parameters_they_moved_by
     assert!(is_error && other["code"] == "other-project", "{other}");
 }
 
+// The looks go on with the connection the host makes after the bridge let go of the old one; a watch whose looks found no
+// connection says when they stopped.
+#[tokio::test]
+async fn watching_goes_on_with_the_hosts_new_connection_and_says_when_its_looks_stopped() {
+    let mut lab = Lab::start(true).await;
+    let pause = |ms| tokio::time::sleep(std::time::Duration::from_millis(ms));
+    lab.ok("watch_start").await;
+    lab.simulator.retire_with_bye();
+    pause(200).await;
+    assert!(!lab.tool("read", json!({"kind": "track"})).await.1, "the host connects again");
+    let eq = lab.script.add_fx_with(2, "ReaEQ", &[("Band 1 Gain", 0.5), ("Band 1 Freq", 0.25)]);
+    // A look on the new connection sees the EQ as it came, so its gain, turned after, is told against that.
+    pause(1600).await;
+    lab.script.set_param(&eq, 0, 0.75);
+    let watched = lab.ok("watch_stop").await;
+    assert_eq!(said(&watched), ["+FX ReaEQ"], "{watched}");
+    assert_eq!(watched["changes"][0]["madeOf"]["parameters"], json!([{"name": "Band 1 Gain", "value": {"value": 0.75, "shows": "0.8"}}]));
+    assert!(watched.get("stoppedLooking").is_none(), "{watched}");
+
+    // Lost, and made again only by watch_stop: what the looks missed is said.
+    lab.ok("watch_start").await;
+    lab.simulator.retire_with_bye();
+    pause(1600).await;
+    let watched = lab.ok("watch_stop").await;
+    let why = watched["stoppedLooking"]["why"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("Kumi's looks found no connection to REAPER from then on") && watched["stoppedLooking"]["at"].is_i64(),
+        "{watched}"
+    );
+}
+
 #[tokio::test]
 async fn a_bridge_without_digest_says_it_cant_compare() {
     let home = tempfile::tempdir().unwrap();

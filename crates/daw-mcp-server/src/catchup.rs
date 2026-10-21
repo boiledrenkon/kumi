@@ -11,7 +11,7 @@
 //! Snapshots live in `<Kumi's folder>/bridges/<daw>/snapshots/`: a saved project's under its place (`<place>/last-seen.json`,
 //! with the other files of the same song in `sets/`), an unsaved one's under the identity this run of the DAW gives it.
 use crate::client::{BridgeClient, RequestError};
-use crate::host::{CallError, Host, Pick};
+use crate::host::{CallError, Following, Host, Pick};
 use crate::semantic::{self, Change, Detail, Diff, Record, Snapshot, SNAPSHOT_VERSION};
 use daw_bridge::Daw;
 use serde_json::{json, Map, Value};
@@ -265,6 +265,8 @@ struct Seen {
     firsts: HashMap<String, Record>,
     selected: Vec<Value>,
     looks: usize,
+    /// When a look last found no connection to the DAW (ms since the epoch), until one is made again.
+    unlooked_since: Option<i64>,
 }
 
 /// The host's catch-up and watch state.
@@ -430,20 +432,32 @@ fn selected_tracks(data: &Value) -> Vec<Value> {
 
 /// Looks at the project again and again while watching, keeping the first look at each thing that wasn't there when the
 /// watch started, and the tracks the producer selects.
+/// The next of a connection's events; none while there's no connection.
+async fn next_event(
+    events: &mut Option<tokio::sync::broadcast::Receiver<daw_bridge::wire::Event>>,
+) -> Result<daw_bridge::wire::Event, tokio::sync::broadcast::error::RecvError> {
+    match events {
+        Some(events) => events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn poll(
     daw: Daw,
-    client: BridgeClient,
+    following: Following,
     start: HashSet<String>,
     seen: Arc<Mutex<Seen>>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut events = client.events();
+    // The host's connection now: when it's replaced (or made again), the looks and the selections go on with the new one.
+    let mut client = following.client().await;
+    let mut events = client.as_ref().map(BridgeClient::events);
     let mut gap = POLL_MIN;
     let mut next = tokio::time::Instant::now() + gap;
     loop {
         tokio::select! {
             _ = stop.changed() => break,
-            event = events.recv() => match event {
+            event = next_event(&mut events) => match event {
                 Ok(event) if event.name == "selection" => {
                     let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
                     for track in selected_tracks(&event.data) {
@@ -452,13 +466,21 @@ async fn poll(
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => events = None,
                 _ => {}
             },
             _ = tokio::time::sleep_until(next) => {
-                if client.is_closed() {
-                    break;
+                let now = following.client().await;
+                let Some(now) = now else {
+                    seen.lock().unwrap_or_else(|e| e.into_inner()).unlooked_since.get_or_insert_with(now_ms);
+                    next = tokio::time::Instant::now() + POLL_MIN;
+                    continue;
+                };
+                if client.as_ref().is_none_or(|before| !before.same_connection(&now)) {
+                    events = Some(now.events());
+                    client = Some(now.clone());
                 }
+                let client = now;
                 let began = Instant::now();
                 let look = collect(daw, true, false, |params| {
                     let client = client.clone();
@@ -468,6 +490,7 @@ async fn poll(
                 if let Ok(now) = look {
                     let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
                     seen.looks += 1;
+                    seen.unlooked_since = None;
                     for record in now.records {
                         let key = record.key();
                         if !start.contains(&key) {
@@ -620,9 +643,9 @@ impl Host {
         };
         let seen = Arc::new(Mutex::new(Seen::default()));
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        if let Ok(client) = self.client(&pick).await {
+        if let Ok(instance) = self.pin(&pick).await {
             let keys = start.records.iter().map(Record::key).collect();
-            tokio::spawn(poll(self.daw(), client, keys, seen.clone(), stopped));
+            tokio::spawn(poll(self.daw(), self.following(instance), keys, seen.clone(), stopped));
         }
         let answer = json!({"watching": true, "place": start.place, "name": start.name});
         let before =
@@ -662,9 +685,9 @@ impl Host {
                 true,
             );
         }
-        let (firsts, selected, looks) = {
+        let (firsts, selected, looks, unlooked_since) = {
             let seen = watching.seen.lock().unwrap_or_else(|e| e.into_inner());
-            (seen.firsts.clone(), seen.selected.clone(), seen.looks)
+            (seen.firsts.clone(), seen.selected.clone(), seen.looks, seen.unlooked_since)
         };
         let mut diff = semantic::diff(&watching.start, &now, true, &firsts);
         self.name_moves(&mut diff, &pick).await;
@@ -681,6 +704,15 @@ impl Host {
         }
         if !selected.is_empty() {
             answer["selected"] = selected.into();
+        }
+        if let Some(at) = unlooked_since {
+            answer["stoppedLooking"] = json!({
+                "at": at,
+                "why": format!(
+                    "Kumi's looks found no connection to {} from then on: what was added after is told without the parameters moved on it",
+                    self.daw()
+                ),
+            });
         }
         (answer, false)
     }

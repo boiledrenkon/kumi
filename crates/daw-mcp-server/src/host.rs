@@ -23,6 +23,26 @@ struct Current {
     client: BridgeClient,
 }
 
+/// The host's connection to one instance as work beside the calls follows it: a connection the host replaces (or makes
+/// again) is the one used from then on.
+pub(crate) struct Following {
+    current: std::sync::Arc<tokio::sync::Mutex<Option<Current>>>,
+    instance: Pick,
+}
+
+impl Following {
+    /// The connection the host has open to the instance now, if it has one: the host makes them, this only follows.
+    pub(crate) async fn client(&self) -> Option<BridgeClient> {
+        let current = self.current.lock().await;
+        let open = current.as_ref().filter(|open| {
+            !open.client.is_closed()
+                && self.instance.pid.is_none_or(|pid| pid == open.pid)
+                && self.instance.resource.as_ref().is_none_or(|resource| *resource == open.resource)
+        })?;
+        Some(open.client.clone())
+    }
+}
+
 /// Why a call to the bridge has no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallError {
@@ -46,7 +66,7 @@ const RESENT: [&str; 7] = ["read", "snapshot", "focus", "focus_body", "status", 
 pub struct Host {
     daw: Daw,
     paths: BridgePaths,
-    current: tokio::sync::Mutex<Option<Current>>,
+    current: std::sync::Arc<tokio::sync::Mutex<Option<Current>>>,
     /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
     events: tokio::sync::broadcast::Sender<Value>,
     /// The changes previewed, applied and undone through this host (M3).
@@ -118,7 +138,7 @@ impl Host {
         Self {
             daw,
             paths: BridgePaths::new(kumi_home, daw),
-            current: tokio::sync::Mutex::new(None),
+            current: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             events: tokio::sync::broadcast::channel(1024).0,
             journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
             catchup: crate::catchup::Catchup::new(BridgePaths::new(kumi_home, daw).snapshots()),
@@ -130,11 +150,9 @@ impl Host {
         &self.catchup
     }
 
-    /// The chosen instance's connection, for work beside the calls (watch_me's looks).
-    pub(crate) async fn client(&self, pick: &Pick) -> Result<BridgeClient, CallError> {
-        let mut current = self.current.lock().await;
-        self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
-        Ok(current.as_ref().expect("connected above").client.clone())
+    /// The host's connection to one instance, followed by work beside the calls (watch_me's looks).
+    pub(crate) fn following(&self, instance: Pick) -> Following {
+        Following { current: self.current.clone(), instance }
     }
 
     pub(crate) fn journal(&self) -> &crate::changes::Journal {
