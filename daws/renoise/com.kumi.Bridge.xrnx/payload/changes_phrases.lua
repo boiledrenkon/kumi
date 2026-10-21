@@ -243,6 +243,7 @@ local function range_ok(v) return type(v) == "table" and whole(0, 119)(v[1]) and
 
 -- (set below, once the column helpers are there)
 local write_content
+local zero_z_cells
 
 local function add_plan(song, env, input)
   local n, objects, label = places_.locate(song, env, "instrument", input, "phrase-add")
@@ -320,14 +321,29 @@ local function add_apply(song, env, input, fence, desc)
     end
   end
   local m = { plan.n[1], plan.index }
+  -- (whether the new phrase plays as the program now: Renoise's doing, not the producer's, so Kumi's undo may take it)
+  local program = instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == plan.index
   return {
-    applied = { index = plan.index, print = phrase_print(phrase) },
+    applied = { index = plan.index, print = phrase_print(phrase), program = program or nil },
     -- (M7: its place too, which Kumi finds it by after other phrases came and went)
     created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase", place = places_.place_of(env, "phrase", m) },
     material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
     display = { title = string.format("Added phrase %s to %s%s", q(places_.phrase_label(plan.index, phrase)), q(plan.label), with_lines(input)), before = { phrases = plan.count }, after = { phrases = plan.count + 1 } },
     undo = { desc = desc, entry = true }, prior = { phrases = plan.count }, place = places_.journal_place("phrase", m), shape = "made",
   }
+end
+
+-- How the producer plays phrase `ph` of `instrument` now, in words, or nil: keys mapped to it, the program (unless it was the
+-- program when Kumi made it: `was_program`), or 0Z commands naming it (or a song too big to look through).
+local function in_use(song, instrument, phrase, ph, was_program)
+  if phrase.mapping then return "is mapped to keys" end
+  if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == ph and not was_program then
+    return "is the instrument's phrase program"
+  end
+  local named = zero_z_cells(song, ph)
+  if named == nil then return "may be named by 0Z commands (the song is too big for Kumi to look)" end
+  if #named > 0 then return string.format("is named by %d 0Z %s in the patterns", #named, #named == 1 and "command" or "commands") end
+  return nil
 end
 
 -- (the restore of a change that made a phrase: phrase-add, and phrase-load in changes_loaders.lua)
@@ -343,6 +359,12 @@ local function remove_made(song, env, restore, desc, kind)
   local label = phrase_label_of(n, objects)
   if not restore.discard and not base.same_table(phrase_print(objects.phrase), (restore.applied or {}).print) then
     fail("changed", label .. " changed in Renoise since Kumi made it (lines, length, name or script)")
+  end
+  -- (one the producer plays since, by keys, as the program or by 0Z commands, stays: deleting it would undo their work, and
+  -- Renoise clears the 0Z cells that name it)
+  if not restore.discard then
+    local use = in_use(song, objects.instrument, objects.phrase, n[2], (restore.applied or {}).program)
+    if use then fail("changed", label .. " " .. use .. " since Kumi made it: Kumi left it, so nothing that plays it is lost") end
   end
   song:describe_undo(desc)
   objects.instrument:delete_phrase_at(n[2])
@@ -412,8 +434,11 @@ end
 -- kind}; nil when the song is too big to look through in one callback. Renoise 3.5.4 clears those that name a phrase it deletes
 -- (and renumbers the later ones), and an insert renumbers again but never fills a cleared one (lab 2026-10-21).
 M.ZERO_Z_READS = 200000
-local function zero_z_cells(song, ph)
+-- The cells whose 0Z command names phrase `wanted` (a number, or a set of numbers: one look for them all), each with `ph`; nil
+-- when the song is too big to look through.
+zero_z_cells = function(song, wanted)
   local rows_ = import("rows")
+  local named = type(wanted) == "table" and wanted or { [wanted] = true }
   local found, reads = {}, 0
   for p = 1, #song.patterns do
     local pattern = song:pattern(p)
@@ -426,13 +451,13 @@ local function zero_z_cells(song, ph)
           if not line.is_empty then
             for c = 1, 8 do
               local column = line:effect_column(c)
-              if column.number_string == "0Z" and column.amount_value == ph then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "effect" } end
+              if column.number_string == "0Z" and named[column.amount_value] then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "effect", ph = column.amount_value } end
             end
             if song:track(t).max_note_columns > 0 then
               for c = 1, 12 do
                 local column = line:note_column(c)
                 local ok, number = pcall(function() return column.effect_number_string end)
-                if ok and number == "0Z" and column.effect_amount_value == ph then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "note" } end
+                if ok and number == "0Z" and named[column.effect_amount_value] then found[#found + 1] = { p = p, t = t, line = l, col = c, kind = "note", ph = column.effect_amount_value } end
               end
             end
             reads = reads + 20
@@ -622,14 +647,19 @@ local function drop_plan(song, env, input)
   return instrument_at, items
 end
 
--- (the 0Z commands naming any of them, looked for once the request is otherwise fine: the song's patterns, bounded)
+-- (the 0Z commands naming any of them, looked for once the request is otherwise fine: one look through the song's patterns for
+-- them all, bounded)
 local function drop_unused(song, items)
+  local wanted = {}
+  for _, item in ipairs(items) do wanted[item.n[2]] = true end
+  local named = zero_z_cells(song, wanted)
+  if named == nil then bad("the song is too big for Kumi to look for 0Z commands naming those phrases: delete them with phrase_delete") end
   for _, item in ipairs(items) do
-    local named = zero_z_cells(song, item.n[2])
-    if named == nil then bad("the song is too big for Kumi to look for 0Z commands naming " .. item.label .. ": delete it with phrase_delete") end
-    if #named > 0 then
-      bad(string.format("%s is named by %d 0Z %s in the patterns: delete it with phrase_delete, which writes %s back on undo", item.label, #named,
-        #named == 1 and "command" or "commands", #named == 1 and "it" or "them"))
+    local count = 0
+    for _, cell in ipairs(named or {}) do if cell.ph == item.n[2] then count = count + 1 end end
+    if count > 0 then
+      bad(string.format("%s is named by %d 0Z %s in the patterns: delete it with phrase_delete, which writes %s back on undo", item.label, count,
+        count == 1 and "command" or "commands", count == 1 and "it" or "them"))
     end
   end
 end
@@ -672,16 +702,29 @@ local function drops_apply(song, env, input, fence, desc)
   end
   if writes > M.MAX_WRITES then fail("failed", "those phrases hold more lines than Kumi puts back in one step: drop fewer at once") end
   local title = drop_title(items)
+  -- (a program on a phrase that stays: Renoise may move it as phrases go, so Kumi puts it back on that phrase)
+  local program_before, stays = instrument.phrase_program, nil
+  if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and program_before >= 1 and program_before <= fence.phrases then
+    stays = program_before
+    for _, item in ipairs(items) do
+      if item.n[2] == program_before then stays = nil break end
+      if item.n[2] < program_before then stays = stays - 1 end
+    end
+  end
   song:describe_undo(desc)
-  -- (from the last down, each with the phrases' mark just after it went: its place to come back to)
+  -- (from the last down, each with the phrases' mark just after it went: what follows it once Kumi puts it back)
   for k = #items, 1, -1 do
     instrument:delete_phrase_at(items[k].n[2])
     kept[k].after = env.list_mark and env.list_mark("phrases", i) or nil
   end
-  -- (the program Renoise moved it to: unless the producer chooses another since, Kumi's undo plays the one it was again)
+  if stays and instrument.phrase_program ~= stays then instrument.phrase_program = stays end
+  -- (the program as the drop left it: unless the producer chooses another since, Kumi's undo plays the one it was again)
   local program_after = instrument.phrase_program
   return {
-    applied = { deleted = true, count = #items }, material = { instrument = places_.place_of(env, "instrument", { i }), phrases = kept, programAfter = program_after },
+    applied = { deleted = true, count = #items },
+    -- (`mark`: the phrases' log once all had gone, which every place to come back to is counted from)
+    material = { instrument = places_.place_of(env, "instrument", { i }), phrases = kept, programAfter = program_after,
+      mark = env.list_mark and env.list_mark("phrases", i) or nil, program = stays and places_.place_of(env, "phrase", { i, stays }) or nil },
     target = places_.target_of(env, "instrument", { i }), display = { title = title, note = DROP_NOTE }, undo = { desc = desc, entry = true },
     -- (the journal tells Renoise's undo of it by the first phrase coming back: its undo puts them back from the first up)
     prior = { deleted = false }, place = places_.journal_place("phrase", { i, items[1].n[2] }), shape = "deleted",
@@ -696,6 +739,22 @@ local function is_kept(instrument, at, saved)
     and json.encode(read_lines(there), { sort_keys = true }) == json.encode(saved.lines, { sort_keys = true })
 end
 
+-- Where dropped phrase `k` goes back now, or nil when the log can't say: just after the phrase that stayed before it, wherever
+-- that is, and after the phrases dropped next to it before it. It counts from one mark taken once all had gone
+-- (`material.mark`), so phrases dropped next to each other come back in their order, put back by Kumi or by Renoise's undo.
+local function drop_spot(env, i, material, k)
+  if not env.list_after then return nil end
+  local mark = material.mark or (material.phrases[1] or {}).after
+  -- (the phrase that stayed before it was at index - k once the k phrases up to it had gone)
+  local anchor = material.phrases[k].index - k
+  local at = env.list_after("phrases", i, nil, anchor + 1, mark)
+  if not at then return nil end
+  for j = 1, k - 1 do
+    if material.phrases[j].index - j == anchor then at = at + 1 end
+  end
+  return at
+end
+
 local function drops_restore(song, env, restore, desc)
   local material = restore.material
   if type(material) ~= "table" or type(material.instrument) ~= "table" or type(material.phrases) ~= "table" or #material.phrases == 0 then
@@ -706,33 +765,27 @@ local function drops_restore(song, env, restore, desc)
   local instrument = song:instrument(n[1])
   local count = #material.phrases
   local title = count == 1 and "Phrase put back" or (count .. " phrases put back")
+  local spots = {}
+  for k = 1, count do
+    spots[k] = drop_spot(env, n[1], material, k)
+    if not spots[k] then fail("stale", "the phrases changed in a way Kumi couldn't follow since the drop: nothing was put back") end
+  end
   -- (back already: each where it goes, as it was)
   local back = 0
-  for _, saved in ipairs(material.phrases) do
-    local at = env.list_after and env.list_after("phrases", n[1], nil, saved.index, saved.after) or nil
-    if at and is_kept(instrument, at, saved) then back = back + 1 end
+  for k, saved in ipairs(material.phrases) do
+    if is_kept(instrument, spots[k], saved) then back = back + 1 end
   end
   if back == count then
-    for _, saved in ipairs(material.phrases) do
-      local at = env.list_after("phrases", n[1], nil, saved.index, saved.after)
-      base.note_restored_at(env.journal, "phrases-drop", places_.journal_place("phrase", { n[1], at }))
-    end
+    for k = 1, count do base.note_restored_at(env.journal, "phrases-drop", places_.journal_place("phrase", { n[1], spots[k] })) end
     return { restored = { done = true }, display = { title = title .. " already" }, undo = { desc = desc, entry = false }, unwritten = true }
   end
   if back > 0 then fail("changed", "some of the phrases are back in the instrument already and some aren't: Kumi left them as they are") end
   if #instrument.phrases + count > 126 then fail("changed", "the instrument has no room for them any more (126 phrases at most)") end
-  -- (each place, before anything is written: a gap in the log refuses the whole undo)
-  for _, saved in ipairs(material.phrases) do
-    if not (env.list_after and env.list_after("phrases", n[1], nil, saved.index, saved.after)) then
-      fail("stale", "the phrases changed in a way Kumi couldn't follow since the drop: nothing was put back")
-    end
-  end
   song:describe_undo(desc)
   local program_at
-  -- (from the first up: each place follows the ones put back before it through the log)
-  for _, saved in ipairs(material.phrases) do
-    local at = env.list_after("phrases", n[1], nil, saved.index, saved.after)
-    at = math.max(1, math.min(at, #instrument.phrases + 1))
+  -- (from the first up, each at its spot once the ones before it are back)
+  for k, saved in ipairs(material.phrases) do
+    local at = math.max(1, math.min(drop_spot(env, n[1], material, k) or spots[k], #instrument.phrases + 1))
     local phrase = instrument:insert_phrase_at(at)
     pcall(write_settings, phrase, saved.settings)
     write_lines(phrase, saved.lines)
@@ -743,12 +796,19 @@ local function drops_restore(song, env, restore, desc)
     base.note_restored_at(env.journal, "phrases-drop", places_.journal_place("phrase", { n[1], at }))
     if saved.program then program_at = at end
   end
-  if program_at then
+  -- (the program the drop moved, back on the phrase it played, unless the producer chose another since: a dropped one, or one
+  -- that stayed, which the phrases put back below it moved)
+  local program_on = program_at
+  if not program_on and type(material.program) == "table" then
+    local now = places_.follow(env, material.program)
+    program_on = now and now[2] or nil
+  end
+  if program_on then
     pcall(function()
       local program = instrument.phrase_program
-      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE
+      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and program ~= program_on
         and (program == 0 or program > #instrument.phrases or (material.programAfter ~= nil and program == material.programAfter)) then
-        instrument.phrase_program = program_at
+        instrument.phrase_program = program_on
       end
     end)
   end

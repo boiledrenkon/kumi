@@ -821,6 +821,13 @@ local function drop_apply(song, env, input, fence, desc)
     sequencer:delete_sequence_at(item.slot)
     if #song.patterns < pool then item.gone = kept or { name = "", lines = 64, aliases = {} } end
   end
+  -- (what each next slot's section reads once all went, at slot - k: the undo puts its own back only while it still reads so)
+  for k, item in ipairs(items) do
+    if item.next then
+      local after = state_of(song, item.slot - k + 1)
+      item.nextAfter = { start = after.start, name = after.name }
+    end
+  end
   local now = sequence_of(song)
   local prior, applied = journal_fields(before, now)
   applied.pool, applied.items = env.pattern_mark and env.pattern_mark() or nil, items
@@ -865,6 +872,7 @@ local function drop_restore(song, env, restore, desc)
   end
   song:describe_undo(desc)
   local sequencer = song.sequencer
+  local kept_sections = {}
   for i, item in ipairs(applied.items) do
     if item.gone then
       sequencer:insert_new_pattern_at(item.slot)
@@ -885,10 +893,23 @@ local function drop_restore(song, env, restore, desc)
       if moved and moved <= rows.track_count(song) then mutes[#mutes + 1] = moved end
     end
     set_state(song, item.slot, { start = state.start, name = state.name, mutes = mutes })
-    if item.next and item.slot < slot_count(song) then set_state(song, item.slot + 1, item.next, true) end
+    if item.next and item.slot < slot_count(song) then
+      -- (a section the producer made, renamed or ended on the next slot since stays theirs)
+      local now_next = state_of(song, item.slot + 1)
+      local was = item.nextAfter
+      if not was or (now_next.start == was.start and now_next.name == was.name) then
+        set_state(song, item.slot + 1, item.next, true)
+      else
+        kept_sections[#kept_sections + 1] = item.slot + 1
+      end
+    end
   end
   base.note_restored(env.journal, "slots-drop", {}, applied, base.KINDS["slots-drop"])
-  return { restored = { done = true }, display = { title = title }, undo = { desc = desc, entry = true } }
+  local display = { title = title }
+  if #kept_sections > 0 then
+    display.note = string.format("The section on %s changed since the drop: Kumi left it as the producer made it.", slots_list_text(kept_sections))
+  end
+  return { restored = { done = true }, display = display, undo = { desc = desc, entry = true } }
 end
 
 -- (the journal compares the whole sequence; see changes_base.lua)

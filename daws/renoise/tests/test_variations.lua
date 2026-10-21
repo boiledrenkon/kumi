@@ -281,6 +281,28 @@ test("variations: an empty pattern Renoise removes with its dropped slot is made
   ok(made)
 end)
 
+-- (review W3)
+test("variations: Kumi's undo of a slot drop leaves a section the producer made or renamed on the next slot since", function()
+  local _, peer = seq_setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "slots-drop", { refs = { K.ref(E, "seq", 3) } })
+  eq(seq(), "1,2,3")
+  mock.song.sequencer:set_sequence_is_start_of_section(3, true)
+  mock.song.sequencer:set_sequence_section_name(3, "Outro")
+  local undone = K.restore(peer, record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(seq(), "1,2,1,3")
+  eq(sections(), "2:Break 4:Outro", "the producer's section stays")
+  ok((undone.result.display.note or ""):find("left it", 1, true), json.encode(undone.result.display))
+  local _, peer2 = seq_setup()
+  local E2 = K.place(peer2)
+  local again = K.change(peer2, "slots-drop", { refs = { K.ref(E2, "seq", 2) } })
+  eq(sections(), "2:Break", "passed on")
+  mock.song.sequencer:set_sequence_section_name(2, "Chorus")
+  ok(K.restore(peer2, again).result)
+  eq(sections(), "2:Break 3:Chorus", "the slot gets its own back; the renamed one stays")
+end)
+
 -- phrases-drop
 
 local function four_phrases()
@@ -355,6 +377,107 @@ test("variations: a phrase drop's apply refuses `changed` when a phrase changed 
   local done = I.apply(peer, "phrases-drop", input, "Kumi: drop (kp9)", previewed.fence, epoch, layout)
   failure(done, "changed")
   eq(phrase_names(bass), "P1,P2,P3,P4")
+end)
+
+local function five_phrases()
+  local env, peer, bass = four_phrases()
+  bass:insert_phrase_at(5).name = "P5"
+  bass:phrase(5):line(1):note_column(1).note_value = 52
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return env, peer, bass
+end
+
+-- (review W1)
+test("variations: phrases dropped next to each other come back in their order by Kumi's undo", function()
+  local _, peer, bass = five_phrases()
+  local E = place(peer)
+  local record = change(peer, "phrases-drop", { refs = { pref(E, 2, 2), pref(E, 2, 3), pref(E, 2, 4) } })
+  eq(phrase_names(bass), "P1,P5")
+  local undone = restore(peer, "phrases-drop", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(phrase_names(bass), "P1,P2,P3,P4,P5")
+  eq(bass:phrase(3):line(1):note_column(1).note_value, 50, "P3's lines with it")
+  local _, peer2, bass2 = four_phrases()
+  local E2 = place(peer2)
+  local two = change(peer2, "phrases-drop", { refs = { pref(E2, 2, 3), pref(E2, 2, 2) } })
+  eq(phrase_names(bass2), "P1,P4")
+  bass2:insert_phrase_at(3).name = "New"
+  ok(restore(peer2, "phrases-drop", two).result)
+  eq(phrase_names(bass2), "P1,P2,P3,P4,New", "after P1, wherever it is, and before what came after it")
+end)
+
+test("variations: after Renoise's undo of a drop of neighbouring phrases, Kumi's undo finds them all back", function()
+  local _, peer, bass = five_phrases()
+  local E = place(peer)
+  local record = change(peer, "phrases-drop", { refs = { pref(E, 2, 2), pref(E, 2, 3), pref(E, 2, 4) } })
+  mock.song:undo()
+  eq(phrase_names(bass), "P1,P2,P3,P4,P5")
+  local back = restore(peer, "phrases-drop", record)
+  ok(back.result and back.result.display.title:find("already", 1, true), json.encode(back.result or back.error))
+  eq(phrase_names(bass), "P1,P2,P3,P4,P5")
+end)
+
+-- (review W2)
+test("variations: a program on a phrase that stays plays that phrase after the drop and after Kumi's undo", function()
+  local _, peer, bass = five_phrases()
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 5
+  mock.data.undo.stack = {}
+  local E = place(peer)
+  local record = change(peer, "phrases-drop", { refs = { pref(E, 2, 2), pref(E, 2, 3) } })
+  eq(bass:phrase(bass.phrase_program).name, "P5", "after the drop")
+  local undone = restore(peer, "phrases-drop", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(phrase_names(bass), "P1,P2,P3,P4,P5")
+  eq(bass:phrase(bass.phrase_program).name, "P5", "after Kumi's undo")
+end)
+
+-- (review W13)
+test("variations: a phrase drop looks through the song for 0Z commands once, however many phrases it drops", function()
+  local _, peer = five_phrases()
+  local E = place(peer)
+  local fields = mock.impl(mock.song)
+  local real, looks = fields.pattern, 0
+  fields.pattern = function(self, p)
+    looks = looks + 1
+    return real(self, p)
+  end
+  preview(peer, "phrases-drop", { refs = { pref(E, 2, 2) } })
+  local one = looks
+  looks = 0
+  preview(peer, "phrases-drop", { refs = { pref(E, 2, 2), pref(E, 2, 3), pref(E, 2, 4) } })
+  fields.pattern = real
+  ok(one > 0, "it looks")
+  eq(looks, one, "one look for three phrases")
+end)
+
+-- (review W4)
+test("variations: Kumi's undo of a take leaves it once the producer plays it by a 0Z command, keys or as the program", function()
+  local _, peer = setup()
+  local record = change(peer, "phrase-add", { ref = iref(place(peer), 2), lines = 8, content = CHOP })
+  mock.ops.set_note(1, 3, 1, 1, { note = 48, instrument = 1 })
+  mock.ops.set_effect(1, 3, 1, 1, 256 + 35, 2)
+  local refused = restore(peer, "phrase-add", record)
+  failure(refused, "changed")
+  ok(refused.error.message:find("0Z", 1, true), refused.error.message)
+  eq(#instrument(2).phrases, 2, "the take stays")
+  eq(mock.song:pattern(1):track(3):line(1):effect_column(1).amount_value, 2, "and the producer's 0Z with it")
+  mock.ops.set_effect(1, 3, 1, 1, 0, 0)
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_mapping_at(1, bass:phrase(2)).note_range = { 60, 71 }
+  failure(restore(peer, "phrase-add", record), "changed")
+  bass:delete_phrase_mapping_at(1)
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  failure(restore(peer, "phrase-add", record), "changed")
+  bass.phrase_program = 1
+  ok(restore(peer, "phrase-add", record).result, "unused again: Kumi's undo takes it")
+  eq(#instrument(2).phrases, 1)
+  -- (the program Renoise put on it as it was made is no use of the producer's)
+  bass.phrase_program = 2
+  local again = change(peer, "phrase-add", { ref = iref(place(peer), 2), lines = 8, content = CHOP })
+  eq(bass.phrase_program, 2)
+  ok(restore(peer, "phrase-add", again).result)
 end)
 
 -- read {kind: where}
