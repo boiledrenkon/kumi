@@ -23,8 +23,8 @@
                                                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
                                                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
                                                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-                                                                    Keys C4–B4 → C5–B5
+                                                                    Keys C-4–B-4 → C-5–B-5
                                                                     Velocities 0–127 → 64–127
-   Ask Kumi about your song                                         Base note C4 → C5
+   Ask Kumi about your song                                         Base note C-4 → C-5
                                                 enter to send
 

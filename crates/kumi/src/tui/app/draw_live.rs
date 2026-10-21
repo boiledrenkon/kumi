@@ -584,14 +584,18 @@ impl TuiApp {
             26..=51 => char::from(b'a' + (k - 26) as u8),
             _ => '+',
         };
-        // The keyzone map: keys across (the zones' keys, an octave at least), velocities up in two bands (four with room); each
-        // cell is the zone that plays there, ▒ where zones overlap, · where none does.
-        let bands: i32 = if map.zones.is_empty() || most < 6 || width < 12 {
+        let phrase_line = !map.phrases.is_empty();
+        let macro_line = !map.macros.is_empty();
+        // The keyzone map: keys across (the zones' keys, an octave at least), velocities up in four bands, two or one, with
+        // the keys under them; each cell is the zone that plays there, ▒ where zones overlap, · where none does. The zones'
+        // names come first, so each letter in it is named below: the map takes the rows they leave (under the title, less
+        // the facts line), beside the macros and phrases lines, else one band in their place.
+        let left = most - 2 - map.zones.len() as i32;
+        let fits = |room: i32| [4, 2, 1].into_iter().find(|bands| (*bands < 4 || most >= 12) && room > *bands);
+        let bands: i32 = if map.zones.is_empty() || width < 12 {
             0
-        } else if most >= 12 {
-            4
         } else {
-            2
+            fits(left - phrase_line as i32 - macro_line as i32).or(fits(left).map(|_| 1)).unwrap_or(0)
         };
         if bands > 0 {
             let lo = map.zones.iter().map(|zone| zone.notes.0).min().unwrap_or(0) as i32;
@@ -628,9 +632,7 @@ impl TuiApp {
             screen.put(x, row, &truncate(&format!("{from}{}{to}", " ".repeat(gap)), width), &st::FAINT);
             row += 1;
         }
-        let phrase_line = !map.phrases.is_empty();
-        let macro_line = !map.macros.is_empty();
-        let rows = map.zones.len().min((y + most - row - 1 - phrase_line as i32 - macro_line as i32).max(0) as usize);
+        let rows = map.zones.len().min((y + most - row - 1).max(0) as usize);
         for (k, zone) in map.zones.iter().take(rows).enumerate() {
             let notes = if zone.notes.0 == zone.notes.1 {
                 profile.note_name(zone.notes.0)
@@ -648,6 +650,9 @@ impl TuiApp {
         }
         let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         let mut facts = vec![count(map.zones.len(), "zone", "zones")];
+        if rows < map.zones.len() {
+            facts[0].push_str(&format!(" ({} not shown)", map.zones.len() - rows));
+        }
         if !map.macros.is_empty() {
             facts.push(count(map.macros.len(), "macro", "macros"));
         }

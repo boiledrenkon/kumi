@@ -647,7 +647,7 @@ mod tests {
         assert_eq!((before[0].notes, after[0].notes, after[0].velocities, after[0].base), ([36, 47], [48, 59], None, Some(48)));
         let said: Vec<(&str, Option<&str>, Option<&str>)> =
             values.iter().map(|v| (v.name.as_str(), v.from_text.as_deref(), v.to_text.as_deref())).collect();
-        assert_eq!(said, [("Keys", Some("C3–B3"), Some("C4–B4")), ("Base note", Some("C3"), Some("C4"))], "in FOCUS's names");
+        assert_eq!(said, [("Keys", Some("C-3–B-3"), Some("C-4–B-4")), ("Base note", Some("C-3"), Some("C-4"))], "in Renoise's names");
         // A Drumkit layout: every zone.
         let zone = |low: u8, high: u8| json!({"noteRange": [low, high], "velocityRange": [0, 127], "baseNote": low});
         let (preview, applied) = answers(

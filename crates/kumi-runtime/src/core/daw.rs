@@ -83,6 +83,8 @@ pub struct PromptVocab {
     pub eq: &'static str,
     /// The octave the DAW names middle C (MIDI 60) in: Live calls it C3.
     pub middle_c_octave: i8,
+    /// Notes named as a tracker writes them, three characters with a dash for a natural ("C-5", "C#5"): Renoise's.
+    pub tracker_notes: bool,
     /// For each gap no knob closes, the structural change that closes it, with the DAW's own devices.
     pub structure_moves: &'static [(crate::audio::matching::StructuralKind, &'static str)],
     /// Where the producer's sounds are, as find_sounds names them: "Live's User Library and Places, Splice, packs, folders
@@ -674,6 +676,7 @@ impl DawProfile {
             write_notes_tool: "the tool that writes notes",
             eq: "an EQ",
             middle_c_octave: 4,
+            tracker_notes: false,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
             library_places: "Splice, folders they named and the DAW's own library",
             preset_sources: "the DAW's own presets and device chains, and plug-ins' own presets",
@@ -778,6 +781,7 @@ impl DawProfile {
             write_notes_tool: crate::live_word!(write_notes_tool),
             eq: crate::live_word!(eq),
             middle_c_octave: 3,
+            tracker_notes: false,
             structure_moves: crate::audio::matching::STRUCTURE_MOVES,
             library_places: crate::live_word!(library_places),
             preset_sources: crate::live_word!(preset_sources),
@@ -864,6 +868,7 @@ impl DawProfile {
             write_notes_tool: "the tool that writes MIDI notes",
             eq: "ReaEQ",
             middle_c_octave: 4,
+            tracker_notes: false,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
             library_places: "Splice, folders they named and their sample folders in other DAWs",
             preset_sources: "REAPER's FX chains, track and project templates, JSFX and FX preset banks (its resource folder), and VST3 presets",
@@ -950,6 +955,7 @@ impl DawProfile {
             write_notes_tool: "the tool that writes pattern lines",
             eq: "EQ 10",
             middle_c_octave: 5,
+            tracker_notes: true,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
             library_places: "the samples of Renoise's Library and User Library, Splice, folders they named and their sample folders in other DAWs",
             preset_sources: "Renoise's instruments, multi-samples, effect chains and presets, phrases, phrase scripts and modulation sets (its Library and User Library)",
@@ -1011,7 +1017,9 @@ impl DawProfile {
             return crate::notation::pitch_name(midi);
         }
         const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-        format!("{}{}", NAMES[midi as usize % 12], midi as i32 / 12 - 5 + self.vocab.middle_c_octave as i32)
+        const TRACKER: [&str; 12] = ["C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"];
+        let names = if self.vocab.tracker_notes { TRACKER } else { NAMES };
+        format!("{}{}", names[midi as usize % 12], midi as i32 / 12 - 5 + self.vocab.middle_c_octave as i32)
     }
 
     /// `(app, place)`, as `Integration::words` answered before profiles.
@@ -1140,6 +1148,14 @@ mod tests {
         assert_eq!(DawProfile::ABLETON.without_caps().word_pair(), ("Live", "Set"));
         assert_eq!(DawProfile::ABLETON.without_caps().caps, Capabilities::NONE);
         assert_eq!(Capabilities::default(), Capabilities::NONE);
+    }
+
+    #[test]
+    fn each_daw_names_notes_as_it_writes_them() {
+        // (review U10) Renoise writes a natural with a dash, C-5 for MIDI 60.
+        let names = |profile: &DawProfile| [60, 61, 0, 119].map(|midi| profile.note_name(midi));
+        assert_eq!(names(&DawProfile::RENOISE), ["C-5", "C#5", "C-0", "B-9"]);
+        assert_eq!(names(&DawProfile::REAPER), ["C4", "C#4", "C-1", "B8"]);
     }
 
     crate::daw_text!(

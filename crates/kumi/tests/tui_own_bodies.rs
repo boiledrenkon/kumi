@@ -223,17 +223,17 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     h.emit(json!({"type":"focus","focus":instrument}));
     shows(&h, "FOCUS · Keyzones").await;
     h.has("Drumkit · overlapping zones: cycle");
-    // (an octave of keys from G#4: the Kick at C5 and the Ghost at D#5 at every velocity; loud, the Snare's D5, and D#5 where
-    // the Snare and the Ghost overlap)
+    // (an octave of keys from G#4: the Kick at C-5 and the Ghost at D#5 at every velocity; loud, the Snare's D-5, and D#5
+    // where the Snare and the Ghost overlap; named as Renoise writes them, review U10)
     h.has("····A·B▒····");
     h.has("····A··C····");
-    h.has("G#4       G5");
-    h.has("A C5        Kick");
-    h.has("B D5–D#5    Snare · vel 64–127");
+    h.has("G#4      G-5");
+    h.has("A C-5       Kick");
+    h.has("B D-5–D#5   Snare · vel 64–127");
     h.has("C D#5       Ghost · note-off");
     h.has("3 zones · 1 macro · 2 phrases");
     h.has("macros: Drive 40%");
-    h.has("phrases by keymap: Fill C4–B4 · Roll");
+    h.has("phrases by keymap: Fill C-4–B-4 · R");
     h.close().await;
 });
 

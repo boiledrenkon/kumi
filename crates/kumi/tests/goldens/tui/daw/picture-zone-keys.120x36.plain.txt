@@ -7,7 +7,7 @@
 
                                                                                   NOW
                                                                                   ✓ “Snare” keyzone: notes 60-71
-                                                                                  Keys C4–B4 → C5–B5
+                                                                                  Keys C-4–B-4 → C-5–B-5
                          ██                          ▀▀
                          ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██
                          ██▀█▄   ██  ██  ██  ██  ██  ██
@@ -19,7 +19,7 @@
 
                                        Try                                        HISTORY 1 ──────────────────────────
                              “What's on this track?”                              ✓ “Snare” keyzone: notes 60-71  undo
-                             “Set the tempo to 124”                                 Keys C4–B4 → C5–B5
+                             “Set the tempo to 124”                                 Keys C-4–B-4 → C-5–B-5
                        “Why might my low end sound muddy?”
 
      Kumi keeps each song's conversations: /conversations goes back to one.
