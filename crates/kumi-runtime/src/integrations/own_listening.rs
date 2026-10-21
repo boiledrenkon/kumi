@@ -110,6 +110,20 @@ pub(super) struct Table {
     /// Parameters the DAW lists last on every device that aren't the sound's (REAPER's Bypass, Wet and Delta): a search
     /// never moves them.
     pub pseudo_params: &'static [&'static str],
+    /// Whether a device's parameter aims it somewhere rather than shaping its sound (Renoise's meta devices' Dest. Track,
+    /// Effect and Parameter, a #Send's Receiver), by the device's own name and the parameter's: a search never moves it.
+    pub aims: fn(&str, &str) -> bool,
+}
+
+/// Renoise's parameters that are places, as the tool keeps them ([lab] M3 checks): a meta device's and #Sidechain's "Dest.
+/// Track/Effect/Parameter" and *Hydra's and *XY Pad's "OutN Track/Effect/Parameter", a #Send's or #Multiband Send's
+/// Receiver.
+fn renoise_aims(device: &str, parameter: &str) -> bool {
+    if device.starts_with("#Send") || device.starts_with("#Multiband Send") {
+        return parameter.starts_with("Receiver");
+    }
+    (device.starts_with('*') || device.starts_with("#Sidechain"))
+        && ["Track", "Effect", "Parameter"].iter().any(|end| parameter.ends_with(end))
 }
 
 /// REAPER (the extension): pre-fader stems in one pass, the master with and without its FX, ReaLimit and JS Volume
@@ -142,6 +156,7 @@ pub(super) const REAPER: Table = Table {
     plugin_prefixes: &["VST:", "VSTi:", "VST3:", "VST3i:", "AU:", "AUi:", "CLAP:", "CLAPi:", "LV2:", "LV2i:", "DX:", "DXi:"],
     stop_notes: &["The audition playing was stopped", "REAPER stopped playback to render"],
     pseudo_params: &["Bypass", "Wet", "Delta"],
+    aims: |_, _| false,
 };
 
 /// Renoise (the tool): one solo render per track, through its fader and the Master track's devices; the Maximizer and
@@ -174,6 +189,7 @@ pub(super) const RENOISE: Table = Table {
     plugin_prefixes: &[],
     stop_notes: &["Renoise stopped playback to render"],
     pseudo_params: &[],
+    aims: renoise_aims,
 };
 
 pub(super) fn table(id: Option<DawId>) -> &'static Table {

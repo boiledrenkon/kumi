@@ -292,6 +292,10 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
                 if LEAVE_NAMES.contains(&lower.as_str()) || LEAVE_WORDS.iter().any(|word| lower.contains(word)) {
                     continue;
                 }
+                // (where a device aims, not how it sounds: kept on a copy, it would aim the copy at the producer's tracks)
+                if (r.table.aims)(&device.own_name, &name) {
+                    continue;
+                }
                 let number = |key: &str| row.get(key).and_then(Value::as_f64);
                 let (min, max) = if r.table.normalized { (0., 1.) } else { (number("min").unwrap_or(0.), number("max").unwrap_or(1.)) };
                 let index =

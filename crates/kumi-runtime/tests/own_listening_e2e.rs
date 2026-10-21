@@ -1363,3 +1363,43 @@ async fn reaper_measures_sounds_lays_out_the_form_and_tunes_a_reaeq_on_scratch_c
         })
         .await;
 }
+
+/// A goal's request over one candidate, toward a reference of noise.
+fn goal_request(home: &Path, track: &str) -> AuditionRequest {
+    let reference = home.join("reference.wav");
+    daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+    AuditionRequest {
+        candidates: vec![AuditionCandidate { track: track.into(), clip: None, label: None, mix: None }],
+        from_beat: Some(0.),
+        beats: Some(4.),
+        reference: Some(reference.to_string_lossy().into_owned()),
+        reference_from: None,
+        reference_seconds: None,
+        focus: None,
+    }
+}
+
+/// (#361 final review) A meta device's Dest. Track, Effect and Parameter say where it aims, not how it sounds: a goal
+/// never searches them, so a copy of the track kept as the best is never re-aimed at the producer's tracks.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_never_searches_where_a_meta_device_aims() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.add_device(4, "EQ 10");
+            script.add_device(4, "*LFO");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let rig = renoise.goal(&goal_request(home.path(), "Bass"), Signal::new()).await.unwrap().unwrap();
+            let names: Vec<String> = rig.slots()[0].knobs.iter().map(|knob| knob.name.clone()).collect();
+            assert!(names.iter().all(|name| !name.starts_with("Dest. ")), "{names:?}");
+            assert!(names.contains(&"Amplitude".to_string()), "the LFO's own knobs are searched: {names:?}");
+            rig.close().await.unwrap();
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

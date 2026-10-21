@@ -80,6 +80,15 @@ pub fn device(path: &str) -> Option<Device> {
             p("Ceiling", -0.1, -24., 0., Shows::Db),
         ],
         "Gainer" => vec![p("Gain", 1., 0., 4., Shows::Linear), p("Panning", 0.5, 0., 1., Shows::Plain)],
+        // (a meta device: where it sends values, a track from 0 and a device on it, -1 for none, beside its own knobs)
+        "*LFO" => vec![
+            p("Dest. Track", -1., -1., 255., Shows::Plain),
+            p("Dest. Effect", -1., -1., 255., Shows::Plain),
+            p("Dest. Parameter", -1., -1., 255., Shows::Plain),
+            p("Amplitude", 0.5, 0., 1., Shows::Plain),
+            p("Offset", 0., 0., 1., Shows::Plain),
+            p("Frequency", 1., 0.01, 100., Shows::Hz),
+        ],
         _ => return None,
     };
     let path = if path.contains('/') { path.to_owned() } else { format!("Audio/Effects/Native/{name}") };
