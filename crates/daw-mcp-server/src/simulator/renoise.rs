@@ -908,7 +908,10 @@ impl RenoiseScript {
         if LISTENING_METHODS.contains(&method) {
             let (epoch, run_start) = {
                 let mut state = self.state.lock().unwrap();
-                if let Some(after) = state.render_bpm.filter(|_| method == "render_start") {
+                // (a pattern's or a slot's audio is a render too: it plays the song's tempo commands as one does)
+                let part = method == "audio_file"
+                    && params["ref"].as_str().is_some_and(|reference| [":pattern:", ":seq:"].iter().any(|kind| reference.contains(kind)));
+                if let Some(after) = state.render_bpm.filter(|_| method == "render_start" || part) {
                     let before = std::mem::replace(&mut state.song["bpm"], after.into());
                     self.listening.tempo_next(json!({"before": {"bpm": before, "lpb": 4}, "bpm": after, "lpb": 4}));
                 }

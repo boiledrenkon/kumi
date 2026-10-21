@@ -822,9 +822,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     ) -> Result<Result<(IndexMap<String, (Render, Value)>, Vec<String>), String>, RuntimeError> {
         let pre_roll = self.beats_per_bar.get().min(window.from).max(0.);
         let args = json!({"sources": sources, "range": {"fromBeat": window.from, "beats": window.beats}, "preRollBeats": pre_roll});
-        // Kumi's own listen still playing out loud: the render stops it, which a run says once (each listen of a judged
-        // run or a goal stops the last one). (A second's slack: the DAW started it a moment before Kumi heard so.)
-        let own_playing = self.played.borrow().back().is_some_and(|(_, to)| *to + 1000 > chrono::Utc::now().timestamp_millis());
+        let own_playing = self.own_playing();
         let started = match self.ask("render", args, signal.clone()).await? {
             Ok(started) => started,
             Err(refused) => return Ok(Err(refused.why)),
@@ -833,7 +831,27 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             Ok(done) => done,
             Err(why) => return Ok(Err(why)),
         };
-        let mut notes = notes_of(&done);
+        let notes = self.finished(&done, own_playing);
+        let mut files = IndexMap::new();
+        for file in done.get("files").and_then(Value::as_array).into_iter().flatten() {
+            let (Some(id), Some(path)) = (text(file, "id"), text(file, "file")) else { continue };
+            let start = file.get("start").and_then(Value::as_f64).unwrap_or(0.);
+            let seconds = file.get("seconds").and_then(Value::as_f64).map(|seconds| (seconds - start).max(0.));
+            files.insert(id, (Render { file: path, start, seconds }, file.clone()));
+        }
+        Ok(Ok((files, notes)))
+    }
+
+    /// Kumi's own listen still playing out loud: a render stops it, which a run says once (each listen of a judged run or a
+    /// goal stops the last one). (A second's slack: the DAW started it a moment before Kumi heard so.)
+    fn own_playing(&self) -> bool {
+        self.played.borrow().back().is_some_and(|(_, to)| *to + 1000 > chrono::Utc::now().timestamp_millis())
+    }
+
+    /// A finished render job (a render, a part's audio rendered, a track's items): its notes, told as it ends (a stop of
+    /// Kumi's own play said once a run), and the tempo it played into the transport, kept to set back once.
+    fn finished(&self, done: &Value, own_playing: bool) -> Vec<String> {
+        let mut notes = notes_of(done);
         if own_playing {
             let stops = |note: &String| self.table.stop_notes.iter().any(|start| note.starts_with(start));
             if self.stop_told.get() {
@@ -1363,13 +1381,18 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             }
             return Ok(None);
         }
+        let own_playing = self.own_playing();
         let answer = match self.ask("audio_file", json!({"ref": long}), signal.clone()).await? {
             Ok(answer) => answer,
             Err(refused) => return Err(RuntimeError::Observation(refused.why)),
         };
+        // (a part rendered, as Renoise renders a pattern: its notes and the tempo it moved, as every render's are)
         if answer.get("jobId").is_some() {
             return match self.wait(&answer, &signal).await? {
-                Ok(done) => Ok(done.pointer("/files/0/file").and_then(Value::as_str).map(str::to_owned)),
+                Ok(done) => {
+                    self.finished(&done, own_playing);
+                    Ok(done.pointer("/files/0/file").and_then(Value::as_str).map(str::to_owned))
+                }
                 Err(why) => Err(RuntimeError::Observation(why)),
             };
         }
@@ -2000,6 +2023,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         };
         let source = json!({"id": "items", "what": "track", "ref": reference, "stage": "items"});
         let args = json!({"sources": [source], "range": {"fromBeat": from, "beats": beats}, "preRollBeats": 0});
+        let own_playing = self.own_playing();
         let started = match self.ask("render", args, signal.clone()).await? {
             Ok(started) => started,
             Err(refused) => return Ok(Err(refused.why)),
@@ -2008,6 +2032,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             Ok(done) => done,
             Err(why) => return Ok(Err(why)),
         };
+        let notes = self.finished(&done, own_playing);
         let Some(file) = done.pointer("/files/0") else { return Ok(Err(format!("{} rendered nothing", self.app()))) };
         let mut reply = JsonObject::new();
         for key in ["file", "seconds", "channels", "sampleRate"] {
@@ -2015,7 +2040,6 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 reply.insert(key.into(), value.clone());
             }
         }
-        let notes = notes_of(&done);
         if !notes.is_empty() {
             reply.insert("notes".into(), json!(notes));
         }
@@ -2332,7 +2356,10 @@ impl<S: RefScheme + 'static> OwnListening<S> {
 
     /// The audio file a ref stands for (an item's, a sample's, a pattern rendered); None for a file.
     pub async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
-        self.renderer.clip_file(named, signal).await
+        let file = self.renderer.clip_file(named, signal).await;
+        // (a part's audio is a render in Renoise: what it moved goes back as the call ends, as a listen's does)
+        self.renderer.put_tempo_back().await;
+        file
     }
 
     /// Whether a goal's rig can be opened now (the bridge renders and makes scratch copies).

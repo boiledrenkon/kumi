@@ -1404,6 +1404,30 @@ async fn a_goal_never_searches_where_a_meta_device_aims() {
         .await;
 }
 
+/// (#361 final review) A pattern's audio is a render in Renoise: the tempo its tempo commands played into the transport
+/// goes back as the call ends, said as a step of Renoise's undo, as a listen's does.
+#[tokio::test(flavor = "current_thread")]
+async fn a_patterns_audio_puts_back_the_tempo_its_render_moved() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.set_render_bpm(Some(140.));
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let file = renoise.audio_file("1:pattern:2", Signal::new()).await.unwrap();
+            assert!(file.is_some(), "the pattern's render");
+            assert_eq!(script.song()["bpm"], 128.0, "the producer's tempo");
+            let said = told.borrow().iter().filter(|title| title.contains("tempo back")).cloned().collect::<Vec<_>>();
+            assert_eq!(said, ["Kumi set the tempo back to 128 BPM, LPB 4 (1 step in Renoise's undo)."]);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 final review) An instrument track (only a VSTi): the gain FX a quieter round adds goes after the synth, where
 /// the track's sound is, so the turn is heard.
 #[tokio::test(flavor = "current_thread")]
