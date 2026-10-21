@@ -132,7 +132,9 @@ and migration checks do not replace a new real-Live acceptance run.
   key commands on the selection). The acceptance run gains the second slice's
   checks: a Gain on the Stereo Out with its gain set and read back, a send from
   track 1 to a new bus, a patch loaded, a bounce of bars 1 to 5 found on disk,
-  each undone or taken away.
+  each undone or taken away. The second slice's gate on this Mac, every check
+  passed on its second run, is recorded in
+  `docs/evidence/logic-m4b-gate-2026-10-21.md`.
 
 ## Evidence
 
@@ -196,9 +198,9 @@ bridge, the version given is the one in the commit that added it.
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: the second M4 slice's gate with `accept_logic --files <dir>` on
-  this Mac, and reading a region's notes past the rows the Event List shows on
-  its screen; then M5, listening.
+- Logic Pro: M5, listening (the helper's process tap, `hear`, `audition` and
+  `render` on the bridge, a Renderer for Logic in the runtime), and reading a
+  region's notes past the rows the Event List shows on its screen.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
