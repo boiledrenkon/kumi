@@ -291,6 +291,13 @@ local TRANSPORT_OBSERVABLES = {
   "playing_observable", "bpm_observable", "lpb_observable", "tpl_observable", "edit_mode_observable",
   "follow_player_observable", "loop_pattern_observable",
 }
+-- (what Renoise's undo doesn't keep, measured in 3.5.4: no step, and Renoise's redo stays as it was)
+local UNKEPT = {}
+for name in ([[playing_observable edit_mode_observable follow_player_observable loop_pattern_observable metronome_enabled_observable
+  metronome_precount_enabled_observable metronome_precount_bars_observable edit_step_observable octave_observable
+  record_quantize_enabled_observable record_quantize_lines_observable wrapped_pattern_edit_observable
+  single_track_edit_mode_observable keyboard_velocity_enabled_observable keyboard_velocity_observable
+  record_parameter_mode_observable mute_state_observable solo_state_observable]]):gmatch("%S+") do UNKEPT[name] = true end
 -- M4 (n-song): the song's settings Kumi changes (the groove, the metronome, the editing settings, the headroom), counted, and
 -- asked on the producer's undo.
 local SETTING_OBSERVABLES = {
@@ -332,8 +339,8 @@ local function watch_track(song, i)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
-    observers:watch_changes(track.mute_state_observable)
-    observers:watch_changes(track.solo_state_observable)
+    observers:watch_changes(track.mute_state_observable, UNKEPT.mute_state_observable)
+    observers:watch_changes(track.solo_state_observable, UNKEPT.solo_state_observable)
     observers:watch_changes(track.visible_note_columns_observable)
     observers:watch_changes(track.visible_effect_columns_observable)
     for c = 1, track.max_note_columns do
@@ -490,10 +497,10 @@ local function attach(song)
   for t = 1, tracks do b.groups.tracks[t] = group() end
   for p = 1, #song.patterns do b.groups.patterns[p] = group() end
   for i = 1, #song.instruments do b.groups.instruments[i] = group() end
-  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
-  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
+  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection", true) end
+  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport", UNKEPT[name]) end
   observers:watch(song.name_observable, "project")
-  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name]) end
+  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name], UNKEPT[name]) end
   observers:watch_changes(song.artist_observable)
   observers:watch_changes(song.comments_observable)
   observers:watch_tracks(song.tracks_observable)

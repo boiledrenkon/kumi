@@ -19,7 +19,9 @@ function M.new(guard, state, hooks)
   return setmetatable({ entries = {}, dirty = {}, last = {}, guard = guard, state = state or {}, hooks = hooks or {}, dead = 0 }, M)
 end
 
-local function count(self, light)
+-- (`unkept`: state Renoise's undo doesn't keep, as mute, solo, the selection and playback: a change of it is no step, and leaves
+-- Renoise's redo as it was)
+local function count(self, light, unkept)
   local state = self.state
   -- (M5 m5-renoise: Kumi's own solo, mute and loop writes for a render or an audition, put back after: not edits)
   if state.quiet and state.quiet > 0 then return end
@@ -29,7 +31,7 @@ local function count(self, light)
   local undoing = self.hooks.undoing
   if undoing and undoing() then
     state.undone = true
-  else
+  elseif not unkept then
     -- (an edit of the producer's or of Kumi's: what an undo took back can't be redone any more)
     state.edits = (state.edits or 0) + 1
   end
@@ -69,10 +71,10 @@ function M:prune()
   self.dead = 0
 end
 
-function M:watch(observable, key)
+function M:watch(observable, key, unkept)
   add(self, observable, self.guard("notifier " .. key, function()
     self.dirty[key] = true
-    count(self, true)
+    count(self, true, unkept)
   end))
 end
 
@@ -90,9 +92,9 @@ function M:watch_undo_with(observable, fn)
   add(self, observable, fn)
 end
 
--- Only counts: a name, a colour, a mute.
-function M:watch_changes(observable)
-  add(self, observable, self.guard("notifier", function() count(self) end))
+-- Only counts: a name, a colour, a mute (`unkept`: no step of Renoise's undo, as count says).
+function M:watch_changes(observable, unkept)
+  add(self, observable, self.guard("notifier", function() count(self, false, unkept) end))
 end
 
 -- A list operation: Renoise names the places of a swap `index1` and `index2` (measured, 3.5.4), those of an insert or remove `index`.
