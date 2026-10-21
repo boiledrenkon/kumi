@@ -61,7 +61,7 @@ where
             };
             let host = host.clone();
             let answers = answers.clone();
-            tasks.spawn(async move {
+            spawn_reaping(&mut tasks, async move {
                 let answer = match serde_json::from_str::<Value>(&line) {
                     Ok(message) => mcp::handle(&host, &message).await,
                     Err(_) => Some(serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})),
@@ -87,8 +87,33 @@ where
     Ok(())
 }
 
+/// Spawns a request's handling, reaping the ones that finished first: a finished task's cell (as big as the whole handler)
+/// stays allocated until it's joined, and FOCUS asks for the focus several times a second all session.
+fn spawn_reaping<F>(tasks: &mut tokio::task::JoinSet<()>, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(task);
+}
+
 fn encode(value: &Value) -> Vec<u8> {
     let mut line = serde_json::to_vec(value).expect("JSON serializes");
     line.push(b'\n');
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn finished_requests_are_let_go_as_new_ones_come() {
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..1000 {
+            spawn_reaping(&mut tasks, async {});
+            tokio::task::yield_now().await;
+        }
+        assert!(tasks.len() < 10, "{} requests' tasks held", tasks.len());
+    }
 }
