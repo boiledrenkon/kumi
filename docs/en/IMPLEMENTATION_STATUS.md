@@ -163,7 +163,9 @@ and migration checks do not replace a new real-Live acceptance run.
   The acceptance run gains the M5 checks: bars 1 to 5 heard (the file's length
   and loudness), a judged round whose gain goes on the Stereo Out (a Gain
   added, set, read back, undone), tracks 1 and 2 auditioned, a render of bars
-  1 to 5 found on disk, and the project as before at the end.
+  1 to 5 found on disk, and the project as before at the end. The M5 gate on
+  this Mac, every check passed on its first run, is recorded in
+  `docs/evidence/logic-m5-gate-2026-10-21.md`.
 
 ## Evidence
 
@@ -238,9 +240,11 @@ bridge, the version given is the one in the commit that added it.
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: M5, listening (the helper's process tap, `hear`, `audition` and
-  `render` on the bridge, a Renderer for Logic in the runtime), and reading a
-  region's notes past the rows the Event List shows on its screen.
+- Logic Pro: M6 (catch-up and `watch_me`, instant phrases, change pictures of
+  Channel EQ and Compressor, Logic's library and places, the export's words,
+  middle C), M7 (the manual, the instruction pack, knowledge probes and evals)
+  and M8 (the release); the goal search over Logic (a `GoalRig`); a region's
+  notes past the rows the Event List shows on its screen.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
