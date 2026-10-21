@@ -537,6 +537,10 @@ async fn busy_rejection_cancel_preserves_input_and_close_is_once() {
             flush().await;
             assert_eq!(f.control.calls.borrow().iter().filter(|c| c.starts_with("submit:")).cloned().collect::<Vec<_>>(), ["submit:first"]);
             assert!(f.text().contains("Busy; cancel first"));
+            // A command Kumi doesn't have is no turn: it's answered while Kumi works too.
+            f.input.write("/nonsense\r");
+            flush().await;
+            assert!(f.text().contains("Unknown command. Use /help."), "{}", f.text());
             f.input.write("follow\x03");
             flush().await;
             assert!(f.control.calls.borrow().contains(&"cancel".into()));
