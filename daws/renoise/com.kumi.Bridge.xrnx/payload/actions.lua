@@ -56,12 +56,24 @@ local function epoch_check(params, env)
   end
 end
 
+-- Ends an audition where its instrument, track and sample are now (an instrument or track made or deleted while it played
+-- moves them). Where they went can't be told: every note stops (Renoise's panic), so none hangs on, and the status bar says so.
 local function stop_one(song, playing)
+  local i, t, s = playing.instrument, playing.track, playing.sample
+  if playing.follow then
+    local ok, now_i, now_t, now_s = pcall(playing.follow)
+    if not ok or not now_i or not now_t or (s and not now_s) then
+      pcall(function() song.transport:panic() end)
+      pcall(function() renoise.app():show_status("Kumi stopped every note: what it auditioned moved while it played") end)
+      return
+    end
+    i, t, s = now_i, now_t, now_s
+  end
   pcall(function()
-    if playing.sample then
-      song:trigger_sample_note_off(playing.instrument, playing.sample, playing.track, playing.notes[1])
+    if s then
+      song:trigger_sample_note_off(i, s, t, playing.notes[1])
     else
-      song:trigger_instrument_note_off(playing.instrument, playing.track, playing.notes)
+      song:trigger_instrument_note_off(i, t, playing.notes)
     end
   end)
 end
@@ -139,7 +151,17 @@ function M.audition(params, env)
     end
   end)
   if not ok then fail("failed", "Renoise wouldn't play it: " .. tostring(err):gsub("^[^%s:]*%.lua:%d+: ", "")) end
-  M.playing[#M.playing + 1] = { instrument = i, track = t, notes = notes, sample = sample, until_ms = env.now_ms() + duration }
+  -- (where it plays, followed to its note-off: the instruments' and the sample list's marks, and the track layout, now)
+  local imark = env.instrument_mark and env.instrument_mark() or nil
+  local layout = env.layout and env.layout() or nil
+  local smark = sample and env.list_mark and env.list_mark("samples", i) or nil
+  local follow = function()
+    local now_i = imark and env.instrument_at and env.instrument_at(i, imark) or nil
+    local now_t = type(layout) == "number" and env.shifted and env.shifted(t, layout) or nil
+    local now_s = (sample and now_i and smark and env.list_at) and env.list_at("samples", now_i, nil, sample, smark) or nil
+    return now_i, now_t, now_s
+  end
+  M.playing[#M.playing + 1] = { instrument = i, track = t, notes = notes, sample = sample, until_ms = env.now_ms() + duration, follow = follow }
   local names = {}
   for k, value in ipairs(notes) do names[k] = note_name(value) end
   local instrument = song:instrument(i)

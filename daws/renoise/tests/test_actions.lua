@@ -39,6 +39,24 @@ test("actions: a note auditioned plays out loud and is ended after its time; a c
   H.no_dialogs()
 end)
 
+test("actions: an audition's note-off reaches the instrument where it is now, and everything stops when that can't be told (#361 N-S14)", function()
+  local _, peer = K.setup(nil, { instruments = 2, instrument_specs = { { name = "Piano" }, { name = "Pad" } } })
+  local E = K.place(peer)
+  ok(K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 2), track = K.ref(E, "track", 3), note = "C-4", durationMs = 300 }).result)
+  mock.ops.insert_instrument_at(1, { name = "Organ" }) -- made while Pad plays: Pad is instrument 3 now
+  H.tick(2)
+  mock.advance(400)
+  H.tick(2)
+  eq(mock.triggers[#mock.triggers][1] .. " " .. mock.triggers[#mock.triggers][2], "off 3", "the note-off goes to Pad, where it is now")
+  -- an audition whose instrument can't be followed: every note stops
+  ok(K.call(peer, "audition_note", { instrument = K.ref(K.place(peer), "instrument", 3), note = "C-4", durationMs = 300 }).result)
+  mock.fire(mock.tool.app_new_document_observable) -- the tool watches the song anew: what moved can't be told
+  mock.advance(400)
+  H.tick(2)
+  eq(mock.triggers[#mock.triggers][1], "panic", "Renoise's panic: no voice hangs on")
+  H.no_dialogs()
+end)
+
 test("actions: an audition asks nothing Renoise can't play, and waits for nothing while Renoise is busy", function()
   local _, peer = K.setup()
   local E = K.place(peer)
