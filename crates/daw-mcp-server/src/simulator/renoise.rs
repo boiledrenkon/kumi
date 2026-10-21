@@ -10,6 +10,7 @@
 use super::listening::SimListening;
 use super::reaper::LISTENING_METHODS;
 use super::renoise_dsp::Chains;
+use super::renoise_takes::Takes;
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -75,6 +76,8 @@ struct State {
     /// The song's tempo commands, when a test gives it some: each render plays them into the transport and leaves its
     /// tempo at this BPM (no undo step), as Renoise's does.
     render_bpm: Option<f64>,
+    /// (M7) What Kumi's variations made: phrases with their lines, slots of variation patterns.
+    takes: Takes,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -217,6 +220,7 @@ impl RenoiseScript {
                 lines: Default::default(),
                 chains: Chains::default(),
                 render_bpm: None,
+                takes: Takes::default(),
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -525,6 +529,10 @@ impl RenoiseScript {
         if kind == "notes-write" {
             return Self::notes_write(state, method, params);
         }
+        if Takes::owns(kind) {
+            let State { takes, lines, undo, .. } = state;
+            return takes.change(epoch, method, params, lines, undo);
+        }
         if matches!(kind, "device-param" | "device-params") {
             // (a device or parameter ref names its place in this epoch only: a device-add since moves it)
             if let Some(from) =
@@ -819,6 +827,16 @@ impl RenoiseScript {
         self.state.lock().unwrap().song[field] = value;
     }
 
+    /// (M7) The phrases Kumi's variations made in an instrument (from 1): name and lines, in order.
+    pub fn made_phrases(&self, instrument: u64) -> Vec<(String, Vec<Value>)> {
+        self.state.lock().unwrap().takes.phrases(instrument)
+    }
+
+    /// (M7) The variation patterns a slot plays: name and pattern number (from 1).
+    pub fn variation_slots(&self) -> Vec<(String, u64)> {
+        self.state.lock().unwrap().takes.slotted()
+    }
+
     /// Every request the simulator answered, in order.
     pub fn asked(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().asked.clone()
@@ -894,6 +912,17 @@ impl RenoiseScript {
         }
         if method.starts_with("change_") {
             return Some(Self::change(&mut state, method, params));
+        }
+        // (M7) Where what the variations made is now, and a phrase's lines.
+        if method == "read" && params["kind"] == "where" {
+            let items = params["items"].as_array().cloned().unwrap_or_default();
+            return Some(state.takes.locate(state.epoch, &items));
+        }
+        if method == "read" && params["kind"] == "line" && params["parent"].as_str().is_some_and(|parent| parent.contains(":phrase:")) {
+            let parent = params["parent"].as_str().unwrap_or_default();
+            return Some(
+                state.takes.phrase_lines(state.epoch, parent).unwrap_or_else(|| Err(("bad-params".into(), "no such phrase".into()))),
+            );
         }
         // A line in Renoise's status bar (m4-tui): shown (kept for the tests: m6-places), nothing changed.
         if method == "show_status" {

@@ -941,3 +941,164 @@ async fn an_m3_kinds_no_op_and_change_are_as_before_and_an_action_reaper_made_no
         })
         .await;
 }
+
+/// (M7) Renoise with Kumi's host in front of the simulator's song, and the changes Kumi makes told to `told`.
+async fn renoise_with_changes(
+    home: &std::path::Path,
+) -> (RenoiseScript, Simulator, Rc<dyn Integration>, Observation, Rc<RefCell<Vec<ChangeRecord>>>) {
+    let paths = BridgePaths::new(home, Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let script = RenoiseScript::new();
+    let mut config = script.config_with_changes(secret, "/lab/Renoise");
+    config.discovery_dir = Some(paths.discovery());
+    let simulator = Simulator::start(config).await.unwrap();
+    let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, home)), id: Cell::new(0) });
+    let connect: Connect = Rc::new(move |_| {
+        let endpoint = endpoint.clone();
+        async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+    });
+    let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+    let into = told.clone();
+    let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+    context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+    let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.into(), connect: Some(connect) });
+    renoise.start(Signal::new()).await.unwrap();
+    let observed = renoise.observe(Signal::new(), None).await.unwrap();
+    (script, simulator, renoise, observed, told)
+}
+
+async fn run_tool(tool: &Rc<dyn KernelTool>, value: Value) -> Value {
+    let done = tool.execute(input(value.clone()), Signal::new()).await.unwrap();
+    assert!(!done.is_error, "{value}: {}", done.text);
+    serde_json::from_str(&done.text).unwrap()
+}
+
+/// The user's loop (M7): "make me 9 phrases for this instrument" — then "I like these 5, change these 4 in different ways" —
+/// then the rest dropped. Each take is its own change; the kept takes are never touched.
+#[tokio::test(flavor = "current_thread")]
+async fn nine_phrases_keep_five_change_four_in_different_ways_and_drop_the_rest_in_one_step() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            let read = tool(&observed, "renoise_read");
+            let instruments = run_tool(&read, json!({"kind": "instrument"})).await;
+            let pad = instruments["items"][1]["ref"].as_str().unwrap().to_owned();
+            let variations = tool(&observed, "variations");
+            within_schema(&variations.input_schema(), &input(json!({"action": "make", "source": {"instrumentRef": pad}, "count": 9, "seed": 7})));
+            let arp = json!([
+                {"line": 0, "notes": [{"col": 1, "note": "C-4"}]}, {"line": 4, "notes": [{"col": 1, "note": "E-4"}]},
+                {"line": 8, "notes": [{"col": 1, "note": "G-4"}]}, {"line": 12, "notes": [{"col": 1, "note": "B-4", "volume": "40"}]},
+            ]);
+            let made = run_tool(
+                &variations,
+                json!({"action": "make", "source": {"instrumentRef": pad}, "takes": [{"direction": "rising arp", "lines": arp}], "count": 9, "seed": 7}),
+            )
+            .await;
+            let takes = made["takes"].as_array().unwrap();
+            assert_eq!(takes.len(), 9, "{made}");
+            assert!(made["skipped"].as_array().unwrap().is_empty(), "{made}");
+            assert!(takes[0]["line"].as_str().unwrap().starts_with("V1 (rising arp): lines as written"), "{made}");
+            assert!(!made.to_string().contains(":phrase:"), "no long ref reaches the model: {made}");
+            let phrases = script.made_phrases(2);
+            assert_eq!(phrases.len(), 9);
+            assert_eq!(phrases[0].0, "V1 \u{b7} Pad");
+            assert_eq!(phrases[8].0, "V9 \u{b7} Pad");
+            let distinct: std::collections::BTreeSet<String> = phrases.iter().map(|(_, rows)| rows.iter().map(Value::to_string).collect()).collect();
+            assert_eq!(distinct.len(), 9, "nine different takes");
+            assert_eq!(told.borrow().len(), 9, "each take its own change in HISTORY");
+
+            let kept = run_tool(&variations, json!({"action": "keep", "names": ["V1", "V3", "V5", "V7", "V9"]})).await;
+            assert_eq!(kept["rest"], json!(["V2", "V4", "V6", "V8"]), "{kept}");
+            assert_eq!(told.borrow().len(), 9, "keeping writes nothing");
+
+            let changed = run_tool(&variations, json!({"action": "change", "names": ["rest"]})).await;
+            let lines = changed["changed"].as_array().unwrap();
+            assert_eq!(lines.len(), 4, "{changed}");
+            let directions: std::collections::BTreeSet<String> =
+                lines.iter().map(|line| line["line"].as_str().unwrap().split(['(', ')']).nth(1).unwrap().to_owned()).collect();
+            assert_eq!(directions.len(), 4, "four different ways: {changed}");
+            let after = script.made_phrases(2);
+            for k in [0, 2, 4, 6, 8] {
+                assert_eq!(after[k], phrases[k], "the kept V{} is as it was", k + 1);
+            }
+            for k in [1, 3, 5, 7] {
+                assert_ne!(after[k].1, phrases[k].1, "V{} changed", k + 1);
+            }
+            assert_eq!(told.borrow().len(), 13, "one change per take changed");
+            let refused = variations.execute(input(json!({"action": "change", "names": ["V3"]})), Signal::new()).await.unwrap();
+            assert!(refused.is_error && refused.text.contains("V3 is kept"), "{}", refused.text);
+
+            let dropped = run_tool(&variations, json!({"action": "drop"})).await;
+            assert_eq!(dropped["dropped"], json!(["V2", "V4", "V6", "V8"]), "{dropped}");
+            assert_eq!(told.borrow().len(), 14, "the rest go in one change");
+            let left: Vec<String> = script.made_phrases(2).into_iter().map(|(name, _)| name).collect();
+            assert_eq!(left, ["V1 \u{b7} Pad", "V3 \u{b7} Pad", "V5 \u{b7} Pad", "V7 \u{b7} Pad", "V9 \u{b7} Pad"]);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (M7) "I like this chop: give me some similar variations": takes of a pattern track's lines as slots of their own, the anchors
+/// and the source as they were; a take the producer edited is left out of the drop.
+#[tokio::test(flavor = "current_thread")]
+async fn variations_of_a_chop_are_slots_of_their_own_and_an_edited_take_is_never_dropped() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            let chop = json!([
+                {"line": 0, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}], "effects": [{"col": 1, "number": "0S", "amount": "00"}]},
+                {"line": 3, "notes": [{"col": 1, "note": "C-4", "instrument": "00", "volume": "20"}], "effects": [{"col": 1, "number": "0S", "amount": "40"}]},
+                {"line": 4, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}], "effects": [{"col": 1, "number": "0S", "amount": "80"}]},
+                {"line": 6, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}], "effects": [{"col": 1, "number": "0S", "amount": "60"}]},
+                {"line": 7, "notes": [{"col": 1, "note": "C-4", "instrument": "00", "volume": "30"}], "effects": [{"col": 1, "number": "0S", "amount": "20"}]},
+                {"line": 12, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}], "effects": [{"col": 1, "number": "0S", "amount": "80"}]},
+                {"line": 14, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}], "effects": [{"col": 1, "number": "0S", "amount": "A0"}]},
+                {"line": 20, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+            ]);
+            script.set_lines(2, 1, chop.clone());
+            let read = tool(&observed, "renoise_read");
+            let patterns = run_tool(&read, json!({"kind": "pattern"})).await;
+            let second = patterns["items"][1]["ref"].as_str().unwrap().to_owned();
+            let variations = tool(&observed, "variations");
+            let made = run_tool(
+                &variations,
+                json!({"action": "make", "source": {"patternRef": second, "trackRef": "track:1", "first": 0, "last": 15}, "anchors": [0, 4], "seed": 3,
+                    "takes": [{"direction": "swapped slices", "ops": [{"op": "shuffle", "amount": 1}]},
+                              {"direction": "more rolls", "ops": [{"op": "retrig", "amount": 0.5}]},
+                              {"direction": "reversed hits", "ops": [{"op": "reverse", "amount": 0.5}]}]}),
+            )
+            .await;
+            assert_eq!(made["takes"].as_array().unwrap().len(), 3, "{made}");
+            assert!(made["source"].as_str().unwrap().starts_with("lines 00–15 of"), "{made}");
+            let slots = script.variation_slots();
+            assert_eq!(slots.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["V1 \u{b7} Pattern 01", "V2 \u{b7} Pattern 01", "V3 \u{b7} Pattern 01"]);
+            assert_eq!(script.lines(2, 1), chop, "the source is as it was");
+            for (_, pattern) in &slots {
+                let lines = script.lines(*pattern, 1);
+                let at = |n: u64| lines.as_array().unwrap().iter().find(|row| row["line"] == n).cloned();
+                assert_eq!(at(0), Some(chop[0].clone()), "the anchors stay");
+                assert_eq!(at(4), Some(chop[2].clone()), "the anchors stay");
+                assert_eq!(at(20), Some(chop[7].clone()), "lines past the range are the source's");
+                assert_ne!(lines, chop, "each take varies");
+            }
+            assert_eq!(told.borrow().len(), 3);
+
+            // The producer edits V3; then keeps V2 and drops the rest: V3 is left, named.
+            let third = slots[2].1;
+            let mut edited = script.lines(third, 1);
+            edited.as_array_mut().unwrap().push(json!({"line": 9, "notes": [{"col": 1, "note": "D-4"}]}));
+            script.set_lines(third, 1, edited);
+            run_tool(&variations, json!({"action": "keep", "names": ["V2"]})).await;
+            let dropped = run_tool(&variations, json!({"action": "drop", "names": ["rest"]})).await;
+            assert_eq!(dropped["dropped"], json!(["V1"]), "{dropped}");
+            assert!(dropped["skipped"][0].as_str().unwrap().contains("V3 was edited in Renoise"), "{dropped}");
+            assert_eq!(script.variation_slots().iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["V2 \u{b7} Pattern 01", "V3 \u{b7} Pattern 01"]);
+            assert_eq!(told.borrow().len(), 4, "one change for the drop");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

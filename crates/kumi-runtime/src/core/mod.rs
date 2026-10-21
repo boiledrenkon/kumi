@@ -37,4 +37,5 @@ pub mod store_rows;
 pub mod taste_log;
 pub mod techniques;
 pub mod timing;
+pub mod variations;
 pub mod view;

@@ -16,6 +16,8 @@ pub mod reaper;
 pub mod reaper_changes;
 pub mod renoise;
 pub mod renoise_changes;
+mod renoise_lines;
+mod renoise_variations;
 pub mod shared;
 
 use crate::core::daw::{DawId, DawProfile};

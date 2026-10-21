@@ -622,6 +622,8 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     /// Kumi's track renames, oldest first: the change, the track's ref and the name it had and was given (a judged run
     /// follows its track by them).
     pub(super) renamed: RefCell<Vec<(String, String, String, String)>>,
+    /// (M7) What the DAW answered the last change it applied (`created`, `applied`): the variations find their takes by it.
+    pub(super) last_applied: RefCell<Option<Value>>,
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -638,10 +640,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             added: Cell::new(0),
             not_copied: RefCell::new(None),
             renamed: RefCell::default(),
+            last_applied: RefCell::default(),
         })
     }
 
-    fn link(&self) -> &Link<S> {
+    pub(super) fn link(&self) -> &Link<S> {
         &self.history.host.link
     }
 
@@ -978,6 +981,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         };
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
+        *self.last_applied.borrow_mut() = Some(applied.clone());
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
         // (r-tracks) Done, and nothing the DAW keeps changed (an action the DAW made no undo point of: a view, selection or
         // transport one): no row in HISTORY, and the host forgets it.

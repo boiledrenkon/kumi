@@ -236,19 +236,35 @@ function M.read(job, params, epoch)
     local tracks = track_count(song)
     return page(job, epoch, params, #song.patterns, function(p) return pattern_row(the_song(), epoch, p, tracks) end)
   elseif kind == "where" then
-    -- M7 (variations): where what Kumi keeps by its place is now: a pattern of the pool ({pattern = {n, mark}}: its ref, number,
-    -- the slots that play it and a fresh place), a phrase ({phrase = place}: its ref, index, name and a fresh place), and a track
-    -- by its ref ({track = ref}: carried through the shifts since the request's layout, as every request's refs are).
+    -- M7 (variations): where what Kumi keeps by its place is now, and the place of what a ref names now, for Kumi to find it
+    -- again after the producer's edits: a pattern of the pool ({pattern = {n, mark}} or a pattern or slot ref: its ref, number,
+    -- the slots that play it, a place), an instrument or a phrase ({instrument|phrase = place or ref}: its ref, index, name, a
+    -- place), and a track by its ref ({track = ref}: carried through the shifts since the request's layout, as every request's
+    -- refs are).
     local env, items = M.places, params.items
     if type(items) ~= "table" or #items > M.MAX_LIMIT then fail("bad-params", "items: up to " .. M.MAX_LIMIT .. " places") end
     if not env then fail("busy", "the tool isn't watching the song yet") end
     local instruments_ = import("instruments")
+    local function missing(why) return { [why == "gone" and "gone" or "unknown"] = true } end
     local out = {}
     for k, item in ipairs(items) do
       local row
-      if type(item) ~= "table" then fail("bad-params", "each item is {pattern}, {phrase} or {track}") end
-      if type(item.pattern) == "table" then
-        local p, why = env.pattern_at(item.pattern.n, item.pattern.mark)
+      if type(item) ~= "table" then fail("bad-params", "each item is {pattern}, {instrument}, {phrase} or {track}") end
+      if item.pattern ~= nil then
+        local p, why
+        if type(item.pattern) == "string" then
+          local ref = refs.parse(item.pattern)
+          if ref and ref.kind == "seq" then
+            local s = refs.expect(item.pattern, "seq", 1, epoch)[1]
+            p = song.sequencer.pattern_sequence[s]
+            why = "gone"
+          else
+            p = refs.expect(item.pattern, "pattern", 1, epoch)[1]
+            why = "gone"
+          end
+        elseif type(item.pattern) == "table" then
+          p, why = env.pattern_at(item.pattern.n, item.pattern.mark)
+        end
         if p and p <= #song.patterns then
           local slots = {}
           for s, value in ipairs(song.sequencer.pattern_sequence) do
@@ -257,22 +273,33 @@ function M.read(job, params, epoch)
           row = { ref = refs.make(epoch, "pattern", p), number = p - 1, name = song:pattern(p).name, lines = song:pattern(p).number_of_lines,
             slots = array(slots), seqRef = slots[1] and refs.make(epoch, "seq", slots[1]) or nil, place = { n = p, mark = env.pattern_mark() } }
         else
-          row = { [why == "gone" and "gone" or "unknown"] = true }
+          row = missing(why)
         end
-      elseif type(item.phrase) == "table" then
-        local n, why = instruments_.follow(env, item.phrase)
-        if n and n[1] <= #song.instruments and n[2] <= #song:instrument(n[1]).phrases then
-          local phrase = song:instrument(n[1]):phrase(n[2])
-          row = { ref = refs.make(epoch, "phrase", n[1], n[2]), index = n[2], name = phrase.name, lines = phrase.number_of_lines, lpb = phrase.lpb,
-            place = instruments_.place_of(env, "phrase", n) }
+      elseif item.phrase ~= nil or item.instrument ~= nil then
+        local of = item.phrase ~= nil and "phrase" or "instrument"
+        local given = item[of]
+        local n, why
+        if type(given) == "string" then
+          n = refs.expect(given, of, #instruments_.SHAPES[of].lists, epoch)
         else
-          row = { [why == "gone" and "gone" or "unknown"] = true }
+          n, why = instruments_.follow(env, given)
+        end
+        local ok_, objects = pcall(instruments_.resolve, song, of, n or { 0, 0 })
+        if n and ok_ then
+          row = { ref = refs.make(epoch, of, unpack(n)), index = n[#n], place = instruments_.place_of(env, of, n) }
+          if of == "phrase" then
+            row.name, row.lines, row.lpb = objects.phrase.name, objects.phrase.number_of_lines, objects.phrase.lpb
+          else
+            row.name = objects.instrument.name
+          end
+        else
+          row = missing(n and "gone" or why)
         end
       elseif type(item.track) == "string" then
         local t = refs.expect(item.track, "track", 1, epoch)[1]
         if t > track_count(song) then row = { gone = true } else row = { ref = refs.make(epoch, "track", t), index = t, name = song:track(t).name } end
       else
-        fail("bad-params", "each item is {pattern}, {phrase} or {track}")
+        fail("bad-params", "each item is {pattern}, {instrument}, {phrase} or {track}")
       end
       out[k] = row
     end
