@@ -295,6 +295,23 @@ impl Accept {
         }
     }
 
+    /// The tempo at `beats` in Logic's Tempo List, read back through the bridge: a delete previewed there (never
+    /// applied) finds the event and its BPM, or says there is none; `Err` when the preview failed otherwise.
+    async fn tempo_listed(&self, beats: f64) -> Result<Option<f64>, String> {
+        let epoch = self.tool("read", json!({"kind": "project"})).await.body["epoch"].clone();
+        let preview =
+            self.tool("change_preview", json!({"kind": "tempo-marker-delete", "input": {"positionBeats": beats}, "epoch": epoch})).await;
+        if preview.ok {
+            return Ok(preview.body["prior"]["bpm"].as_f64());
+        }
+        let error = preview.error();
+        if error.contains("there is no tempo event") {
+            Ok(None)
+        } else {
+            Err(short(&error, 160))
+        }
+    }
+
     async fn observe(&self) -> Result<Observation, RuntimeError> {
         let observation = self.integration.observe(signal(), None).await?;
         *self.observation.borrow_mut() = Some(observation.clone());
@@ -1093,38 +1110,39 @@ impl Accept {
             ),
         );
 
-        // A tempo change in the Tempo List, set and deleted, each read back from the tempo row.
+        // A tempo change in the Tempo List, set and deleted, each read back from the list itself (the tempo row holds
+        // the project's tempo and signatures only).
         let bpm = (context["project"]["tempo"].as_f64().unwrap_or(120.0).round() + 8.0).min(990.0);
-        let shows = |row: &Value, beats: f64| -> bool {
-            row["tempos"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|tempo| tempo["positionBeats"].as_f64().is_some_and(|at| (at - beats).abs() < 0.5))
-        };
         let t0 = perf_now();
         let done = run_plan(json!([{"tool": "tempo_marker_set", "input": {"positionBeats": at, "bpm": bpm}}])).await?;
-        let row = self.tool("read", json!({"kind": "tempo"})).await.body["items"][0].clone();
-        let shown = shows(&row, at);
+        let listed = self.tempo_listed(at).await;
         self.say(
-            !done.is_error,
+            !done.is_error && listed.as_ref().is_ok_and(|shown| *shown == Some(bpm)),
             Some(perf_now() - t0),
             &format!(
-                "tempo {bpm} BPM at beat {at} in the Tempo List: {}; the tempo row {}",
+                "tempo {bpm} BPM at beat {at} in the Tempo List: {}; the list {}",
                 if done.is_error { short(&done.text, 200) } else { "set".into() },
-                if shown { "shows it".to_string() } else { format!("doesn't list it ({})", short(&row.to_string(), 160)) }
+                match &listed {
+                    Ok(Some(shown)) => format!("shows {shown} BPM there"),
+                    Ok(None) => "has no tempo event there".into(),
+                    Err(why) => format!("couldn't be read ({why})"),
+                }
             ),
         );
         let t0 = perf_now();
         let done = run_plan(json!([{"tool": "tempo_marker_delete", "input": {"positionBeats": at}}])).await?;
-        let row = self.tool("read", json!({"kind": "tempo"})).await.body["items"][0].clone();
+        let listed = self.tempo_listed(at).await;
         self.say(
-            !done.is_error && !shows(&row, at),
+            !done.is_error && matches!(listed, Ok(None)),
             Some(perf_now() - t0),
             &format!(
-                "the tempo change at beat {at} deleted: {}; the tempo row {}",
+                "the tempo change at beat {at} deleted: {}; the list {}",
                 if done.is_error { short(&done.text, 200) } else { "deleted".into() },
-                if shows(&row, at) { "still lists it" } else { "no longer lists it" }
+                match &listed {
+                    Ok(Some(shown)) => format!("still shows {shown} BPM there"),
+                    Ok(None) => "has no tempo event there".into(),
+                    Err(why) => format!("couldn't be read ({why})"),
+                }
             ),
         );
 

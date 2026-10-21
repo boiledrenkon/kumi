@@ -168,7 +168,7 @@ Logic Pro 12.3.1; the host's simulated Logic (`simulator/logic.rs`) answers the 
 | `fx-bypass` | `fx_bypass` | the Mixer strip slot's bypass checkbox | the slot | none |
 | `key-command` | `key_command` | the key command's chord, by name or id from `com.apple.logic10.plist` (else the factory U.S. set), posted with Logic in front | the Edit menu's Undo title, moved or not | the command's own, or none |
 | `region-move` | `region_move` | the Event List at its region level (Leave Folder), the region's Position scrubber | the Tracks area's items | "Value Change" |
-| `region-resize` | `region_resize` | the playhead at the new edge, Set Region Start/End to Playhead (Cmd-[ / Cmd-]) | the Tracks area | "Value Change" |
+| `region-resize` | `region_resize` | the playhead at the new edge, Set Region Start/End to Playhead (Cmd-[ / Cmd-]) | the Tracks area | "Set Start to Playhead Position", "Set End to Playhead Position" (one each edge) |
 | `region-split` | `region_split` | the region clicked, the playhead at the split, Split at Playhead (Cmd-T) | the Tracks area: the right part is `created` | "Split Regions" |
 | `region-loop` | `region_loop` | the Region inspector's Loop checkbox | the checkbox (the Tracks area never shows `looped`) | "Loop Parameter Change" |
 | `region-rename` | `region_rename` | the Region inspector's name field, `AXConfirm` | the Tracks area | "Renaming" |

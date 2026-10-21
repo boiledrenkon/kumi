@@ -445,6 +445,19 @@ pub fn resize_preview(ctx: &mut Ctx, input: &Value) -> Done<Preview> {
 }
 
 /// Sets a region's edges: selected alone, the playhead at each new edge and Logic's own command for it posted.
+/// The edges to set, each on a beat with its command, both checked before either is written: an edge refused once the
+/// other had moved would leave half a resize.
+fn edges_on_the_beat(start: Option<f64>, end: Option<f64>, beats_per_bar: u32) -> Done<Vec<(Position, (u32, &'static str))>> {
+    let edges: Vec<(Position, (u32, &'static str))> = [(start, START_TO_PLAYHEAD), (end, END_TO_PLAYHEAD)]
+        .into_iter()
+        .filter_map(|(beats, command)| beats.map(|beats| (Position::from_beats(beats, beats_per_bar), command)))
+        .collect();
+    if edges.iter().any(|(position, _)| position.division > 1 || position.tick > 1) {
+        return Err(bad("Logic Pro's playhead display places an edge on a beat: give whole beats"));
+    }
+    Ok(edges)
+}
+
 fn put_edges(
     ctx: &mut Ctx,
     keys: &KeyCommands,
@@ -453,15 +466,11 @@ fn put_edges(
     end: Option<f64>,
     beats_per_bar: u32,
 ) -> Done<Vec<Found>> {
+    let edges = edges_on_the_beat(start, end, beats_per_bar)?;
     let (_, before) = timeline::control_bar(ctx)?;
     let was = before.position();
     select_only(ctx, found.place)?;
-    for (beats, command) in [(start, START_TO_PLAYHEAD), (end, END_TO_PLAYHEAD)] {
-        let Some(beats) = beats else { continue };
-        let position = Position::from_beats(beats, beats_per_bar);
-        if position.division > 1 || position.tick > 1 {
-            return Err(bad("Logic Pro's playhead display places an edge on a beat: give whole beats"));
-        }
+    for (position, command) in edges {
         timeline::set_playhead(ctx, position)?;
         let chord = chord_of(keys, command)?;
         post(ctx, &chord)?;
@@ -915,6 +924,13 @@ mod tests {
         assert!(edges_input(&json!({"start": 1.0}), &now).is_err(), "seconds are REAPER's");
         assert!(edges_input(&json!({}), &now).is_err());
         assert_eq!(edges_title(&keys, 0.0, 8.0, 4), "Trimmed region “Keys” to bar 1–bar 3");
+        let edges = edges_on_the_beat(Some(4.0), Some(8.0), 4).unwrap();
+        assert_eq!(
+            edges.iter().map(|(position, command)| (position.bar, position.beat, command.0)).collect::<Vec<_>>(),
+            [(2, 1, 1500), (3, 1, 1501)]
+        );
+        assert!(edges_on_the_beat(Some(4.0), Some(8.5), 4).is_err(), "an end off the beat refuses before the start moves");
+        assert!(edges_on_the_beat(None, Some(7.25), 4).is_err());
         assert!(loop_input(&json!({"loop": "yes"})).is_err());
         assert_eq!(name_input(&json!({"name": "Verse"})).unwrap(), "Verse");
         assert!(name_input(&json!({"name": ""})).is_err());
