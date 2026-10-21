@@ -221,10 +221,10 @@ local LAYERS = named({ ["note-on"] = 1, ["note-off"] = 2 })
 
 local ZONE_FIELDS = {
   noteRange = { get = function(m) return copy_range(m.note_range) end, set = function(m, v) m.note_range = copy_range(v) end, field = "note_range",
-    check = range_check(0, 119), says = "noteRange is [low, high], notes from 0 to 119 (C-4 is 48)", text = function(v) return "notes " .. v[1] .. "-" .. v[2] end },
+    check = range_check(0, 119), says = "noteRange is [low, high], notes from 0 to 119 (C-4 is 48)", text = function(v) return "notes " .. base.notes_text(v[1], v[2]) end },
   velocityRange = { get = function(m) return copy_range(m.velocity_range) end, set = function(m, v) m.velocity_range = copy_range(v) end, field = "velocity_range",
     check = range_check(0, 127), says = "velocityRange is [low, high] from 0 to 127", text = function(v) return "velocity " .. v[1] .. "-" .. v[2] end },
-  baseNote = plain("base_note", whole(0, 119), "baseNote is a note from 0 to 119 (C-4 is 48)", function(v) return "base note " .. v end),
+  baseNote = plain("base_note", whole(0, 119), "baseNote is a note from 0 to 119 (C-4 is 48)", function(v) return "base note " .. base.note_name(v) end),
   layer = enum("layer", LAYERS, "layer is note-on or note-off", function(v) return "plays on " .. v end),
   keyTracking = plain("map_key_to_pitch", is_boolean, "keyTracking is true or false", function(v) return v and "pitch follows the key" or "fixed pitch" end),
   velocityToVolume = plain("map_velocity_to_volume", is_boolean, "velocityToVolume is true or false", function(v) return v and "velocity to volume" or "fixed volume" end),

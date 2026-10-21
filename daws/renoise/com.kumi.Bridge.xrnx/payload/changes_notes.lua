@@ -850,8 +850,7 @@ base.register(clear)
 -- M4 (n-song): notes transposed, notes humanized, and a block of lines copied or moved. They write cells as notes-write does
 -- (whole cells, the visible columns raised first, read back), and Kumi's undo puts them back by the same plain rule.
 
-local NOTE_NAMES = { "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-" }
-local function note_name(value) return NOTE_NAMES[value % 12 + 1] .. math.floor(value / 12) end
+local note_name = base.note_name
 
 -- The lines a request names (`first`, `last`: the whole pattern when left out) and the note columns (`columns`, the shown
 -- ones when left out).

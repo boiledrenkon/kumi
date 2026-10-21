@@ -164,6 +164,8 @@ test("samples: a keyzone's notes, velocities, base note, layer and key tracking 
   eq(data.layer, 2)
   eq(data.map_key_to_pitch, false)
   ok(done.display.title:find("keyzone", 1, true), done.display.title)
+  ok(done.display.title:find("notes C-3\226\128\147B-3", 1, true) and done.display.title:find("base note E-3", 1, true),
+    "notes as Renoise names them: " .. done.display.title)
   local undone = restore(peer, "keyzone-set", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(data.note_range[1], 0)

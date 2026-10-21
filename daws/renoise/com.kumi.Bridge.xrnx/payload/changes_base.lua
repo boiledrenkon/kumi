@@ -63,6 +63,16 @@ function M.db_text(db)
   return "+" .. trimmed(rounded)
 end
 
+-- A note value as Renoise writes it: C-4 is 48, C#4 is 49 (its own naming, with the octave last).
+local NOTE_NAMES = { "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-" }
+function M.note_name(value) return NOTE_NAMES[value % 12 + 1] .. math.floor(value / 12) end
+
+-- A range of notes, as a title says it: "C-5–B-5", or one note.
+function M.notes_text(low, high)
+  if low == high then return M.note_name(low) end
+  return M.note_name(low) .. "\226\128\147" .. M.note_name(high)
+end
+
 function M.pan_text(pan)
   local percent = math.floor(math.abs(pan) * 100 + 0.5)
   if percent == 0 then return "centre" end
