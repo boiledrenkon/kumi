@@ -36,6 +36,13 @@
 | --- | --- | --- | --- | --- |
 | [logic-lab-2026-10-18.md](../evidence/logic-lab-2026-10-18.md) | 2026-10-18 | Logic Pro 12.3.1 | なし | Logic Pro のラボ（M0）：macOS のチャンネルごとの可否（アクセシビリティでの読み取りと書き込み、キーコマンド、開くパネルと保存パネル、Mackie Control、OSC、プロジェクトファイル、プロセスタップ）。この Mac で測定 |
 | [logic-m1-gate-2026-10-19.md](../evidence/logic-m1-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M1 のゲート：ヘルパーで本物の Logic にアタッチしたブリッジ、ワイヤー越しの `ping` と `status`。インストールのライフサイクル、doctor、Kumi のホストがセッションからブリッジを起動すること |
+| [logic-m2-gate-2026-10-19.md](../evidence/logic-m2-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M2 のゲート：ブリッジ越しに参照付きの行として読んだ Logic のプロジェクト、FOCUS の本文、Logic を見る Kumi の目 |
+| [logic-m3-gate-2026-10-19.md](../evidence/logic-m3-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M3 のゲート：経路ひとつずつで行い読み戻した変更、HISTORY への出し入れをするプラン、Kumi に名指しで戻る Logic 自身の Cmd-Z |
+| [logic-m4-gate-2026-10-21.md](../evidence/logic-m4-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M4 のゲート、第一弾：別名保存、キーコマンド、リージョン、MIDI の読み込み、サイクル、テンポリスト。それぞれ読み戻して元に戻す。42 中 42 |
+| [logic-m4b-gate-2026-10-21.md](../evidence/logic-m4b-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M4 のゲート、第二弾：コントロール表示で設定した Stereo Out の Gain、センド、パッチ、バウンス、スマートコントロールとオートメーション。54 中 54 |
+| [logic-m5-gate-2026-10-21.md](../evidence/logic-m5-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M5 のゲート：プロセスタップで Logic を聴く Kumi、判定したラウンドの Stereo Out でのゲイン、オーディション、レンダリング。66 中 66 |
+| [logic-m6-gate-2026-10-21.md](../evidence/logic-m6-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M6 のゲート：インスタントフレーズ、メトロノーム、Sampler トラックへのサンプル、最近のプロジェクト、中央の C、一括スナップショット、watch_me、Channel EQ と Compressor のカーブ。95 中 95 |
+| [logic-m7-evals-2026-10-21.md](../evidence/logic-m7-evals-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M7 の評価：シミュレートされた Logic の上で制作者のモデルを使ったもの。最初は 23 中 14、修正後は 23 中 22。言葉だけでは促すにとどまること |
 | [kumi-poc.md](../evidence/kumi-poc.md) | 2026-09-28〜09-30 | 12.4.15b4、b5 | 1.0.0〜1.0.63 | 本物の Live 上の Kumi：受け入れテスト、速度と大きな Set、`kumi bridge`、試聴とゴール、Max for Live デバイス、再接続 |
 | [live-extension.md](../evidence/live-extension.md) | 2026-09-30 | 12.4.15b5 | 1.0.57〜1.0.65 | Live が Kumi の拡張機能をどう実行するか。オフラインレンダリングとそのコスト、両チャンネルの結果の一致、取り消し、右クリック |
 | [lom-audit.md](../evidence/lom-audit.md)、[JSON](../evidence/lom-audit-12.4.15b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.55 | Live の Python API の全数調査と、Remote Script が使っているものとの照合 |

@@ -36,6 +36,13 @@
 | --- | --- | --- | --- | --- |
 | [logic-lab-2026-10-18.md](../evidence/logic-lab-2026-10-18.md) | 2026-10-18 | Logic Pro 12.3.1 | 无 | Logic Pro 实验（M0）：每个 macOS 通道一个可行或不可行的结论（辅助功能的读取和写入、快捷键命令、打开和保存面板、Mackie Control、OSC、工程文件、进程音频分接（process tap）），在这台 Mac 上测得 |
 | [logic-m1-gate-2026-10-19.md](../evidence/logic-m1-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M1 关口：桥接借助它的辅助程序接入真实的 Logic，通过协议应答 `ping` 和 `status`；安装生命周期、doctor，以及 Kumi 的主机从会话中启动桥接 |
+| [logic-m2-gate-2026-10-19.md](../evidence/logic-m2-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M2 关口：通过桥接以带引用的行读取 Logic 的工程、FOCUS 的正文，以及 Kumi 对 Logic 的观察 |
+| [logic-m3-gate-2026-10-19.md](../evidence/logic-m3-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M3 关口：每种修改各走一条通道并读回，一个计划进出 HISTORY，Logic 自身的 Cmd-Z 被告知 Kumi |
+| [logic-m4-gate-2026-10-21.md](../evidence/logic-m4-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M4 关口第一部分：另存为、键盘命令、片段、MIDI 导入、循环和速度列表，每项读回并复原；42 项全部通过 |
+| [logic-m4b-gate-2026-10-21.md](../evidence/logic-m4b-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M4 关口第二部分：在控制视图中设置的 Stereo Out 上的 Gain、发送、音色、并轨、智能控制和自动化；54 项全部通过 |
+| [logic-m5-gate-2026-10-21.md](../evidence/logic-m5-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M5 关口：Kumi 通过进程音频分接聆听 Logic，评判一轮在 Stereo Out 上的增益、试听和渲染；66 项全部通过 |
+| [logic-m6-gate-2026-10-21.md](../evidence/logic-m6-gate-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M6 关口：即时短语、节拍器、把采样载入 Sampler 轨道、最近的工程、中央 C、批量快照、watch_me 以及 Channel EQ 和 Compressor 的曲线；95 项全部通过 |
+| [logic-m7-evals-2026-10-21.md](../evidence/logic-m7-evals-2026-10-21.md) | 2026-10-21 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | M7 评测：在模拟的 Logic 上使用制作人的模型，最初 23 项中通过 14 项，修正后 23 项中通过 22 项，以及仅靠措辞只能提示的部分 |
 | [kumi-poc.md](../evidence/kumi-poc.md) | 2026-09-28 至 09-30 | 12.4.15b4、b5 | 1.0.0 至 1.0.63 | 真实 Live 上的 Kumi：验收运行、速度与大型工程、`kumi bridge`、试听与目标、一个 Max for Live 设备、重新连接 |
 | [live-extension.md](../evidence/live-extension.md) | 2026-09-30 | 12.4.15b5 | 1.0.57 至 1.0.65 | Live 如何运行 Kumi 的扩展；离线渲染及其开销、两个通道结果一致、撤销、右键菜单 |
 | [lom-audit.md](../evidence/lom-audit.md)、[JSON](../evidence/lom-audit-12.4.15b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.55 | 对 Live 的 Python API 所做的普查，与 Remote Script 实际使用的内容对照 |
