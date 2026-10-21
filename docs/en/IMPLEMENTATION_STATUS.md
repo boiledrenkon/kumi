@@ -260,6 +260,23 @@ and migration checks do not replace a new real-Live acceptance run.
   bytes (16,398 of system text) against Live's 73,204 (25,945); before the
   pack it was 47,656 (7,356). With Logic Pro away, the conversation's one line
   says so and points at Apple's guide.
+- **Logic Pro's eval (M7):** `crates/kumi/examples/eval_logic.rs` asks the
+  configured model 23 things over the simulated Logic, each a session of its
+  own with Logic's instruction pack, changes and listening, and Apple's guide
+  read from a fixture of its topics (never the network): ten knowledge probes
+  of Logic's terms and ways (a region, the Stereo Out, Track Stacks, the
+  Marker, Tempo and Signature Lists, key commands on the selection, what
+  Logic's undo keeps no step of, the Controls View, quantize as a region
+  parameter, an import's own track, Smart Controls), seven change requests over
+  Scratch (a fader, a rename, a marker, a tempo change, a Gain on the Stereo
+  Out, a send, a plan of several), five limits (a track moved or coloured, a
+  send's mode, a plug-in moved, Quick Sampler) and a listen. Each check is
+  code: Logic's words and none of Live's, the guide asked and cited by a topic
+  it gave where a question is about Logic's features, nothing changed for a
+  question, the changes Logic applied and HISTORY's rows, a limit refused
+  saying why, the mix heard. Its dry run, every check on a canned answer, runs
+  in CI (`crates/kumi/tests/eval_logic_dry.rs`); it hasn't been run with a
+  model yet.
 
 ## Evidence
 

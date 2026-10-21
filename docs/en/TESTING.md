@@ -117,6 +117,7 @@ run them.
 | `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Live with a disposable copy of a Set open; the bridge, built first with `cargo build --release -p ableton-mcp-server --bins` (for a debug run, the same without `--release`) | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
 | `cargo run --release -p kumi --example time_rebuild` | Live with a Set open; the bridge, built first as for `accept_live` | Times what a tutorial's rebuild costs in Live, without a model: a MIDI track with Drift and four effects in one plan, each device's parameters read, 30 of them set by name, and Kumi's looks at the Set, each with the bridge requests it took. It adds one track and deletes it at the end. |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | Your sign-in and model | How the model uses Kumi's tools, against a synthetic bridge with the real bridge's tool schemas, read from its native catalog. Never touches Live. Each case says its time, its tools' share of it, and how many model calls it took; `EVAL_EFFORT` sets the model's reasoning effort, and `EVAL_TRACE=1` prints each call. `EVAL_TUTORIAL=1` adds a real 16-minute tutorial from YouTube, which needs the network. `EVAL_MEASURE=1`, with no sign-in or model, prints what every request carries: the instructions and each tool's definition in bytes (`EVAL_MEASURE=tools` adds the definitions). |
+| `cargo run --release -p kumi --example eval_logic [-- <part of a case name>]` | Your sign-in and model | How the model knows Logic Pro and works in it, over the simulated Logic: Kumi's host in process, in front of the Scratch project the Logic bridge's tests recorded, with Logic's instruction pack, changes and listening. Never touches Logic Pro. Its 23 cases are knowledge probes of Logic's terms and ways (Apple's guide asked and cited where a question is about one of Logic's features), change requests over Scratch, the limits Kumi's bridge can't pass (refused saying why) and a listen; each case's check is code. `--list` prints each case and what its check looks for, and `--dry` runs every check on a canned answer per case, with no sign-in or model. `EVAL_EFFORT`, `EVAL_TRACE=1` (which also prints each answer whole) and `EVAL_TIMINGS` work as for `eval_changes`. |
 | `cargo run --release -p kumi --example probe_inference` | Your sign-in | One authenticated request with a harmless tool. Never touches Live. |
 | `cargo run --release -p kumi --example probe_cache` | Your sign-in and model | Whether a conversation keeps its provider's prompt cache when its kernel is rebuilt, as on a resume: short turns that print their input and cached tokens, rebuilt with the same conversation, another one and none. Never touches Live. |
 
@@ -124,6 +125,25 @@ The synthetic bridge's Operator, Saturator and EQ Eight have every parameter
 Live 12.4 gives them, read from Live into
 `crates/kumi/examples/fixtures/eval_changes/live-devices.json`, and it runs
 Kumi's own scripts for setting parameters as Live does.
+
+The Logic eval reads Apple's Logic Pro User Guide from a fixture of Logic's
+topics, written for the eval in the shape of Apple's guide
+(`crates/kumi/examples/fixtures/eval_logic/logic-guide.json`), which it lays
+out as Apple's site lays the guide out, so Kumi's own parser reads it: nothing
+comes from the network. Each case is a session of its own, with a throwaway
+folder for Kumi's home, memory, recipes and library, and opens no project in
+Logic Pro. CI builds it and runs its dry run
+(`crates/kumi/tests/eval_logic_dry.rs`), which also checks that each kind of
+check fails an answer wrong in its way and takes other good answers. A run
+with the model is what costs: the canned answers take 35 model requests, and
+a model takes more (it reads before it changes and asks `find_tools` for the
+guide), about 50 to 70 for the 23 cases, each carrying about 47 KB of
+instructions and tool definitions besides the conversation (cache reads after
+the first, with a provider that caches). A case's name, or part of one,
+narrows a run to those cases. Its results are recorded by hand under
+`docs/evidence/`, as the Live benchmark's were: the date, the model and its
+effort, each case's pass or FAIL with what it found wanting, and the totals the
+eval prints.
 
 ## Docs
 
