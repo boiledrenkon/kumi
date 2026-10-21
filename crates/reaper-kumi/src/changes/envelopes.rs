@@ -926,13 +926,33 @@ fn flags_of(reaper: &Reaper, envelope: Envelope) -> Value {
     json!({"visible": reaper.envelope_flag(envelope, "VISIBLE"), "active": reaper.envelope_flag(envelope, "ACTIVE"), "armed": reaper.envelope_flag(envelope, "ARM")})
 }
 
+/// What envelope-show fences: the envelope's flags, its points, and its automation items, each as its state keeps them
+/// (an undo writes the whole state from before back, items' places, lengths, loops and mutes among it).
 fn env_state(ctx: &Ctx, envelope: Envelope) -> Value {
     let lane_hash = {
         let count = ctx.reaper.env_point_count(envelope, -1);
         let points: Vec<EnvPoint> = (0..count).filter_map(|i| ctx.reaper.env_point(envelope, -1, i)).collect();
         points_hash(ctx.reaper, envelope, &points)
     };
-    json!({"flags": flags_of(ctx.reaper, envelope), "points": lane_hash, "items": ctx.reaper.ai_count(envelope)})
+    json!({
+        "flags": flags_of(ctx.reaper, envelope),
+        "points": lane_hash,
+        "items": ctx.reaper.ai_count(envelope),
+        "itemsPrint": items_print(ctx, envelope),
+    })
+}
+
+/// Whether the envelope's state now is the recorded one (a state recorded before items were kept by their print is
+/// compared without it).
+fn same_env(now: &Value, recorded: &Value) -> bool {
+    if recorded.get("itemsPrint").is_some() {
+        return now == recorded;
+    }
+    let mut now = now.clone();
+    if let Some(fields) = now.as_object_mut() {
+        fields.remove("itemsPrint");
+    }
+    now == *recorded
 }
 
 fn set_flags(reaper: &Reaper, envelope: Envelope, (visible, active, armed): (Option<bool>, Option<bool>, Option<bool>)) {
@@ -1079,7 +1099,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let (at, created) = match shown {
         Shown::Has(at) => {
-            if fence["exists"] == false || env_state(ctx, at.envelope) != fence["state"] {
+            if fence["exists"] == false || !same_env(&env_state(ctx, at.envelope), &fence["state"]) {
                 return Err(changed(format!("{label} changed since the preview")));
             }
             (at, None)
@@ -1150,11 +1170,12 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     let label = env_label(ctx, &at);
     let now = env_state(ctx, at.envelope);
-    if restore.prior["exists"] == true && now == restore.prior["state"] {
+    if restore.prior["exists"] == true && same_env(&now, &restore.prior["state"]) {
         return Ok(Restored { restored: now, display: json!({"title": format!("{label} is as it was")}), unwritten: true });
     }
-    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since)
-    if now != restore.applied["state"] {
+    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since,
+    // and put their automation items back where they were)
+    if !same_env(&now, &restore.applied["state"]) {
         return Err(changed(format!(
             "{label} has been changed in REAPER since Kumi showed it: putting it back as it was would write over those changes \
              too (its points and items), so Kumi leaves it, even with discard"
@@ -1165,8 +1186,8 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         let chunk = restore.prior["chunk"].as_str().ok_or_else(|| bad("prior.chunk"))?;
         reaper.set_env_chunk(at.envelope, chunk);
         mark_envelope(reaper, at.envelope);
-        if env_state(ctx, at.envelope) != restore.prior["state"] {
-            return Err(failed(format!("REAPER wouldn't put {label} back")));
+        if !same_env(&env_state(ctx, at.envelope), &restore.prior["state"]) {
+            return Err(("uncertain".into(), format!("REAPER didn't put {label} back exactly: read it")));
         }
     } else {
         let chunk = reaper.env_chunk(at.envelope).ok_or_else(|| failed("REAPER wouldn't give the envelope's state"))?;

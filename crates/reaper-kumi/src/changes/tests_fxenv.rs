@@ -1166,6 +1166,41 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
 }
 
 #[test]
+fn showing_an_envelope_isnt_undone_once_the_producer_moved_or_looped_its_automation_item() {
+    let lab = envelope_lab();
+    let item = FakeAutoItem {
+        pool: 1,
+        position: 4.0,
+        length: 1.0,
+        offset: 0.0,
+        rate: 1.0,
+        baseline: 0.5,
+        amplitude: 1.0,
+        looped: false,
+        mute: false,
+        selected: false,
+    };
+    state(|s| {
+        let volume = &mut s.tracks[1].envelopes[0];
+        volume.visible = false;
+        volume.items = vec![item.clone()];
+    });
+    let (preview, applied) = lab.make("envelope-show", json!({"ref": KICK_VOLUME}));
+    for (what, change) in
+        [("moved", FakeAutoItem { position: 6.0, ..item.clone() }), ("looped", FakeAutoItem { looped: true, ..item.clone() })]
+    {
+        state(|s| s.tracks[1].envelopes[0].items = vec![change.clone()]);
+        assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap_err().0, "changed", "{what}");
+        let (code, why) = lab.discard("envelope-show", &preview, &applied).unwrap_err();
+        assert!(code == "changed" && why.contains("even with discard"), "{what}: {why}");
+        assert!(state(|s| s.tracks[1].envelopes[0].items == vec![change.clone()]), "{what}: the producer's item stays");
+    }
+    state(|s| s.tracks[1].envelopes[0].items = vec![item.clone()]);
+    lab.undo("envelope-show", &preview, &applied).unwrap();
+    assert!(state(|s| !s.tracks[1].envelopes[0].visible));
+}
+
+#[test]
 fn an_fx_parameters_envelope_is_made_and_undo_takes_it_out_of_the_list() {
     let lab = chains_lab();
     let input = json!({"paramRef": "r:param:{K-MAIN}:0"});
