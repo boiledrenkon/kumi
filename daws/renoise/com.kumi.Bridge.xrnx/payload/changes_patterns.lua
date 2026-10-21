@@ -1,7 +1,8 @@
 -- M4 (n-song): Kumi's changes to a pattern itself (its name and number of lines) and to a pattern's track (its slot colour in the
 -- pattern matrix). A pattern is named by its ref (`E:pattern:p`) or by a sequence slot's (`E:seq:s`, the pattern it plays); a
--- pattern's track by the pattern and a track ref, kept as `E:ptrack:p.t`. Records hold them as refs: a pattern pool that changed
--- since (a pattern made or deleted) makes them `stale`, and nothing is written.
+-- pattern's track by the pattern and a track ref, kept as `E:ptrack:p.t`. Records keep the pattern as a place in the pool (its
+-- log since then followed, as the tracks are through the layout), so patterns made or deleted since leave them working; a pool
+-- whose changes can't be followed makes them `stale`, and nothing is written.
 --
 -- Measured in Renoise 3.5.4 (lab, 2026-10-19): the name, the number of lines and the slot colour are undo steps; a pattern
 -- made shorter keeps the lines past its end (they show again when it is made longer), and its automation points too.

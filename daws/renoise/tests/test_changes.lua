@@ -2622,3 +2622,11 @@ test("changes: Kumi's undo of columns it showed refuses to hide a note written i
   ok(forced.result, json.encode(forced.error or {}))
   eq(mock.song:track(3).visible_note_columns, 2)
 end)
+
+test("changes: soloing a track that reads soloed only along with its group's solo says the group's solo ends (#361 N-N16)", function()
+  local env, peer = setup(nil, { tracks = { { name = "Kick" }, { name = "Hat" }, { name = "Drums", kind = "group", members = 2 }, { name = "Bass" } } })
+  mock.ops.solo(3, true) -- the producer soloed the group: its members read soloed
+  local epoch = place(peer)
+  local previewed = preview(peer, "track-solo", { ref = track_ref(epoch, 1), solo = true })
+  ok((previewed.display.note or ""):find("exclusive", 1, true), "it says what ends: " .. tostring(previewed.display.note))
+end)
