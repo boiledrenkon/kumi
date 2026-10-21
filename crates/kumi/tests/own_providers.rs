@@ -86,6 +86,28 @@ async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 }
 
+/// A tool that can't come out (its folder won't let Kumi move it) stays, and uninstall says what to delete by hand.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_that_cant_come_out_is_named_with_what_to_delete_by_hand() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, env) = renoise_home();
+    let renoise: &dyn DawProvider = &own::RENOISE;
+    assert_eq!(renoise.setup_bridge(Rc::new(Out::default()), &env, yes()).await.unwrap(), 0);
+    let tools = dir.path().join("Renoise/V3.5.4/Scripts/Tools");
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let out = Rc::new(Out::default());
+    let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
+    let run: kumi::process::Run = Rc::new(|_, _, _| panic!("removing the tool runs no program"));
+    let removed = renoise.remove_bridge(&io, run).await.unwrap();
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(removed, RemovedBridge::Kept);
+    let said = out.0.borrow().clone();
+    let tool = tools.join("com.kumi.Bridge.xrnx");
+    assert!(said.starts_with("Kumi's tool couldn't be taken out of Renoise ("), "{said}");
+    assert!(said.contains(&format!("): delete {} by hand.", tool.display())), "{said}");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn the_doctor_says_nothing_of_a_daw_this_user_never_used() {
     let dir = tempfile::tempdir().unwrap();
