@@ -386,6 +386,42 @@ async fn an_update_follows_each_copy_and_never_puts_back_a_bridge_taken_out_or_m
     }
 }
 
+/// A Kumi an earlier updater put in place (1.19's knows no DAW bridge) brings the bridge it carries as a session starts;
+/// once that's in, starting again changes nothing, and a tool the producer took out stays out.
+#[tokio::test(flavor = "current_thread")]
+async fn a_kumi_an_earlier_updater_put_in_place_brings_its_bridge_as_it_starts() {
+    use daw_bridge::daw::Daw;
+    let (dir, env) = renoise_home();
+    let tools = dir.path().join("Renoise/V3.5.4/Scripts/Tools");
+    let folder = daw_bridge::install::RENOISE_TOOL_FOLDER;
+    let target = daw_bridge::lifecycle::Target {
+        daw: Daw::Renoise,
+        dir: tools.clone(),
+        name: folder.into(),
+        folder: true,
+        reference: tools.join(folder).join(daw_bridge::install::RENOISE_REFERENCE),
+    };
+    // Renoise's tool 0.9.0, as the Kumi before put it in; this checkout carries 1.0.0.
+    let earlier = app_carrying(dir.path(), "app.earlier", b"x", "0.0.9", "0.9.0").join("daws/renoise").join(folder);
+    let home = std::path::PathBuf::from(&env["KUMI_HOME"]);
+    let put_earlier = || daw_bridge::lifecycle::Lifecycle::new(&home, target.clone()).install(&earlier, "0.9.0").unwrap();
+    put_earlier();
+    let out = Rc::new(Out::default());
+    let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
+    own::RENOISE.finish_transition(&io).await;
+    assert!(out.0.borrow().contains("Kumi's tool 1.0.0 is in Renoise now: restart Renoise if it's open."), "{}", out.0.borrow());
+    assert_eq!(receipt_of(&env, Daw::Renoise).version.as_deref(), Some("1.0.0"));
+    out.0.borrow_mut().clear();
+    own::RENOISE.finish_transition(&io).await;
+    assert_eq!(out.0.borrow().as_str(), "", "in already: nothing to do");
+    // Taken out by the producer: starting doesn't put it back.
+    put_earlier();
+    std::fs::remove_dir_all(tools.join(folder)).unwrap();
+    own::RENOISE.finish_transition(&io).await;
+    assert!(!tools.join(folder).exists());
+    assert_eq!(out.0.borrow().as_str(), "");
+}
+
 fn receipt_of(env: &Env, daw: daw_bridge::daw::Daw) -> daw_bridge::lifecycle::Receipt {
     let paths = daw_bridge::paths::BridgePaths::new(std::path::Path::new(&env["KUMI_HOME"]), daw);
     serde_json::from_str(&std::fs::read_to_string(paths.receipt()).unwrap()).unwrap()

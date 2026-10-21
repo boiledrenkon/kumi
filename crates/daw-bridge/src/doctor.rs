@@ -202,7 +202,11 @@ fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: 
                         checks.push(check(
                             "update",
                             Level::Warn,
-                            format!("this Kumi ships bridge {} and {daw} has {version}: update Kumi's {daw} bridge", bundled.version),
+                            format!(
+                                "this Kumi ships bridge {} and {daw} has {version}: kumi --daw {} bridge brings it up to date",
+                                bundled.version,
+                                daw.id()
+                            ),
                         ));
                     }
                 }

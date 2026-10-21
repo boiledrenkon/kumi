@@ -519,8 +519,28 @@ impl DawProvider for Own {
         // Nothing moves before the swap: the bridge follows Kumi once it's back (see OwnRollback).
         async move { Ok(Box::new(OwnRollback(self.id)) as Box<dyn BridgeRollbackStep>) }.boxed_local()
     }
-    fn finish_transition<'a>(&'a self, _io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
-        async {}.boxed_local()
+    fn finish_transition<'a>(&'a self, io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
+        async move {
+            // An earlier Kumi's updater (1.19's knows no DAW bridge) put this Kumi in place: the bridge it carries goes
+            // in now, as its own kumi update would have put it. Nothing when it's in already, or the producer took it out.
+            let Some(receipt) = self.receipt(&io.env) else { return };
+            let (Some(source), Some(version)) = (self.bundled_source(), self.bundled_version()) else { return };
+            if receipt.version.as_deref() == Some(version.as_str()) {
+                return;
+            }
+            let Ok(life) = self.follow(&io.env) else { return };
+            if let Some(put) = self.put(life, &source, false).ok().filter(|put| put.changed) {
+                io.out.write(&format!(
+                    "{} {} is in {} now: restart {} if it's open.\n{}",
+                    self.bridge,
+                    put.version,
+                    self.name(),
+                    self.name(),
+                    self.kept_words(&put)
+                ));
+            }
+        }
+        .boxed_local()
     }
     fn setup_bridge(
         &self,
