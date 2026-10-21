@@ -69,8 +69,58 @@ local function preset_kind(xml)
   }
 end
 
+-- What in a Doofer's or Splitter's preset data Renoise 3.5.4 crashes on (n-devices lab): a routing device inside it, or a
+-- macro mapping into a chain or a device the container hasn't (chains and devices from 0; a mapping to device -1 is none). Nil
+-- when there is none, else the words. (presets.rs refuses the same in the edits it makes.)
+local ROUTING = { SendDevice = true, SideChainDevice = true, CrossoverDevice = true, LineInDevice = true }
+local CONTAINER_SLOTS = { DooferDevice = 1, SplitterDevice = 2 }
+
+local function container_trouble(xml)
+  local stack, containers = {}, {}
+  for close, name, attributes, empty, text in xml:gmatch("<(/?)([%w_]+)([^>]-)(/?)>([^<]*)") do
+    if close == "/" then
+      stack[#stack] = nil
+    else
+      local frame = { name = name }
+      local lanes = CONTAINER_SLOTS[name] or (name == "DeviceSlot" and CONTAINER_SLOTS[attributes:match('type="([%w_]+)"') or ""])
+      if ROUTING[name] then return name .. " can't be inside a Doofer or Splitter (Renoise crashes on routing devices there)" end
+      if lanes then
+        frame.container = { lanes = lanes, counts = {}, mappings = {} }
+        containers[#containers + 1] = frame.container
+      end
+      local parent, chain, owner = stack[#stack], stack[#stack - 1], stack[#stack - 2]
+      -- (a device in one of the container's chains: DeviceChain, or a Splitter's DeviceChain0 and DeviceChain1)
+      if parent and parent.name == "Devices" and chain and chain.name:match("^DeviceChain%d?$") and owner and owner.container then
+        local lane = chain.name == "DeviceChain1" and 1 or 0
+        owner.container.counts[lane] = (owner.container.counts[lane] or 0) + 1
+      end
+      -- (a mapping of one of the container's macros)
+      if parent and parent.name == "Mappings" and chain and chain.name:match("^Macro%d+$") and owner and owner.container then
+        frame.mapping = {}
+        owner.container.mappings[#owner.container.mappings + 1] = frame.mapping
+      end
+      if parent and parent.mapping and (name == "DestChainIndex" or name == "DestDeviceIndex") then parent.mapping[name] = tonumber(text) end
+      if empty ~= "/" then stack[#stack + 1] = frame end
+    end
+  end
+  for _, container in ipairs(containers) do
+    for _, mapping in ipairs(container.mappings) do
+      local lane, device = mapping.DestChainIndex or 0, mapping.DestDeviceIndex or -1
+      if lane < 0 or lane >= container.lanes then
+        return string.format("a macro maps into chain %d, which the container hasn't (Renoise crashes on it)", lane)
+      end
+      local count = container.counts[lane] or 0
+      if device < -1 or device >= count then
+        return string.format("a macro maps to device %d of a chain of %d (from 0; Renoise crashes on it)", device, count)
+      end
+    end
+  end
+  return nil
+end
+M.container_trouble = container_trouble
+
 -- Preset data that may go to this device: the same device type (another crashes Renoise), not a newer document, the same
--- plug-in, within the bound. Refused before anything is written.
+-- plug-in, nothing a container crashes on, within the bound. Refused before anything is written.
 local function check_preset_data(device, xml, label)
   if type(xml) ~= "string" or xml == "" then bad("presetData (the device's preset data, XML as Renoise gives it) or path (an .xrdp preset file)") end
   if #xml > M.MAX_PRESET_BYTES then
@@ -88,6 +138,10 @@ local function check_preset_data(device, xml, label)
   end
   if now.plugin and given.plugin ~= now.plugin then
     bad(string.format("that preset data is for the plug-in %s, and %s is %s", tostring(given.plugin), q(label), now.plugin))
+  end
+  if CONTAINER_SLOTS[given.slot] then
+    local trouble = container_trouble(xml)
+    if trouble then bad(string.format("that preset data won't go to %s: %s", q(label), trouble)) end
   end
 end
 

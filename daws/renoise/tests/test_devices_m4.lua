@@ -309,6 +309,25 @@ test("devices m4: the undo of a Doofer's preset data refuses what the producer c
   H.no_dialogs()
 end)
 
+test("devices m4: a Doofer's preset data with a routing device inside or a macro mapped past its chain is refused before Renoise crashes (#361 N17)", function()
+  local _, peer = setup()
+  local epoch, layout = place(peer)
+  local current = mock.song:track(3):device(2).active_preset_data
+  local function asked(xml)
+    return call(peer, "change_preview", { kind = "device-preset-data", input = { ref = epoch .. ":device:3.2", presetData = xml }, epoch = epoch, layout = layout })
+  end
+  local function mapped(chain, device)
+    return (current:gsub("<Name>Macro 1</Name>", string.format("<Name>Macro 1</Name>\n      <Mappings>\n        <Mapping>\n          <DestChainIndex>%d</DestChainIndex>\n"
+      .. "          <DestDeviceIndex>%d</DestDeviceIndex>\n        </Mapping>\n      </Mappings>", chain, device), 1))
+  end
+  local send = current:gsub("</Devices>", "<SendDevice type=\"SendDevice\">\n        </SendDevice>\n      </Devices>", 1)
+  failure(asked(send), "bad-params", "routing")
+  failure(asked(mapped(-1, 0)), "bad-params", "chain %-1")
+  failure(asked(mapped(0, 5)), "bad-params", "device 5")
+  ok(asked(mapped(0, 0)).result, "a mapping to its one device is fine")
+  eq(steps(), 0)
+end)
+
 test("devices m4: preset data a plug-in of another kind would get is refused", function()
   local plugin = { name = "AUDelay", path = "Audio/Effects/AU/aufx:dely:appl", slot = "AudioPluginDevice",
     params = { { name = "Dry/Wet Mix", value = 0.5, min = 0, max = 1 } },
