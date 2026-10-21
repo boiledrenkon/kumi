@@ -318,8 +318,12 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
   add_shown(spec, loc, display)
+  -- (`restore_by_id`: what the undo writes into must be what was set, discard or not: a plug-in's parameter after another plug-in
+  -- was loaded is another one)
+  local applied = wire(spec, after, env, loc)
+  if spec.restore_by_id then applied = with_id(applied, loc.id, loc.name) end
   return {
-    applied = wire(spec, after, env, loc), journal_applied = after,
+    applied = applied, journal_applied = after,
     display = display,
     undo = { desc = desc, entry = spec.undoable },
     spec = spec, place = loc.place, prior = now, target = loc.target,
@@ -338,6 +342,9 @@ function M.prop_restore(song, env, spec, restore, desc)
   if not ok then
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
+  end
+  if spec.restore_by_id and type(restore.applied) == "table" and restore.applied.id ~= nil and restore.applied.id ~= loc.id then
+    fail("changed", string.format("%s isn't what Kumi set any more (another plug-in or device is there): Kumi won't write into it", loc.name))
   end
   local prior, applied = unwire(spec, restore.prior, env, loc), unwire(spec, restore.applied, env, loc)
   local now = spec.read(loc.object, prior)

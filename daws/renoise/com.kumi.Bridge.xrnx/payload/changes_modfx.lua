@@ -744,7 +744,7 @@ M.parameter_number = parameter_number
 function M.param_kind(spec)
   local device_param = base.KINDS["device-param"]
   local kind = {
-    kind = spec.kind, of = spec.of, noun = "parameter", undoable = true, by_place = true,
+    kind = spec.kind, of = spec.of, noun = "parameter", undoable = true, by_place = true, restore_by_id = true,
     read = function(parameter) return { value = parameter.value, valueString = parameter.value_string } end,
     wanted = device_param.wanted, write = device_param.write, same = device_param.same, title = device_param.title,
     observables = function(parameter) return { parameter.value_observable } end, shown = device_param.shown,
@@ -775,7 +775,10 @@ function M.param_kind(spec)
     if spec.param_of then target.ref = places_.ref_of(env, spec.param_of, (function() local all = {} for j, v in ipairs(n) do all[j] = v end all[#all + 1] = k return all end)()) end
     local place = places_.journal_place(spec.of, n)
     place.param = k
-    return { object = parameter, name = label .. " " .. parameter.name, place = place, target = target }
+    -- (what it is, not only where: the device's type (a plug-in's path) and the parameter's name)
+    local ok, path = pcall(function() return device.device_path end)
+    local id = tostring(ok and path or device.name) .. "/" .. tostring(parameter.name)
+    return { object = parameter, name = label .. " " .. parameter.name, place = place, target = target, id = id }
   end
   kind.reread = function(song, place)
     local numbers = {}

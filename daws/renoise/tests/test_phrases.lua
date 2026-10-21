@@ -379,6 +379,28 @@ test("plugins: a plug-in's parameter by name or by its ref, its program, its set
   failure(call(peer, "change_preview", { kind = "plugin-param", input = { ref = iref(place(peer), 1), param = 1, value = 0 }, epoch = place(peer) }), "bad-params")
 end)
 
+test("plugins: Kumi's undo of a parameter or a program never writes into another plug-in loaded since, discard or not (#361 N5)", function()
+  plugin_catalog()
+  local env, peer = setup()
+  change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "DLSMusicDevice" })
+  mock.data.undo.stack = {}
+  local param = change(peer, "plugin-param", { ref = iref(place(peer), 3), param = 1, value = 1 })
+  instrument(3).plugin.preset_data = "<dls before/>"
+  local preset = change(peer, "plugin-preset", { ref = iref(place(peer), 3), preset = "Strings" })
+  -- the producer loads another plug-in into the instrument; its first parameter happens to read what Kumi wrote
+  mock.song:instrument(3).plugin_properties:load_plugin("Audio/Generators/VST3/Synth")
+  instrument(3).plugin.params[1].value = 1
+  instrument(3).plugin.preset_data = "<synth patch/>"
+  local before = steps()
+  for _, more in ipairs({ {}, { discard = true } }) do
+    failure(restore(peer, "plugin-param", param, nil, more), "changed")
+    failure(restore(peer, "plugin-preset", preset, nil, more), "changed")
+  end
+  eq(instrument(3).plugin.params[1].value, 1, "the new plug-in's parameter untouched")
+  eq(instrument(3).plugin.preset_data, "<synth patch/>", "and its state")
+  eq(steps(), before)
+end)
+
 test("plugins: auto-suspend is no step of Renoise's undo (lab): Kumi says so, makes no step, and puts it back itself; refused once changed", function()
   plugin_catalog()
   local env, peer = setup()

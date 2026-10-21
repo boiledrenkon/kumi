@@ -185,7 +185,7 @@ local function preset_plan(song, env, input)
   end
   local state = device.active_preset_data or ""
   if #state > M.MAX_STATE_BYTES then fail("failed", "the plug-in's state is more than Kumi keeps to put it back") end
-  return { n = n, label = label, device = device, index = index, name = presets[index], now = device.active_preset, state = state }
+  return { n = n, label = label, device = device, index = index, name = presets[index], now = device.active_preset, state = state, path = device.device_path }
 end
 
 base.register({
@@ -216,7 +216,7 @@ base.register({
     end
     if not M.UNDO_COVERS.preset then display.note = NOT_IN_UNDO end
     return {
-      applied = { preset = plan.device.active_preset, hash = state_hash(plan.device.active_preset_data or "") }, material = { state = plan.state },
+      applied = { preset = plan.device.active_preset, hash = state_hash(plan.device.active_preset_data or "") }, material = { state = plan.state, path = plan.path },
       target = places_.target_of(env, "instrument", plan.n), display = display, undo = { desc = desc, entry = M.UNDO_COVERS.preset },
       prior = { preset = plan.now }, place = places_.journal_place("instrument", plan.n),
     }
@@ -226,6 +226,10 @@ base.register({
     if type(material) ~= "table" or type(prior) ~= "table" or type(applied) ~= "table" then bad("material: the plug-in's state before") end
     local n, objects, label = places_.locate(song, env, "instrument", { place = restore.target and restore.target.place }, "plugin-preset")
     local device = plugin_device_of(objects)
+    -- (the state kept is that plug-in's: another one loaded since never gets it, discard or not)
+    if material.path ~= nil and device.device_path ~= material.path then
+      fail("changed", string.format("%s plays another plug-in now: Kumi won't give it the old one's state", q(label)))
+    end
     local hash = state_hash(device.active_preset_data or "")
     if device.active_preset == prior.preset and hash == state_hash(material.state or "") then
       return { restored = { preset = prior.preset }, display = { title = q(label) .. "'s program is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
