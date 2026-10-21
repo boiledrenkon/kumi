@@ -30,16 +30,30 @@ pub struct Control {
     pub text: String,
 }
 
+/// How long a pane drawn without controls gets before it is read once more and taken as having none.
+const EMPTY_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// The pane's controls: the sliders of its layout area named "Smart Controls", in the order the pane shows them (by
 /// rows, then from the left, from their frames: Accessibility lists them in an order of its own, which changes from
-/// one showing of the pane to the next, measured on Logic Pro 12.3.1).
+/// one showing of the pane to the next, measured on Logic Pro 12.3.1). A track whose strip has nothing Smart Controls
+/// map (an audio track with only a Channel EQ, or nothing, on it) shows the pane's header, its Controls and EQ views'
+/// buttons, over no layout area: no controls. A pane without even its header hasn't drawn, and that is `failed`.
 fn controls(ctx: &mut Ctx, pane: &Node) -> Done<Vec<Control>> {
     let root = ctx.project.root.clone();
-    let tree = nudge::read(ctx.ax.tree(&root, &pane.path, 5, 100, Some(&["role", "desc", "value", "valueDesc"])))?;
-    let strings = &ctx.project.strings;
-    let area = tree
-        .find(&|n| n.role == "AXLayoutArea" && strings.is(&n.desc, "Smart Controls"))
-        .ok_or_else(|| failed("Logic Pro's Smart Controls pane shows no controls for this track"))?;
+    let read = |ctx: &mut Ctx| nudge::read(ctx.ax.tree(&root, &pane.path, 5, 100, Some(&["role", "desc", "value", "valueDesc"])));
+    let strings = ctx.project.strings.clone();
+    let has_area = |tree: &Node| tree.find(&|n| n.role == "AXLayoutArea" && strings.is(&n.desc, "Smart Controls")).is_some();
+    let mut tree = read(ctx)?;
+    if !has_area(&tree) {
+        super::pause(EMPTY_SETTLE);
+        tree = read(ctx)?;
+    }
+    let Some(area) = tree.find(&|n| n.role == "AXLayoutArea" && strings.is(&n.desc, "Smart Controls")) else {
+        if tree.find(&|n| n.role == "AXRadioButton" && strings.is(&n.desc, "Controls")).is_some() {
+            return Ok(vec![]);
+        }
+        return Err(failed("Logic Pro's Smart Controls pane shows no controls for this track"));
+    };
     let sliders: Vec<Node> = area.children.iter().filter(|c| c.role == "AXSlider" && !c.desc.is_empty()).cloned().collect();
     let mut placed = Vec::new();
     for slider in sliders {

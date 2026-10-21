@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 51] = [
+const SCENES: [&str; 52] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -77,6 +77,7 @@ const SCENES: [&str; 51] = [
     "change-bounce",
     "change-export-tracks",
     "change-undo-m4b",
+    "read-smart-none",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -1060,4 +1061,14 @@ fn the_producers_own_undo_of_a_plug_in_and_a_send_kumi_added_is_named_back() {
     let reads = of(&replayed, "read");
     assert_eq!(reads[0].result()["total"], 1);
     assert_eq!(reads[1].result()["total"], 0);
+}
+
+#[test]
+fn a_track_whose_strip_has_nothing_smart_controls_map_reads_none_of_them() {
+    // Vocal's strip holds a Channel EQ alone: the pane draws its header (the Controls and EQ views' buttons) over no
+    // controls, which is no rows, not a failure.
+    let replayed = replay("read-smart-none");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result(), &json!({"items": [], "total": 0, "epoch": "1"}));
+    assert_eq!(reads[1].result()["items"][0]["name"], "Channel EQ");
 }
