@@ -165,8 +165,9 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let id = TrackId::Guid(guid.clone());
     let name = rows::clip(&reaper.track_name(track));
     let label = super::track_name(reaper, track);
+    let adopted: Vec<&str> = plan.adopted.iter().map(|(_, guid)| guid.as_str()).collect();
     Ok(Applied {
-        applied: json!({"index": place(reaper, track), "name": name, "folder": !plan.adopted.is_empty(), "closedAt": closed}),
+        applied: json!({"index": place(reaper, track), "name": name, "folder": !plan.adopted.is_empty(), "closedAt": closed, "adopted": adopted}),
         created: Some(json!({"ref": refs::track_ref(&id), "kind": "track"})),
         material: None,
         display: json!({"title": if plan.adopted.is_empty() { format!("Added track {}", super::quoted(&label)) } else { format!("Added folder {}", super::quoted(&label)) }}),
@@ -211,12 +212,24 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if now != closed["after"].as_i64().unwrap_or(now) && !restore.discard {
             return Err(changed("the folder's last track has been changed since"));
         }
-        reaper.set_track_value(last, "I_FOLDERDEPTH", closed["before"].as_f64().unwrap_or(0.0));
     }
+    // The tracks the folder was made of move up out of it; any other track keeps its folder (REAPER's bare delete would
+    // drop a closing the track has taken over since, and pull the tracks after it into that folder).
+    let children: Vec<String> = if restore.applied["folder"] != true {
+        vec![]
+    } else if let Some(adopted) = restore.applied["adopted"].as_array() {
+        adopted.iter().filter_map(Value::as_str).map(str::to_string).collect()
+    } else {
+        // (a folder made before the change kept its tracks' ids: those in it now are taken for its own)
+        (0..reaper.track_count(ctx.proj))
+            .filter_map(|at| reaper.track_at(ctx.proj, at))
+            .filter(|other| reaper.track_parent(*other) == Some(track))
+            .map(|other| reaper.track_guid(other))
+            .collect()
+    };
+    let children: Vec<&str> = children.iter().map(String::as_str).collect();
     let name = super::track_name(reaper, track);
-    if !reaper.delete_track(track) {
-        return Err(failed("REAPER wouldn't delete the track"));
-    }
+    super::tracks::delete_keeping_folders(ctx, &[track], if restore.discard { None } else { Some(&children) })?;
     Ok(Restored {
         restored: json!({"deleted": reference}),
         display: json!({"title": format!("{} taken away again", super::quoted(&name))}),

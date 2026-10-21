@@ -135,3 +135,23 @@ pub const DRUMS: &str = "r:track:{AAAA}";
 pub const KICK: &str = "r:track:{BBBB}";
 pub const SNARE: &str = "r:track:{CCCC}";
 pub const REVERB: &str = "r:track:{DDDD}";
+
+/// The lab project with Drums inside a folder of its own: Rhythm › Drums › Kick, Snare (closing both); then Reverb, outside
+/// them. A track at the end of Drums closes two folders.
+pub fn drums_in_rhythm() {
+    state(|s| {
+        s.tracks.insert(0, fake::FakeTrack::new("{RRRR}", "Rhythm"));
+        s.tracks[0].folder = 1;
+        for track in s.tracks.iter_mut() {
+            for send in track.sends.iter_mut() {
+                send.dest += 1;
+            }
+        }
+        s.tracks[3].folder = -2;
+    });
+}
+
+/// Every track's folder depth, in order.
+pub fn folder_depths() -> Vec<i32> {
+    state(|s| s.tracks.iter().map(|t| t.folder).collect())
+}

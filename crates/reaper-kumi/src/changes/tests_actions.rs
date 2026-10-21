@@ -189,6 +189,19 @@ fn a_track_template_goes_in_at_its_place_and_its_undo_takes_those_tracks_away() 
 }
 
 #[test]
+fn a_templates_tracks_at_the_end_of_a_folder_in_a_folder_go_leaving_every_track_in_its_folder() {
+    let lab = Lab::new();
+    let _dir = templates();
+    drums_in_rhythm();
+    let (preview, made) = lab.make("track-template-insert", json!({"name": "Drums/Kit", "index": 4}), "Kumi: template (kt021)");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Kit Bus", "Kit Kick", "Snare", "Reverb"]);
+    assert_eq!(folder_depths(), [1, 1, 0, 1, -1, -2, 0]);
+    lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kt022)").unwrap();
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Snare", "Reverb"]);
+    assert_eq!(folder_depths(), [1, 1, 0, -2, 0], "Snare still closes both folders, and Reverb is in neither");
+}
+
+#[test]
 fn a_template_goes_in_at_the_end_whichever_track_the_producer_touched_last() {
     // REAPER puts a template's tracks after the last touched track, not at the end (accept-reaper lab, 7.82: with the
     // producer's last touched track in the middle, Kumi's insert was refused "elsewhere than asked").

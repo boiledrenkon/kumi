@@ -439,6 +439,66 @@ fn a_folder_is_a_track_added_before_the_run_it_holds_and_undo_closes_the_run_as_
     assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
 }
 
+/// Removes the track at `at` as REAPER's own Remove tracks does: the track before takes over its closing, and the sends
+/// after it close up.
+fn remove_as_reaper_does(at: usize) {
+    state(|s| {
+        let gone = s.tracks.remove(at);
+        if gone.folder < 0 && at > 0 {
+            s.tracks[at - 1].folder += gone.folder;
+        }
+        for track in s.tracks.iter_mut() {
+            track.sends.retain(|send| send.dest != at);
+            for send in track.sends.iter_mut().filter(|send| send.dest > at) {
+                send.dest -= 1;
+            }
+        }
+    });
+}
+
+#[test]
+fn undoing_an_added_track_that_took_over_a_folders_closing_leaves_every_other_track_in_its_folder() {
+    let lab = Lab::new();
+    super::tests_lab::drums_in_rhythm();
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    // Kumi adds Perc before Snare, in Drums; the producer removes Snare, and REAPER hands its closing of both folders to Perc.
+    let (preview, applied) = lab.make("track-add", json!({"name": "Perc", "index": 4}), "Kumi: Added track Perc (kadd7)");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Perc", "Snare", "Reverb"]);
+    remove_as_reaper_does(4);
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    lab.undo("track-add", &preview, &applied, "Kumi: undo (kund7)").unwrap();
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Reverb"]);
+    assert_eq!(depths(), [1, 1, -2, 0], "Kick closes both folders now, and Reverb stays out of them");
+}
+
+#[test]
+fn a_folder_kumi_made_is_taken_away_around_a_track_the_producer_put_in_it_only_when_told_to_discard() {
+    let lab = Lab::new();
+    let (preview, applied) =
+        lab.make("track-add", json!({"name": "Subgroup", "asFolderOf": [KICK, "r:track:{CCCC}"]}), "Kumi: Added folder Subgroup (kfol2)");
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
+    // The producer puts a track of theirs between Kick and Snare, inside Kumi's folder.
+    state(|s| {
+        s.tracks.insert(3, crate::reaper::fake::FakeTrack::new("{MINE}", "Mine"));
+        for track in s.tracks.iter_mut() {
+            for send in track.sends.iter_mut().filter(|send| send.dest >= 3) {
+                send.dest += 1;
+            }
+        }
+    });
+    let (code, message) = lab.undo("track-add", &preview, &applied, "Kumi: undo (kund8)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("“Mine”"), "{message}");
+    assert_eq!(names(), ["Drums", "Subgroup", "Kick", "Mine", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 1, 0, 0, -2, 0]);
+    // Told to undo anyway, the folder goes, and the producer's track moves up with Kick and Snare, still in Drums.
+    let mut params = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo (kund9)", "discard": true});
+    params["epoch"] = lab.reads.epoch().into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(names(), ["Drums", "Kick", "Mine", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 0, 0, -1, 0]);
+}
+
 #[test]
 fn a_bad_add_is_refused_and_one_whose_place_moved_is_changed() {
     let lab = Lab::new();

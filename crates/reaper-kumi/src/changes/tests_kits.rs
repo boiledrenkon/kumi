@@ -165,6 +165,20 @@ fn a_kit_in_gm_notes_chokes_the_open_hat_from_the_closed_and_pedal_ones_and_goes
 }
 
 #[test]
+fn a_kit_at_the_end_of_a_folder_in_a_folder_is_taken_away_leaving_every_track_in_its_folder() {
+    let lab = Lab::new();
+    fake::extra(|e| e.stable_chunks = true);
+    drums_in_rhythm();
+    let (_dir, paths) = sounds(&["Kick", "Snare"]);
+    let (preview, made) = lab.make("drum-kit", kit(&paths, json!({"name": "Perc", "index": 4})), "Kumi: kit (kn001)");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Perc", "Perc MIDI", "Kick", "Snare", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 1, 0, 1, 0, 0, -1, -2, 0]);
+    lab.undo("drum-kit", &preview, &made, "Kumi: undo (kn002)").unwrap();
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 1, 0, -2, 0], "Snare still closes both folders, and Reverb is in neither");
+}
+
+#[test]
 fn a_container_kit_is_one_track_its_pads_in_one_container_behind_the_choke() {
     let lab = Lab::new();
     fake::extra(|e| e.stable_chunks = true);
@@ -311,6 +325,12 @@ fn a_kit_reaper_wont_finish_leaves_nothing_behind() {
     assert_eq!(code, "failed");
     assert!(message.contains("what Kumi made is taken away again"), "{message}");
     assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
+    // At the end of a folder in a folder too, every track keeps its folder.
+    drums_in_rhythm();
+    let (code, _) = lab.make_err("drum-kit", kit(&paths, json!({"index": 4})));
+    assert_eq!(code, "failed");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Snare", "Reverb"]);
+    assert_eq!(depths(), [1, 1, 0, -2, 0]);
 }
 
 #[test]

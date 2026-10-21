@@ -384,13 +384,15 @@ fn by_guid(ctx: &Ctx, guid: &str) -> Option<Track> {
     ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(guid.to_string())).ok()
 }
 
-/// Takes away what a kit that went wrong made, last first; `uncertain` when REAPER wouldn't.
-fn take_back(ctx: &Ctx, made: &[String], why: Fault) -> Fault {
+/// Takes away what a kit that went wrong made, last first, and puts the other tracks' folders back as they were (`depths`);
+/// `uncertain` when REAPER wouldn't.
+fn take_back(ctx: &Ctx, made: &[String], depths: &[(String, i64)], why: Fault) -> Fault {
     for guid in made.iter().rev() {
         if let Some(track) = by_guid(ctx, guid) {
             ctx.reaper.delete_track(track);
         }
     }
+    super::tracks::put_folder_depths_back(ctx, depths);
     if made.iter().any(|guid| by_guid(ctx, guid).is_some()) {
         ("uncertain".into(), format!("{}, and Kumi couldn't take away the tracks it made: read the tracks", why.1))
     } else {
@@ -539,15 +541,16 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         pad.path = super::kumi_files::playable(ctx, &pad.path)?;
     }
     let mut made = Vec::new();
+    let depths = super::tracks::folder_depths(ctx);
     let built = match build(ctx, &kit, &mut made) {
         Ok(built) => built,
-        Err(why) => return Err(take_back(ctx, &made, why)),
+        Err(why) => return Err(take_back(ctx, &made, &depths, why)),
     };
     let reaper = ctx.reaper;
     let placed: Vec<i64> =
         made.iter().filter_map(|g| by_guid(ctx, g)).map(|t| reaper.track_value(t, "IP_TRACKNUMBER") as i64 - 1).collect();
     if placed.len() != made.len() || placed.iter().enumerate().any(|(n, p)| *p != kit.at + n as i64) {
-        return Err(take_back(ctx, &made, failed("REAPER put the kit's tracks elsewhere than asked")));
+        return Err(take_back(ctx, &made, &depths, failed("REAPER put the kit's tracks elsewhere than asked")));
     }
     let tracks: Vec<Value> = made
         .iter()
@@ -607,11 +610,9 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(changed("a track of the producer's is inside the kit's folder now: Kumi won't delete the folder around it"));
     }
     let name = present.first().map(|(_, t)| super::track_name(reaper, *t)).unwrap_or_default();
-    for (_, track) in present.iter().rev() {
-        if !reaper.delete_track(*track) {
-            return Err(("uncertain".into(), "REAPER wouldn't delete one of the kit's tracks: read the tracks".into()));
-        }
-    }
+    // Every other track stays in the folder it is in (a kit at the end of a folder closes it, which a bare delete loses).
+    let kit: Vec<Track> = present.iter().map(|(_, t)| *t).collect();
+    super::tracks::delete_keeping_folders(ctx, &kit, Some(&[]))?;
     Ok(Restored {
         restored: json!({"deleted": present.len()}),
         display: json!({"title": format!("Took away the drum kit {} ({} track{})", super::quoted(&name), present.len(), if present.len() == 1 { "" } else { "s" })}),
