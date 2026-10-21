@@ -457,6 +457,25 @@ fn a_trim_moves_the_edges_and_the_takes_offsets_so_the_media_stays_in_place() {
 }
 
 #[test]
+fn a_start_trims_undo_leaves_an_item_the_producer_put_stretch_markers_on_since() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].items[0].extra.insert("B_LOOPSRC".into(), 0.0));
+    let (preview, applied) = lab.make("item-trim", json!({"ref": K1, "start": 0.5}));
+    // The producer warps the trimmed item.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.25, 0.75, 0.0)]);
+    for discard in [false, true] {
+        let (code, message) = lab.undo_with("item-trim", &preview, &applied, discard).unwrap_err();
+        assert_eq!(code, "changed", "discard {discard}");
+        assert!(message.contains("stretch markers"), "{message}");
+        assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.5, "the item is as the producer has it");
+    }
+    // Without markers, the start goes back.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch.clear());
+    lab.undo("item-trim", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.0);
+}
+
+#[test]
 fn a_trim_before_the_media_or_under_stretch_markers_is_refused_and_its_undo_fenced() {
     let lab = Lab::new();
     state(|s| {

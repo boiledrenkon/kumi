@@ -850,10 +850,37 @@ pub fn trim_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_edges(&now, restore.applied) {
         return Err(changed(format!("{} has been changed in REAPER since Kumi trimmed it", label(ctx, found.item))));
     }
+    // Putting the start back moves its takes' offsets, and REAPER doesn't move stretch markers with them: markers the
+    // producer added since (the trim had none to move) would slide off the audio they hold, discard or not.
+    let reaper = ctx.reaper;
+    let offset_of = |state: &Value, guid: &str| {
+        state["offsets"].as_array().into_iter().flatten().find(|e| e[0].as_str() == Some(guid)).and_then(|e| e[1].as_f64())
+    };
+    let slid = (0..reaper.take_count(found.item)).filter_map(|n| reaper.take_at(found.item, n)).any(|take| {
+        let guid = reaper.take_guid(take);
+        let moves = match (offset_of(&now, &guid), offset_of(restore.prior, &guid)) {
+            (Some(now), Some(then)) => !close(now, then),
+            _ => false,
+        };
+        moves && !reaper.stretch_markers(take).is_empty()
+    });
+    if slid {
+        return Err(changed(format!(
+            "{} has stretch markers now, which REAPER doesn't move with its start: putting the start back would slide them off \
+             the audio they hold, so Kumi leaves it, even with discard",
+            label(ctx, found.item)
+        )));
+    }
     put_edges(ctx, found.item, restore.prior);
     let after = edges_of(ctx.reaper, found.item);
     if !same_edges(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item's edges back"));
+        // Written, so never a plain failure: put as Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_edges(ctx, found.item, &now) && same_edges(&edges_of(ctx.reaper, found.item), &now);
+        return Err(if left {
+            failed("REAPER didn't put the item's edges back; it is as Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item's edges back, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored {
         restored: after,
