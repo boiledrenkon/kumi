@@ -97,7 +97,7 @@ Kumi は REAPER 7 以降と Renoise 3.5 以降で、macOS、Windows、Linux の�
 
 **Kumi が探す場所。**
 
-- **REAPER：** リソースフォルダー（Mac は `~/Library/Application Support/REAPER`、Windows は `%APPDATA%\REAPER`、Linux は `~/.config/REAPER` か `~/.reaper`）、ポータブル版の REAPER（アプリの隣に `reaper.ini` があるもの）それぞれ、または `KUMI_REAPER_RESOURCE_DIR` で指定したフォルダーだけ。
+- **REAPER：** リソースフォルダー（Mac は `~/Library/Application Support/REAPER`、Windows は `%APPDATA%\REAPER`、Linux は `~/.config/REAPER` か `~/.reaper`）、いつものアプリフォルダーにあるポータブル版の REAPER（アプリの隣に `reaper.ini` があるもの）それぞれ、Kumi の拡張機能を入れた REAPER、または `KUMI_REAPER_RESOURCE_DIR` で指定したフォルダーだけ。ほかの場所（別のドライブなど）にあるポータブル版は、最初の一度だけ `KUMI_REAPER_RESOURCE_DIR` が要ります。
 - **Renoise：** 3.5 以降でいちばん新しい設定フォルダー（`~/Library/Preferences/Renoise`、`%APPDATA%\Renoise`、Linux では `~/.config/Renoise` か `~/.renoise` の中の `V3.5.4` など）、または `KUMI_RENOISE_PREFS_DIR` で指定したもの（`V<x.y.z>` フォルダーか、それを収めたフォルダー）。
 
 **接続。** DAW がブリッジ付きで動いていれば Kumi は自分で接続し、DAW が戻ってきたときもまた接続します。DAW がダイアログやレンダリングで手が離せない間は、Kumi はそう伝え、応答するまで何も変更しません。

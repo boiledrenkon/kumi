@@ -236,8 +236,10 @@ again with that one. `--daw` and `KUMI_DAW` always decide.
 
 - **REAPER:** its resource folder (`~/Library/Application Support/REAPER` on a
   Mac, `%APPDATA%\REAPER` on Windows, `~/.config/REAPER` or `~/.reaper` on
-  Linux), each portable REAPER (a `reaper.ini` beside the app), or only the
-  folder `KUMI_REAPER_RESOURCE_DIR` names.
+  Linux), each portable REAPER in the usual app folders (a `reaper.ini` beside
+  the app), the one Kumi's extension went in, or only the folder
+  `KUMI_REAPER_RESOURCE_DIR` names. A portable REAPER elsewhere (on another
+  drive, say) needs `KUMI_REAPER_RESOURCE_DIR` the first time.
 - **Renoise:** the newest preferences folder for 3.5 or later (such as
   `V3.5.4` in `~/Library/Preferences/Renoise`, `%APPDATA%\Renoise`, or
   `~/.config/Renoise` or `~/.renoise` on Linux), or the one

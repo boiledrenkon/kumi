@@ -97,7 +97,7 @@ Kumi 可以在 REAPER 7 及更高版本和 Renoise 3.5 及更高版本中工作�
 
 **Kumi 查找的位置。**
 
-- **REAPER：** 它的资源文件夹（Mac 上为 `~/Library/Application Support/REAPER`，Windows 上为 `%APPDATA%\REAPER`，Linux 上为 `~/.config/REAPER` 或 `~/.reaper`）、每个便携版 REAPER（应用旁边有 `reaper.ini`），或者只用 `KUMI_REAPER_RESOURCE_DIR` 指定的文件夹。
+- **REAPER：** 它的资源文件夹（Mac 上为 `~/Library/Application Support/REAPER`，Windows 上为 `%APPDATA%\REAPER`，Linux 上为 `~/.config/REAPER` 或 `~/.reaper`）、常用应用文件夹中的每个便携版 REAPER（应用旁边有 `reaper.ini`）、装有 Kumi 扩展的那个 REAPER，或者只用 `KUMI_REAPER_RESOURCE_DIR` 指定的文件夹。放在别处（例如另一个磁盘上）的便携版 REAPER，第一次需要设置 `KUMI_REAPER_RESOURCE_DIR`。
 - **Renoise：** 3.5 及更高版本中最新的偏好设置文件夹（例如 `~/Library/Preferences/Renoise`、`%APPDATA%\Renoise`，或 Linux 上 `~/.config/Renoise` 或 `~/.renoise` 中的 `V3.5.4`），或者 `KUMI_RENOISE_PREFS_DIR` 指定的文件夹：一个 `V<x.y.z>` 文件夹，或包含它们的文件夹。
 
 **连接。** DAW 带着桥接运行后，Kumi 会自己连接，DAW 回来时也会再次连接。DAW 忙于对话框或渲染时，Kumi 会说明，并在它应答之前不做任何修改。

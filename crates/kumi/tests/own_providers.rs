@@ -633,3 +633,39 @@ async fn setup_opens_the_app_it_found_and_names_an_older_reaper() {
         assert!(older_than("11.3.21", "12") && !older_than("12.0b4", "12") && !older_than("unknown", "12"));
     }
 }
+
+/// Review K20: a portable REAPER Kumi doesn't find by itself is found once its receipt says the extension went in it;
+/// with that folder gone (the drive is out), the doctor names the variable that shows Kumi where REAPER is.
+#[tokio::test(flavor = "current_thread")]
+async fn a_portable_reaper_is_found_by_its_receipt_and_otherwise_named_by_the_variable() {
+    use kumi::daw::Installed;
+    let dir = tempfile::tempdir().unwrap();
+    let env = Env::from([
+        ("HOME".into(), dir.path().to_string_lossy().into_owned()),
+        ("KUMI_HOME".into(), dir.path().join(".kumi").to_string_lossy().into_owned()),
+        ("ProgramFiles".into(), dir.path().join("Program Files").to_string_lossy().into_owned()),
+    ]);
+    let reaper: &dyn DawProvider = &own::REAPER;
+    // A REAPER installed on this computer itself would be found anyway.
+    let alone = !reaper.here(&env);
+    let portable = dir.path().join("Stick/REAPER");
+    std::fs::create_dir_all(portable.join("UserPlugins")).unwrap();
+    std::fs::write(portable.join("reaper.ini"), "").unwrap();
+    let target = portable.join("UserPlugins").join(daw_bridge::install::reaper_extension_name(daw_bridge::detect::Os::current()));
+    let paths = daw_bridge::paths::BridgePaths::new(&dir.path().join(".kumi"), daw_bridge::daw::Daw::Reaper);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let receipt = serde_json::json!({
+        "schema": daw_bridge::lifecycle::RECEIPT_SCHEMA, "daw": "reaper", "status": "installed",
+        "target": target, "reference": portable.join("UserPlugins/kumi-bridge-reference.json"),
+        "previous": [], "updatedMs": 0, "history": [],
+    });
+    std::fs::write(paths.receipt(), receipt.to_string()).unwrap();
+    assert!(reaper.here(&env));
+    assert_eq!(reaper.setup(&env, Rc::default(), false, Rc::default()).installed().await, Installed::Ready);
+    std::fs::remove_dir_all(dir.path().join("Stick")).unwrap();
+    if alone {
+        let checks = reaper.installation_checks(&env, &kumi::doctor::InstallationIo::default(), "darwin").await;
+        let said = format!("{checks:?}");
+        assert!(said.contains("set KUMI_REAPER_RESOURCE_DIR to its resource folder"), "{said}");
+    }
+}

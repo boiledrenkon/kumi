@@ -101,13 +101,29 @@ impl Own {
 
     /// Where the bridge goes in the DAW, or why it can't go yet.
     fn target(&self, env: &Env) -> Result<Target, String> {
-        self.placed(env).map_err(|why| why.map(|why| why.to_string()).unwrap_or_else(|| format!("{} isn't installed", self.name())))
+        self.placed(env).map_err(|why| why.map(|why| why.to_string()).unwrap_or_else(|| self.not_found()))
+    }
+
+    /// Why the DAW isn't found, with the variable that shows Kumi where it is.
+    fn not_found(&self) -> String {
+        match self.daw {
+            Daw::Reaper => "REAPER isn't installed (or not where Kumi looks: set KUMI_REAPER_RESOURCE_DIR to its resource folder)".into(),
+            Daw::Renoise => {
+                "Renoise isn't installed (or not where Kumi looks: set KUMI_RENOISE_PREFS_DIR to its preferences folder)".into()
+            }
+        }
+    }
+
+    /// The REAPERs here, and the one Kumi's extension was put in (a portable one Kumi doesn't find by itself).
+    fn reapers(&self, env: &Env) -> Vec<detect::ReaperInstall> {
+        let placed = self.receipt(env).map(|receipt| PathBuf::from(receipt.target));
+        detected(env, |found| detect::with_placed(found, detect::detect_reaper(found), placed.as_deref()))
     }
 
     /// `target`, with why it can't go yet as detection says it; None when the DAW isn't installed.
     fn placed(&self, env: &Env) -> Result<Target, Option<TargetError>> {
         match self.daw {
-            Daw::Reaper => reaper_target(reaper_install(&detected(env, detect::detect_reaper))?, Os::current()).map_err(Some),
+            Daw::Reaper => reaper_target(reaper_install(&self.reapers(env))?, Os::current()).map_err(Some),
             Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
         }
     }
@@ -210,7 +226,7 @@ impl Own {
         let target = self.target(env)?;
         // A REAPER that can't load it (a 32-bit one, say) is said, and nothing goes in.
         if self.daw == Daw::Reaper {
-            if let Some(why) = reaper_install(&detected(env, detect::detect_reaper)).ok().and_then(|install| unloadable(&source, install)) {
+            if let Some(why) = reaper_install(&self.reapers(env)).ok().and_then(|install| unloadable(&source, install)) {
                 return Err(why);
             }
         }
@@ -258,7 +274,7 @@ impl Own {
             return true;
         }
         match self.daw {
-            Daw::Reaper => detected(env, detect::detect_reaper).iter().any(|install| install.opened),
+            Daw::Reaper => self.reapers(env).iter().any(|install| install.opened),
             Daw::Renoise => !detected(env, detect::detect_renoise).prefs.is_empty(),
         }
     }
@@ -303,7 +319,7 @@ impl DawProvider for Own {
     }
     fn here(&self, env: &Env) -> bool {
         match self.daw {
-            Daw::Reaper => !detected(env, detect::detect_reaper).is_empty(),
+            Daw::Reaper => !self.reapers(env).is_empty(),
             Daw::Renoise => {
                 let found = detected(env, detect::detect_renoise);
                 !found.apps.is_empty() || !found.prefs.is_empty()
@@ -792,7 +808,7 @@ impl OwnSetup {
     fn app(&self) -> Option<PathBuf> {
         match self.own().daw {
             Daw::Reaper => {
-                let installs = detected(&self.env, detect::detect_reaper);
+                let installs = self.own().reapers(&self.env);
                 let chosen = reaper_install(&installs).ok().and_then(|install| install.app.clone());
                 chosen.or_else(|| installs.into_iter().find_map(|install| install.app))
             }
@@ -899,7 +915,9 @@ impl DawSetup for OwnSetup {
         let app = app.filter(|app| !app.is_empty()).map(PathBuf::from);
         let is = |path: &Path| app.as_deref().is_none_or(|app| app == path);
         match self.own().daw {
-            Daw::Reaper => detected(&self.env, detect::detect_reaper)
+            Daw::Reaper => self
+                .own()
+                .reapers(&self.env)
                 .into_iter()
                 .filter(|install| install.app.as_deref().is_some_and(is))
                 .find_map(|install| install.version),
