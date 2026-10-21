@@ -1012,6 +1012,45 @@ async fn a_limiter_that_cant_turn_down_far_enough_leaves_the_rest_to_a_gain_fx_a
         .await;
 }
 
+/// (#361 review K25) A plug-in limiter Kumi doesn't know, last on the master: the gain FX a quieter round adds goes before
+/// it, so turning up never goes past its ceiling.
+#[tokio::test(flavor = "current_thread")]
+async fn a_gain_fx_rebalancing_adds_goes_before_a_plugin_limiter_last_on_the_master() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_plugin_fx("r:track:master", "VST3: Pro-L 2 (FabFilter)");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let judge = tool(&observed, "judge");
+            let start = judge
+                .execute(object(json!({"goal": {"loudness": -6, "problems": false}, "from_beat": 0, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            script.listening().set_master_level(0.4);
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            let bass = context["tracks"][2]["ref"].as_str().unwrap().to_owned();
+            let change =
+                tool(&observed, "track_volume").execute(object(json!({"ref": bass, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!change.is_error, "{}", change.text);
+            let round = judge.execute(object(json!({"change": "Bass down 3 dB"})), Signal::new()).await.unwrap();
+            assert!(!round.is_error, "{}", round.text);
+            assert_eq!(
+                script.fx_names("r:track:master"),
+                ["JS: Volume Adjustment", "VST3: Pro-L 2 (FabFilter)"],
+                "turned up before the limiter: {}",
+                round.text
+            );
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 review K24) An FX is known by what it is, whatever the producer named it: a master ReaLimit renamed "Bus Limit"
 /// is still the gain stage a judged round turns (no gain FX added after it), and a ReaLimit renamed "Glue" last on a
 /// goal's candidate is its safety limiter (no second one added).

@@ -1496,6 +1496,15 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 let (add, name) = self.table.gain_device;
                 let mut input = json!({"ref": scope});
                 input[self.table.add_field] = add.into();
+                // Before the chain's last device that shapes the sound (a plug-in limiter Kumi doesn't know may hold the
+                // ceiling there): turned up after it, the level would go past it.
+                let last = devices
+                    .iter()
+                    .rev()
+                    .find(|device| !device.mixer && !self.table.analyzers.iter().any(|word| device.own_name.contains(word)));
+                if let Some(last) = last {
+                    input["index"] = last.index.into();
+                }
                 self.change(self.table.add_tool, input, signal.clone()).await?;
                 devices = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
                 let added = devices.iter().rev().find(|device| device.own_name.contains(name)).cloned();

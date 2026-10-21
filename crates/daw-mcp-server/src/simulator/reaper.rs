@@ -304,6 +304,23 @@ impl ReaperScript {
         guid
     }
 
+    /// A plug-in the sim doesn't otherwise know (a limiter from outside REAPER) on a track's chain, by the track's ref: its
+    /// ref.
+    pub fn add_plugin_fx(&self, track: &str, name: &str) -> String {
+        let mut state = self.state.lock().unwrap();
+        state.next_fx += 1;
+        let guid = format!("{{F{:04}}}", state.next_fx);
+        state.fx.entry(track.to_owned()).or_default().push(SimFx {
+            guid: guid.clone(),
+            name: name.into(),
+            original: None,
+            params: vec![],
+            input: false,
+        });
+        state.changed += 1;
+        format!("r:fx:{guid}")
+    }
+
     /// The producer renames an FX (its ref): its row says its own name as `originalName` from then on.
     pub fn rename_fx(&self, reference: &str, name: &str) {
         let mut state = self.state.lock().unwrap();
@@ -821,7 +838,9 @@ impl ReaperScript {
                         state.next_fx += 1;
                         let fx = sim_fx(&name, format!("{{F{:04}}}", state.next_fx)).ok_or_else(|| bad(format!("no FX named {name:?}")))?;
                         let made = format!("r:fx:{}", fx.guid);
-                        state.fx.entry(track.clone()).or_default().push(fx);
+                        let chain = state.fx.entry(track.clone()).or_default();
+                        let at = params["input"]["index"].as_u64().map_or(chain.len(), |at| (at as usize).min(chain.len()));
+                        chain.insert(at, fx);
                         state.changed += 1;
                         Self::step(state, &desc);
                         Ok(
