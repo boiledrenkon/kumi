@@ -20,8 +20,9 @@ function M.new(guard, state, hooks)
 end
 
 -- (`unkept`: state Renoise's undo doesn't keep, as mute, solo, the selection and playback: a change of it is no step, and leaves
--- Renoise's redo as it was)
+-- Renoise's redo as it was. A function says so as the change comes: the tempo the player or a render moves, but not a hand)
 local function count(self, light, unkept)
+  if type(unkept) == "function" then unkept = unkept() end
   local state = self.state
   -- (M5 m5-renoise: Kumi's own solo, mute and loop writes for a render or an audition, put back after: not edits)
   if state.quiet and state.quiet > 0 then return end

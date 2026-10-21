@@ -2748,3 +2748,33 @@ test("changes: the producer's redo of a Kumi change is told after they clicked a
   eq(told[1].data.how, "redo")
   eq(told[1].data.descs[1], desc)
 end)
+
+test("changes: the producer's redo of a Kumi change is told after the player moved the tempo or an instrument's tab was shown", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local ref = track_ref(epoch, 1)
+  local previewed, _, layout = preview(peer, "track-volume", { ref = ref, volumeDb = -6 })
+  local desc = "Kumi: Kick volume \226\136\1466 dB (k7fa)"
+  apply(peer, "track-volume", { ref = ref, volumeDb = -6 }, desc, previewed.fence, epoch, layout)
+  H.tick(2)
+  peer.events = {}
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  eq(H.events(peer, "undone_in_daw")[1].data.how, "undo")
+  -- (playing through a ZT moves the tempo, and the producer shows an instrument's plug-in tab: no step of Renoise's undo)
+  local transport = mock.data.transport_fields
+  transport.playing = true
+  transport.bpm = 140
+  mock.fire(transport.bpm_observable)
+  transport.playing = false
+  mock.song:instrument(1).active_tab = 2
+  H.tick(3)
+  drain(peer)
+  mock.song:redo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1, "the redo is told")
+  eq(told[1].data.how, "redo")
+end)

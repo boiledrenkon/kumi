@@ -297,7 +297,16 @@ for name in ([[playing_observable edit_mode_observable follow_player_observable 
   metronome_precount_enabled_observable metronome_precount_bars_observable edit_step_observable octave_observable
   record_quantize_enabled_observable record_quantize_lines_observable wrapped_pattern_edit_observable
   single_track_edit_mode_observable keyboard_velocity_enabled_observable keyboard_velocity_observable
-  record_parameter_mode_observable mute_state_observable solo_state_observable]]):gmatch("%S+") do UNKEPT[name] = true end
+  record_parameter_mode_observable mute_state_observable solo_state_observable active_tab_observable]]):gmatch("%S+") do UNKEPT[name] = true end
+-- (the tempo, LPB and TPL also move as the player or a render meets a ZT, ZL or ZK command: no step either)
+local function playing_or_rendering()
+  local ok, moving = pcall(function()
+    local song = renoise.song()
+    return song ~= nil and (song.transport.playing or song.rendering)
+  end)
+  return ok and moving == true
+end
+for _, name in ipairs({ "bpm_observable", "lpb_observable", "tpl_observable" }) do UNKEPT[name] = playing_or_rendering end
 -- M4 (n-song): the song's settings Kumi changes (the groove, the metronome, the editing settings, the headroom), counted, and
 -- asked on the producer's undo.
 local SETTING_OBSERVABLES = {
@@ -462,7 +471,7 @@ local function watch_instrument(song, i)
     observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument, token)
     -- n-instruments
     for _, name in ipairs({ "volume", "transpose", "sample_mapping_overlap_mode", "phrase_playback_mode", "phrase_program", "active_tab" }) do
-      observers:watch_changes(instrument[name .. "_observable"])
+      observers:watch_changes(instrument[name .. "_observable"], UNKEPT[name .. "_observable"])
     end
     observers:watch_changes(instrument.phrase_mappings_observable)
     observers:watch_structural(instrument.sample_modulation_sets_observable, "an instrument's modulation sets changed", "modsets", instrument, token)
