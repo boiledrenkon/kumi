@@ -336,6 +336,15 @@ struct Tearing {
     kind: &'static str,
     torn: Cell<bool>,
 }
+
+/// (M6) A bridge from before the bulk read: its snapshot is the one screen whatever it's asked.
+fn without_rows(name: &str, mut args: JsonObject) -> JsonObject {
+    if name == "snapshot" {
+        args.remove("rows");
+        args.remove("limit");
+    }
+    args
+}
 #[async_trait::async_trait(?Send)]
 impl McpEndpoint for Tearing {
     fn pid(&self) -> Option<u32> {
@@ -351,7 +360,7 @@ impl McpEndpoint for Tearing {
         if name == "read" && args.get("kind") == Some(&json!(self.kind)) && args.contains_key("limit") && !self.torn.replace(true) {
             self.script.change_tracks();
         }
-        self.inner.call(name, args, signal).await
+        self.inner.call(name, without_rows(name, args), signal).await
     }
     fn on_catalog_changed(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
         self.inner.on_catalog_changed(listener)
@@ -421,6 +430,39 @@ async fn the_snapshot_reads_each_kind_whole_and_again_when_an_edit_tore_it() {
             assert!(took < Duration::from_secs(2) && bytes < 8 * 1024, "{took:?}, {bytes} bytes");
             session.logic.close().await.unwrap();
             lab.simulator.stop();
+        })
+        .await;
+}
+
+/// (M6) With the bridge's bulk read, the snapshot is one request (`snapshot {rows}`), no page read, and what it keeps is
+/// what the pages kept.
+#[tokio::test(flavor = "current_thread")]
+async fn the_snapshot_is_one_bulk_read_where_the_bridge_has_it_and_keeps_what_the_pages_kept() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let read_by = |bulk: bool| async move {
+                let lab = Lab::new().await;
+                let script = lab.script.clone();
+                let older: Rc<dyn Fn(Rc<dyn McpEndpoint>) -> Rc<dyn McpEndpoint>> = Rc::new(move |inner| {
+                    Rc::new(Tearing { inner, script: script.clone(), kind: "none", torn: Cell::new(true) }) as Rc<dyn McpEndpoint>
+                });
+                let session = lab.session(Some(lab.store()), (!bulk).then_some(older));
+                session.logic.start(Signal::new()).await.unwrap();
+                session.logic.observe(Signal::new(), None).await.unwrap();
+                until("the baseline", || lab.baseline().is_some()).await;
+                let asked = lab.script.asked();
+                let bulk_reads = asked.iter().filter(|(method, params)| method == "snapshot" && params.get("rows").is_some()).count();
+                let pages = asked.iter().filter(|(method, params)| method == "read" && params.get("limit") == Some(&json!(200))).count();
+                let kept = lab.baseline().unwrap().pages[0].clone();
+                session.logic.close().await.unwrap();
+                lab.simulator.stop();
+                (bulk_reads, pages, kept)
+            };
+            let (bulk_reads, pages, bulk) = read_by(true).await;
+            assert_eq!((bulk_reads, pages), (1, 0), "one look at the project");
+            let (bulk_reads, pages, paged) = read_by(false).await;
+            assert_eq!((bulk_reads, pages), (0, 6), "an older bridge's pages, a kind at a time");
+            assert_eq!(bulk, paged, "the same snapshot");
         })
         .await;
 }

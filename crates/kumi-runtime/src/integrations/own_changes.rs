@@ -10,6 +10,7 @@ use crate::{
         daw::DawProfile,
         errors::RuntimeError,
         history::{cant_reach_to_undo, cant_take_back, Applied, ChangeHost, Entry, History, UndoResult},
+        picture::ParameterRow,
         plan::{make_changes, stream_changes, ActionOutcome, ActionSummary, Batch, ChangeOutcome, PlanHost, StepKind},
         refs::{Book, RefScheme},
     },
@@ -26,6 +27,7 @@ use indexmap::IndexMap;
 use kumi_common::{
     abort::{self, Signal, SignalExt},
     js::json::stringify,
+    time::perf_now,
 };
 use serde_json::{json, Value};
 use std::{
@@ -69,14 +71,41 @@ pub struct OwnKind {
     pub picture: Picture,
     /// The DAW's own undo never takes it back (Renoise's mute, solo and loop; REAPER's repeat): only Kumi's undo does.
     pub skipped_by_daw_undo: bool,
+    /// (M6) The input field naming an audio file the change brings in (Logic's sample-load `file`), and the extensions the
+    /// DAW takes: Kumi finds the file on this computer first, as it finds a sample for Live, and refuses one that isn't
+    /// there in its own words before the DAW is asked.
+    pub sample: Option<(&'static str, &'static [&'static str])>,
 }
 
-/// What HISTORY draws of a change: a value moved within its span (a fader, a pan), or a colour's swatches.
+/// What HISTORY draws of a change: a value moved within its span (a fader, a pan), or a colour's swatches; (M6) a
+/// plug-in's parameters as the values they moved (the preview's prior and the apply's `params`), and its curve once a
+/// read of the plug-in's others says it is an equaliser or a compressor, for a DAW that reads curves.
 #[derive(Clone, Copy)]
 pub enum Picture {
     None,
     Meter { field: &'static str, min: f64, max: f64 },
     Colors { field: &'static str },
+    Params,
+}
+
+/// How long a plug-in's parameter changes are let settle before its curve is read, the most a read waits for them, and
+/// the most it waits for a change under way (the DAW answers one request at a time: a plan's next step goes first).
+const CURVE_QUIET_MS: f64 = 300.;
+const CURVE_WAIT_MS: f64 = 3_000.;
+const CURVE_HOLD_MS: f64 = 120_000.;
+
+/// A change under way, counted while it lives.
+struct Changing<'a>(&'a Cell<u32>);
+impl<'a> Changing<'a> {
+    fn new(count: &'a Cell<u32>) -> Self {
+        count.set(count.get() + 1);
+        Self(count)
+    }
+}
+impl Drop for Changing<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 impl OwnKind {
@@ -99,10 +128,15 @@ impl OwnKind {
             wire: &[],
             picture: Picture::None,
             skipped_by_daw_undo: false,
+            sample: None,
         }
     }
     pub const fn skipped_by_daw_undo(mut self) -> Self {
         self.skipped_by_daw_undo = true;
+        self
+    }
+    pub const fn sample(mut self, field: &'static str, extensions: &'static [&'static str]) -> Self {
+        self.sample = Some((field, extensions));
         self
     }
     pub const fn meter(mut self, field: &'static str, min: f64, max: f64) -> Self {
@@ -113,11 +147,22 @@ impl OwnKind {
         self.picture = Picture::Colors { field };
         self
     }
-    /// HISTORY's summary of the change: its title, and its picture from the values before (`prior`) and after.
-    fn summary(&self, title: &str, prior: Option<&Value>, after: Option<&Value>) -> ChangeSummary {
+    pub const fn params(mut self) -> Self {
+        self.picture = Picture::Params;
+        self
+    }
+    /// HISTORY's summary of the change: its title, and its picture from the values before (`prior`) and after (what was
+    /// asked in `input`, for a value set otherwise).
+    fn summary(&self, title: &str, prior: Option<&Value>, after: Option<&Value>, input: Option<&JsonObject>) -> ChangeSummary {
         let mut summary = ChangeSummary::title(title);
         let (Some(prior), Some(after)) = (prior.filter(|v| v.is_object()), after.filter(|v| v.is_object())) else { return summary };
         match self.picture {
+            Picture::Params => {
+                let values = moved_params(prior, after, input);
+                if !values.is_empty() {
+                    summary.picture = Some(ChangePicture::Values { values });
+                }
+            }
             Picture::Meter { field, min, max } => {
                 // A value the DAW leaves out (Renoise's volume at silence) is the bottom of its span.
                 let value = |values: &Value| values.get(field).and_then(Value::as_f64).unwrap_or(min).clamp(min, max);
@@ -542,6 +587,10 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     added: Cell<usize>,
     /// The saved project was too big to copy before the step about to run (its size).
     not_copied: Cell<Option<u64>>,
+    /// Itself, for what it does later on its own (a plug-in's curve read once its changes settle).
+    me: std::rc::Weak<Self>,
+    /// (M6) Changes under way now.
+    changing: Cell<u32>,
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -551,12 +600,14 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
         on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     ) -> Rc<Self> {
-        Rc::new(Self {
+        Rc::new_cyclic(|me| Self {
             history: History::over(OwnChanges { link }, timeout_ms, on_change),
             names: RefCell::default(),
             on_action,
             added: Cell::new(0),
             not_copied: Cell::new(None),
+            me: me.clone(),
+            changing: Cell::new(0),
         })
     }
 
@@ -702,6 +753,78 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         self.history.outside.borrow_mut().push(profile.vocab.own_undo);
     }
 
+    /// (M6) A plug-in's curve for its parameter changes, as Live's are drawn: once they come no more, one read of its
+    /// parameters (the host's `read` under the plug-in), each change's picture walked back from what was read (an
+    /// equaliser's bands, a compressor's curve, before and after). Only for a DAW that reads curves (Logic's Channel EQ
+    /// and Compressor), and a change that moved a parameter one of them has; a read another plug-in answers draws none.
+    fn curve_later(&self, id: &str, plugin: &str, values: Vec<PictureValue>) {
+        let Some(curves) = self.link().daw.curves else { return };
+        if self.history.is_quiet() || !values.iter().any(|value| (curves.curve_parameter)(&value.name)) {
+            return;
+        }
+        let first = {
+            let mut runs = self.history.curve_runs.borrow_mut();
+            let run = runs.entry(plugin.to_owned()).or_default();
+            run.waiting.push((id.to_owned(), values));
+            run.last = perf_now();
+            run.waiting.len() == 1 && run.reading.is_empty()
+        };
+        if !first {
+            return;
+        }
+        let (plan, plugin) = (self.me.clone(), plugin.to_owned());
+        tokio::task::spawn_local(async move {
+            // One task a plug-in: it reads again for changes that came while it read.
+            loop {
+                let began = perf_now();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let Some(plan) = plan.upgrade() else { return };
+                    // (never while a change is under way: the DAW answers one request at a time, and the read can wait)
+                    if plan.changing.get() > 0 && perf_now() - began < CURVE_HOLD_MS {
+                        continue;
+                    }
+                    let Some(last) = plan.history.curve_runs.borrow().get(&plugin).map(|run| run.last) else { return };
+                    if perf_now() - last >= CURVE_QUIET_MS || perf_now() - began >= CURVE_WAIT_MS {
+                        break;
+                    }
+                }
+                let Some(this) = plan.upgrade() else { return };
+                let changes = {
+                    let mut runs = this.history.curve_runs.borrow_mut();
+                    let Some(run) = runs.get_mut(&plugin) else { return };
+                    run.reading = std::mem::take(&mut run.waiting);
+                    run.reading.clone()
+                };
+                let read =
+                    this.link().call("read", json!({"kind": "param", "parent": plugin, "limit": 200}), abort::timeout(CALL_MS)).await;
+                let newer = {
+                    let mut runs = this.history.curve_runs.borrow_mut();
+                    let Some(run) = runs.get_mut(&plugin) else { return };
+                    run.reading.clear();
+                    run.waiting.clone()
+                };
+                if let Ok(Ok(page)) = read {
+                    let rows: Vec<ParameterRow> =
+                        page.get("items").and_then(Value::as_array).into_iter().flatten().filter_map(parameter_row).collect();
+                    let applied = |id: &str| {
+                        this.history.entries.borrow().get(id).is_some_and(|entry| entry.borrow().record.state == ChangeState::Applied)
+                    };
+                    for (id, curve) in crate::core::picture::curves_for(curves.reader, &rows, &changes, &newer, applied) {
+                        if let Some(curve) = curve.bounded() {
+                            this.history.set_picture(&id, curve);
+                        }
+                    }
+                }
+                let mut runs = this.history.curve_runs.borrow_mut();
+                if runs.get(&plugin).is_none_or(|run| run.waiting.is_empty()) {
+                    runs.remove(&plugin);
+                    return;
+                }
+            }
+        });
+    }
+
     /// The input with this turn's short refs made long, or what to say of a short ref the turn doesn't know.
     fn lengthened(&self, input: &JsonObject) -> Result<JsonObject, String> {
         let book = self.link().book.borrow();
@@ -771,6 +894,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
 
     /// One change: previewed, applied in one named step of the DAW's undo, and kept in HISTORY.
     async fn one_change(&self, kind: &'static OwnKind, asked: JsonObject, signal: Signal) -> ChangeOutcome {
+        let _changing = Changing::new(&self.changing);
         let words = self.link().words().words;
         if self.history.changes_this_turn.get() >= 5_000 {
             return ChangeOutcome::stop("That's 5000 changes in one answer; carry on in the next one");
@@ -787,6 +911,17 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Ok(input) => input,
             Err(why) => return ChangeOutcome::error(why),
         };
+        // (M6) An audio file it brings in: its whole path on this computer, or why not, before the DAW is asked.
+        if let Some((field, extensions)) = kind.sample {
+            if let Some(path) = input.get(field).and_then(Value::as_str) {
+                match crate::integrations::shared::samples::sample_file(path, extensions) {
+                    Ok(found) => {
+                        input.insert(field.into(), found.into());
+                    }
+                    Err(why) => return ChangeOutcome::error(why),
+                }
+            }
+        }
         for (ours, theirs) in kind.wire {
             if let Some(value) = input.remove(*ours) {
                 input.insert((*theirs).into(), value);
@@ -845,7 +980,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Ok(Err(refused)) if refused.code.as_deref() == Some("uncertain") || refused.why.contains("uncertain") => {
                 self.remember(
                     kind,
-                    kind.summary(&title, None, None),
+                    kind.summary(&title, None, None, None),
                     &transaction,
                     ChangeState::Unsure,
                     Some(self.unsure_note(kind, &title, &transaction)),
@@ -870,7 +1005,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Err(_) => {
                 self.remember(
                     kind,
-                    kind.summary(&title, None, None),
+                    kind.summary(&title, None, None, None),
                     &transaction,
                     ChangeState::Unsure,
                     Some(self.unsure_note(kind, &title, &transaction)),
@@ -913,8 +1048,16 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         if skipped {
             self.link().outside_daw_undo.borrow_mut().insert(transaction.clone());
         }
-        let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
+        let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"), Some(&input));
+        let moved = match &summary.picture {
+            Some(ChangePicture::Values { values }) => values.clone(),
+            _ => vec![],
+        };
         let id = self.remember(kind, summary, &transaction, ChangeState::Applied, note.clone());
+        // (M6) A plug-in's curve, once a read of its parameters says it's an equaliser or a compressor.
+        if let Some(plugin) = preview.pointer("/target/ref").and_then(Value::as_str).filter(|_| !moved.is_empty()) {
+            self.curve_later(&id, plugin, moved);
+        }
         // No copy kept first (the saved project was too big): said with what it deleted.
         let note = match (self.not_copied.take().filter(|_| kind.deletes), note) {
             (Some(size), note) => {
@@ -1114,6 +1257,42 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     }
 }
 
+/// (M6) A plug-in's parameters a change moved, as HISTORY draws them: each the prior and the applied lists name (by
+/// their place in the plug-in's list), from and to as the raw values the DAW reads and the words it shows, with what was
+/// asked when the DAW set something else (fx_param's value, fx_params' values in their order).
+fn moved_params(prior: &Value, after: &Value, input: Option<&JsonObject>) -> Vec<PictureValue> {
+    let list = |value: &Value| value.get("params").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (was, now) = (list(prior), list(after));
+    let asks: Vec<Value> = match input {
+        Some(input) if input.get("values").is_some_and(Value::is_array) => {
+            input["values"].as_array().into_iter().flatten().map(|ask| ask.get("value").cloned().unwrap_or(Value::Null)).collect()
+        }
+        Some(input) => vec![input.get("value").cloned().unwrap_or(Value::Null)],
+        None => vec![],
+    };
+    let text = |row: &Value| row.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()).map(str::to_owned);
+    now.iter()
+        .enumerate()
+        .filter_map(|(at, row)| {
+            let name = row.get("name").and_then(Value::as_str)?.to_owned();
+            let before = was.iter().find(|old| old.get("index").is_some() && old.get("index") == row.get("index")).or_else(|| was.get(at));
+            let to_text = text(row);
+            let asked = asks.get(at).filter(|ask| !ask.is_null()).and_then(|ask| {
+                crate::core::picture::asked_apart(ask, to_text.as_deref().and_then(crate::core::picture::amount), to_text.as_deref())
+            });
+            Some(PictureValue {
+                name,
+                from: before.and_then(|old| old.get("value")).and_then(Value::as_f64),
+                to: row.get("value").and_then(Value::as_f64),
+                from_text: before.and_then(text),
+                to_text,
+                asked,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 /// The most of a saved file Kumi copies before a delete, and the copies of one project it keeps.
 const MOST_COPIED: u64 = 512 * 1024 * 1024;
 const COPIES_KEPT: usize = 5;
@@ -1198,6 +1377,24 @@ fn unsure_undo_note(profile: &DawProfile, title: &str) -> String {
         "Kumi isn't sure its undo went through ({title}): check it in {}, and change it back by hand if it's still as Kumi set it.",
         profile.words.app
     )
+}
+
+/// A row of a plug-in's parameters (the host's `param` read) as a curve reads it: a menu's has no value, and is kept
+/// for its words alone (Channel EQ's slope).
+fn parameter_row(row: &Value) -> Option<ParameterRow> {
+    let name = row.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())?.to_owned();
+    let text = row.get("text").and_then(Value::as_str).map(str::to_owned);
+    let value = row.get("value").and_then(Value::as_f64);
+    if value.is_none() && text.is_none() {
+        return None;
+    }
+    Some(ParameterRow {
+        name,
+        value: value.unwrap_or(0.0),
+        min: row.get("min").and_then(Value::as_f64).unwrap_or(0.0),
+        max: row.get("max").and_then(Value::as_f64).unwrap_or(0.0),
+        text,
+    })
 }
 
 /// The first short ref a request names that lengthening left short: one this turn doesn't know.

@@ -817,6 +817,107 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
         .await;
 }
 
+/// (M6) Logic Pro's fixed phrases run with no model call: each is one of Logic's own changes, made through Kumi's host
+/// on the project as a fresh look reads it, and lands in HISTORY in Logic's words; Kumi's undo takes each back. A phrase
+/// Logic can't run as given (a tempo past its 990 BPM, a track it hasn't) goes to the model.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_fixed_phrases_run_without_the_model_and_come_back_with_kumis_undo() {
+    use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
+    use daw_mcp_server::{host::Host, simulator::logic::LogicScript, simulator::Simulator};
+    use kumi_runtime::core::context::IntegrationContext;
+    use kumi_runtime::integrations::{
+        logic::create_logic_integration,
+        own_bridge::{Connect, OwnOptions},
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(dir.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let host = Rc::new(in_process::InProcess { host: std::sync::Arc::new(Host::new(Daw::Logic, dir.path())), id: Cell::new(0) });
+            let home = dir.path().to_path_buf();
+            let changes: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = changes.clone();
+            let integration: IntegrationFactory = Box::new(move |listener: ConnectionListener| {
+                let host = host.clone();
+                let connect: Connect = Rc::new(move |_| {
+                    let host = host.clone();
+                    async move { Ok(host as Rc<dyn kumi_runtime::mcp::client::McpEndpoint>) }.boxed_local()
+                });
+                let mut context = IntegrationContext::new(listener);
+                let into = into.clone();
+                context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+                create_logic_integration(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect), open_file: None })
+            });
+            let main = Rc::new(Recorded::default());
+            let mut options = SessionOptions::new(recording(main.clone(), None), integration, Rc::new(|_| {}));
+            options.profile = DawProfile::LOGIC;
+            options.timeout_ms = Some(20_000);
+            options.close_timeout_ms = Some(5_000);
+            let session = create_session(options).unwrap();
+            session.start().await.unwrap();
+            assert!(session.has_instant());
+            let state = |title: &str| changes.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
+            // Each phrase, the row it makes, and the project after it.
+            for (phrase, title) in [
+                ("tempo 124", "Tempo 124 BPM"),
+                ("mute keys", "Keys muted"),
+                ("solo vocal", "Vocal soloed"),
+                ("arm track 1", "Vocal armed"),
+                ("loop 2-3", "Cycle bar 2 to bar 4"),
+                ("loop off", "Cycle off"),
+                ("metronome off", "Metronome off"),
+            ] {
+                let outcome = session.instant(phrase).await.unwrap().unwrap_or_else(|| panic!("{phrase} ran"));
+                assert!(!outcome.is_error && outcome.text.contains(title), "{phrase}: {}", outcome.text);
+                assert_eq!(
+                    state(title),
+                    Some(ChangeState::Applied),
+                    "{phrase}: {:?}",
+                    changes.borrow().iter().map(|r| &r.title).collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(
+                (script.tempo(), script.track(2)["mute"].clone(), script.track(1)["solo"].clone()),
+                (124.0, json!(true), json!(true))
+            );
+            assert_eq!((script.track(1)["armed"].clone(), script.cycle(), script.metronome()), (json!(true), (false, 4.0, 12.0), false));
+            for phrase in ["tempo 87.5"] {
+                assert!(session.instant(phrase).await.unwrap().is_some_and(|outcome| !outcome.is_error), "{phrase}");
+            }
+            assert_eq!(script.tempo(), 88.0, "whole BPM, as Logic's tempo display takes it");
+            // What Logic can't take as given goes to the model.
+            for phrase in ["tempo 995", "mute guitar", "make the bass darker"] {
+                assert!(session.instant(phrase).await.unwrap().is_none(), "{phrase}");
+            }
+            assert!(main.requests.borrow().is_empty(), "no model call");
+            // Kumi's undo takes each back, newest first; none was a step of Logic's own undo.
+            for _ in 0..8 {
+                let undone = session.undo(None).await.unwrap().expect("a change to undo");
+                assert_eq!(undone.state, ChangeState::Undone, "{}", undone.title);
+            }
+            assert_eq!(
+                (script.tempo(), script.track(2)["mute"].clone(), script.track(1)["solo"].clone()),
+                (160.0, json!(false), json!(false))
+            );
+            assert_eq!((script.track(1)["armed"].clone(), script.cycle(), script.metronome()), (json!(false), (false, 0.0, 16.0), true));
+            assert!(script.undo_titles().is_empty(), "no step of Logic's own undo: {:?}", script.undo_titles());
+            // (M6) The session's profile names notes as the open project does: Logic's middle C, as its row says it.
+            assert_eq!(session.profile().map(|profile| profile.note_name(60)).as_deref(), Some("C3"));
+            script.set_middle_c(4);
+            session.refresh().await.unwrap();
+            assert_eq!(session.profile().map(|profile| profile.note_name(60)).as_deref(), Some("C4"), "the producer chose C4");
+            assert_eq!(session.profile().map(|profile| profile.words.app), Some("Logic Pro"));
+            session.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 fn floor(text: &str, mut at: usize) -> usize {
     while !text.is_char_boundary(at) {
         at -= 1;

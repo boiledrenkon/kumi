@@ -181,7 +181,7 @@ struct PluginSpec {
     settings: &'static [(&'static str, &'static [(&'static str, f64)])],
 }
 
-static PLUGINS: [PluginSpec; 14] = [
+static PLUGINS: [PluginSpec; 15] = [
     PluginSpec {
         name: "Gain",
         instrument: false,
@@ -316,6 +316,19 @@ static PLUGINS: [PluginSpec; 14] = [
         ],
         settings: &[],
     },
+    // (M6) The Sampler Logic's Convert Regions to New Sampler Track loads (its Controls View is the simulator's).
+    PluginSpec {
+        name: "Sampler",
+        instrument: true,
+        params: &[
+            slider("Volume", 1080.0, db(-96.0, 0.1), 960.0),
+            slider("Cutoff", 100.0, PERCENT, 100.0),
+            slider("Resonance", 100.0, PERCENT, 0.0),
+            slider("Attack", 10000.0, MS, 0.0),
+            slider("Release", 10000.0, MS, 50.0),
+        ],
+        settings: &[],
+    },
     PluginSpec {
         name: "Alchemy",
         instrument: true,
@@ -386,8 +399,9 @@ impl PatchSpec {
 /// MIDI file.
 pub(super) const KEYS_PATCH: &str = "Piano/Studio Grand";
 
-/// The kinds the bridge reads (`read.rs`'s `KINDS`).
-const READ_KINDS: [&str; 11] = ["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"];
+/// The kinds the bridge reads (`read.rs`'s `KINDS`), with (M6) the projects Logic opened lately.
+const READ_KINDS: [&str; 12] =
+    ["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation", "recent"];
 
 /// The parameters the simulated Track Automation Event List names (Volume is 7, as the bridge's scenes read it; Balance
 /// 8 and Pan 10 are the simulator's).
@@ -819,6 +833,12 @@ pub(super) fn recorded_channel(plugin_rows: &[Value], name: &str) -> Channel {
 /// The Smart Controls a recorded track shows: its patch's (none for a track that plays no patch).
 pub(super) fn recorded_smart(channel: &Channel) -> Vec<Smart> {
     PATCHES.iter().find(|patch| patch.name() == channel.patch).map(smart_of).unwrap_or_default()
+}
+
+/// (M6) The strip of the software instrument track Logic makes for a sample: the Sampler alone, its setting button
+/// naming the instrument.
+pub(super) fn sampler_channel(name: &str) -> Channel {
+    Channel { plugins: vec![Plugin::named("Sampler")], sends: vec![], patch: name.into() }
 }
 
 /// A software instrument track Logic makes for a MIDI file it imports: its default patch's strip and Smart Controls.
@@ -1412,7 +1432,7 @@ impl State {
     }
 
     /// Every plug-in row: the tracks' strips in order, then the outputs'.
-    fn plugin_rows(&self) -> Vec<Value> {
+    pub(super) fn plugin_rows(&self) -> Vec<Value> {
         let owners = (0..self.tracks.len()).map(Owner::Track).chain((0..self.outputs.len()).map(Owner::Output));
         owners
             .flat_map(|owner| (1..=self.channel(owner).plugins.len()).map(move |slot| (owner, slot)))
@@ -1420,7 +1440,7 @@ impl State {
             .collect()
     }
 
-    fn send_rows(&self) -> Vec<Value> {
+    pub(super) fn send_rows(&self) -> Vec<Value> {
         (0..self.tracks.len())
             .flat_map(|track| (1..=self.tracks[track].channel.sends.len()).map(move |slot| (track, slot)))
             .map(|(track, slot)| self.send_row(track, slot))

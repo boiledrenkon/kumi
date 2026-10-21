@@ -547,6 +547,15 @@ impl Library {
         write_json(&file, &ordered.into_iter().collect::<Vec<_>>()).await.map_err(io_error)?;
         Ok(true)
     }
+    /// (M6) The projects the DAW's bridge says it opened lately (Logic Pro's File > Open Recent: the ones whose place it
+    /// knew), kept for the next learning run, which counts them and looks through the folders they're in. Written only
+    /// when they change.
+    pub async fn remember_recent(&self, daw: crate::core::daw::DawId, paths: Vec<String>) {
+        if plan::remembered_recent(&self.dir, daw).await == paths {
+            return;
+        }
+        let _ = write_json(Path::new(&plan::recent_file(&self.dir, daw)), &paths).await;
+    }
     pub fn tools(self: &Rc<Self>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
         self.tools_for(&DawProfile::ABLETON, options)
     }

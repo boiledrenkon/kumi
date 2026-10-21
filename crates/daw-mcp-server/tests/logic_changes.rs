@@ -1022,7 +1022,8 @@ async fn the_cycle_the_tempo_and_signature_lists_and_track_stacks_change_and_com
     assert!(lab.script.undo_titles().is_empty(), "the cycle makes no step");
 
     // The Tempo List: an event made (Insert Tempo, then its Tempo cell's Value Change), changed to a fraction of a BPM
-    // and deleted, each put back; the project's first tempo changed, never deleted. The tempo row lists no events.
+    // and deleted, each put back; the project's first tempo changed, never deleted. (M6) The tempo row lists every
+    // event of the Tempo List, the project's tempo at the first bar first.
     let (tempo, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 128}), "a3").await;
     assert_eq!(
         (tempo["prior"].clone(), tempo["target"].clone()),
@@ -1034,7 +1035,8 @@ async fn the_cycle_the_tempo_and_signature_lists_and_track_stacks_change_and_com
     );
     assert_eq!(lab.script.undo_titles(), ["Undo Insert Tempo", "Undo Value Change"]);
     let (read, _) = lab.tool("read", json!({"kind": "tempo"})).await;
-    assert!(read["items"][0].get("tempos").is_none(), "{read}");
+    let at = |bar: u32| json!({"bar": bar, "beat": 1, "division": 1, "tick": 1});
+    assert_eq!(read["items"][0]["tempos"], json!([{"bpm": 160.0, "position": at(1)}, {"bpm": 128.0, "position": at(9)}]), "{read}");
     let (changed, applied) = lab.make("tempo-marker-set", json!({"positionBeats": 32, "bpm": 100.5}), "a4").await;
     assert_eq!(
         (applied["applied"].clone(), applied["display"]["title"].clone(), applied["undo"]["title"].clone()),
@@ -1861,5 +1863,165 @@ async fn a_bounce_and_an_export_write_audio_files_and_change_nothing() {
     assert_eq!(again["files"][0]["name"], "02.wav", "never over a file");
     let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
     assert_eq!(released["released"], 0, "nothing is kept for undo");
+    lab.simulator.stop();
+}
+
+/// A second of silence as a 16-bit mono WAV file at 44.1 kHz, where the test names.
+fn tone(path: &std::path::Path) {
+    let (rate, frames) = (44_100u32, 44_100u32);
+    let data = frames * 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    bytes.resize(bytes.len() + data as usize, 0);
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// (M6) The metronome, as the bridge's `change-metronome-set` scene makes it: the control bar's click, no step of
+/// Logic's undo, unchanged when already as asked, put back by value unless the producer turned it since. A sample into
+/// the Sampler, as its `change-sample-load` scene does: Quick Sampler, a file that isn't there and a track that isn't
+/// an audio track refused in the bridge's words; the file imported onto Vocal at bar 3 and converted into a new Sampler
+/// track below it (the epoch moving twice), Logic's two steps named; taken back through Logic's own undo, both steps.
+#[tokio::test]
+async fn the_metronome_and_a_sample_loaded_into_a_sampler_change_and_come_back() {
+    let mut lab = Lab::start().await;
+    assert!(lab.script.metronome(), "Scratch's click is on, as recorded");
+    let (off, applied) = lab.make("metronome-set", json!({"on": false}), "a1").await;
+    assert_eq!(
+        (off["target"].clone(), off["prior"].clone(), off["display"]["title"].clone()),
+        (json!({"ref": null, "kind": "project"}), json!({"on": true}), json!("Metronome off"))
+    );
+    assert_eq!((applied["applied"].clone(), applied["undo"]["entry"].clone()), (json!({"on": false}), json!(false)));
+    assert!(!lab.script.metronome() && lab.script.undo_titles().is_empty(), "no step of Logic's undo");
+    let again = lab.preview("metronome-set", json!({"on": false})).await;
+    assert_eq!(again["display"]["unchanged"], true, "already off: no step and no row");
+    let (refused, _) = lab.try_preview("metronome-set", json!({"on": "yes"})).await;
+    assert_eq!(refused["code"], "bad-params");
+    let (back, _) = lab.undo(&off, "u1", false).await;
+    assert_eq!((back["restored"].clone(), back["display"]["title"].clone()), (json!({"on": true}), json!("Metronome on (put back)")));
+    assert!(lab.script.metronome());
+    // The producer turned it back on by hand after Kumi turned it off: Kumi's undo finds it as it was, and writes nothing.
+    let (off, _) = lab.make("metronome-set", json!({"on": false}), "a2").await;
+    lab.script.set_metronome(true);
+    let (back, is_error) = lab.undo(&off, "u2", false).await;
+    assert!(!is_error && back["display"]["before"] == back["display"]["after"], "{back}");
+    assert!(lab.script.metronome());
+
+    let files = tempfile::tempdir().unwrap();
+    let file = files.path().join("kumi-tone.wav");
+    tone(&file);
+    let file = file.to_string_lossy().into_owned();
+    for (input, words) in [
+        (json!({"kind": "quick-sampler", "file": file}), "Logic Pro's bridge can't load a sample into Quick Sampler"),
+        (json!({"kind": "sampler", "file": format!("{file}.gone.wav")}), "isn't there, or Kumi can't see it"),
+        (json!({"kind": "sampler", "file": file, "ref": "1:track:2"}), "“Keys” isn't an audio track"),
+        (json!({"kind": "sampler", "file": "kumi-tone.wav"}), "file: the whole path of an audio file"),
+    ] {
+        let (refused, is_error) = lab.try_preview("sample-load", input.clone()).await;
+        assert!(is_error && refused["code"] == "bad-params" && refused_with(&(refused.clone(), true), words), "{input}: {refused}");
+    }
+    let input = json!({"kind": "sampler", "file": file, "ref": "1:track:1", "positionBeats": 8});
+    let (load, applied) = lab.make("sample-load", input, "a3").await;
+    assert_eq!(
+        (load["target"].clone(), load["prior"].clone(), load["display"]["title"].clone(), load["display"]["track"].clone()),
+        (
+            json!({"ref": "1:track:1", "kind": "track"}),
+            json!({"tracks": 2, "regions": 1}),
+            json!("Loaded “kumi-tone” into a new Sampler track"),
+            json!("Vocal")
+        )
+    );
+    assert_eq!(
+        (applied["applied"].clone(), applied["created"].clone(), applied["undo"]["title"].clone(), applied["undo"]["entry"].clone()),
+        (
+            json!({"file": file, "kind": "sampler", "track": 2, "name": "kumi-tone", "instrument": "Sampler", "startBeats": 8.0, "endBeats": 12.0, "sourceTrack": 1, "answered": []}),
+            json!({"ref": "3:track:2", "kind": "track", "region": "3:region:2", "source": "3:region:1"}),
+            json!("Undo Convert Regions to New Sampler Track"),
+            json!(true)
+        )
+    );
+    assert_eq!(lab.script.undo_titles(), ["Undo Insert", "Undo Convert Regions to New Sampler Track"]);
+    assert_eq!(
+        (lab.script.epoch(), lab.script.track(2)["name"].clone(), lab.script.track(2)["kind"].clone()),
+        (3, json!("kumi-tone"), json!("instrument"))
+    );
+    assert_eq!(lab.script.plugins("track:2"), [("Sampler".to_string(), false)]);
+    let (regions, _) = lab.tool("read", json!({"kind": "region"})).await;
+    let shown: Vec<(Value, Value, Value, Value)> = regions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["name"].clone(), row["trackRef"].clone(), row["startBeats"].clone(), row["endBeats"].clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (json!("kumi-tone, muted"), json!("3:track:1"), json!(8.0), json!(10.666667)),
+            (json!("kumi-tone"), json!("3:track:2"), json!(8.0), json!(12.0)),
+            (json!("Keys"), json!("3:track:3"), json!(0.0), json!(16.0)),
+        ],
+        "a second at 160 BPM, and its trigger a bar long"
+    );
+    let (back, is_error) = lab.undo(&load, "u3", false).await;
+    assert!(!is_error, "{back}");
+    assert_eq!(
+        (back["restored"].clone(), back["display"]["title"].clone()),
+        (
+            json!({"deleted": "3:track:2", "pressed": ["Undo Convert Regions to New Sampler Track", "Undo Insert"]}),
+            json!("“kumi-tone” taken back")
+        )
+    );
+    assert_eq!((lab.script.track_count(), lab.script.regions().len(), lab.script.undo_titles().len()), (2, 1, 0));
+    lab.simulator.stop();
+}
+
+/// (M6) The rows the bridge's M6 reads add: the project's middle C (the producer's setting), the Tempo List's events,
+/// the projects Logic opened lately, and every row of the kinds a catch-up reads in one bulk read, each kind's exactly
+/// what `read` pages.
+#[tokio::test]
+async fn middle_c_the_tempo_list_the_recent_projects_and_the_bulk_read() {
+    let mut lab = Lab::start().await;
+    let (project, _) = lab.tool("read", json!({"kind": "project"})).await;
+    assert_eq!(project["items"][0]["middleC"], 3, "Logic's default, as recorded");
+    lab.script.set_middle_c(4);
+    let (project, _) = lab.tool("read", json!({"kind": "project"})).await;
+    assert_eq!(project["items"][0]["middleC"], 4);
+    let (recent, is_error) = lab.tool("read", json!({"kind": "recent"})).await;
+    assert!(!is_error, "{recent}");
+    assert_eq!(
+        recent["items"],
+        json!([
+            {"index": 1, "name": "Scratch", "open": true, "path": "/Users/me/Music/Logic/Scratch.logicx"},
+            {"index": 2, "name": "Night Drive", "open": false, "path": "/Users/me/Projects/Night Drive.logicx"},
+            {"index": 3, "name": "Old Demo", "open": false, "path": null},
+        ])
+    );
+    let kinds = json!(["project", "track", "region", "plugin", "send", "marker", "tempo"]);
+    let (bulk, is_error) = lab.tool("snapshot", json!({"rows": kinds})).await;
+    assert!(!is_error && bulk.get("truncated").is_none(), "{bulk}");
+    for kind in kinds.as_array().unwrap() {
+        let kind = kind.as_str().unwrap();
+        let (paged, _) = lab.tool("read", json!({"kind": kind, "limit": 200})).await;
+        assert_eq!((&bulk["rows"][kind], &bulk["totals"][kind]), (&paged["items"], &paged["total"]), "{kind}");
+    }
+    let (cut, _) = lab.tool("snapshot", json!({"rows": ["track"], "limit": 1})).await;
+    assert_eq!((cut["rows"]["track"].as_array().map(Vec::len), cut["truncated"].clone()), (Some(1), json!(["track"])));
+    let (refused, is_error) = lab.tool("snapshot", json!({"rows": ["note"]})).await;
+    assert!(
+        is_error && refused["code"] == "bad-params" && refused_with(&(refused.clone(), true), "note is read with read, under its parent"),
+        "{refused}"
+    );
+    let (plain, _) = lab.tool("snapshot", json!({})).await;
+    assert!(plain["tracks"].is_array() && plain.get("rows").is_none(), "without rows, the one screen as before");
     lab.simulator.stop();
 }

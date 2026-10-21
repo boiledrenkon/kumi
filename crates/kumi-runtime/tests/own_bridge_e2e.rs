@@ -1848,3 +1848,251 @@ async fn logics_listening_hears_a_pass_per_track_through_kumis_host_and_says_why
         })
         .await;
 }
+
+/// A second of silence as a 16-bit mono WAV file at 44.1 kHz.
+fn one_second_wav(path: &std::path::Path) {
+    let data: u32 = 88_200;
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    for part in [16u32.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec()] {
+        bytes.extend_from_slice(&part);
+    }
+    for part in
+        [44_100u32.to_le_bytes().to_vec(), 88_200u32.to_le_bytes().to_vec(), 2u16.to_le_bytes().to_vec(), 16u16.to_le_bytes().to_vec()]
+    {
+        bytes.extend_from_slice(&part);
+    }
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    bytes.resize(bytes.len() + data as usize, 0);
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// (M6) The metronome and a sample into the Sampler through Kumi's host into HISTORY: the click turned off (no step of
+/// Logic's undo, which its row says) and back by Kumi's undo; a sample found on this computer first (one that isn't
+/// there refused in Kumi's words before Logic Pro is asked), loaded onto a new Sampler track whose ref comes back
+/// short, and taken away again through Logic's own undo.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_m6_kinds_go_through_kumis_host_the_metronome_and_a_sample_into_the_sampler() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let row = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).cloned();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            let vocal = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"][0]["ref"].as_str().unwrap().to_owned();
+            let plan = tool(&observed, "make_changes");
+            for words in ["metronome_set:", "sample_load:"] {
+                assert!(plan.description().contains(words), "{words}: {}", plan.description());
+            }
+
+            // The click off: a row whose note says Logic's own undo doesn't take it back; Kumi's undo does.
+            let off = plan
+                .execute(input(json!({"steps": [{"tool": "metronome_set", "input": {"on": false}}], "final": true})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!off.is_error, "{}", off.text);
+            let made = row("Metronome off").expect("a row");
+            assert_eq!(made.note.as_deref(), Some("Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can."));
+            assert!(!script.metronome() && script.undo_titles().is_empty());
+            let back = tool(&observed, "undo_change").execute(input(json!({"change": made.id})), Signal::new()).await.unwrap();
+            assert!(!back.is_error, "{}", back.text);
+            assert_eq!((row("Metronome off").unwrap().state, script.metronome()), (ChangeState::Undone, true));
+
+            // A sample that isn't there: Kumi says so, and Logic Pro isn't asked.
+            let files = tempfile::tempdir().unwrap();
+            let previews = || script.asked().iter().filter(|(method, _)| method == "change_preview").count();
+            let before = previews();
+            let missing = files.path().join("gone.wav").to_string_lossy().into_owned();
+            let refused = plan
+                .execute(input(json!({"steps": [{"tool": "sample_load", "input": {"kind": "sampler", "file": missing}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(refused.is_error && refused.text.contains("There's no audio file at"), "{}", refused.text);
+            assert_eq!(previews(), before, "refused before Logic Pro is asked");
+
+            // A second of sound loaded on Vocal at bar 3: a new Sampler track below it, its ref short; taken away again.
+            let file = files.path().join("kumi-tone.wav");
+            one_second_wav(&file);
+            let steps = json!({"steps": [{"tool": "sample_load", "input": {"kind": "sampler", "file": file.to_string_lossy(), "ref": vocal, "positionBeats": 8}}]});
+            let loaded = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!loaded.is_error, "{}", loaded.text);
+            let made = serde_json::from_str::<Value>(&loaded.text).unwrap()["done"][0]["ref"].as_str().unwrap().to_owned();
+            assert!(made.starts_with("track:"), "{}", loaded.text);
+            assert_eq!((script.track_count(), script.plugins("track:2")), (3, vec![("Sampler".to_string(), false)]));
+            let load = row("Loaded “kumi-tone” into a new Sampler track").expect("a row");
+            assert_eq!(
+                load.note.as_deref(),
+                Some("Logic Pro left the audio region it converted muted on “Vocal” and copied the file into the project's folder.")
+            );
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let gone = tool(&look, "undo_change").execute(input(json!({"change": load.id})), Signal::new()).await.unwrap();
+            assert!(!gone.is_error, "{}", gone.text);
+            assert_eq!(
+                (row("Loaded “kumi-tone” into a new Sampler track").unwrap().state, script.track_count(), script.regions().len()),
+                (ChangeState::Undone, 2, 1)
+            );
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (M6) Once connected, Logic's integration reads the projects Logic opened lately (its bridge's File > Open Recent)
+/// and tells whoever keeps them (the library) the ones whose place the bridge knew, once.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_recent_projects_are_read_once_connected_and_told_with_their_places() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<Vec<String>>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_recent_projects = Some(Rc::new(move |paths| into.borrow_mut().push(paths)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            for _ in 0..200 {
+                if !told.borrow().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                *told.borrow(),
+                [vec!["/Users/me/Music/Logic/Scratch.logicx".to_string(), "/Users/me/Projects/Night Drive.logicx".to_string()]],
+                "the open project's place from its window, another's from Spotlight; one Spotlight found twice has none"
+            );
+            logic.observe(Signal::new(), None).await.unwrap();
+            logic.start(Signal::new()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(told.borrow().len(), 1, "read once");
+            let reads = script.asked().iter().filter(|(method, params)| method == "read" && params["kind"] == "recent").count();
+            assert_eq!(reads, 1);
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (M6) A plug-in's parameter change in HISTORY, as Live's are drawn: the values it moved at once (as Logic shows them),
+/// then Channel EQ's curve, or the Compressor's, from one read of the plug-in once its changes settle. A parameter no
+/// curve has (the Piano's volume) draws its values alone, with no read.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_channel_eq_and_compressor_changes_draw_their_curves_in_history() {
+    use kumi_runtime::core::contracts::ChangePicture;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            let keys = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"][1]["ref"].as_str().unwrap().to_owned();
+            let read =
+                tool(&observed, "logic_read").execute(input(json!({"kind": "plugin", "parent": keys})), Signal::new()).await.unwrap();
+            let rows = serde_json::from_str::<Value>(&read.text).unwrap()["items"].clone();
+            let plugin =
+                |name: &str| rows.as_array().unwrap().iter().find(|row| row["name"] == name).unwrap()["ref"].as_str().unwrap().to_owned();
+            let (piano, eq, comp) = (plugin("Piano"), plugin("Channel EQ"), plugin("Compressor"));
+            let latest = |id: &str| told.borrow().iter().rev().find(|record| record.id == id).cloned().unwrap();
+            let param_reads = || script.asked().iter().filter(|(method, params)| method == "read" && params["kind"] == "param").count();
+            let settled = |id: String| {
+                let latest = latest.clone();
+                async move {
+                    for _ in 0..60 {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        if !matches!(latest(&id).picture, Some(ChangePicture::Values { .. })) {
+                            break;
+                        }
+                    }
+                    latest(&id)
+                }
+            };
+
+            // Channel EQ: two gains in one change, their values at once, then the bands before and after.
+            let values = json!([{"param": "Low Shelf Gain", "value": 3}, {"param": "Peak 1 Gain", "value": -2}]);
+            let done = tool(&observed, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "fx_params", "input": {"ref": eq, "values": values}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let id = told.borrow().last().unwrap().id.clone();
+            let Some(ChangePicture::Values { values }) = latest(&id).picture else { panic!("{:?}", latest(&id)) };
+            let shown: Vec<(&str, Option<&str>, Option<&str>)> =
+                values.iter().map(|value| (value.name.as_str(), value.from_text.as_deref(), value.to_text.as_deref())).collect();
+            assert_eq!(shown, [("Low Shelf Gain", Some("0.0 dB"), Some("+3.0 dB")), ("Peak 1 Gain", Some("0.0 dB"), Some("-2.0 dB"))]);
+            let Some(ChangePicture::Eq { before, after, values }) = settled(id).await.picture else { panic!("no curve") };
+            assert_eq!((before[1].gain_db, after[1].gain_db, before[2].gain_db, after[2].gain_db, values.len()), (0.0, 3.0, 0.0, -2.0, 2));
+            assert_eq!(param_reads(), 1, "one read of the plug-in for its curve");
+
+            // The Compressor's threshold: its static curve, before and after.
+            let done = tool(&observed, "fx_param")
+                .execute(input(json!({"ref": comp, "param": "Threshold", "value": -30})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let id = told.borrow().last().unwrap().id.clone();
+            let Some(ChangePicture::Dynamics { before, after, .. }) = settled(id).await.picture else { panic!("no curve") };
+            assert_eq!((before.threshold_db, after.threshold_db, after.ratio), (-20.0, -30.0, 2.0));
+
+            // The Piano's volume: its values alone, and no read for a curve no instrument has.
+            let reads = param_reads();
+            let done = tool(&observed, "fx_param")
+                .execute(input(json!({"ref": piano, "param": "Main Volume", "value": -6})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let id = told.borrow().last().unwrap().id.clone();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert!(matches!(latest(&id).picture, Some(ChangePicture::Values { .. })), "{:?}", latest(&id).picture);
+            assert_eq!(param_reads(), reads);
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

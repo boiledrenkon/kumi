@@ -36,6 +36,8 @@ pub const DAW: OwnDaw = OwnDaw {
     open_project: None,
     listening: None,
     project: None,
+    instant: None,
+    curves: None,
 };
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),

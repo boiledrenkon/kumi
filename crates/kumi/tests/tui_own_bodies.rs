@@ -221,6 +221,29 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     h.close().await;
 });
 
+// (M6) FOCUS's keyzones name notes as the session's profile does (the octave the open project names middle C in, as
+// Logic's project row says it), not as the DAW's static profile.
+case!(keyzones_name_notes_in_the_sessions_octave, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    *c.profile.borrow_mut() = Some(kumi_runtime::core::daw::DawProfile::RENOISE.with_middle_c(Some(4)));
+    *c.own.borrow_mut() = Some(FocusBody::Keyzones(KeyzoneMap {
+        item_ref: "3:instrument:1".into(),
+        name: "Drumkit".into(),
+        zones: vec![Keyzone { sample: "Kick".into(), notes: (60, 60), velocities: (0, 127), base: 60, ..Default::default() }],
+        ..Default::default()
+    }));
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let track = json!({"name":"Bass","kind":"sequencer"});
+    let instrument = json!({"track":track,"trackRef":"3:track:2","mainView":{"kind":"instrument","label":"Instrument"},"item":{"kind":"sample","itemRef":"3:instrument:1","name":"Drumkit"}});
+    h.emit(json!({"type":"focus","focus":instrument}));
+    shows(&h, "FOCUS · Keyzones").await;
+    h.has("A C4        Kick");
+    h.close().await;
+});
+
 /// Renoise can't say which pane has the keyboard, so FOCUS follows what changes: the pattern under the DSP frame, the
 /// DSP chain for another device on the same track, the matrix when the producer moves through the sequence (never
 /// when playback does), and the pattern again on another track.

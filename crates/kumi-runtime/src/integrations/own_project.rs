@@ -1,6 +1,7 @@
 //! Catching up on a saved project, and watching the producer work, for a DAW whose bridge is Kumi's own: the project's
-//! snapshot, read whole through Kumi's host (`read`, a page at a time, every page of one epoch; a snapshot an edit tore
-//! is read again), kept as the baseline in the project store under the project's place, and compared with the project
+//! snapshot, read whole through Kumi's host (in one request where the bridge reads every row of the kinds at once,
+//! `snapshot {rows}`; else `read`, a page at a time, every page of one epoch; a snapshot an edit tore is read again),
+//! kept as the baseline in the project store under the project's place, and compared with the project
 //! as it is when it's opened or switched to: what changed goes to the app (`on_catch_up`) and into the model's context.
 //! The baseline is saved again every five minutes and soon after Kumi's own changes, as Live's is. `watch_me` compares
 //! the project before and after the producer works. What a snapshot holds and how two differ is the DAW's
@@ -58,6 +59,10 @@ pub struct OwnProject {
     pub changes: fn(&JsonObject, &JsonObject, bool) -> Vec<ProjectChange>,
     /// watch_me's description, in the DAW's words.
     pub watch_description: &'static str,
+    /// (M6) Whether the DAW's bridge reads every row of the kinds in one request, from one look at the project
+    /// (`snapshot {rows}`: Logic's, which shows its Mixer and List Editors once rather than once a kind). The snapshot is
+    /// read so, and a page at a time when it can't be (an older bridge, a kind past what one answer holds).
+    pub bulk: bool,
 }
 
 /// The tool that watches the producer work.
@@ -125,6 +130,11 @@ pub async fn read_snapshot(endpoint: &Rc<dyn McpEndpoint>, project: &OwnProject,
 }
 
 async fn read_once(endpoint: &Rc<dyn McpEndpoint>, project: &OwnProject, signal: &Signal) -> Result<Read, Torn> {
+    if project.bulk {
+        if let Some(read) = read_bulk(endpoint, project, signal).await? {
+            return Ok(read);
+        }
+    }
     let mut epoch: Option<String> = None;
     let mut kinds: Vec<KindRows> = vec![];
     let mut pages = 0;
@@ -169,6 +179,34 @@ async fn read_once(endpoint: &Rc<dyn McpEndpoint>, project: &OwnProject, signal:
     let project_row = kinds.first().and_then(|(_, rows)| rows.first().cloned()).unwrap_or(Value::Null);
     let snapshot = (project.snapshot)(&kinds).map_err(|why| Torn::Not(Unread::Later(why)))?;
     Ok(Read { snapshot, project: project_row, pages, rows })
+}
+
+/// (M6) The snapshot in one request (`snapshot {rows}`): every row of each kind from one look at the project, in one
+/// epoch. None when it can't be read so, and pages are read instead: a bridge that answers the one screen (an older one,
+/// which doesn't know `rows`), a refusal, or a kind past what one answer holds (`truncated`, or the host's bound).
+async fn read_bulk(endpoint: &Rc<dyn McpEndpoint>, project: &OwnProject, signal: &Signal) -> Result<Option<Read>, Torn> {
+    let mut args = JsonObject::new();
+    args.insert("rows".into(), json!(project.reads));
+    let bounded = abort::any([signal.clone(), abort::timeout(CALL_MS)]);
+    let result = endpoint.call("snapshot", args, bounded).await.map_err(|error| Torn::Not(Unread::Later(error.to_string())))?;
+    let answer = match answer_of(&result) {
+        Ok(answer) => answer,
+        Err(Refused { code: Some(code), why, .. }) if matches!(code.as_str(), "stale" | "changed" | "epoch-changed") => {
+            return Err(Torn::Again(why))
+        }
+        Err(Refused { busy: true, why, .. }) => return Err(Torn::Not(Unread::Later(why))),
+        Err(_) => return Ok(None),
+    };
+    let Some(rows) = answer.get("rows").and_then(Value::as_object) else { return Ok(None) };
+    if answer.get("truncated").and_then(Value::as_array).is_some_and(|kinds| !kinds.is_empty()) {
+        return Ok(None);
+    }
+    let kinds: Vec<KindRows> =
+        project.reads.iter().map(|kind| (*kind, rows.get(*kind).and_then(Value::as_array).cloned().unwrap_or_default())).collect();
+    let count = kinds.iter().map(|(_, rows)| rows.len()).sum();
+    let project_row = kinds.first().and_then(|(_, rows)| rows.first().cloned()).unwrap_or(Value::Null);
+    let snapshot = (project.snapshot)(&kinds).map_err(|why| Torn::Not(Unread::Later(why)))?;
+    Ok(Some(Read { snapshot, project: project_row, pages: 1, rows: count }))
 }
 
 /// A snapshot's fingerprint: two alike are the same project as it was.
@@ -650,6 +688,7 @@ mod tests {
         snapshot: names,
         changes: added,
         watch_description: "Watch.",
+        bulk: false,
     };
     const FAKE: DawProfile = DawProfile {
         id: Some(DawId::Reaper),

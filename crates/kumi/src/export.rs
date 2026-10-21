@@ -30,8 +30,18 @@ use crate::tui::tty::TtyOutput;
 
 /// The most `/export` copies through the terminal; a longer conversation is saved as a file instead.
 pub const COPY_MOST: usize = 64 * 1024;
-/// The DAW's words in what Kumi's commands export: every conversation kept today is about a Live Set.
+/// The DAW's words in what Kumi's commands export for a conversation Live's place holds (or an imported one): Live's.
 pub const WORDS: (&str, &str) = ("Live", "Set");
+
+/// The DAW's words for a kept conversation's place, as an export says them: what the producer calls the DAW and a place
+/// in it (Logic Pro's, REAPER's, Renoise's for theirs), as the session's own export takes them from its DAW; Live's for
+/// Live's places and imported conversations.
+pub fn words_of(place: &str) -> (&'static str, &'static str) {
+    kumi_runtime::core::place::Place::parse(place)
+        .and_then(|place| place.daw())
+        .and_then(kumi_runtime::integrations::profile)
+        .map_or(WORDS, |profile| profile.word_pair())
+}
 /// A picture's size on the page, in its own units: wide, as the terminal draws it.
 const WIDTH: f64 = 400.;
 const HEIGHT: f64 = 160.;
@@ -438,8 +448,14 @@ pub async fn export_command(
     };
     let redact = if request.raw { None } else { Some(redactor_for(env).await) };
     let title = row.title();
-    let source =
-        Source { id: &row.id, conversation: &conversation, title: &title, place: row.set.as_deref(), words: WORDS, created: row.created };
+    let source = Source {
+        id: &row.id,
+        conversation: &conversation,
+        title: &title,
+        place: row.set.as_deref(),
+        words: words_of(&row.place),
+        created: row.created,
+    };
     let text = render(request.format, &source, request.full, redact.as_deref(), local_zone(), now_ms());
     // The file's name comes from its title, so it's redacted too.
     let name = file_name(&redact.as_deref().map_or_else(|| title.clone(), |redact| redact(&title)), &row.id, request.format);

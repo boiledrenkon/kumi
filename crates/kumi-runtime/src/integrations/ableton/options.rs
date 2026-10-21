@@ -141,6 +141,8 @@ impl AbletonOptions {
             on_look_again: None,
             change_timeout_ms: self.change_timeout_ms,
             on_catch_up: self.on_catch_up.clone(),
+            // (Live's library reads its recent Sets from its own log)
+            on_recent_projects: None,
             project_store: self.project_store.clone(),
             reconnect_interval_ms: self.reconnect_interval_ms,
             restore_file: self.restore_file.clone(),

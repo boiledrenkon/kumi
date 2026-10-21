@@ -40,6 +40,9 @@ pub struct IntegrationContext {
     pub on_look_again: Option<Rc<dyn Fn()>>,
     pub change_timeout_ms: Option<u64>,
     pub on_catch_up: Option<Rc<dyn Fn(CatchUp)>>,
+    /// (M6) Told the projects the DAW opened lately, as its bridge reads them once connected (Logic's File > Open Recent,
+    /// the ones whose place it knew), for the library to learn.
+    pub on_recent_projects: Option<Rc<dyn Fn(Vec<String>)>>,
     /// Where saved projects' baselines are kept (the session's store, each project under its place), for a DAW Kumi
     /// catches up on; None keeps none.
     pub project_store: Option<Rc<dyn ProjectStore>>,
@@ -73,6 +76,7 @@ impl IntegrationContext {
             on_look_again: None,
             change_timeout_ms: None,
             on_catch_up: None,
+            on_recent_projects: None,
             project_store: None,
             reconnect_interval_ms: None,
             restore_file: None,

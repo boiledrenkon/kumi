@@ -64,8 +64,16 @@ impl ProjectRules for LogicRules {
 const WATCH_DESCRIPTION: &str = "Learn a routine the producer does by hand in Logic Pro: action start just before they do it (Kumi notes the project as it is; nothing in Logic Pro changes), then action stop when they say they're done. Stop gives what changed, each with its track: tracks added, renamed, moved or deleted (with their kind and channel strip: volume, pan, mute, solo, output), regions added, moved, resized, renamed or deleted, plug-ins inserted, removed, moved or bypassed (their settings aren't compared yet), markers, tempo events, and the project's tempo, time signature and key. Save it at once with save_recipe as the make_changes steps that would redo it, with $blanks for what differs each time (the track, say), leaving out anything clearly unrelated. Then say in a few words what the recipe does. The producer can ask you to change it.";
 
 /// What Logic gives the shared integration for catching up and watch_me.
-pub const PROJECT: OwnProject =
-    OwnProject { rules: &LogicRules, words: &LOGIC_WORDS, reads: READS, snapshot, changes, watch_description: WATCH_DESCRIPTION };
+pub const PROJECT: OwnProject = OwnProject {
+    rules: &LogicRules,
+    words: &LOGIC_WORDS,
+    reads: READS,
+    snapshot,
+    changes,
+    watch_description: WATCH_DESCRIPTION,
+    // (M6) The bridge's bulk read: one look at the project, its Mixer and List Editors shown once.
+    bulk: true,
+};
 
 // ----- the snapshot -----
 
@@ -136,6 +144,10 @@ fn snapshot(rows: &[KindRows]) -> Result<JsonObject, String> {
             if flag(row, "stack") {
                 track["stack"] = json!(true);
             }
+            // (M6) A strip the Mixer hadn't drawn when it was read: its routing and plug-ins weren't read, not empty.
+            if flag(row, "stripUnread") {
+                track["stripUnread"] = json!(true);
+            }
             track
         })
         .collect();
@@ -202,9 +214,22 @@ fn snapshot(rows: &[KindRows]) -> Result<JsonObject, String> {
             .push(json!({"position": start_position(), "time": text(project, "timeSignature"), "key": text(project, "keySignature")}));
     }
     signatures.sort_by_key(|event| place_of(&event["position"]));
+    // (M6) The Stereo Out's plug-ins: an output strip no track has (its rows' trackRef is `<epoch>:output:1`), the
+    // project's own, in slot order.
+    let mut stereo_out: Vec<Value> = of("plugin")
+        .iter()
+        .filter(|row| row.get("trackRef").and_then(Value::as_str).is_some_and(|reference| reference.split(':').nth(1) == Some("output")))
+        .filter_map(|row| {
+            Some(json!({
+                "slot": row.get("slot").and_then(Value::as_u64)?, "name": text(row, "name"), "bypassed": flag(row, "bypassed"),
+                "kind": text(row, "kind"),
+            }))
+        })
+        .collect();
+    stereo_out.sort_by_key(|plugin| plugin["slot"].as_u64());
     let snapshot = json!({
         "snapshot": SNAPSHOT, "version": VERSION, "tracks": tracks, "regions": regions, "plugins": plugins, "markers": markers,
-        "tempos": tempos, "signatures": signatures,
+        "tempos": tempos, "signatures": signatures, "stereoOut": stereo_out,
     });
     Ok(snapshot.as_object().cloned().unwrap_or_default())
 }
@@ -420,7 +445,9 @@ pub fn changes(before: &JsonObject, after: &JsonObject, watching: bool) -> Vec<P
                 details.push(detail("mixer", what, &old[what], &new[what], watching));
             }
         }
-        for what in ["output", "inputs"] {
+        // (a strip read on one side only says nothing of its routing)
+        let unread = flag(old, "stripUnread") || flag(new, "stripUnread");
+        for what in ["output", "inputs"].into_iter().filter(|_| !unread) {
             if old[what] != new[what] {
                 details.push(detail("routing", what, &old[what], &new[what], watching));
             }
@@ -440,9 +467,16 @@ pub fn changes(before: &JsonObject, after: &JsonObject, watching: bool) -> Vec<P
     // What's on a track goes with it: the matched tracks' plug-ins and regions are compared, an added track's are added,
     // and a removed or unclear track's aren't told again.
     let paired: Vec<(u64, u64)> = tracks.pairs.iter().map(|(b, a, _)| (order(was[*b]), order(now[*a]))).collect();
+    // (M6) A track whose strip the Mixer hadn't drawn on either side has its plug-ins left out: they weren't read.
+    let strips_read: Vec<(u64, u64)> = tracks
+        .pairs
+        .iter()
+        .filter(|(b, a, _)| !flag(was[*b], "stripUnread") && !flag(now[*a], "stripUnread"))
+        .map(|(b, a, _)| (order(was[*b]), order(now[*a])))
+        .collect();
     let added_tracks: Vec<u64> = tracks.added.iter().map(|a| order(now[*a])).collect();
     let name_now: HashMap<u64, &str> = now.iter().map(|row| (order(row), text(row, "name"))).collect();
-    plugin_changes(before, after, &paired, &added_tracks, &name_now, watching, &mut out);
+    plugin_changes(before, after, &strips_read, &added_tracks, &name_now, watching, &mut out);
     region_changes(before, after, &paired, &added_tracks, &name_now, watching, &mut out);
     marker_changes(before, after, watching, &mut out);
     tempo_event_changes(before, after, watching, &mut out);
@@ -532,6 +566,7 @@ fn project_lines(before: &JsonObject, after: &JsonObject, watching: bool, out: &
             _ => {}
         }
     }
+    stereo_out_lines(before, after, watching, &mut lines, &mut details);
     if !lines.is_empty() {
         out.push(ProjectChange::Changed {
             kind: LOGIC_WORDS.project.into(),
@@ -542,6 +577,48 @@ fn project_lines(before: &JsonObject, after: &JsonObject, watching: bool, out: &
             lines: Some(lines),
         });
     }
+}
+
+/// (M6) The Stereo Out's plug-ins, the project's own lines: matched by name in slot order, each one added, removed, or
+/// bypassed or back on. Compared only when both snapshots read them (a baseline Kumi kept before it did says nothing).
+fn stereo_out_lines(before: &JsonObject, after: &JsonObject, watching: bool, lines: &mut Vec<String>, details: &mut Vec<Detail>) {
+    let (Some(was), Some(now)) = (before.get("stereoOut").and_then(Value::as_array), after.get("stereoOut").and_then(Value::as_array))
+    else {
+        return;
+    };
+    let (old, new): (Vec<&Value>, Vec<&Value>) = (was.iter().collect(), now.iter().collect());
+    let matched = match_lists(&names(&old), &names(&new), |_, _| false);
+    let named = |row: &Value| quoted(text(row, "name"));
+    for b in &matched.removed {
+        lines.push(format!("Removed plug-in {} from the Stereo Out", named(old[*b])));
+        details.push(detail("stereoOut", "plug-in", &old[*b]["name"], &Value::Null, watching));
+    }
+    for a in &matched.added {
+        lines.push(format!("Added plug-in {} on the Stereo Out", named(new[*a])));
+        details.push(detail("stereoOut", "plug-in", &Value::Null, &new[*a]["name"], watching));
+    }
+    for (olds, news) in &matched.unclear {
+        let all = |rows: &Vec<&Value>, at: &[usize]| at.iter().map(|at| named(rows[*at])).collect::<Vec<_>>().join(", ");
+        lines.push(format!("The Stereo Out's plug-ins changed ({} → {})", all(&old, olds), all(&new, news)));
+    }
+    for (b, a, _) in &matched.pairs {
+        if old[*b]["bypassed"] != new[*a]["bypassed"] {
+            let state = if flag(new[*a], "bypassed") { "bypassed" } else { "back on" };
+            lines.push(format!("Plug-in {} on the Stereo Out {state}", named(new[*a])));
+            details.push(detail(
+                "stereoOut",
+                &format!("{} bypassed", text(new[*a], "name")),
+                &old[*b]["bypassed"],
+                &new[*a]["bypassed"],
+                watching,
+            ));
+        }
+    }
+}
+
+/// A name inside a line, in curly quotes.
+fn quoted(name: &str) -> String {
+    format!("\u{201c}{name}\u{201d}")
 }
 
 /// Each matched track's plug-ins by slot order (one inserted or removed moves the ones after it), an added track's
@@ -1063,6 +1140,54 @@ mod tests {
                 json!({"added": "track", "name": "Pad", "trackKind": "instrument", "mixer": {"volumeDb": 0.0, "pan": 0, "mute": false, "solo": false}, "output": "Stereo Output", "inputs": []})
             ]
         );
+    }
+
+    /// (M6) A track whose Mixer strip Logic hadn't drawn (`stripUnread`: a project too wide for the Mixer's view) gives no
+    /// plug-ins and no routing: catch-up leaves them out rather than telling them removed, and still tells its regions.
+    #[test]
+    fn a_strip_the_mixer_hadnt_drawn_is_left_out_not_told_emptied() {
+        let plugins = [(3, 1, "Channel EQ", false), (3, 2, "Compressor", false)];
+        let before = snapshot(&rows(1, &SCRATCH, &[(3, "Bass", 0.0, 8.0)], &plugins, &[], 160.0)).unwrap();
+        let mut read = rows(2, &SCRATCH, &[(3, "Bass", 4.0, 12.0)], &[], &[], 160.0);
+        let bass = &mut read[1].1[2];
+        (bass["stripUnread"], bass["output"], bass["inputs"]) = (json!(true), json!(""), json!([]));
+        let after = snapshot(&read).unwrap();
+        assert_eq!(after["tracks"][2]["stripUnread"], true);
+        assert_eq!(said(&before, &after), ["Changed region “Bass” (position)"], "its plug-ins and routing unread, not gone");
+        // Read again with its strip drawn: the plug-ins compare as ever.
+        let drawn = snapshot(&rows(3, &SCRATCH, &[(3, "Bass", 4.0, 12.0)], &plugins[..1], &[], 160.0)).unwrap();
+        assert_eq!(said(&before, &drawn), ["Changed region “Bass” (position)", "Removed plug-in “Compressor”"]);
+    }
+
+    /// (M6) The Stereo Out's plug-ins (an output strip no track has) are the project's own lines: a Gain added there, a
+    /// Limiter taken off and another bypassed are told; a baseline kept before Kumi read them says nothing of them.
+    #[test]
+    fn the_stereo_outs_plug_ins_are_the_projects_own_lines() {
+        let with = |plugins: &[(usize, &str, bool)]| {
+            let mut read = rows(4, &SCRATCH, &[], &[(1, 1, "Channel EQ", false)], &[], 160.0);
+            read[3].1.extend(plugins.iter().map(|(slot, name, bypassed)| {
+                json!({"ref": format!("4:plugin:0.1.{slot}"), "trackRef": "4:output:1", "slot": slot, "name": name, "bypassed": bypassed, "kind": "effect"})
+            }));
+            snapshot(&read).unwrap()
+        };
+        let before = with(&[(1, "Limiter", false), (2, "Multipressor", false)]);
+        assert_eq!(before["stereoOut"][0], json!({"slot": 1, "name": "Limiter", "bypassed": false, "kind": "effect"}));
+        assert_eq!(before["plugins"].as_array().map(Vec::len), Some(1), "a track's plug-ins stay the tracks'");
+        let after = with(&[(1, "Multipressor", true), (2, "Gain", false)]);
+        assert_eq!(
+            said(&before, &after),
+            [
+                "Removed plug-in “Limiter” from the Stereo Out",
+                "Added plug-in “Gain” on the Stereo Out",
+                "Plug-in “Multipressor” on the Stereo Out bypassed"
+            ]
+        );
+        let told = watched(&before, &after);
+        assert!(told.iter().any(|change| change["changed"] == "project" && change.to_string().contains("Gain")), "{told:?}");
+        // A baseline kept before the Stereo Out was read: nothing to compare.
+        let mut older = before.clone();
+        older.remove("stereoOut");
+        assert!(said(&older, &after).is_empty());
     }
 
     #[test]
