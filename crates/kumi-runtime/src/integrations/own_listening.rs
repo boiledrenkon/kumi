@@ -523,6 +523,13 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         Ok(Ok(rows))
     }
 
+    /// A track's fader (dB, -120 for -inf), by its long ref.
+    async fn fader_at(&self, reference: &str, signal: &Signal) -> Option<f64> {
+        let tracks = self.track_rows(signal).await.ok()?.ok()?;
+        let row = tracks.iter().find(|row| self.same_place(&row.reference, reference))?;
+        Some(row.volume_db.unwrap_or(-120.).max(-120.))
+    }
+
     /// Whether two refs name the same thing: Renoise's positional refs by their place, whatever epoch each was read in (a
     /// device added moves the epoch and keeps the tracks); REAPER's as they are.
     pub(super) fn same_place(&self, a: &str, b: &str) -> bool {
@@ -815,11 +822,18 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// Plays a render out loud where the producer listens (its part, at most `PLAYED_SECONDS`), without waiting: whether
-    /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't.
-    pub(super) async fn play(&self, render: &Render) -> (bool, Option<String>) {
+    /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't. A track's
+    /// render from before its fader (`track`, its ref) plays at its fader's level, as Kumi measured it, not louder.
+    pub(super) async fn play(&self, render: &Render, track: Option<&str>) -> (bool, Option<String>) {
         // (tried whatever the flags said last: REAPER opens its audio device for a preview itself, and says why not)
         let seconds = render.seconds.unwrap_or(PLAYED_SECONDS).min(PLAYED_SECONDS);
-        let args = json!({"file": render.file, "fromSeconds": render.start, "seconds": seconds});
+        let mut args = json!({"file": render.file, "fromSeconds": render.start, "seconds": seconds});
+        if let Some(track) = track.filter(|_| !self.table.post_fader) {
+            let fader = self.fader_at(track, &self.cleanup_signal()).await.unwrap_or(0.);
+            if fader != 0. {
+                args["gainDb"] = json!(fader.clamp(-60., 12.));
+            }
+        }
         match self.link.call("audition", args, self.cleanup_signal()).await {
             Ok(Ok(answer)) => {
                 let playing = answer.get("playing") == Some(&Value::Bool(true));
@@ -861,13 +875,13 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         signal: &Signal,
     ) -> Pass {
         let mut sources = vec![];
-        // Each source's id, the name its file goes by, and whether it's the mix.
-        let mut named: Vec<(String, String, bool)> = vec![];
+        // Each source's id, the name its file goes by, and its track (None for the mix).
+        let mut named: Vec<(String, String, Option<String>)> = vec![];
         for (at, candidate) in candidates.iter().enumerate() {
             if candidate.mix == Some(true) || candidate.track == MIX_CANDIDATE {
-                if !named.iter().any(|(_, _, mix)| *mix) {
+                if !named.iter().any(|(_, _, track)| track.is_none()) {
                     sources.push(json!({"id": "mix", "what": "master"}));
-                    named.push(("mix".into(), MIX_CANDIDATE.into(), true));
+                    named.push(("mix".into(), MIX_CANDIDATE.into(), None));
                 }
                 continue;
             }
@@ -875,7 +889,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                 Ok(Ok((reference, name))) => {
                     let id = format!("t{at}");
                     sources.push(json!({"id": id, "what": "track", "ref": reference, "stage": "pre-fader"}));
-                    named.push((id, name, false));
+                    named.push((id, name, Some(reference)));
                 }
                 Ok(Err(why)) => return pass(Err(RuntimeError::Observation(why)), vec![], None, false),
                 Err(error) => return pass(Err(error), vec![], None, false),
@@ -903,9 +917,9 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         let mut notes = notes;
         // What the producer hears: the first thing heard that isn't a copy only Kumi compares.
         let first = named.iter().filter(|_| aloud).find(|(_, name, _)| !self.copies.borrow().contains_key(name));
-        let audible = match first.and_then(|(_, name, _)| captured.get(name)) {
-            Some(render) => {
-                let (played, said) = self.play(render).await;
+        let audible = match first.and_then(|(_, name, track)| Some((captured.get(name)?, track.as_deref()))) {
+            Some((render, track)) => {
+                let (played, said) = self.play(render, track).await;
                 if played {
                     self.tell_app(&format!("Playing {} out loud", self.bars(window)));
                     notes.extend(said);
@@ -920,7 +934,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             }
             None => false,
         };
-        let sources = named.iter().map(|(_, name, mix)| (name.clone(), *mix)).collect();
+        let sources = named.iter().map(|(_, name, track)| (name.clone(), track.is_none())).collect();
         pass(Ok(Captured { files: captured, sources, before_master }), notes, tried, audible)
     }
 
@@ -1334,9 +1348,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
             return Some(0.);
         }
         let (reference, _) = self.resolve(track, &signal).await.ok()?.ok()?;
-        let tracks = self.track_rows(&signal).await.ok()?.ok()?;
-        let row = tracks.iter().find(|row| self.same_place(&row.reference, &reference))?;
-        Some(row.volume_db.unwrap_or(-120.).max(-120.))
+        self.fader_at(&reference, &signal).await
     }
 
     fn applied(&self) -> Vec<String> {

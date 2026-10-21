@@ -99,6 +99,8 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             let home = tempfile::tempdir().unwrap();
             let script = ReaperScript::new(3, 0);
             let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            // (the warm candidate sits low in the mix)
+            script.set_volume(2, -15.0);
             let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
             reaper.start(Signal::new()).await.unwrap();
             let observed = reaper.observe(Signal::new(), None).await.unwrap();
@@ -134,6 +136,9 @@ async fn reaper_renders_a_part_to_hear_it_and_plays_what_it_heard_out_loud() {
             let played = script.listening().previews();
             assert_eq!(played.len(), 1, "the first candidate, out loud");
             assert_eq!(played[0]["fromSeconds"], 2.0, "from where the part starts, past the pre-roll");
+            // (#361 review K16) Rendered before its fader, played at its fader's level: as loud as in the mix, as Kumi
+            // measured it.
+            assert_eq!(played[0]["gainDb"], -15.0, "{}", played[0]);
             assert!(reaper.first_heard(since).is_some_and(|at| at >= since), "the producer heard Kumi's listen");
             said.push(audition.text);
             // A round REAPER couldn't play out loud is said to be rendered, not heard.

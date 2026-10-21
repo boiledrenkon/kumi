@@ -682,7 +682,7 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
                 ["full", "screen"].iter().find_map(|how| cache.get(&format!("{slot}|{how}|{values_key}"))).map(|found| found.render.clone())
             };
             let (played, said) = match heard {
-                Some(render) => r.play(&render).await,
+                Some(render) => r.play(&render, Some(&track)).await,
                 None => (false, Some("it wasn't heard at these values in this search".to_owned())),
             };
             if !played {
