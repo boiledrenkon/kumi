@@ -398,7 +398,7 @@ Live の中のブリッジのほうが古く、Live が閉じていれば、続�
 
 **REAPER の拡張機能と Renoise のツール**は、Kumi のブリッジが入っていれば Kumi に合わせて動きます。
 
-- `kumi update` は新しい Kumi に付属するものを入れ、DAW が開いていれば再起動するよう伝えます（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。REAPER のものは Kumi が入れた場所へ、Renoise のものはいちばん新しい設定フォルダーへ入れます。新しい Renoise は自分の設定フォルダーを作るためです。
+- `kumi update` は新しい Kumi に付属するものを入れ、DAW が開いていれば再起動するよう伝えます（"Kumi's extension 0.1.1 is in REAPER now: restart REAPER if it's open."）。どちらも Kumi が入れた場所へ入れ、新しい Renoise が自分のバージョンフォルダーに作ったツールのコピーも一緒に最新にします。あなたが取り除いたものは入れ直さず（"Kumi's tool isn't in Renoise any more"）、REAPER のフォルダーがなくなった拡張機能をほかの REAPER に移すこともありません。入れるには `kumi --daw reaper bridge` を使います。
 - `--rollback` は前の Kumi に付属していたものに戻します。REAPER と Renoise を知らない Kumi（1.19.3 以前）はそれらをそのまま残して使わず、取り除くために削除するファイルやフォルダーを Kumi が伝えます。その Kumi は、`KUMI_DAW` が `reaper` か `renoise` のままだと起動しません。使うときは外してください。
 - Kumi が入れた後に DAW のフォルダーで変わっていたものは、まず `~/.kumi/bridges/reaper/changed`（または `renoise`）に保存し、その場所を伝えます。
 - どちらも Live や DAW を閉じる必要はありません。動いている DAW は、再起動したときに新しいものを読み込みます。

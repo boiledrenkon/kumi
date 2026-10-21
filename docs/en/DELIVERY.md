@@ -68,9 +68,13 @@ producer's side.
   REAPER Kumi found (a portable one, or the folder `KUMI_REAPER_RESOURCE_DIR`
   names), with `kumi-bridge-reference.json` beside it; Renoise's tool into
   `Scripts/Tools` in its newest preferences folder from 3.5, with
-  `bridge-reference.json` inside. Each is copied under another name and renamed
-  into place, never written over where it is (a running REAPER keeps the old
-  file; Windows locks it). On macOS, Kumi's copies lose the download mark.
+  `bridge-reference.json` inside. Updates and rollbacks keep each where Kumi put
+  it and bring along every copy of Kumi's the receipt lists (`copies`), such as
+  one a newer Renoise made in its own version folder; uninstall takes each of
+  those out too. A bridge the producer took out isn't put back. Each is copied
+  under another name and renamed into place, never written over where it is (a
+  running REAPER keeps the old file; Windows locks it). On macOS, Kumi's copies
+  lose the download mark.
 - **Receipt and generations:** `~/.kumi/bridges/<daw>/install-receipt.json`
   records each step, the newest 20: `install`, `upgrade`, `reinstall` (the same
   copy over one that changed), `rollback` and `uninstall`. The copy in place and

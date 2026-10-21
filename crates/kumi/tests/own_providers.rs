@@ -149,6 +149,7 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
         version: Some("0.1.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };
@@ -251,6 +252,7 @@ async fn asking_for_live_starts_live_whatever_was_used_last() {
         version: Some("0.1.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };
@@ -299,6 +301,89 @@ fn app_carrying(root: &std::path::Path, name: &str, extension: &[u8], version: &
     let text = std::fs::read_to_string(&lua).unwrap();
     std::fs::write(&lua, text.replace("\"1.0.0\"", &format!("\"{tool}\""))).unwrap();
     app
+}
+
+/// An update follows Kumi's bridge where it is: Renoise's tool stays in the version folder chosen at setup, and the copy
+/// a newer Renoise made of it is brought along; a bridge the producer took out isn't put back, and an extension whose
+/// REAPER folder is gone never moves into another REAPER. Each is said.
+#[tokio::test(flavor = "current_thread")]
+async fn an_update_follows_each_copy_and_never_puts_back_a_bridge_taken_out_or_moves_it_to_another_reaper() {
+    use daw_bridge::daw::Daw;
+    let (dir, mut env) = renoise_home();
+    let resource = dir.path().join("REAPER");
+    std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
+    std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
+    env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
+    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0");
+    let later = app_carrying(dir.path(), "app.new", b"extension 0.1.1", "0.1.1", "1.0.1");
+    let home = env["KUMI_HOME"].clone();
+    let out = Rc::new(Out::default());
+    let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
+    assert_eq!(own::RENOISE.setup_bridge(out.clone(), &env, yes()).await.unwrap(), 0, "{}", out.0.borrow());
+    for provider in [&own::REAPER as &dyn DawProvider, &own::RENOISE] {
+        assert_eq!(provider.after_update(&io, &home, &now.to_string_lossy(), None).await, 0);
+    }
+    let extension = now.join("daws/reaper").join(daw_bridge::install::reaper_extension_name(daw_bridge::detect::Os::current()));
+    let target = daw_bridge::install::reaper_target(
+        &daw_bridge::detect::ReaperInstall {
+            app: None,
+            version: None,
+            archs: vec![],
+            resource: resource.clone(),
+            resource_from: daw_bridge::detect::ResourceFrom::Override,
+            opened: true,
+        },
+        daw_bridge::detect::Os::current(),
+    )
+    .unwrap();
+    daw_bridge::lifecycle::Lifecycle::new(std::path::Path::new(&home), target).install(&extension, "0.1.0").unwrap();
+
+    // Renoise 3.5.5's first run copied 3.5.4's folder, Kumi's tool in it: an update brings both along, from 3.5.4.
+    let tool = |version: &str| dir.path().join("Renoise").join(version).join("Scripts/Tools/com.kumi.Bridge.xrnx");
+    copy_folder(&tool("V3.5.4"), &tool("V3.5.5"));
+    out.0.borrow_mut().clear();
+    assert_eq!(own::RENOISE.after_update(&io, &home, &later.to_string_lossy(), None).await, 0);
+    assert!(out.0.borrow().contains("Kumi's tool 1.0.1 is in Renoise now"), "{}", out.0.borrow());
+    for version in ["V3.5.4", "V3.5.5"] {
+        let lua = std::fs::read_to_string(tool(version).join("payload/version.lua")).unwrap();
+        assert!(lua.contains("\"1.0.1\""), "{version}: {lua}");
+    }
+    let receipt = receipt_of(&env, Daw::Renoise);
+    assert_eq!(receipt.target, tool("V3.5.4").to_string_lossy(), "setup chose 3.5.4");
+    assert_eq!(
+        receipt.copies.iter().map(|copy| copy.target.clone()).collect::<Vec<_>>(),
+        vec![tool("V3.5.5").to_string_lossy().into_owned()]
+    );
+
+    // The producer took the tool out of both: the next update, even one bringing the same tool, leaves it out.
+    for version in ["V3.5.4", "V3.5.5"] {
+        std::fs::remove_dir_all(tool(version)).unwrap();
+    }
+    out.0.borrow_mut().clear();
+    assert_eq!(own::RENOISE.after_update(&io, &home, &later.to_string_lossy(), None).await, 0);
+    let said = out.0.borrow().clone();
+    assert!(said.starts_with("Kumi's tool isn't in Renoise any more (") && said.contains(" --daw renoise bridge puts it back."), "{said}");
+    assert!(!tool("V3.5.4").exists() && !tool("V3.5.5").exists());
+
+    // REAPER's folder moved (an unplugged drive, say) while another REAPER is here: nothing goes into that one.
+    std::fs::rename(&resource, dir.path().join("REAPER moved")).unwrap();
+    for default in ["Library/Application Support/REAPER", "AppData/Roaming/REAPER", ".config/REAPER"] {
+        std::fs::create_dir_all(dir.path().join(default)).unwrap();
+        std::fs::write(dir.path().join(default).join("reaper.ini"), "[REAPER]\n").unwrap();
+    }
+    let mut unset = env.clone();
+    unset.remove("KUMI_REAPER_RESOURCE_DIR");
+    let io = kumi::install::InstalledIo::new(out.clone(), unset);
+    out.0.borrow_mut().clear();
+    assert_eq!(own::REAPER.after_update(&io, &home, &later.to_string_lossy(), None).await, 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.starts_with("Kumi's extension isn't in REAPER any more (") && said.contains(" --daw reaper bridge puts it back."),
+        "{said}"
+    );
+    for default in ["Library/Application Support/REAPER", "AppData/Roaming/REAPER", ".config/REAPER"] {
+        assert!(!dir.path().join(default).join("UserPlugins").exists(), "{default}");
+    }
 }
 
 fn receipt_of(env: &Env, daw: daw_bridge::daw::Daw) -> daw_bridge::lifecycle::Receipt {

@@ -37,6 +37,31 @@ impl Target {
     pub fn path(&self) -> PathBuf {
         self.dir.join(&self.name)
     }
+
+    /// The same bridge at another place: a copy's path and its reference.
+    fn at(&self, copy: &Copy) -> Target {
+        let path = Path::new(&copy.target);
+        Target {
+            daw: self.daw,
+            dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            name: path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| self.name.clone()),
+            folder: self.folder,
+            reference: PathBuf::from(&copy.reference),
+        }
+    }
+
+    fn copy(&self) -> Copy {
+        Copy { target: self.path().to_string_lossy().into_owned(), reference: self.reference.to_string_lossy().into_owned() }
+    }
+}
+
+/// Another copy of Kumi's bridge in a DAW's folder, besides the receipt's target: where the target was before (a Renoise
+/// version folder the tool moved on from), or a copy a newer Renoise made of it in the version folder it made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Copy {
+    pub target: String,
+    pub reference: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +70,9 @@ pub struct HistoryRow {
     pub action: String,
     pub generation: Option<String>,
     pub ms: u64,
+    /// Where the action put the bridge or took it from (each copy it updated or removed is in the receipt's `copies`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// Where the copy that was in the DAW's folder went, when it wasn't what Kumi placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept: Option<String>,
@@ -70,6 +98,9 @@ pub struct Receipt {
     /// Generations to roll back to, newest first.
     #[serde(default)]
     pub previous: Vec<String>,
+    /// The other copies of Kumi's bridge, each brought to the same generation as `target` and removed with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<Copy>,
     pub updated_ms: u64,
     #[serde(default)]
     pub history: Vec<HistoryRow>,
@@ -153,13 +184,18 @@ fn collect(dir: &Path, prefix: &str, rows: &mut Vec<String>) -> std::io::Result<
             let bytes = std::fs::read(entry.path())?;
             rows.push(format!("{relative}\0{}\0{}\n", bytes.len(), sha256_hex(&bytes)));
         } else {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{relative} is a link")));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a link, and bridge files can't hold links", entry.path().display()),
+            ));
         }
     }
     Ok(())
 }
 
-fn copy_tree(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
+/// Copies a bridge's file or folder. A link inside one is refused, by name (`keeping`: a copy kept for the producer
+/// writes down where it pointed instead, as `<name>.link`, so nothing of theirs blocks an upgrade or an uninstall).
+fn copy_tree(from: &Path, to: &Path, top: bool, keeping: bool) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
     if meta.is_file() {
         std::fs::copy(from, to)?;
@@ -174,9 +210,18 @@ fn copy_tree(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
         }
         let kind = entry.file_type()?;
         if kind.is_dir() || kind.is_file() {
-            copy_tree(&entry.path(), &to.join(&name), false)?;
+            copy_tree(&entry.path(), &to.join(&name), false, keeping)?;
+        } else if keeping {
+            let pointed = std::fs::read_link(entry.path()).map(|to| to.display().to_string()).unwrap_or_default();
+            std::fs::write(
+                to.join(format!("{}.link", name.to_string_lossy())),
+                format!("{} was a link to {pointed}\n", entry.path().display()),
+            )?;
         } else {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "bridge files can't hold links"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a link, and bridge files can't hold links", entry.path().display()),
+            ));
         }
     }
     Ok(())
@@ -208,11 +253,52 @@ pub struct Status {
 pub struct Lifecycle {
     pub paths: BridgePaths,
     pub target: Target,
+    /// Other places a copy of Kumi's bridge may be (Renoise's other version folders): each one that holds a copy of
+    /// Kumi's is updated and removed with the target, as the receipt's copies are.
+    pub elsewhere: Vec<Target>,
 }
 
 impl Lifecycle {
     pub fn new(kumi_home: &Path, target: Target) -> Self {
-        Self { paths: BridgePaths::new(kumi_home, target.daw), target }
+        Self { paths: BridgePaths::new(kumi_home, target.daw), target, elsewhere: vec![] }
+    }
+
+    /// The same, with other places a copy of Kumi's bridge may be.
+    pub fn with_elsewhere(mut self, elsewhere: Vec<Target>) -> Self {
+        self.elsewhere = elsewhere;
+        self
+    }
+
+    /// Where Kumi's bridge is now, by its receipt: the target while anything is there, else the first other place
+    /// holding a copy of Kumi's (one a newer Renoise made). None when it isn't installed, or the producer took every
+    /// copy out: then nothing should put it back unasked.
+    pub fn found(&self) -> Result<Option<Target>, LifecycleError> {
+        let Some(receipt) = self.receipt()?.filter(|receipt| receipt.status == "installed") else { return Ok(None) };
+        if std::fs::symlink_metadata(self.target.path()).is_ok() {
+            return Ok(Some(self.target.clone()));
+        }
+        let ours = self.ours(&receipt);
+        Ok(self.others(Some(&receipt)).into_iter().find(|other| tree_sha256(&other.path()).is_ok_and(|sha| ours.contains(&sha))))
+    }
+
+    /// Every other place there may be a copy of Kumi's bridge, besides the target: the receipt's copies, its target when
+    /// that was elsewhere, and the places given; each once.
+    fn others(&self, receipt: Option<&Receipt>) -> Vec<Target> {
+        let here = self.target.path();
+        let mut others: Vec<Target> = vec![];
+        let recorded = receipt.into_iter().flat_map(|receipt| {
+            receipt
+                .copies
+                .iter()
+                .cloned()
+                .chain(std::iter::once(Copy { target: receipt.target.clone(), reference: receipt.reference.clone() }))
+        });
+        for target in recorded.map(|copy| self.target.at(&copy)).chain(self.elsewhere.iter().cloned()) {
+            if target.path() != here && !others.iter().any(|other| other.path() == target.path()) {
+                others.push(target);
+            }
+        }
+        others
     }
 
     pub fn receipt(&self) -> Result<Option<Receipt>, LifecycleError> {
@@ -318,7 +404,7 @@ impl Lifecycle {
             }
         };
         let staged = dir.join(&self.target.name);
-        if let Err(error) = copy_tree(source, &staged, true) {
+        if let Err(error) = copy_tree(source, &staged, true, false) {
             let _ = remove_tree(&dir);
             return Err(error.into());
         }
@@ -347,7 +433,7 @@ impl Lifecycle {
         let copied = match link {
             true => std::fs::read_link(path)
                 .and_then(|to| std::fs::write(&copy, format!("{} was a link to {}\n", path.display(), to.display()))),
-            false => copy_tree(path, &copy, false),
+            false => copy_tree(path, &copy, false, true),
         };
         if let Err(error) = copied {
             let _ = remove_tree(&copy);
@@ -361,19 +447,24 @@ impl Lifecycle {
     /// first is kept unless it's a copy Kumi placed (one of `ours`: hashes of what Kumi installed): its SHA-256 and where
     /// the kept copy went.
     fn place(&self, generation: &str, ours: &[String]) -> Result<(String, Option<PathBuf>), LifecycleError> {
+        self.place_at(&self.target, generation, ours)
+    }
+
+    /// [`place`](Self::place), at `at`: the target or one of the other copies.
+    fn place_at(&self, at: &Target, generation: &str, ours: &[String]) -> Result<(String, Option<PathBuf>), LifecycleError> {
         let source = self.paths.generations().join(generation).join(&self.target.name);
         let sha = tree_sha256(&source)?;
-        std::fs::create_dir_all(&self.target.dir)?;
-        let target = self.target.path();
+        std::fs::create_dir_all(&at.dir)?;
+        let target = at.path();
         let changed = std::fs::symlink_metadata(&target).is_ok() && !tree_sha256(&target).is_ok_and(|sha| ours.contains(&sha));
         let kept = if changed { Some(self.keep(&target)?) } else { None };
         let token = &crate::auth::random_hex16()[..12];
-        let new = self.target.dir.join(format!(".{}.kumi-new-{token}", self.target.name));
-        let old = self.target.dir.join(format!("{}.kumi-old-{token}", self.target.name));
+        let new = at.dir.join(format!(".{}.kumi-new-{token}", at.name));
+        let old = at.dir.join(format!("{}.kumi-old-{token}", at.name));
         self.begin("place", &[&new])?;
         // Renoise writes its tool preferences inside the folder: they stay with the tool.
-        let kept_preferences = self.target.folder.then(|| std::fs::read(target.join("preferences.xml")).ok()).flatten();
-        copy_tree(&source, &new, true)?;
+        let kept_preferences = at.folder.then(|| std::fs::read(target.join("preferences.xml")).ok()).flatten();
+        copy_tree(&source, &new, true, false)?;
         if let Some(preferences) = kept_preferences {
             std::fs::write(new.join("preferences.xml"), preferences)?;
         }
@@ -386,7 +477,7 @@ impl Lifecycle {
             let _ = remove_tree(&new);
             return Err(error.into());
         }
-        let replaced = if !self.target.folder { std::fs::rename(&new, &target).is_ok() } else { false };
+        let replaced = if !at.folder { std::fs::rename(&new, &target).is_ok() } else { false };
         if !replaced {
             if target.exists() {
                 std::fs::rename(&target, &old)?;
@@ -414,14 +505,36 @@ impl Lifecycle {
     }
 
     fn write_reference(&self) -> Result<(), LifecycleError> {
+        self.write_reference_at(&self.target)
+    }
+
+    fn write_reference_at(&self, at: &Target) -> Result<(), LifecycleError> {
         let reference = Reference::new(self.target.daw, &self.paths);
-        if let Some(parent) = self.target.reference.parent() {
+        if let Some(parent) = at.reference.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temporary = owner::temporary_beside(&self.target.reference);
+        let temporary = owner::temporary_beside(&at.reference);
         std::fs::write(&temporary, reference.to_json())?;
-        std::fs::rename(&temporary, &self.target.reference)?;
+        std::fs::rename(&temporary, &at.reference)?;
         Ok(())
+    }
+
+    /// Brings each other copy that's still Kumi's (one of `ours`) to `generation` (whose hash is `sha`): the copies kept,
+    /// each now holding it. One gone, or one the producer changed since, is left as it is and no longer counted.
+    fn follow_copies(&self, others: &[Target], generation: &str, sha: &str, ours: &[String]) -> Result<Vec<Copy>, LifecycleError> {
+        let mut copies = vec![];
+        for other in others {
+            let Ok(found) = tree_sha256(&other.path()) else { continue };
+            if found != sha {
+                if !ours.contains(&found) {
+                    continue;
+                }
+                self.place_at(other, generation, ours)?;
+            }
+            self.write_reference_at(other)?;
+            copies.push(other.copy());
+        }
+        Ok(copies)
     }
 
     fn prune(&self, receipt: &Receipt) {
@@ -439,9 +552,11 @@ impl Lifecycle {
     fn record(&self, mut receipt: Receipt, action: &str, kept: Option<PathBuf>, left: Option<PathBuf>) -> Result<Receipt, LifecycleError> {
         receipt.updated_ms = now_ms();
         let (kept, left) = (kept.map(|path| path.to_string_lossy().into_owned()), left.map(|path| path.to_string_lossy().into_owned()));
-        receipt
-            .history
-            .insert(0, HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms, kept, left });
+        let target = Some(receipt.target.clone());
+        receipt.history.insert(
+            0,
+            HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms, target, kept, left },
+        );
         receipt.history.truncate(HISTORY);
         receipt.previous.truncate(KEPT_GENERATIONS);
         self.write_receipt(&receipt)?;
@@ -476,11 +591,15 @@ impl Lifecycle {
         let sha = tree_sha256(source)?;
         ensure_secret(&self.paths.secret())?;
         let here = self.target.path().to_string_lossy().into_owned();
-        if let Some(before) = before.as_ref().filter(|before| before.target == here && before.sha256.as_deref() == Some(sha.as_str())) {
-            if tree_sha256(&self.target.path()).ok().as_deref() == Some(sha.as_str()) {
-                self.write_reference()?;
-                return Ok(before.clone());
-            }
+        // Kumi's own copies, wherever they turn up: a newer Renoise copies the tool into the version folder it makes.
+        let ours = before.as_ref().map(|before| self.ours(before)).unwrap_or_default();
+        let others = self.others(before.as_ref());
+        let behind = |other: &Target| tree_sha256(&other.path()).is_ok_and(|found| found != sha && ours.contains(&found));
+        let in_place = before.as_ref().is_some_and(|before| before.target == here && before.sha256.as_deref() == Some(sha.as_str()))
+            && tree_sha256(&self.target.path()).ok().as_deref() == Some(sha.as_str());
+        if let Some(before) = before.as_ref().filter(|_| in_place && !others.iter().any(behind)) {
+            self.write_reference()?;
+            return Ok(before.clone());
         }
         let kept = before.iter().flat_map(|before| before.generation.iter().chain(before.previous.iter())).find(|generation| {
             tree_sha256(&self.paths.generations().join(generation).join(&self.target.name)).ok().as_deref() == Some(sha.as_str())
@@ -489,9 +608,11 @@ impl Lifecycle {
             Some(generation) => (generation.clone(), false),
             None => (self.stage(source, version)?.0, true),
         };
-        // Kumi's own copies, wherever they turn up: a newer Renoise copies the tool into the version folder it makes.
-        let ours = before.as_ref().map(|before| self.ours(before)).unwrap_or_default();
-        let (sha, kept) = match self.place(&generation, &ours) {
+        let placed = match in_place {
+            true => Ok((sha.clone(), None)),
+            false => self.place(&generation, &ours),
+        };
+        let (sha, kept) = match placed {
             Ok(placed) => placed,
             Err(error) => {
                 if staged {
@@ -501,6 +622,7 @@ impl Lifecycle {
             }
         };
         self.write_reference()?;
+        let copies = self.follow_copies(&others, &generation, &sha, &ours)?;
         let current = before.as_ref().and_then(|before| before.generation.clone());
         let action = match (&before, rollback) {
             (None, false) => "install",
@@ -523,6 +645,7 @@ impl Lifecycle {
             version: Some(version.into()),
             sha256: Some(sha),
             previous,
+            copies,
             updated_ms: 0,
             history: before.map(|before| before.history).unwrap_or_default(),
         };
@@ -543,8 +666,10 @@ impl Lifecycle {
             return Err(LifecycleError::State(format!("the earlier version {earlier} is no longer kept")));
         }
         let ours = self.ours(&receipt);
+        let others = self.others(Some(&receipt));
         let (sha, kept) = self.place(&earlier, &ours)?;
         self.write_reference()?;
+        receipt.copies = self.follow_copies(&others, &earlier, &sha, &ours)?;
         receipt.previous.remove(0);
         receipt.version = earlier.rsplit_once('-').map(|(version, _)| version.to_string());
         receipt.generation = Some(earlier);
@@ -582,6 +707,29 @@ impl Lifecycle {
         if Reference::read(&reference).is_ok_and(|reference| reference.daw == self.target.daw.id()) {
             let _ = std::fs::remove_file(&reference);
         }
+        // The other copies: each still Kumi's goes too (a recorded one the producer changed since is kept first, as the
+        // target is); one of theirs found elsewhere stays.
+        let ours = self.ours(&receipt);
+        let recorded: Vec<PathBuf> = receipt.copies.iter().map(|copy| PathBuf::from(&copy.target)).collect();
+        for other in self.others(Some(&receipt)).iter().filter(|other| other.path() != target) {
+            let path = other.path();
+            let Ok(found) = tree_sha256(&path).or_else(|_| std::fs::symlink_metadata(&path).map(|_| String::new())) else { continue };
+            if !ours.contains(&found) {
+                if !recorded.contains(&path) {
+                    continue;
+                }
+                kept = kept.or(Some(self.keep(&path)?));
+            }
+            let token = &crate::auth::random_hex16()[..12];
+            let aside = path.with_file_name(format!("{}.kumi-old-{token}", other.name));
+            std::fs::rename(&path, &aside)?;
+            if remove_tree(&aside).is_err() {
+                left = left.or(Some(aside));
+            }
+            if Reference::read(&other.reference).is_ok_and(|reference| reference.daw == self.target.daw.id()) {
+                let _ = std::fs::remove_file(&other.reference);
+            }
+        }
         if purge_secret {
             let _ = std::fs::remove_file(self.paths.secret());
         }
@@ -590,6 +738,7 @@ impl Lifecycle {
         receipt.version = None;
         receipt.sha256 = None;
         receipt.previous.clear();
+        receipt.copies.clear();
         self.record(receipt, "uninstall", kept, left)
     }
 }
@@ -762,7 +911,7 @@ mod tests {
         // Renoise 3.5.5's first run copies 3.5.4's folder, Kumi's tool in it, into its own.
         let tools = root.path().join("prefs").join("V3.5.5").join("Scripts").join("Tools");
         std::fs::create_dir_all(&tools).unwrap();
-        copy_tree(&old.target.path(), &tools.join("com.kumi.Bridge.xrnx"), false).unwrap();
+        copy_tree(&old.target.path(), &tools.join("com.kumi.Bridge.xrnx"), false, false).unwrap();
         let target = Target {
             dir: tools.clone(),
             reference: tools.join("com.kumi.Bridge.xrnx").join("bridge-reference.json"),
@@ -865,6 +1014,85 @@ mod tests {
         std::fs::write(folder.join("lib").join("bridge-reference.json"), "{}").unwrap();
         assert_ne!(tree_sha256(&folder).unwrap(), first);
         assert!(life_version_rejected(root.path()));
+    }
+
+    /// Renoise's tool in another version folder, as a newer Renoise's first run copies it there.
+    fn renoise_copy(life: &Lifecycle, root: &Path, version: &str) -> Target {
+        let tools = root.join("prefs").join(version).join("Scripts").join("Tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        copy_tree(&life.target.path(), &tools.join("com.kumi.Bridge.xrnx"), false, false).unwrap();
+        Target { dir: tools.clone(), reference: tools.join("com.kumi.Bridge.xrnx").join("bridge-reference.json"), ..life.target.clone() }
+    }
+
+    #[test]
+    fn every_copy_of_kumis_tool_is_brought_up_to_date_and_taken_out_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let life = renoise(root.path());
+        life.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        // Renoise 3.5.5 made its own copy; a 3.6 beta made one the producer then edited.
+        let newer = renoise_copy(&life, root.path(), "V3.5.5");
+        let beta = renoise_copy(&life, root.path(), "V3.6.0");
+        std::fs::write(beta.path().join("main.lua"), "-- the producer's\n").unwrap();
+        let life = renoise(root.path()).with_elsewhere(vec![newer.clone(), beta.clone()]);
+        let upgraded = life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        assert_eq!(read(newer.path().join("main.lua")), "-- 2.0\n", "Kumi's copy follows the tool");
+        assert!(newer.reference.exists());
+        assert_eq!(read(beta.path().join("main.lua")), "-- the producer's\n", "one the producer changed is theirs");
+        assert_eq!(upgraded.copies, vec![newer.copy()]);
+        assert_eq!(upgraded.history[0].target.as_deref(), life.target.path().to_str());
+        // Up to date everywhere: nothing changes. Behind somewhere: that copy is brought along.
+        assert_eq!(life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap().history.len(), upgraded.history.len());
+        std::fs::write(newer.path().join("main.lua"), "-- 1.0\n").unwrap();
+        let followed = life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        assert_eq!(followed.history.len(), upgraded.history.len() + 1);
+        assert_eq!(read(newer.path().join("main.lua")), "-- 2.0\n", "a copy holding the 1.0 Kumi keeps is Kumi's: brought along");
+        // The uninstall takes out every copy of Kumi's (the receipt's), and leaves the producer's.
+        let removed = renoise(root.path()).uninstall(false).unwrap();
+        assert!(!life.target.path().exists() && !newer.path().exists(), "{removed:?}");
+        assert!(beta.path().join("main.lua").exists());
+        assert!(removed.copies.is_empty());
+    }
+
+    #[test]
+    fn a_tool_that_moves_to_another_version_folder_leaves_no_copy_behind() {
+        let root = tempfile::tempdir().unwrap();
+        let old = renoise(root.path());
+        old.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        // Set up again into Renoise 3.5.5's folder (nothing of Kumi's in it yet): the 3.5.4 copy is followed, then removed.
+        let tools = root.path().join("prefs").join("V3.5.5").join("Scripts").join("Tools");
+        let target = Target {
+            dir: tools.clone(),
+            reference: tools.join("com.kumi.Bridge.xrnx").join("bridge-reference.json"),
+            ..old.target.clone()
+        };
+        let new = Lifecycle::new(&root.path().join("kumi"), target);
+        let moved = new.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        assert_eq!(moved.copies, vec![old.target.copy()]);
+        assert_eq!(read(old.target.path().join("main.lua")), "-- 2.0\n");
+        let removed = Lifecycle::new(&root.path().join("kumi"), new.target.clone()).uninstall(false).unwrap();
+        assert!(!new.target.path().exists() && !old.target.path().exists(), "{removed:?}");
+        assert!(!old.target.reference.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_tool_is_named_or_written_down_never_a_block() {
+        let root = tempfile::tempdir().unwrap();
+        let life = renoise(root.path());
+        life.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        // The producer's link inside Kumi's tool: kept as a note of where it pointed, and the upgrade and uninstall go on.
+        std::os::unix::fs::symlink("/etc/hosts", life.target.path().join("lib").join("hosts")).unwrap();
+        let upgraded = life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        let kept = PathBuf::from(upgraded.history[0].kept.as_ref().unwrap());
+        assert!(read(kept.join("lib").join("hosts.link")).contains("was a link to /etc/hosts"));
+        std::os::unix::fs::symlink("/etc/hosts", life.target.path().join("main2.lua")).unwrap();
+        assert!(life.uninstall(false).unwrap().history[0].kept.is_some());
+        assert!(!life.target.path().exists());
+        // A source holding one is refused, by the link's name.
+        let source = bridge_folder(root.path(), "3.0");
+        std::os::unix::fs::symlink("/etc/hosts", source.join("lib").join("hosts")).unwrap();
+        let refused = life.install(&source, "3.0").unwrap_err().to_string();
+        assert!(refused.contains(&source.join("lib").join("hosts").display().to_string()) && refused.contains("is a link"), "{refused}");
     }
 
     fn life_version_rejected(root: &Path) -> bool {

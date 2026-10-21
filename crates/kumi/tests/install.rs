@@ -2376,6 +2376,7 @@ async fn uninstall_carries_on_when_a_daws_folder_is_gone() {
         version: Some("1.0.0".into()),
         sha256: None,
         previous: vec![],
+        copies: vec![],
         updated_ms: 0,
         history: vec![],
     };

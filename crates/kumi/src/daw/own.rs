@@ -15,7 +15,7 @@ use daw_bridge::{
     detect::{self, Os},
     doctor::{self, Bundled, Level},
     files,
-    install::{reaper_extension_name, reaper_target, renoise_target, TargetError, RENOISE_TOOL_FOLDER},
+    install::{reaper_extension_name, reaper_target, renoise_target, renoise_targets, TargetError, RENOISE_TOOL_FOLDER},
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
 };
@@ -134,15 +134,37 @@ impl Own {
         }
     }
 
-    /// Where an update or a rollback brings the bridge: REAPER's where Kumi put it, while that folder's there (a
-    /// portable REAPER, or a resource folder named once with KUMI_REAPER_RESOURCE_DIR); Renoise's in the version folder
-    /// detection finds, as a newer Renoise makes its own, else where Kumi put it.
-    fn update_target(&self, env: &Env) -> Result<Target, String> {
-        let placed = self.receipt(env).map(|receipt| self.receipt_target(&receipt)).filter(|target| target.dir.is_dir());
-        match (self.daw, placed) {
-            (Daw::Reaper, Some(placed)) => Ok(placed),
-            (_, placed) => self.target(env).or_else(|why| placed.ok_or(why)),
+    /// Renoise's version folders from 3.5, where a newer Renoise may have copied Kumi's tool: places for the lifecycle
+    /// to follow a copy of Kumi's to, and to take it out of. REAPER has none.
+    fn elsewhere(&self, env: &Env) -> Vec<Target> {
+        match self.daw {
+            Daw::Renoise => renoise_targets(&detected(env, detect::detect_renoise)),
+            Daw::Reaper => vec![],
         }
+    }
+
+    /// Where an update or a rollback brings the bridge: where Kumi put it, as its receipt says (a portable REAPER, a
+    /// resource folder named once with KUMI_REAPER_RESOURCE_DIR, the Renoise version folder chosen at setup), with each
+    /// copy of Kumi's in Renoise's other version folders brought along; never into a DAW nobody chose. Err, in words,
+    /// when nothing of Kumi's is left where it was (the producer took it out, or the folder's gone): an update doesn't
+    /// put it back.
+    fn follow(&self, env: &Env) -> Result<Lifecycle, String> {
+        let home = kumi_home(env);
+        let receipt = self.receipt(env).ok_or_else(|| self.missing_words())?;
+        let at = self.receipt_target(&receipt);
+        let path = at.path();
+        let found = Lifecycle::new(&home, at).with_elsewhere(self.elsewhere(env)).found().map_err(|why| why.to_string())?;
+        let found = found.ok_or_else(|| {
+            format!(
+                "{} isn't in {} any more ({}), so it was left as it is: {} --daw {} bridge puts it back",
+                self.bridge,
+                self.name(),
+                path.display(),
+                *kumi_runtime::KUMI,
+                self.id.as_str()
+            )
+        })?;
+        Ok(Lifecycle::new(&home, found).with_elsewhere(self.elsewhere(env)))
     }
 
     /// The bridge the Kumi in `app` (its app folder) brings, laid out as a release lays it out (`daws/<daw>/`).
@@ -189,14 +211,13 @@ impl Own {
         let source = self
             .bundled_source()
             .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?;
-        self.put(self.target(env)?, env, &source, false)
+        self.put(Lifecycle::new(&kumi_home(env), self.target(env)?).with_elsewhere(self.elsewhere(env)), &source, false)
     }
 
-    /// Puts `source` at `target` through the lifecycle (`rollback`: recorded as one): a copy it keeps already goes back
-    /// rather than in again, and nothing changes when it's the one in place.
-    fn put(&self, target: Target, env: &Env, source: &Path, rollback: bool) -> Result<Put, String> {
+    /// Puts `source` at the lifecycle's target, and in each copy of Kumi's it follows (`rollback`: recorded as one): a
+    /// copy it keeps already goes back rather than in again, and nothing changes when it's the one in place.
+    fn put(&self, life: Lifecycle, source: &Path, rollback: bool) -> Result<Put, String> {
         let version = self.version_of(source).unwrap_or_else(|| "dev".into());
-        let life = Lifecycle::new(&kumi_home(env), target);
         let before = life.receipt().ok().flatten();
         let receipt = if rollback { life.rollback_to(source, &version) } else { life.install(source, &version) };
         let receipt = receipt.map_err(|why| why.to_string())?;
@@ -438,7 +459,15 @@ impl DawProvider for Own {
                 }
                 return 0;
             };
-            match self.update_target(&io.env).and_then(|target| self.put(target, &io.env, &source, false)) {
+            // Taken out by the producer: said, and left as it is.
+            let life = match self.follow(&io.env) {
+                Ok(life) => life,
+                Err(why) => {
+                    io.out.write(&format!("{why}.\n"));
+                    return 0;
+                }
+            };
+            match self.put(life, &source, false) {
                 Ok(put) if put.changed => io.out.write(&format!(
                     "{} {} is in {} now: restart {} if it's open.\n{}",
                     self.bridge,
@@ -463,7 +492,7 @@ impl DawProvider for Own {
     fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, _run: Run, _repo: &'a str) -> LocalBoxFuture<'a, i32> {
         async move {
             if let (Some(_), Some(source)) = (self.receipt(&io.env), self.bundled_source()) {
-                let _ = self.update_target(&io.env).and_then(|target| self.put(target, &io.env, &source, false));
+                let _ = self.follow(&io.env).and_then(|life| self.put(life, &source, false));
             }
             0
         }
@@ -627,7 +656,14 @@ impl BridgeRollbackStep for OwnRollback {
             }
             return 0;
         };
-        match own.update_target(&io.env).and_then(|target| own.put(target, &io.env, &source, true)) {
+        let life = match own.follow(&io.env) {
+            Ok(life) => life,
+            Err(why) => {
+                io.out.write(&format!("{why}.\n"));
+                return 0;
+            }
+        };
+        match own.put(life, &source, true) {
             Ok(put) if put.changed => io.out.write(&format!(
                 "{} {} is back in {}, as Kumi {version} had it: restart {} if it's open.\n{}",
                 own.bridge,

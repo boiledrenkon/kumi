@@ -1,6 +1,6 @@
 //! Where each DAW's bridge goes, from what detection found.
 use crate::daw::Daw;
-use crate::detect::{Arch, Os, ReaperInstall, RenoiseInstall};
+use crate::detect::{Arch, Os, ReaperInstall, RenoiseInstall, RenoisePrefs, RENOISE_MIN};
 use crate::lifecycle::Target;
 use std::path::Path;
 
@@ -51,14 +51,24 @@ pub fn renoise_target(install: &RenoiseInstall) -> Result<Target, TargetError> {
     let Some(prefs) = &install.target else {
         return Err(TargetError::NeverOpened("open Renoise 3.5 or newer once first: it has no preferences folder for 3.5 yet".into()));
     };
+    Ok(tool_in(prefs))
+}
+
+/// The tool's place in each version folder at or above 3.5: where a newer Renoise may have copied Kumi's tool, for the
+/// lifecycle to follow and take out with it.
+pub fn renoise_targets(install: &RenoiseInstall) -> Vec<Target> {
+    install.prefs.iter().filter(|prefs| prefs.version >= RENOISE_MIN).map(tool_in).collect()
+}
+
+fn tool_in(prefs: &RenoisePrefs) -> Target {
     let dir = prefs.tools();
-    Ok(Target {
+    Target {
         daw: Daw::Renoise,
         reference: dir.join(RENOISE_TOOL_FOLDER).join(RENOISE_REFERENCE),
         name: RENOISE_TOOL_FOLDER.into(),
         folder: true,
         dir,
-    })
+    }
 }
 
 /// Whether an extension can load into an app: they share an architecture (REAPER under Rosetta runs x86_64, so a
