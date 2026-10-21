@@ -19,13 +19,15 @@ local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
 local patterns_ = import("changes_patterns")
+local notes_ = import("changes_notes")
+local material_ = import("changes_material")
 
 local bad, fail = base.bad, base.fail
 local q = base.q
 local M = {}
 
 -- The kinds whose records find their slots this way (bridge.lua drops the slot refs of their restores).
-M.KINDS = { ["slot-clone"] = true, ["slot-move"] = true, ["slot-unique"] = true }
+M.KINDS = { ["slot-clone"] = true, ["slot-move"] = true, ["slot-unique"] = true, ["slot-variation"] = true, ["slots-drop"] = true }
 
 local function slot_count(song) return #song.sequencer.pattern_sequence end
 
@@ -249,28 +251,33 @@ local function block_now(kept, now, at, count)
   return first
 end
 
-local function clone_restore(song, env, restore, desc)
+-- The restore of a change that made a block of slots, each with a new pattern of its own or not (slot-clone, slot-variation):
+-- the slots and patterns go while they are as the change left them. `words` = {what, title(applied), after(song, env, restore)}.
+local function made_restore(kind, words)
+  return function(song, env, restore, desc)
   local applied = restore.applied
   if type(applied) ~= "table" or type(applied.sequence) ~= "table" or type(applied.before) ~= "table" or type(applied.made) ~= "table" then
-    bad("applied: the sequence before and after the clone")
+    bad("applied: the sequence before and after the change")
   end
   local now = sequence_of(song)
   local kept, before = redone_sequences(song, restore)
   if not kept then kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool) end
-  if not kept or not before then stale("cloned slots") end
-  local title = string.format("Removed the cloned %s (put back)", applied.count == 1 and "slot" or "slots")
+  if not kept or not before then stale(words.what) end
+  local title = words.title(applied)
   if same_list(now, before) then
     return { restored = { done = true }, display = { title = title }, undo = { desc = desc, entry = false }, unwritten = true }
   end
   local first = block_now(kept, now, applied.at, applied.count)
-  if not first then stale("cloned slots") end
+  if not first then stale(words.what) end
   local mine, count = {}, applied.count
   for i = 0, count - 1 do mine[first + i] = true end
   -- What the producer made of them since stays: Kumi takes back only slots and patterns as the clone left them.
   for i, made in ipairs(applied.made) do
     local s = first + i - 1
-    if not restore.discard and not same_state(state_of(song, s), made.state) then
-      fail("changed", string.format("slot %d's mutes or section changed in Renoise since Kumi cloned it", s))
+    local now_state = state_of(song, s)
+    local same = words.mutes_only and same_list(now_state.mutes, made.state.mutes) or (not words.mutes_only and same_state(now_state, made.state))
+    if not restore.discard and not same then
+      fail("changed", string.format("slot %d's %s changed in Renoise since Kumi %s", s, words.mutes_only and "mutes" or "mutes or section", words.did))
     end
     if made.pattern then
       local why = pattern_changed(song, env, now[s], made.pattern)
@@ -297,7 +304,8 @@ local function clone_restore(song, env, restore, desc)
     song.sequencer:delete_sequence_at(s)
   end
   if after_block then set_state(song, first, after_block, true) end
-  base.note_restored(env.journal, "slot-clone", {}, applied, base.KINDS["slot-clone"])
+  if words.after then words.after(song, env, restore) end
+  base.note_restored(env.journal, kind, {}, applied, base.KINDS[kind])
   local display = { title = title }
   if kept_patterns > 0 then
     display.note = string.format("%s Renoise made for %s in the pool, unused: patterns were made after %s.",
@@ -310,7 +318,13 @@ local function clone_restore(song, env, restore, desc)
     display.note = display.note and (display.note .. " " .. said) or said
   end
   return { restored = { done = true }, display = display, undo = { desc = desc, entry = true } }
+  end
 end
+
+local clone_restore = made_restore("slot-clone", {
+  what = "cloned slots", did = "cloned it",
+  title = function(applied) return string.format("Removed the cloned %s (put back)", applied.count == 1 and "slot" or "slots") end,
+})
 
 -- slot-move: a slot goes to another place (`index`, its place once moved), with its own section start and mutes. Renoise has no
 -- move: the slot is made again at its new place (insert_sequence_at), set as it was, and the old one deleted, with the slots
@@ -552,6 +566,331 @@ local function unique_restore(song, env, restore, desc)
   return { restored = { done = true }, display = display, undo = { desc = desc, entry = true } }
 end
 
+-- slot-variation {pattern, track, first?, last?, content, name?, section?, index?} (M7: a variation take as a pattern): a new
+-- pattern at a new slot (the sequence's end by default) that plays `pattern` with one track's lines first..last replaced by
+-- `content` (cells as notes-write takes them). Its other tracks are aliases of `pattern`'s, so they follow the producer's edits
+-- there; the varied track is a copy of its own (an alias in the source is read through, never written through). The slot starts
+-- a section named `section`, or joins the one before it, and mutes what the source slot mutes (the slot `pattern` names, or the
+-- first that plays it). Told by the whole sequence, as slot-clone is: Kumi's undo removes the slot and its pattern while both are
+-- as Kumi left them, and hides again the track's columns it showed.
+
+local cells = notes_.cells
+local MAX_NAME = 256
+
+local function variation_plan(song, env, input)
+  local p = cells.pattern_of(song, env, input.pattern)
+  local t, track = base.find(song, env, input.track, "slot-variation")
+  if track.max_note_columns == 0 then bad("track: a sequencer track (its lines are what varies)") end
+  local pattern = song:pattern(p)
+  local first, last = cells.line_range(input, pattern.number_of_lines)
+  if type(input.content) ~= "table" then bad("content: the varied lines, as notes_write takes them (an empty list clears them)") end
+  local wants, count = {}, 0
+  if #input.content > 0 then
+    wants, count = cells.parse_cells(pattern, track, { lines = input.content }, env)
+    for _, want in pairs(wants) do
+      if want.at.line < first or want.at.line > last then
+        bad(string.format("content's line %02d is outside the lines it varies (%02d to %02d)", want.at.line - 1, first - 1, last - 1))
+      end
+    end
+  end
+  if count * 7 > notes_.MAX_WRITES then bad(string.format("content is up to %d writes, more than one change takes (%d)", count * 7, notes_.MAX_WRITES)) end
+  local n = slot_count(song)
+  local index = input.index == nil and n + 1 or input.index
+  if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > n + 1 then bad(string.format("index is a whole number from 1 to %d", n + 1)) end
+  for _, field in ipairs({ "name", "section" }) do
+    local value = input[field]
+    if value ~= nil and (type(value) ~= "string" or #value > MAX_NAME or value:find("[%c]")) then bad(field .. " must be one line of text") end
+  end
+  -- (the matrix mutes belong to a slot: the source slot's when a slot names the pattern, else the first slot that plays it)
+  local mutes = {}
+  local named = refs.parse(input.pattern)
+  if named and named.kind == "seq" then
+    mutes = state_of(song, named.n[1]).mutes
+  else
+    for slot, value in ipairs(song.sequencer.pattern_sequence) do
+      if value == p then
+        mutes = state_of(song, slot).mutes
+        break
+      end
+    end
+  end
+  return { p = p, t = t, track = track, first = first, last = last, wants = wants, index = index, slots = n, mutes = mutes }
+end
+
+local function variation_title(song, plan, name)
+  local made = name and name ~= "" and (" " .. q(name)) or ""
+  return string.format("Added slot %d%s: a variation of %s on %s", plan.index, made, q(patterns_.pattern_label(song, plan.p)), q(base.named(plan.t, plan.track)))
+end
+
+local function variation_note(song, plan)
+  return string.format("Its other tracks are aliases of %s's, so they play your edits there.", q(patterns_.pattern_label(song, plan.p)))
+end
+
+local function variation_preview(song, env, input)
+  local plan = variation_plan(song, env, input)
+  return {
+    target = base.target(env, plan.t), prior = { slots = plan.slots },
+    fence = { slots = plan.slots, patterns = #song.patterns, pattern = plan.p },
+    display = { title = variation_title(song, plan, input.name), before = { slots = plan.slots }, after = { slots = plan.slots + 1 }, note = variation_note(song, plan) },
+  }
+end
+
+-- The variation made in one go (inside the apply's step): the slot and its pattern, its tracks aliased or copied, the range
+-- written. Answers the pattern's number, the cells written and the columns shown.
+local function make_variation(song, plan, name)
+  local sequencer = song.sequencer
+  sequencer:insert_new_pattern_at(plan.index)
+  local np = sequencer.pattern_sequence[plan.index]
+  local new, source = song:pattern(np), song:pattern(plan.p)
+  if new.number_of_lines ~= source.number_of_lines then new.number_of_lines = source.number_of_lines end
+  new.name = name
+  for t = 1, rows.track_count(song) do
+    local from = source:track(t)
+    if t == plan.t then
+      -- (copied from the lines an alias shows, never from the alias: a copy of an alias plays the same lines, and a write to it
+      -- would land in the pattern it shows; M7 lab, 3.5.4)
+      local real = from.alias_pattern_index > 0 and song:pattern(from.alias_pattern_index):track(t) or from
+      local varied = new:track(t)
+      varied:copy_from(real)
+      if varied.alias_pattern_index > 0 then
+        varied.alias_pattern_index = 0
+        varied:copy_from(real)
+      end
+      if varied.alias_pattern_index > 0 then error("Renoise kept the varied track an alias", 0) end
+    else
+      local alias = from.alias_pattern_index
+      pcall(function() new:track(t).alias_pattern_index = alias > 0 and alias or plan.p end)
+    end
+  end
+  local varied = new:track(plan.t)
+  for l = plan.first, plan.last do
+    local line = varied:line(l)
+    if not line.is_empty then
+      for c = 1, 12 do line:note_column(c):clear() end
+      for c = 1, 8 do line:effect_column(c):clear() end
+    end
+  end
+  local _, after = cells.plan_of(varied, plan.wants, false)
+  local needs = cells.needs_of(after)
+  local hidden = cells.hidden_use(song, plan.t, plan.track, needs)
+  cells.raise_columns(plan.track, needs)
+  for _, cell in ipairs(after) do cells.write_cell(varied, cell) end
+  for _, cell in ipairs(after) do
+    if not cells.same_cell(cells.read_cell(varied, cell), cell) then error(string.format("Renoise didn't keep line %02d as written", cell.line - 1), 0) end
+  end
+  return np, after, hidden
+end
+
+local function variation_apply(song, env, input, fence, desc)
+  local ok, plan = pcall(variation_plan, song, env, input)
+  if not ok then base.gone_is_changed(plan) end
+  local before = sequence_of(song)
+  if #before ~= fence.slots or #song.patterns ~= fence.patterns or plan.p ~= fence.pattern then
+    fail("changed", "the sequence or its patterns changed since the preview")
+  end
+  local columns = cells.read_columns(plan.track)
+  local name = input.name or ("Variation of " .. patterns_.pattern_label(song, plan.p))
+  song:describe_undo(desc)
+  local made, np, after, hidden = pcall(make_variation, song, plan, name)
+  if not made then
+    -- (what was made goes again: the slot, its pattern emptied so Renoise lets go of it, the columns as they were)
+    local why = np
+    pcall(function()
+      local p = song.sequencer.pattern_sequence[plan.index]
+      if #song.sequencer.pattern_sequence > #before and p and p > fence.patterns then
+        song:pattern(p):clear()
+        song.sequencer:delete_sequence_at(plan.index)
+      end
+    end)
+    cells.set_columns(plan.track, columns)
+    fail("failed", "Renoise wouldn't make the variation: " .. tostring(type(why) == "table" and why.message or why):gsub("^[^%s:]*%.lua:%d+: ", ""))
+  end
+  set_state(song, plan.index, { start = input.section ~= nil, name = input.section or "", mutes = plan.mutes })
+  local now = sequence_of(song)
+  local prior, applied = journal_fields(before, now)
+  local shown = cells.read_columns(plan.track)
+  shown.hidden = hidden
+  applied.pool, applied.at, applied.count = env.pattern_mark and env.pattern_mark() or nil, plan.index, 1
+  applied.made = { { state = state_of(song, plan.index), pattern = keep_pattern(song, env, np) } }
+  applied.columns, applied.priorColumns, applied.cells = shown, columns, #after
+  return {
+    applied = applied, target = base.target(env, plan.t),
+    created = {
+      ref = refs.make(env.epoch(), "seq", plan.index), kind = "seq", pattern = refs.make(env.epoch(), "pattern", np),
+      -- (the pattern as a place in the pool: Kumi finds the variation by it after other patterns came and went)
+      place = base.pattern_place(env, np),
+    },
+    display = { title = variation_title(song, plan, name), before = { slots = #before }, after = { slots = #now }, note = variation_note(song, plan) },
+    undo = { desc = desc, entry = true }, prior = prior, place = {}, follows = "sequence",
+  }
+end
+
+-- (after the slot and its pattern went: the track's columns Kumi showed are hidden again, as notes-write's undo hides them)
+local function variation_columns_back(song, env, restore)
+  local target, applied = restore.target, restore.applied
+  if type(target) ~= "table" or type(target.ref) ~= "string" or type(applied.columns) ~= "table" then return end
+  -- (the request's refs were made current as it came in; the slot this restore deleted moved the epoch since, not the tracks)
+  local ref = refs.parse(target.ref)
+  local t = ref and ref.kind == "track" and ref.n[1] or nil
+  if t and t <= rows.track_count(song) then cells.lower_columns(song, t, song:track(t), applied.priorColumns, applied.columns) end
+end
+
+-- (a variation's section may move to it from a variation dropped before it, as Renoise passes a section on: its mutes are what
+-- Kumi keeps from the producer's edits; a section start goes with the slot, and the next slot keeps its own)
+local variation_restore = made_restore("slot-variation", {
+  what = "made the variation's slot", did = "made it", after = variation_columns_back, mutes_only = true,
+  title = function() return "Removed the variation's slot (put back)" end,
+})
+
+-- slots-drop {refs}: several slots of the sequence deleted in one step (M7: the variations not kept, in one undo step). Their
+-- patterns stay in the pool, unused, unless Renoise removes one (the pool's last, empty, played by no other slot: then Kumi keeps
+-- its name, length and aliases to make it again). Told by the whole sequence: Kumi's undo puts every slot back at its place, with
+-- its section and mutes, while the sequence is as the drop left it.
+
+local MAX_DROPPED = 64
+
+local function drop_plan(song, env, input)
+  if type(input.refs) ~= "table" or #input.refs == 0 then bad("refs: the sequence slots to delete") end
+  if #input.refs > MAX_DROPPED then bad(string.format("refs: at most %d slots in one step", MAX_DROPPED)) end
+  local slots, seen = {}, {}
+  for _, reference in ipairs(input.refs) do
+    local s = seq_of(song, env, reference, "slots-drop")
+    if seen[s] then bad(string.format("slot %d is named twice", s)) end
+    seen[s] = true
+    slots[#slots + 1] = s
+  end
+  table.sort(slots)
+  if #slots >= slot_count(song) then bad("those are all the song's slots: one must stay") end
+  return slots, seen
+end
+
+local function slots_list_text(slots)
+  if #slots == 1 then return "slot " .. slots[1] end
+  local shown = {}
+  for i, s in ipairs(slots) do shown[i] = tostring(s) end
+  return "slots " .. table.concat(shown, ", ", 1, #shown - 1) .. " and " .. shown[#shown]
+end
+
+local DROP_NOTE = "Their patterns stay in the pool, unused."
+
+-- Renoise removes pattern `p` as slot `s` lets go of it: the pool's last, empty, played by no other slot (M3, measured).
+local function goes_with_pattern(song, p, s)
+  return p == #song.patterns and not used_by_others(song, p, { [s] = true }) and song:pattern(p).is_empty
+end
+
+local function drop_preview(song, env, input)
+  local slots = drop_plan(song, env, input)
+  local n = slot_count(song)
+  return {
+    target = song_target(env), prior = { slots = n }, fence = { sequence = sequence_of(song), patterns = #song.patterns },
+    display = { title = "Deleted " .. slots_list_text(slots), before = { slots = n }, after = { slots = n - #slots }, note = DROP_NOTE },
+  }
+end
+
+-- A pattern Renoise is about to remove as its slot lets go of it: what makes it again (its name, length and aliases; it is empty).
+local function gone_pattern(song, p)
+  local pattern = song:pattern(p)
+  local aliases = {}
+  for t = 1, rows.track_count(song) do
+    local alias = pattern:track(t).alias_pattern_index
+    if alias > 0 then aliases[tostring(t)] = alias end
+  end
+  return { name = pattern.name, lines = pattern.number_of_lines, aliases = aliases }
+end
+
+local function drop_apply(song, env, input, fence, desc)
+  local ok, slots, dropped = pcall(drop_plan, song, env, input)
+  if not ok then base.gone_is_changed(slots) end
+  local before = sequence_of(song)
+  if not same_list(before, fence.sequence) or #song.patterns ~= fence.patterns then fail("changed", "the sequence changed since the preview") end
+  local n = #before
+  local items = {}
+  for k, s in ipairs(slots) do
+    items[k] = { slot = s, pattern = before[s], state = state_of(song, s) }
+    -- (deleting a section's start passes it to the next slot, which keeps it: the undo puts that slot's own back)
+    if s < n and not dropped[s + 1] then items[k].next = state_of(song, s + 1) end
+  end
+  song:describe_undo(desc)
+  local sequencer = song.sequencer
+  for k = #items, 1, -1 do
+    local item = items[k]
+    local pool = #song.patterns
+    local p = sequencer.pattern_sequence[item.slot]
+    local goes = goes_with_pattern(song, p, item.slot)
+    local kept = goes and gone_pattern(song, p) or nil
+    sequencer:delete_sequence_at(item.slot)
+    if #song.patterns < pool then item.gone = kept or { name = "", lines = 64, aliases = {} } end
+  end
+  local now = sequence_of(song)
+  local prior, applied = journal_fields(before, now)
+  applied.pool, applied.items = env.pattern_mark and env.pattern_mark() or nil, items
+  local removed = 0
+  for _, item in ipairs(items) do if item.gone then removed = removed + 1 end end
+  local note = DROP_NOTE
+  if removed > 0 then
+    note = string.format("Renoise removed %d empty %s with %s; Kumi makes %s again on undo. The other patterns stay in the pool, unused.",
+      removed, removed == 1 and "pattern" or "patterns", removed == 1 and "its slot" or "their slots", removed == 1 and "it" or "them")
+  end
+  return {
+    applied = applied, target = song_target(env),
+    display = { title = "Deleted " .. slots_list_text(slots), before = { slots = n }, after = { slots = #now }, note = note },
+    undo = { desc = desc, entry = true }, prior = prior, place = {}, follows = "sequence",
+  }
+end
+
+local function drop_restore(song, env, restore, desc)
+  local applied = restore.applied
+  if type(applied) ~= "table" or type(applied.sequence) ~= "table" or type(applied.before) ~= "table" or type(applied.items) ~= "table" then
+    bad("applied: the sequence before and after the drop")
+  end
+  local now = sequence_of(song)
+  local kept, before = redone_sequences(song, restore)
+  if not kept then kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool) end
+  if not kept or not before then stale("deleted slots") end
+  local slots = {}
+  for i, item in ipairs(applied.items) do slots[i] = item.slot end
+  local title = slots_list_text(slots):gsub("^%l", string.upper) .. " put back"
+  if same_list(now, before) then
+    return { restored = { done = true }, display = { title = title .. " already" }, undo = { desc = desc, entry = false }, unwritten = true }
+  end
+  if not same_list(now, kept) then stale("deleted slots") end
+  -- (each slot's pattern where the pool has it now; a removed one is made again)
+  local patterns = {}
+  for i, item in ipairs(applied.items) do
+    if not item.gone then
+      local p = before and before[item.slot]
+      if type(p) ~= "number" or p > #song.patterns then fail("gone", string.format("the pattern slot %d played isn't in the song any more", item.slot)) end
+      patterns[i] = p
+    end
+  end
+  song:describe_undo(desc)
+  local sequencer = song.sequencer
+  for i, item in ipairs(applied.items) do
+    if item.gone then
+      sequencer:insert_new_pattern_at(item.slot)
+      local pattern = song:pattern(sequencer.pattern_sequence[item.slot])
+      if item.gone.lines and pattern.number_of_lines ~= item.gone.lines then pattern.number_of_lines = item.gone.lines end
+      if item.gone.name and item.gone.name ~= "" then pattern.name = item.gone.name end
+      for key, alias in pairs(item.gone.aliases or {}) do
+        pcall(function() pattern:track(tonumber(key)).alias_pattern_index = alias end)
+      end
+    else
+      sequencer:insert_sequence_at(item.slot, patterns[i])
+    end
+    local state = item.state or { start = false, name = "", mutes = {} }
+    local mutes = {}
+    for _, t in ipairs(state.mutes or {}) do
+      local moved = t
+      if type(restore.layout) == "number" and env.shifted then moved = env.shifted(t, restore.layout) end
+      if moved and moved <= rows.track_count(song) then mutes[#mutes + 1] = moved end
+    end
+    set_state(song, item.slot, { start = state.start, name = state.name, mutes = mutes })
+    if item.next and item.slot < slot_count(song) then set_state(song, item.slot + 1, item.next, true) end
+  end
+  base.note_restored(env.journal, "slots-drop", {}, applied, base.KINDS["slots-drop"])
+  return { restored = { done = true }, display = { title = title }, undo = { desc = desc, entry = true } }
+end
+
 -- (the journal compares the whole sequence; see changes_base.lua)
 local function sequence_spec(spec)
   spec.custom = true
@@ -580,5 +919,8 @@ end
 sequence_spec { kind = "slot-clone", preview = clone_preview, apply = clone_apply, restore = clone_restore, redo_marks = clone_marks }
 sequence_spec { kind = "slot-move", preview = move_preview, apply = move_apply, restore = move_restore }
 sequence_spec { kind = "slot-unique", preview = unique_preview, apply = unique_apply, restore = unique_restore, redo_marks = unique_marks }
+-- M7 (variations)
+sequence_spec { kind = "slot-variation", preview = variation_preview, apply = variation_apply, restore = variation_restore, redo_marks = clone_marks }
+sequence_spec { kind = "slots-drop", preview = drop_preview, apply = drop_apply, restore = drop_restore }
 
 return M

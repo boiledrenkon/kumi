@@ -136,6 +136,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
     hidden_arg(arguments, &mut params)?;
     grid_arg(arguments, &mut params)?;
     call_args(arguments, &mut params)?;
+    items_arg(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -168,6 +169,18 @@ fn call_args(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), S
             Ok(())
         }
         Some(_) => Err("args must be the function's arguments: a list in order, or an object by their names".into()),
+    }
+}
+
+/// (M7) What a Renoise `where` read finds again: the places and refs Kumi kept (a list of objects, at most a page).
+fn items_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("items") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(items)) if items.len() <= MAX_LIMIT as usize && items.iter().all(Value::is_object) => {
+            params.insert("items".into(), Value::Array(items.clone()));
+            Ok(())
+        }
+        Some(_) => Err(format!("items must be a list of at most {MAX_LIMIT} objects")),
     }
 }
 
@@ -325,6 +338,16 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wheres_items_are_forwarded_and_anything_else_under_items_refused() {
+        let items = json!([{"pattern": {"n": 4, "mark": "p:3"}}, {"track": "1:track:2"}]);
+        let params = read_params(&json!({"kind": "where", "items": items})).unwrap();
+        assert_eq!(params["items"], items);
+        assert!(read_params(&json!({"kind": "where", "items": "all"})).is_err());
+        assert!(read_params(&json!({"kind": "where", "items": [1]})).is_err());
+        assert!(read_params(&json!({"kind": "song"})).unwrap().get("items").is_none());
+    }
 
     #[test]
     fn hidden_is_forwarded_only_when_true() {

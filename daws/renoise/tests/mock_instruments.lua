@@ -1427,6 +1427,14 @@ function M.instrument_proxy(i)
     end
     renumber_phrases(instrument, "remove", ph)
     list_op(instrument.phrases, instrument.phrases_observable, "remove", ph)
+    -- (measured, 3.5.4: the program moves off a phrase deleted, 2 to 1, and down with the phrases after it; an insert leaves
+    -- it where it is: M7 lab 2026-10-21)
+    local program = instrument.phrase_program
+    if program == ph then
+      write(instrument, "phrase_program", #instrument.phrases == 0 and 0 or math.max(1, ph - 1))
+    elseif program > ph then
+      write(instrument, "phrase_program", program - 1)
+    end
   end
   fields.can_insert_phrase_mapping_at = function(_, m) return m >= 1 and m <= #instrument.mappings + 1 end
   fields.insert_phrase_mapping_at = function(_, m, phrase_proxy)

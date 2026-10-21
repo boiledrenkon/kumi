@@ -1589,6 +1589,8 @@ function M.start(h, reloading)
   status.kumi_busy = function() return listening.busy_reason() end
   focus.rendering = function() return listening.active() ~= nil end
   reads_listening.pattern_mark = place_env.pattern_touch_mark
+  -- (M7: where what Kumi keeps by place is now, for `read {kind: "where"}`)
+  reads.places = place_env
   scratch.init(b)
   scratch.cfg = function() return b.cfg end
   if not reloading then b.scratch_sweep_due = true end

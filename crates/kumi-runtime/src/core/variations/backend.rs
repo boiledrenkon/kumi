@@ -1,0 +1,188 @@
+//! A DAW's side of the variations tool (M7): only its own facts. What its material is (and so how far apart two takes are),
+//! its operators and how a recipe's lines become material, how it reads a source, writes, finds, rewrites, marks, places, drops
+//! and renders takes, and its words for the tool. Core does the rest, the same in every DAW.
+use super::heard::Heard;
+use super::{Material, Rng, TakeSet};
+use crate::core::contracts::JsonObject;
+use async_trait::async_trait;
+use kumi_common::abort::Signal;
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// What a set varies: the DAW's words for it (`label`), what its takes are named after (`short`: "V3 · <short>"), what tells the
+/// same source again (`key`), what it holds (None when the takes start from lines the model writes) and the DAW's own facts.
+#[derive(Debug, Clone)]
+pub struct Source<M, D> {
+    pub label: String,
+    pub short: String,
+    pub key: String,
+    pub material: Option<M>,
+    pub data: D,
+}
+
+/// A backend's set of takes: its source, each take's place (the DAW's, opaque to core) and material.
+pub type Set<B> =
+    TakeSet<Source<<B as VariationsBackend>::Material, <B as VariationsBackend>::Data>, Value, <B as VariationsBackend>::Material>;
+
+/// One take's recipe: the DAW's operators as the model gave them, lines the model wrote itself, another take to start from, and
+/// the direction's words. `picked`: Kumi chose the direction (the model left it), so another may take its place.
+#[derive(Debug, Clone, Default)]
+pub struct Recipe {
+    pub direction: String,
+    pub ops: Vec<Value>,
+    pub lines: Option<Vec<Value>>,
+    pub from: Option<usize>,
+    pub picked: bool,
+}
+
+/// The DAW's words for the tool's description and schema.
+pub struct Words {
+    pub app: &'static str,
+    /// What a source is, for make ("a pattern track's lines (…), a phrase (…)…").
+    pub sources: &'static str,
+    /// What anchors are in the DAW's terms.
+    pub anchors: &'static str,
+    /// The operators and what each does.
+    pub ops: &'static str,
+    /// What `lines` are (the model's own material).
+    pub lines: &'static str,
+    /// Where takes go (`place`), and the names `place` takes.
+    pub places: &'static str,
+    pub place_names: &'static [&'static str],
+    /// What `at` places a kept take at.
+    pub at: &'static str,
+    /// What `options` are (the DAW's settings for new takes).
+    pub options: &'static str,
+    /// The extract action's words, when the DAW has it.
+    pub extract: Option<&'static str>,
+    /// The DAW's notation the model writes in (effect commands, numbering).
+    pub idioms: &'static str,
+    /// Directions Kumi picks for takes the model leaves to it, each one no other take of a request has.
+    pub directions: &'static [&'static str],
+    /// JSON schemas: a source, an operator, the options and `at`.
+    pub source_schema: &'static str,
+    pub op_schema: &'static str,
+    pub options_schema: &'static str,
+    pub at_schema: &'static str,
+}
+
+/// A take's row as the backend found it: `ref` (its long ref) when it's there, `gone` when it was deleted, and the DAW's own
+/// fields (its name, index, slots…). Core reads only those two.
+pub fn found(row: &Value) -> bool {
+    row.get("ref").and_then(Value::as_str).is_some()
+}
+
+pub fn gone(row: &Value) -> bool {
+    row.get("gone") == Some(&Value::Bool(true))
+}
+
+/// What each take sounded like (or why it wasn't rendered), and the source when it was asked for.
+pub type Rendered = (Option<Heard>, BTreeMap<usize, Result<Heard, String>>);
+
+#[async_trait(?Send)]
+pub trait VariationsBackend: Sized {
+    type Material: Material + Clone + std::fmt::Debug + PartialEq;
+    type Data: Clone + std::fmt::Debug;
+
+    fn words(&self) -> &'static Words;
+
+    /// What the open project's sets are kept by (its own id), or None when it has none.
+    async fn project_key(&self, signal: &Signal) -> Option<String>;
+
+    /// The source a make names, read: its material and where its takes go.
+    async fn source(&self, input: &JsonObject, signal: &Signal) -> Result<Source<Self::Material, Self::Data>, String>;
+
+    /// The operators of a direction Kumi picked.
+    fn direction_ops(&self, direction: &str) -> Vec<Value>;
+
+    /// Whether the model's operators are the DAW's (before anything is drawn).
+    fn check_ops(&self, ops: &[Value]) -> Result<(), String>;
+
+    /// Applies the operators, each `factor` times as much, to a take drawn from `source`: what each did, in a few words.
+    fn apply_ops(
+        &self,
+        ops: &[Value],
+        factor: f64,
+        take: &mut Self::Material,
+        source: &Self::Material,
+        rng: &mut Rng,
+    ) -> Result<Vec<String>, String>;
+
+    /// The model's own lines as a take (the anchors as `base` has them).
+    fn written(&self, set: &Set<Self>, lines: &[Value], base: &Self::Material) -> Result<Self::Material, String>;
+
+    /// The empty material takes of a source with none start from.
+    fn empty(&self, set: &Set<Self>) -> Self::Material;
+
+    /// Whether a take keeps what every take keeps (the anchors): why not.
+    fn anchors_kept(&self, source: &Self::Material, take: &Self::Material) -> Result<(), String>;
+
+    /// What a take breaks that the source keeps (its key, its grid), with the operators asked for (a transpose moves the key on
+    /// purpose): words, none when nothing.
+    fn judge(&self, source: Option<&Self::Material>, take: &Self::Material, ops: &[Value]) -> Vec<String>;
+
+    /// What a take holds, to tell later whether anyone changed it.
+    fn digest(&self, material: &Self::Material) -> String;
+
+    /// Writes take `number` (one change): its change id, its place and its long ref.
+    async fn write_new(
+        &self,
+        set: &Set<Self>,
+        number: usize,
+        material: &Self::Material,
+        signal: &Signal,
+    ) -> Result<(String, Value, String), (String, bool)>;
+
+    /// Where each take is now, in order (`found`, `gone`); a take found again another way gets its place updated.
+    async fn find(&self, set: &mut Set<Self>, numbers: &[usize], signal: &Signal) -> Result<Vec<Value>, String>;
+
+    /// What a found take holds now.
+    async fn current(&self, set: &Set<Self>, row: &Value, signal: &Signal) -> Result<Self::Material, String>;
+
+    /// Writes `after` over a found take that holds `before` (one change, or two for a setting the DAW changes apart): the id of
+    /// the change that wrote its lines.
+    async fn rewrite(
+        &self,
+        set: &Set<Self>,
+        row: &Value,
+        before: &Self::Material,
+        after: &Self::Material,
+        signal: &Signal,
+    ) -> Result<String, (String, bool)>;
+
+    /// Marks a found take kept in the DAW (renames it "… · kept"): the change, or None when the producer named it otherwise.
+    async fn mark_kept(&self, set: &Set<Self>, number: usize, row: &Value, signal: &Signal) -> Result<Option<String>, String>;
+
+    /// Puts a kept take where the producer says (one change): what it answered.
+    async fn place(&self, set: &mut Set<Self>, number: usize, row: &Value, at: &JsonObject, signal: &Signal) -> Result<Value, String>;
+
+    /// Why a found take can't go in a drop (it's in use elsewhere), or None.
+    fn undroppable(&self, set: &Set<Self>, number: usize, row: &Value) -> Option<String>;
+
+    /// Drops found takes in one change: its id and what the DAW said.
+    async fn drop(&self, set: &Set<Self>, rows: &[(usize, Value)], signal: &Signal) -> Result<(String, Value), String>;
+
+    /// Why the DAW can't render for Kumi now, or None.
+    fn cant_render(&self) -> Option<String>;
+
+    /// Whether the DAW plays now (a render would stop it).
+    async fn playing(&self, signal: &Signal) -> bool;
+
+    /// Renders the takes (and the source, when asked) offline and hears them.
+    async fn render(&self, set: &mut Set<Self>, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String>;
+
+    /// A long ref as the model sees it.
+    fn short(&self, long: &str) -> String;
+
+    /// What to tell of where the takes play (pattern takes play at the song's end), or None.
+    fn end_note(&self, set: &Set<Self>) -> Option<String>;
+
+    /// The DAW's extract action (a phrase of a pattern's lines), when it has one.
+    async fn extract(&self, input: &JsonObject, signal: &Signal) -> Result<Value, String>;
+
+    /// Material and the DAW's facts as kept between runs, and read back.
+    fn material_json(&self, material: &Self::Material) -> Value;
+    fn material_of(&self, value: &Value) -> Option<Self::Material>;
+    fn data_json(&self, data: &Self::Data) -> Value;
+    fn data_of(&self, value: &Value) -> Option<Self::Data>;
+}

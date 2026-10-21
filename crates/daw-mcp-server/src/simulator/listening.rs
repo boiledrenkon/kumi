@@ -42,6 +42,8 @@ struct State {
     steps: u32,
     /// Each track's level (its noise's peak), by ref; the master is their sum.
     levels: HashMap<String, f64>,
+    /// (M7) A track's level in renders from a beat on (its ref, the beat, the level): the song's end plays louder.
+    levels_from: Vec<(String, f64, f64)>,
     /// The master's level when a test sets it (the mix as a change left it).
     master_level: Option<f64>,
     /// What the master's own gain FX add, in dB (a bridge script keeps it).
@@ -137,6 +139,7 @@ impl SimListening {
                 jobs: HashMap::new(),
                 steps: 1,
                 levels: HashMap::new(),
+                levels_from: Vec::new(),
                 master_level: None,
                 master_gain_db: 0.,
                 slow_stop: false,
@@ -206,6 +209,11 @@ impl SimListening {
     /// A track's level (0: silent).
     pub fn set_level(&self, reference: &str, level: f64) {
         self.state.lock().unwrap().levels.insert(reference.into(), level);
+    }
+
+    /// A track's level in renders that start at `beat` or later (the takes at a song's end, say).
+    pub fn set_level_from(&self, reference: &str, beat: f64, level: f64) {
+        self.state.lock().unwrap().levels_from.push((reference.into(), beat, level));
     }
 
     /// The master's level from now on (the mix as a change left it).
@@ -507,7 +515,13 @@ impl SimListening {
             if !known(reference) && !state.scratch.values().flatten().any(|(copy, ..)| copy == reference) {
                 return Err(("gone".into(), format!("{reference} isn't in the project any more: read again")));
             }
-            let level = Self::level(state, reference);
+            let level = state
+                .levels_from
+                .iter()
+                .rev()
+                .find(|(track, beat, _)| track == reference && from >= *beat)
+                .map(|(_, _, level)| *level)
+                .unwrap_or_else(|| Self::level(state, reference));
             master += level;
             let stage = match (state.daw, source["stage"].as_str()) {
                 (Daw::Renoise, _) => "post-fader",
@@ -762,8 +776,13 @@ impl SimListening {
                 if params.get("epoch").and_then(Value::as_str).is_none() {
                     return Err(bad("epoch: the epoch the track ref was read in"));
                 }
-                let source = params["ref"].as_str().unwrap_or_default().to_string();
-                if !known(&source) {
+                // (M7: players of an instrument's phrases stand for their instrument, so a render's level is the instrument's)
+                let players = params.get("phrases").filter(|phrases| !phrases.is_null());
+                let source = match players {
+                    Some(players) => players["instrument"].as_str().unwrap_or_default().to_string(),
+                    None => params["ref"].as_str().unwrap_or_default().to_string(),
+                };
+                if players.is_none() && !known(&source) {
                     return Err(("gone".into(), format!("{source} isn't in the project any more: read again")));
                 }
                 if let Some((_, why)) =

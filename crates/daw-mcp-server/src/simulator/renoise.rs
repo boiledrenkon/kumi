@@ -10,6 +10,7 @@
 use super::listening::SimListening;
 use super::reaper::LISTENING_METHODS;
 use super::renoise_dsp::Chains;
+use super::renoise_takes::Takes;
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -75,6 +76,10 @@ struct State {
     /// The song's tempo commands, when a test gives it some: each render plays them into the transport and leaves its
     /// tempo at this BPM (no undo step), as Renoise's does.
     render_bpm: Option<f64>,
+    /// (M7) What Kumi's variations made: phrases with their lines, slots of variation patterns.
+    takes: Takes,
+    /// Renoise plays, as its focus says (a test sets it).
+    transport_playing: bool,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -217,6 +222,8 @@ impl RenoiseScript {
                 lines: Default::default(),
                 chains: Chains::default(),
                 render_bpm: None,
+                takes: Takes::default(),
+                transport_playing: false,
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -388,27 +395,47 @@ impl RenoiseScript {
         let set = |state: &mut State, rows: &Value| {
             state.lines.insert((pattern, track), rows.as_array().cloned().unwrap_or_default());
         };
-        // The lines after the write: each cell named written whole, or cleared.
+        // The lines after the write: a line named with clear emptied first, each cell named written whole, or cleared (note
+        // and effect columns).
         let after = || -> Result<Value, (String, String)> {
-            let mut rows: std::collections::BTreeMap<u64, Vec<Value>> = now
+            let list = |row: &Value, key: &str| row[key].as_array().cloned().unwrap_or_default();
+            let mut rows: std::collections::BTreeMap<u64, (Vec<Value>, Vec<Value>)> = now
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|row| Some((row["line"].as_u64()?, row["notes"].as_array().cloned().unwrap_or_default())))
+                .filter_map(|row| Some((row["line"].as_u64()?, (list(row, "notes"), list(row, "effects")))))
                 .collect();
             for entry in params["input"]["lines"].as_array().into_iter().flatten() {
                 let line = entry["line"].as_u64().ok_or(bad("line"))?;
-                let cells = rows.entry(line).or_default();
-                for cell in entry["notes"].as_array().into_iter().flatten() {
-                    let col = cell["col"].as_u64().ok_or(bad("col"))?;
-                    cells.retain(|held| held["col"].as_u64() != Some(col));
-                    if cell["clear"] != true {
-                        cells.push(cell.clone());
-                    }
+                if entry["clear"] == true {
+                    rows.remove(&line);
                 }
-                cells.sort_by_key(|cell| cell["col"].as_u64());
+                let (notes, effects) = rows.entry(line).or_default();
+                for (key, cells) in [("notes", notes), ("effects", effects)] {
+                    for cell in entry[key].as_array().into_iter().flatten() {
+                        let col = cell["col"].as_u64().ok_or(bad("col"))?;
+                        cells.retain(|held| held["col"].as_u64() != Some(col));
+                        if cell["clear"] != true {
+                            cells.push(cell.clone());
+                        }
+                    }
+                    cells.sort_by_key(|cell| cell["col"].as_u64());
+                }
             }
-            Ok(rows.into_iter().filter(|(_, cells)| !cells.is_empty()).map(|(line, cells)| json!({"line": line, "notes": cells})).collect())
+            Ok(rows
+                .into_iter()
+                .filter(|(_, (notes, effects))| !notes.is_empty() || !effects.is_empty())
+                .map(|(line, (notes, effects))| {
+                    let mut row = json!({"line": line});
+                    if !notes.is_empty() {
+                        row["notes"] = notes.into();
+                    }
+                    if !effects.is_empty() {
+                        row["effects"] = effects.into();
+                    }
+                    row
+                })
+                .collect())
         };
         match method {
             "change_preview" => {
@@ -524,6 +551,10 @@ impl RenoiseScript {
         }
         if kind == "notes-write" {
             return Self::notes_write(state, method, params);
+        }
+        if Takes::owns(kind) {
+            let State { takes, lines, undo, .. } = state;
+            return takes.change(epoch, method, params, lines, undo);
         }
         if matches!(kind, "device-param" | "device-params") {
             // (a device or parameter ref names its place in this epoch only: a device-add since moves it)
@@ -819,6 +850,26 @@ impl RenoiseScript {
         self.state.lock().unwrap().song[field] = value;
     }
 
+    /// (M7) The phrases Kumi's variations made in an instrument (from 1): name and lines, in order.
+    pub fn made_phrases(&self, instrument: u64) -> Vec<(String, Vec<Value>)> {
+        self.state.lock().unwrap().takes.phrases(instrument)
+    }
+
+    /// (M7) Renoise started again: the places Kumi kept are unknown now (what the variations made is still there by name).
+    pub fn forget_places(&self) {
+        self.state.lock().unwrap().takes.forget();
+    }
+
+    /// (M7) Renoise plays (as its focus says) or not.
+    pub fn set_transport_playing(&self, playing: bool) {
+        self.state.lock().unwrap().transport_playing = playing;
+    }
+
+    /// (M7) The variation patterns a slot plays: name and pattern number (from 1).
+    pub fn variation_slots(&self) -> Vec<(String, u64)> {
+        self.state.lock().unwrap().takes.slotted()
+    }
+
     /// Every request the simulator answered, in order.
     pub fn asked(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().asked.clone()
@@ -895,6 +946,46 @@ impl RenoiseScript {
         if method.starts_with("change_") {
             return Some(Self::change(&mut state, method, params));
         }
+        // (M7) Where what the variations made is now, and a phrase's lines.
+        if method == "read" && params["kind"] == "where" {
+            let items = params["items"].as_array().cloned().unwrap_or_default();
+            return Some(state.takes.locate(state.epoch, &items));
+        }
+        if method == "read" && params["kind"] == "sequence" && params.get("cursor").is_none() {
+            let case = state.cases.iter().find(|case| case.method == "read" && case.params == json!({"kind": "sequence"}));
+            let rows =
+                case.and_then(|case| case.response.as_ref().ok()).and_then(|page| page["items"].as_array().cloned()).unwrap_or_default();
+            let rows = rows.iter().map(|row| retag(row, VECTORS_EPOCH, state.epoch, None)).collect();
+            return Some(state.takes.sequence(state.epoch, rows));
+        }
+        // (the phrases of an instrument and the patterns, with what the variations made after the vectors')
+        if method == "read"
+            && params.get("cursor").is_none()
+            && (params["kind"] == "pattern" || (params["kind"] == "phrase" && params["parent"].is_string()))
+        {
+            let parent = params["parent"].as_str().unwrap_or_default();
+            let instrument = parent.rsplit(':').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+            let asked = if params["kind"] == "pattern" {
+                json!({"kind": "pattern"})
+            } else {
+                json!({"kind": "phrase", "parent": format!("{VECTORS_EPOCH}:instrument:{instrument}")})
+            };
+            let case = state.cases.iter().find(|case| case.method == "read" && case.params == asked);
+            let rows =
+                case.and_then(|case| case.response.as_ref().ok()).and_then(|page| page["items"].as_array().cloned()).unwrap_or_default();
+            let rows = rows.iter().map(|row| retag(row, VECTORS_EPOCH, state.epoch, None)).collect();
+            return Some(if params["kind"] == "pattern" {
+                state.takes.pattern_rows(state.epoch, rows)
+            } else {
+                state.takes.phrase_rows(state.epoch, instrument, rows)
+            });
+        }
+        if method == "read" && params["kind"] == "line" && params["parent"].as_str().is_some_and(|parent| parent.contains(":phrase:")) {
+            let parent = params["parent"].as_str().unwrap_or_default();
+            return Some(
+                state.takes.phrase_lines(state.epoch, parent).unwrap_or_else(|| Err(("bad-params".into(), "no such phrase".into()))),
+            );
+        }
         // A line in Renoise's status bar (m4-tui): shown (kept for the tests: m6-places), nothing changed.
         if method == "show_status" {
             return Some(match params.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
@@ -962,6 +1053,14 @@ impl RenoiseScript {
             }
         }
         let wanted = normal(&asked);
+        if method == "focus" && state.transport_playing {
+            if let Some(Ok(mut page)) =
+                state.cases.iter().find(|case| case.method == method && case.params == wanted).map(|case| case.response.clone())
+            {
+                page["transport"]["playing"] = true.into();
+                return Some(Ok(retag(&page, VECTORS_EPOCH, epoch, None)));
+            }
+        }
         if let Some(case) = state.cases.iter().find(|case| case.method == method && case.params == wanted) {
             let response = case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts));
             if method == "digest" {

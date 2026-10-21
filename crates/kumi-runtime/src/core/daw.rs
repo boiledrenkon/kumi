@@ -640,6 +640,9 @@ pub struct Capabilities {
     /// Listens render the part offline (faster than it plays) and play it out loud after, rather than hearing it as
     /// it plays: REAPER's and Renoise's bridges.
     pub renders_to_listen: bool,
+    /// (M7) The variations tool: numbered takes of a source, kept, changed or dropped by number (core's, with the DAW's backend):
+    /// Renoise's patterns and phrases.
+    pub variations: bool,
 }
 
 /// One DAW as Kumi knows it: its id (None when no DAW is known), its words and what it can do.
@@ -761,6 +764,7 @@ impl DawProfile {
             presets: true,
             // (Live hears as it plays, through Kumi Ears or a recording)
             renders_to_listen: false,
+            variations: false,
         },
         vocab: PromptVocab {
             plan_tool: crate::live_word!(plan_tool),
@@ -944,6 +948,7 @@ impl DawProfile {
             status_line: true,
             catch_up: true,
             presets: true,
+            variations: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -1072,6 +1077,7 @@ impl Capabilities {
         configured_plugin_params: false,
         presets: false,
         renders_to_listen: false,
+        variations: false,
     };
 }
 
