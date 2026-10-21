@@ -306,8 +306,7 @@ jobs:
   logic-bridge:
     # Logic's bridge is Kumi's own process beside Logic (nothing loads into Logic), so it is tested where it runs: the
     # shared crate's and the host's tests with their Logic parts, and the bridge crate's own, on macOS, with its
-    # Accessibility helper built by its script first. The crate and the script land with their own lane; until they are
-    # there, each step does without them.
+    # Accessibility helper built by its script first.
     name: Logic bridge
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -320,17 +319,14 @@ jobs:
         with:
           key: logic-bridge
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: The Accessibility helper, when its build script is there
+      - name: The Accessibility helper
         shell: bash
-        run: |
-          if [ -f scripts/build-logic-hands.py ]; then python3 scripts/build-logic-hands.py; else echo "no scripts/build-logic-hands.py yet: nothing to build"; fi
+        run: python3 scripts/build-logic-hands.py
       - name: The bridge crates' tests, in a home of their own (no test reaches this machine's ~/.kumi or Logic)
         shell: bash
         env:
           KUMI_PACKAGES: daw-bridge daw-mcp-server logic-kumi
-        run: |
-          if [ ! -d crates/logic-kumi ]; then KUMI_PACKAGES="${KUMI_PACKAGES% logic-kumi}"; fi
-          sh scripts/test-isolated.sh --no-fail-fast
+        run: sh scripts/test-isolated.sh --no-fail-fast
 
   scripts:
     name: Release scripts

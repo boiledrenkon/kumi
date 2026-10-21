@@ -215,7 +215,8 @@ impl Own {
     }
 
     /// The folder Logic's bridge is set up from: the one beside Kumi in a release, the one `KUMI_LOGIC_BRIDGE_SOURCE`
-    /// names, else this checkout's own build, staged as a release lays it out (its helper built when it isn't yet).
+    /// names, else, in a checkout's build on a Mac, that checkout's own build, staged as a release lays it out (its helper
+    /// built when it isn't yet).
     fn logic_source(&self, env: &Env) -> Result<PathBuf, String> {
         let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
         if let Some(carried) = beside.as_deref().and_then(|beside| self.carried_by(beside)) {
@@ -229,7 +230,25 @@ impl Own {
                 Err(format!("{LOGIC_BRIDGE_SOURCE_VAR} names {named}, which holds no {LOGIC_BINARY}"))
             };
         }
-        stage_logic_bridge(beside.as_deref())
+        match self.unavailable(env) {
+            Some(why) => Err(why),
+            None => stage_logic_bridge(beside.as_deref()),
+        }
+    }
+
+    /// Why this Kumi has no bridge for the DAW to set up, when it has none: only Logic's can be missing. A release sets up
+    /// only the bridge it carries, and only the Apple Silicon Mac's carries Logic's; nothing but a Mac runs Logic Pro. So
+    /// a Kumi that carries none, with no folder named in `KUMI_LOGIC_BRIDGE_SOURCE`, has none to set up (and says why),
+    /// unless it's a checkout's build on a Mac, which stages its own (`stage_logic_bridge`).
+    fn unavailable(&self, env: &Env) -> Option<String> {
+        if self.daw != Daw::Logic {
+            return None;
+        }
+        let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+        let carried = beside.as_deref().and_then(|beside| self.carried_by(beside)).is_some();
+        let named = env.get(LOGIC_BRIDGE_SOURCE_VAR).is_some_and(|named| !named.is_empty());
+        let stages = cfg!(target_os = "macos") && !released(env, beside.as_deref());
+        (!carried && !named && !stages).then(without_logic_bridge)
     }
 
     /// Puts the bridge this Kumi brings in the DAW (Logic's in Kumi's own folder), where detection finds it, or what
@@ -275,6 +294,15 @@ impl Own {
         match self.daw {
             Daw::Logic => "Kumi's own folder".into(),
             _ => self.name().into(),
+        }
+    }
+
+    /// How a copy just put in place comes to run: the DAW loads it when it starts, or (Logic's) Kumi starts it beside
+    /// Logic, which loads nothing, so nothing of Logic's restarts.
+    fn load_words(&self) -> String {
+        match self.daw {
+            Daw::Logic => format!("Kumi starts it beside {} when a session begins", self.name()),
+            _ => format!("restart {} if it's open", self.name()),
         }
     }
 
@@ -337,6 +365,34 @@ impl Own {
 /// Where this checkout stages Logic's bridge as a release lays it out.
 fn logic_staging(checkout: &Path) -> PathBuf {
     checkout.join("target").join("logic-bridge").join(LOGIC_BRIDGE_FOLDER)
+}
+
+/// Whether this Kumi runs as a release rather than a checkout's build: installed (its launcher sets `KUMI_INSTALLED`), or
+/// started from a release's folder, which holds `kumi-install.json` beside it.
+fn released(env: &Env, beside: Option<&Path>) -> bool {
+    env.get("KUMI_INSTALLED").is_some_and(|value| value == "1") || beside.is_some_and(|beside| beside.join("kumi-install.json").is_file())
+}
+
+/// Why this Kumi has no bridge for Logic Pro: Logic Pro is supported on Apple Silicon Macs only, and this Kumi is for
+/// another system (only the Apple Silicon Mac's release carries the bridge); on an Apple Silicon Mac, its release lacks it.
+fn without_logic_bridge() -> String {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return "this Kumi doesn't carry it: run Kumi's installer again".into();
+    }
+    let system = if cfg!(target_os = "macos") {
+        "Intel Macs"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    format!("Logic Pro is supported on Apple Silicon Macs only, and this Kumi is for {system}")
+}
+
+/// `words` as a sentence of its own: a capital first, a full stop last.
+fn sentence(words: &str) -> String {
+    let mut chars = words.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default() + "."
 }
 
 /// The Accessibility helper in `dir`: the newest `kumi-logic-hands-*` file there.
@@ -536,19 +592,17 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
-    fn bridge_state(&self, _env: &Env, _found: bool, missing: bool, _bundled: Option<&str>, command: &str) -> BridgeState {
+    fn bridge_state(&self, env: &Env, _found: bool, missing: bool, _bundled: Option<&str>, command: &str) -> BridgeState {
         if !missing {
             return BridgeState::default();
         }
         let missing = self.missing_words();
-        BridgeState {
-            notice: Some(format!(
-                "{missing}; chatting without it. Run {command} --daw {} bridge to {}.",
-                self.id.as_str(),
-                self.setup_verb()
-            )),
-            why: Some(format!("{missing}.")),
-        }
+        // A Kumi with no bridge to set up says why, rather than a command that would only say it again.
+        let next = match self.unavailable(env) {
+            Some(why) => sentence(&why),
+            None => format!("Run {command} --daw {} bridge to {}.", self.id.as_str(), self.setup_verb()),
+        };
+        BridgeState { notice: Some(format!("{missing}; chatting without it. {next}")), why: Some(format!("{missing}.")) }
     }
     fn setup(
         &self,
@@ -563,18 +617,22 @@ impl DawProvider for Own {
         if !self.present(&io.env) {
             return async { vec![] }.boxed_local();
         }
-        // The DAW is here, but Kumi's bridge was never put in: a note, nothing to fix.
+        // The DAW is here, but Kumi's bridge was never put in: a note, nothing to fix. A Kumi with no bridge to set up
+        // says why instead of the command.
         if self.receipt(&io.env).is_none() {
-            let note = Check::note(
-                self.not_in_words(),
-                Some(format!(
-                    "{} --daw {} bridge {}, if you want Kumi in {}",
-                    *kumi_runtime::KUMI,
-                    self.id.as_str(),
-                    self.setup_verb_does(),
-                    self.name()
-                )),
-            );
+            let note = match self.unavailable(&io.env) {
+                Some(why) => Check::note(format!("{}: {why}", self.not_in_words()), None),
+                None => Check::note(
+                    self.not_in_words(),
+                    Some(format!(
+                        "{} --daw {} bridge {}, if you want Kumi in {}",
+                        *kumi_runtime::KUMI,
+                        self.id.as_str(),
+                        self.setup_verb_does(),
+                        self.name()
+                    )),
+                ),
+            };
             return async move { vec![note] }.boxed_local();
         }
         let daw = self.daw;
@@ -656,11 +714,11 @@ impl DawProvider for Own {
             };
             match self.update_target(&io.env).and_then(|target| self.put(target, &io.env, &source, false)) {
                 Ok(put) if put.changed => io.out.write(&format!(
-                    "{} {} is in {} now: restart {} if it's open.\n{}",
+                    "{} {} is in {} now: {}.\n{}",
                     self.bridge,
                     put.version,
-                    self.name(),
-                    self.name(),
+                    self.place_words(),
+                    self.load_words(),
                     self.kept_words(&put)
                 )),
                 // The bridge in place is the one this Kumi brings.
@@ -707,9 +765,9 @@ impl DawProvider for Own {
     ) -> LocalBoxFuture<'static, Result<i32, RuntimeError>> {
         let (own, env) = (own_of(self.id), env.clone());
         async move {
-            // Asked before anything is written into the DAW's folder (--yes answers beforehand). Without a place yet,
-            // the install below says why.
-            if let (false, Ok(target)) = (command.yes, own.target(&env)) {
+            // Asked before anything is written into the DAW's folder (--yes answers beforehand). Without a place yet, or
+            // with no bridge to set up (Logic's, on a Kumi that carries none), the install below says why, unasked.
+            if let (false, Ok(target), None) = (command.yes, own.target(&env), own.unavailable(&env)) {
                 let question = match own.daw {
                     Daw::Logic => format!("Set up {} in Kumi's own folder ({})?", own.bridge, target.path().display()),
                     _ => format!("Put {} in {} ({})?", own.bridge, own.name(), target.path().display()),
@@ -851,15 +909,15 @@ impl BridgeRollbackStep for OwnRollback {
         };
         match own.update_target(&io.env).and_then(|target| own.put(target, &io.env, &source, true)) {
             Ok(put) if put.changed => io.out.write(&format!(
-                "{} {} is back in {}, as Kumi {version} had it: restart {} if it's open.\n{}",
+                "{} {} is back in {}, as Kumi {version} had it: {}.\n{}",
                 own.bridge,
                 put.version,
-                own.name(),
-                own.name(),
+                own.place_words(),
+                own.load_words(),
                 own.kept_words(&put)
             )),
             Ok(_) => {}
-            Err(why) => io.out.write(&format!("{} stays as it was in {}: {why}.\n", own.bridge, own.name())),
+            Err(why) => io.out.write(&format!("{} stays as it was in {}: {why}.\n", own.bridge, own.place_words())),
         }
         0
     }
