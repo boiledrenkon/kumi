@@ -314,10 +314,12 @@ pub fn marker_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Appl
     if !ctx.reaper.delete_tempo_marker(ctx.proj, index) || ctx.reaper.tempo_marker_count(ctx.proj) >= count {
         return Err(failed("REAPER wouldn't delete the tempo marker"));
     }
+    // The tempo map as the delete left it: changed since, the marker made again at its old time would sit at another bar.
+    let tempo = super::marks::tempo_print(ctx.reaper, ctx.proj);
     Ok(Applied {
         applied: json!({"deleted": true}),
         created: None,
-        material: Some(json!({"time": marker.time, "state": now})),
+        material: Some(json!({"time": marker.time, "state": now, "tempo": tempo})),
         display: json!({"title": format!("Deleted tempo marker at {}", bar_text(ctx.reaper, ctx.proj, marker.time))}),
         ..Default::default()
     })
@@ -341,6 +343,7 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             )))
         };
     }
+    super::marks::tempo_unmoved(ctx, material, restore.discard, "the tempo marker")?;
     if !put_marker(ctx, -1, time, saved) {
         return Err(failed("REAPER wouldn't make the tempo marker again"));
     }

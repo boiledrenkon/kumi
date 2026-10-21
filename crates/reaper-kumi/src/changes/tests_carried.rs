@@ -48,6 +48,26 @@ fn undoing_a_tempo_marker_delete_never_writes_over_another_marker_at_its_time_an
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
 }
 
+#[test]
+fn undoing_a_tempo_marker_delete_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tempo_markers = vec![
+            FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false },
+            FakeTempo { time: 16.0, bpm: 90.0, num: -1, denom: -1, linear: false },
+        ]
+    });
+    let (preview, applied) = lab.make("tempo-marker-delete", json!({"position": 16.0}), "Kumi: Deleted tempo marker (kt011)");
+    // An earlier tempo change: at 16 s the marker would sit at another bar.
+    state(|s| s.tempo_markers.push(FakeTempo { time: 4.0, bpm: 140.0, num: -1, denom: -1, linear: false }));
+    let (code, message) = lab.undo("tempo-marker-delete", &preview, &applied, "Kumi: undo (kt012)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert_eq!(tempo_markers().len(), 2, "nothing made again");
+    lab.undo_anyway("tempo-marker-delete", &preview, &applied, "Kumi: undo (kt013)").unwrap();
+    assert_eq!(tempo_markers().len(), 3);
+}
+
 // ----- NIT-4: an undo jump deeper than a look reads -----
 
 /// The producer's own edits, each a point, with the watch looking every few of them as REAPER's ticks would.
