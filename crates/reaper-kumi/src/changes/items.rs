@@ -1598,10 +1598,22 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = guid_of_ref(&restore.target["ref"], "target")?;
     if let Some(item) = item_by_guid(ctx, &guid) {
         let back = chunks::item_print(ctx.reaper, item).as_deref() == restore.prior["print"].as_str();
-        if back || restore.discard {
+        if back {
             return Ok(Restored {
                 restored: json!({"ref": refs::item_ref(&guid)}),
                 display: json!({"title": format!("{} is back already", label_opening(ctx, item))}),
+                unwritten: true,
+            });
+        }
+        // (with discard: it is there, but not as it was; nothing is written over it)
+        if restore.discard {
+            let name = label_opening(ctx, item);
+            return Ok(Restored {
+                restored: json!({"ref": refs::item_ref(&guid)}),
+                display: json!({
+                    "title": format!("{name} is in the project again, changed since"),
+                    "note": "It is in the project again, changed since it was deleted: Kumi left it as it is.",
+                }),
                 unwritten: true,
             });
         }

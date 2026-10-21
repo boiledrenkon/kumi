@@ -601,6 +601,11 @@ fn a_deleted_item_back_in_the_project_but_changed_is_the_producers() {
     });
     assert_eq!(code(lab.undo("item-delete", &preview, &applied)), "changed");
     assert_eq!(state(|s| s.tracks[1].items.iter().filter(|i| i.guid == "{ITEM-K1}").count()), 1, "no second item with its id");
+    // With discard: said as it is, there but changed and left so, not "back already" (review R18).
+    let left = lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert_eq!(left["display"]["note"], "It is in the project again, changed since it was deleted: Kumi left it as it is.");
+    assert!(!left["display"]["title"].as_str().unwrap().contains("back already"), "{left}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 3.0);
     // Back as it was: back already.
     state(|s| s.tracks[1].items.iter_mut().find(|i| i.guid == "{ITEM-K1}").unwrap().position = was.position);
     let again = lab.undo("item-delete", &preview, &applied).unwrap();
