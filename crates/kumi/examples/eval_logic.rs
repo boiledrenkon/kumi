@@ -1,5 +1,5 @@
 //! Opt-in eval of how the configured model knows Logic Pro and works in it: knowledge probes for Logic's terms and
-//! ways (Apple's Logic Pro User Guide asked and cited where a question is about one of Logic's features), change
+//! ways (Apple's Logic Pro User Guide asked and cited where Logic's instruction pack doesn't state the answer), change
 //! requests, the limits Kumi's bridge can't pass, and listening. It uses your sign-in and model but never Logic Pro:
 //! each case is a session over the simulated Logic (Kumi's host in process, in front of the Scratch project as the
 //! bridge's tests recorded it), with Logic's instruction pack, change set and listening, and a throwaway folder for
@@ -513,7 +513,7 @@ pub enum Kind {
     Probe,
     /// A change to Scratch.
     Change,
-    /// What Kumi's bridge can't do in Logic, refused saying why.
+    /// What Kumi's bridge can't do in Logic: refused saying why, or a way round said as one.
     Limit,
     /// A request that needs ears.
     Listen,
@@ -658,13 +658,34 @@ fn refused(run: &Run<'_>, why: &str, found: &mut Vec<String>) {
     need(found, run.mentions(why), format!("doesn't say why (/{why}/)"));
 }
 
+/// Logic's instruction pack, as every turn over Logic Pro carries it.
+const PACK: &str = kumi_runtime::integrations::logic::DAW.instructions;
+
+/// What a probe's answer rests on. (M7) Apple's guide is required only where Logic's instruction pack doesn't state the
+/// answer: the first run with a model answered six probes right from the pack, and failed them only for not asking it.
+#[derive(Clone, Copy)]
+pub enum Source {
+    /// Logic's pack, which states the answer in these words (the check fails once it no longer does): asking the guide
+    /// isn't required.
+    Pack(&'static str),
+    /// Apple's guide, since the pack doesn't state the answer: Kumi asks logic_manual and cites a topic it gave.
+    Guide,
+    /// What Kumi reads of the project.
+    Project,
+}
+
 /// A question about Logic Pro: what Kumi says matches each of `says` (in any case), in Logic's words and none of
-/// Live's; with `guide`, Kumi asked Apple's guide and cites a topic it gave; and nothing in the project changes.
-fn probe(name: &'static str, prompt: &'static str, says: &'static [&'static str], guide: bool, canned: fn() -> Vec<Reply>) -> Case {
+/// Live's; with the guide as its source, Kumi asked Apple's guide and cites a topic it gave; and nothing in the project
+/// changes.
+fn probe(name: &'static str, prompt: &'static str, says: &'static [&'static str], source: Source, canned: fn() -> Vec<Reply>) -> Case {
     let looks_for = format!(
         "says {}{}; changes nothing; none of Live's words",
         says.iter().map(|pattern| format!("/{pattern}/")).collect::<Vec<_>>().join(" and "),
-        if guide { "; asks logic_manual and cites a topic it gave" } else { "" }
+        match source {
+            Source::Guide => "; asks logic_manual and cites a topic it gave".to_owned(),
+            Source::Pack(words) => format!(" (Logic's pack says “{words}”, so the guide isn't required)"),
+            Source::Project => String::new(),
+        }
     );
     Case {
         name,
@@ -676,8 +697,14 @@ fn probe(name: &'static str, prompt: &'static str, says: &'static [&'static str]
             for pattern in says {
                 need(&mut found, run.mentions(pattern), format!("doesn't say /{pattern}/"));
             }
-            if guide {
-                cites_the_guide(run, &mut found);
+            match source {
+                Source::Guide => cites_the_guide(run, &mut found),
+                Source::Pack(words) => need(
+                    &mut found,
+                    PACK.contains(words),
+                    format!("Logic's pack no longer says “{words}”: make the guide this probe's source"),
+                ),
+                Source::Project => {}
             }
             unchanged(run, &mut found);
             logic_words(run, &mut found);
@@ -718,23 +745,30 @@ fn field(script: &LogicScript, index: usize, key: &str) -> Value {
 
 pub fn every_case() -> Vec<Case> {
     vec![
-        // Knowledge probes: Logic's terms and ways, the guide asked where a question is about one of Logic's features.
-        probe("probe: a region, not a clip", "What's on the Keys track, and how long is it?", &["region"], false, || {
+        // Knowledge probes: Logic's terms and ways. (M7) Apple's guide is required, asked and cited, only where Logic's
+        // instruction pack doesn't state the answer; where it does, the words it says it in are the probe's source.
+        probe("probe: a region, not a clip", "What's on the Keys track, and how long is it?", &["region"], Source::Project, || {
             vec![
                 call("logic_read", json!({"kind": "region", "parent": "track:2"})),
                 says("The Keys track holds one MIDI region, “Keys”: it starts at bar 1 and runs 16 beats, to bar 5, playing four notes."),
             ]
         }),
-        probe("probe: the Stereo Out", "Where would a limiter go in Logic Pro to work on the whole mix?", &["Stereo Out"], false, || {
-            vec![says(
-                "On the Stereo Out, the project's output channel strip: both your tracks go to Stereo Output, so a limiter in its insert slots works on the whole mix. Say if you want me to put one there.",
-            )]
-        }),
+        probe(
+            "probe: the Stereo Out",
+            "Where would a limiter go in Logic Pro to work on the whole mix?",
+            &["Stereo Out"],
+            Source::Pack("its plug-ins act on the whole mix, so a Gain or a limiter on everything goes there"),
+            || {
+                vec![says(
+                    "On the Stereo Out, the project's output channel strip: both your tracks go to Stereo Output, so a limiter in its insert slots works on the whole mix. Say if you want me to put one there.",
+                )]
+            },
+        ),
         probe(
             "probe: Track Stacks",
             "What's the difference between a folder stack and a summing stack?",
             &["summing", "folder", r"\baux|\bbus|submix"],
-            true,
+            Source::Pack("a summing stack mixes them through a bus, a folder stack only groups them"),
             || {
                 vec![
                     call("find_tools", json!({"names": ["logic_manual"]})),
@@ -749,7 +783,7 @@ pub fn every_case() -> Vec<Case> {
             "probe: the Marker, Tempo and Signature Lists",
             "Where does Logic Pro keep the project's markers, tempo changes and time signatures?",
             &[r"Marker List|Marker,? (?:and )?Tempo", r"Tempo List|Tempo,? (?:and )?Signature Lists?", r"Signature Lists?"],
-            true,
+            Source::Pack("Markers, tempo changes and signatures live in Logic Pro's Marker, Tempo and Signature Lists"),
             || {
                 vec![
                     call("logic_manual", json!({"question": "list of markers, tempo changes and time signatures"})),
@@ -763,7 +797,9 @@ pub fn every_case() -> Vec<Case> {
             "probe: key commands act on the selection",
             "If I press Command-T in Logic Pro, what gets split, and where?",
             &["select", "playhead", "region"],
-            true,
+            // The pack says a key command acts on the selection, but not what Command-T runs or that it splits at the
+            // playhead: the guide's key command tables say it.
+            Source::Guide,
             || {
                 vec![
                     call("logic_manual", json!({"question": "Command-T split regions at playhead key command"})),
@@ -777,7 +813,7 @@ pub fn every_case() -> Vec<Case> {
             "probe: what Logic's undo keeps no step of",
             "Which of my changes can't Logic Pro's own undo take back?",
             &[r"fader|volume", r"\bpan\b|\bmute|\bsolo", r"plug-in|parameter|tempo|Smart Control"],
-            true,
+            Source::Pack("A fader, pan, mute, solo, arm, bypass, the tempo, the cycle, a plug-in's parameter or setting, a Smart Control and a send's level make no step of Logic Pro's own undo"),
             || {
                 vec![
                     call("logic_manual", json!({"question": "what the undo history doesn't keep"})),
@@ -791,7 +827,7 @@ pub fn every_case() -> Vec<Case> {
             "probe: the Controls View",
             "How can I see all of a plug-in's parameters as plain sliders in Logic Pro?",
             &["Controls"],
-            true,
+            Source::Pack("A plug-in's parameters are reached only in its window's Controls View"),
             || {
                 vec![
                     call("logic_manual", json!({"question": "plug-in window Controls view parameters as sliders"})),
@@ -805,7 +841,7 @@ pub fn every_case() -> Vec<Case> {
             "probe: quantize is a region parameter",
             "If I quantize a region in the Region inspector, are my notes moved for good?",
             &[r"Region inspector|parameter", r"\bkeep|recorded|original|non-?destructive|\bOff\b"],
-            true,
+            Source::Pack("Quantize is a parameter of a region's events in Logic Pro: they play on the grid and keep their positions underneath"),
             || {
                 vec![
                     call("logic_manual", json!({"question": "Region inspector Quantize notes positions"})),
@@ -819,7 +855,7 @@ pub fn every_case() -> Vec<Case> {
             "probe: an import's own track",
             "If I import a MIDI file, where does it end up in Logic Pro?",
             &[r"new (?:[\w-]+ ){0,3}track", "region"],
-            true,
+            Source::Pack("A MIDI file imported lands on a new track of its own"),
             || {
                 vec![
                     call("logic_manual", json!({"question": "import a MIDI file"})),
@@ -844,7 +880,7 @@ pub fn every_case() -> Vec<Case> {
                 logic_words(run, &mut found);
                 found
             }),
-            ..probe("probe: Smart Controls", "What do the Smart Controls on the Keys track do?", &[], false, || {
+            ..probe("probe: Smart Controls", "What do the Smart Controls on the Keys track do?", &[], Source::Project, || {
                 vec![
                     call("logic_read", json!({"kind": "smart", "parent": "track:2"})),
                     says(
@@ -959,7 +995,8 @@ pub fn every_case() -> Vec<Case> {
                 ]))]
             },
         ),
-        // The limits: what Kumi's bridge can't do in Logic, refused saying why, and nothing else done in its place.
+        // The limits: what Kumi's bridge can't do in Logic, refused saying why, and nothing else done in its place but a way
+        // round said as one.
         case(
             "limit: a track moved",
             Kind::Limit,
@@ -1016,13 +1053,25 @@ pub fn every_case() -> Vec<Case> {
             "limit: a plug-in moved",
             Kind::Limit,
             "Move the Compressor on the Keys so it comes before the Channel EQ.",
-            "says Logic Pro moves a plug-in only by dragging it; at most the take-it-off-and-add-again way, saying its settings go back to Logic's defaults",
+            "says Logic Pro moves a plug-in only by dragging it; at most the take-it-off-and-add-again way, saying its settings go back to Logic's defaults (with some carried over to the new one, that the others do)",
             |run, found| {
                 need(found, run.mentions("drag"), "doesn't say plug-ins move by dragging");
                 let applied = run.applied();
-                need(found, applied.iter().all(|kind| matches!(*kind, "fx-delete" | "fx-add")), format!("Logic applied {applied:?}"));
+                // (M7) Settings set on the plug-in added again carry the old one's over, which is part of that way:
+                // fx_add's description asks Kumi to say which it carried over and that the others reset, or to ask first.
+                // So an fx-param or fx-params is taken beside an fx-add, with the others said to reset. (The first run
+                // carried 6 of 25 over and never said the rest reset.)
+                let carried = applied.contains(&"fx-add") && applied.iter().any(|kind| kind.starts_with("fx-param"));
+                need(
+                    found,
+                    applied.iter().all(|kind| matches!(*kind, "fx-delete" | "fx-add") || (carried && kind.starts_with("fx-param"))),
+                    format!("Logic applied {applied:?}"),
+                );
                 if applied.contains(&"fx-delete") {
                     need(found, run.mentions(r"default|settings"), "took it off without saying its settings go");
+                }
+                if carried {
+                    need(found, run.mentions(r"default|reset"), "carried settings over without saying the others reset");
                 }
             },
             || {
@@ -1031,15 +1080,30 @@ pub fn every_case() -> Vec<Case> {
                 )]
             },
         ),
+        // (M7) Either a refusal or the way round is a good answer. Kumi's gap guidance says to take the way round first and
+        // say what was done instead, and Logic's own Sampler on a new track (sample_load) is the nearest Kumi can load a
+        // sample into: so the Sampler loaded passes when the answer names Quick Sampler, says Kumi can't load it and why
+        // (it takes a sample only by a drag), and says what Kumi did instead (the Sampler). Only refusing was too strict:
+        // it failed what the guidance asks for. A refusal that names Quick Sampler and the drag and changes nothing still
+        // passes: the producer named Quick Sampler, and may want it rather than another instrument. The first run loaded
+        // the Sampler with final: true, so Kumi's "Done" was all it said, which is neither.
         case(
             "limit: Quick Sampler",
             Kind::Limit,
             "Load this sample into Quick Sampler on a new track: {sample}",
-            "says it can't load Quick Sampler and why (it takes a sample by dragging); nothing changed",
+            "says it can't load Quick Sampler and why (it takes a sample by dragging); nothing changed, or the way round (Logic's Sampler on a new track, one sample-load) said as what it did instead",
             |run, found| {
                 need(found, run.mentions("Quick Sampler"), "doesn't name Quick Sampler");
                 refused(run, r"drag", found);
-                unchanged(run, found);
+                if run.applied().is_empty() {
+                    unchanged(run, found);
+                } else {
+                    made(run, &["sample-load"], found);
+                    // (Logic's Sampler: a Sampler that isn't Quick Sampler)
+                    let quick = Regex::new(r"(?i)\bQuick Sampler\b").unwrap();
+                    let sampler = Regex::new(r"(?i)\bSampler\b").unwrap();
+                    need(found, sampler.is_match(&quick.replace_all(run.answer, "")), "doesn't say it loaded Logic's Sampler instead");
+                }
             },
             || {
                 vec![says(
@@ -1352,7 +1416,7 @@ async fn run_case(model: &Counted, case: &Case) -> Result<Outcome, RuntimeError>
 }
 
 /// A short WAV file (a quarter second of a decaying 55 Hz tone, mono, 16-bit): the sample a case names.
-fn write_sample(path: &Path) -> std::io::Result<()> {
+pub fn write_sample(path: &Path) -> std::io::Result<()> {
     let rate: u32 = 44_100;
     let frames = rate / 4;
     let mut data = Vec::with_capacity(44 + frames as usize * 2);
