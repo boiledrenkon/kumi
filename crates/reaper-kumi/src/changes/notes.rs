@@ -489,8 +489,10 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let missing = added.len() - found.len();
     let to_bring_back = difference(&removed, &current);
     if missing > 0 && !restore.discard {
-        // None of them there and all that went there again: it is put back already.
-        if !(found.is_empty() && to_bring_back.is_empty()) {
+        // None of them there and all that went there again is back already only when the take's notes are as they were
+        // before the change (REAPER's own undo took it back): notes the producer edited since are no longer Kumi's to find.
+        let back = found.is_empty() && to_bring_back.is_empty() && restore.prior.get("fence") == Some(&was);
+        if !back {
             return Err(changed("the notes Kumi wrote in that take have been changed in REAPER since"));
         }
     }

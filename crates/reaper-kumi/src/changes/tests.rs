@@ -1383,6 +1383,27 @@ fn notes_are_written_where_asked_in_beats_and_undo_takes_exactly_those_away() {
 }
 
 #[test]
+fn an_undo_of_written_notes_the_producer_changed_every_one_of_is_refused_not_told_back_already() {
+    // None of Kumi's notes found by value read as back already: the undo answered "put back" with nothing written, HISTORY
+    // said undone, and the notes stayed.
+    let lab = Lab::new();
+    let before = snare_notes();
+    let input =
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 1.0, "length": 0.5}, {"pitch": 64, "start": 2.0, "length": 0.5}]});
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 2 notes in snare.mid take (knb01)");
+    let ours = |n: &fake::FakeNote| n.pitch == 60 || n.pitch == 64;
+    state(|s| s.tracks[2].items[0].takes[0].notes.iter_mut().filter(|n| ours(n)).for_each(|n| n.velocity = 33));
+    let (code, _) = lab.undo("notes-add", &preview, &applied, "Kumi: undo (knb02)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(snare_notes().len(), before.len() + 2, "the producer's notes stay");
+    // REAPER's own undo took them back: Kumi's undo is back already, and writes nothing.
+    state(|s| s.tracks[2].items[0].takes[0].notes.retain(|n| !ours(n)));
+    let undone = lab.undo("notes-add", &preview, &applied, "Kumi: undo (knb03)").unwrap();
+    assert!(undone["display"]["note"].as_str().is_some_and(|note| note.contains("back already")), "{undone}");
+    assert_eq!(snare_notes(), before);
+}
+
+#[test]
 fn notes_are_changed_by_index_and_put_back_by_their_values() {
     let lab = Lab::new();
     let before = snare_notes();
