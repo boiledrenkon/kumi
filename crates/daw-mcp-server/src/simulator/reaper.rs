@@ -106,6 +106,8 @@ impl SimMidi {
 pub struct SimFx {
     pub guid: String,
     pub name: String,
+    /// The plug-in's own name once the producer renamed the FX (REAPER's `fx_name`).
+    pub original: Option<String>,
     pub params: Vec<(String, f64, ParamShows)>,
     /// An input FX (the master's: its monitoring FX), which no render holds.
     pub input: bool,
@@ -184,7 +186,7 @@ fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
         "ReaEQ" => "VST: ReaEQ (Cockos)",
         other => other,
     };
-    Some(SimFx { guid, name: name.into(), params, input: false })
+    Some(SimFx { guid, name: name.into(), original: None, params, input: false })
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -297,9 +299,20 @@ impl ReaperScript {
         let guid = format!("{{F{:04}}}", state.next_fx);
         let reference = state.tracks[track]["ref"].as_str().unwrap_or("").to_owned();
         let params = params.iter().map(|(n, v)| (n.to_string(), *v, ParamShows::Plain { min: 0., max: 1. })).collect();
-        state.fx.entry(reference).or_default().push(SimFx { guid: guid.clone(), name: name.into(), params, input: false });
+        state.fx.entry(reference).or_default().push(SimFx { guid: guid.clone(), name: name.into(), original: None, params, input: false });
         state.changed += 1;
         guid
+    }
+
+    /// The producer renames an FX (its ref): its row says its own name as `originalName` from then on.
+    pub fn rename_fx(&self, reference: &str, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        let guid = reference.strip_prefix("r:fx:").unwrap_or(reference);
+        if let Some(fx) = state.fx.values_mut().flatten().find(|fx| fx.guid == guid) {
+            let own = std::mem::replace(&mut fx.name, name.into());
+            fx.original.get_or_insert(own);
+        }
+        state.changed += 1;
     }
 
     /// M6: the producer moves an FX's parameter (its GUID, the parameter's index).
@@ -1235,6 +1248,9 @@ impl ReaperScript {
         let mut row = json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": false, "paramCount": fx.params.len()});
         if fx.input {
             row["input"] = true.into();
+        }
+        if let Some(original) = &fx.original {
+            row["originalName"] = original.clone().into();
         }
         row
     }

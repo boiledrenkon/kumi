@@ -200,7 +200,7 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
             Err(why) => return Ok(Err(why)),
         };
         let (add, limiter) = r.table.safety_limiter;
-        if !devices.last().is_some_and(|device| device.name.contains(limiter)) {
+        if !devices.last().is_some_and(|device| device.own_name.contains(limiter)) {
             let mut input = json!({"ref": track});
             input[r.table.add_field] = add.into();
             // Part of the candidate, as a goal's is in Live: kept quietly, at its input's unity once the search settles.
@@ -212,7 +212,7 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
                 Ok(devices) => devices,
                 Err(why) => return Ok(Err(why)),
             };
-            if let Some(added) = devices.last().filter(|device| device.name.contains(limiter)) {
+            if let Some(added) = devices.last().filter(|device| device.own_name.contains(limiter)) {
                 self.limiters.borrow_mut().push(added.reference.clone());
             }
             r.tell_app(&format!("Kumi put a safety {limiter} last on “{name}” for the goal's search"));
@@ -262,7 +262,7 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         for (at, device) in devices.iter().enumerate() {
             // (Renoise's mixer is the track's fader and pan: the search leaves the producer's mix where it is; a limiter,
             // the safety one Kumi put last included, would only make trials louder)
-            if device.mixer || r.table.limiters.iter().any(|(word, _, _)| device.name.contains(word)) {
+            if device.mixer || r.table.limiters.iter().any(|(word, _, _)| device.own_name.contains(word)) {
                 continue;
             }
             // (a grid of two points: a stepped parameter answers its steps' texts)
@@ -366,8 +366,8 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         let r = &self.renderer;
         let (_, limiter) = r.table.safety_limiter;
         let Ok(Ok(devices)) = r.devices(track, signal).await else { return };
-        let Some(device) = devices.last().filter(|device| device.name.contains(limiter)) else { return };
-        let Some((_, knob, _)) = r.table.limiters.iter().find(|(word, _, _)| device.name.contains(word)) else { return };
+        let Some(device) = devices.last().filter(|device| device.own_name.contains(limiter)) else { return };
+        let Some((_, knob, _)) = r.table.limiters.iter().find(|(word, _, _)| device.own_name.contains(word)) else { return };
         let Ok(Ok(rows)) = r.parameters(&device.reference, false, signal).await else { return };
         let Some(reference) = rows.iter().find(|row| text(row, "name").as_deref() == Some(*knob)).and_then(|row| text(row, "ref")) else {
             return;

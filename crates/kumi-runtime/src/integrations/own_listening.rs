@@ -228,7 +228,11 @@ pub(super) struct TrackRow {
 #[derive(Debug, Clone)]
 pub(super) struct DeviceRow {
     pub reference: String,
+    /// What the producer calls it: for display only.
     pub name: String,
+    /// Its own name, whatever the producer named it: REAPER's FX as the plug-in is called (`originalName` once renamed),
+    /// Renoise's device by its path's last part ("Audio/Effects/Native/Maximizer"). The tables' words are matched to it.
+    pub own_name: String,
     pub on: bool,
     pub plugin: bool,
     pub index: u64,
@@ -673,6 +677,10 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
                         || matches!(text(row, "name").as_deref(), Some("TrackVolPan" | "Track Vol/Pan" | "Mixer")),
                     reference: text(row, "ref")?,
                     name: text(row, "name").unwrap_or_default(),
+                    own_name: text(row, "originalName")
+                        .or_else(|| text(row, "path").and_then(|path| path.rsplit('/').next().map(str::to_owned)))
+                        .or_else(|| text(row, "name"))
+                        .unwrap_or_default(),
                     // REAPER says enabled and offline; Renoise says active.
                     on: row.get("enabled").or(row.get("active")).and_then(Value::as_bool).unwrap_or(true)
                         && row.get("offline") != Some(&Value::Bool(true)),
@@ -1094,13 +1102,13 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     /// whether lowering it makes it louder), else the last gain device that's on.
     fn gain_stage(&self, devices: &[DeviceRow]) -> Option<(DeviceRow, &'static str, bool, bool)> {
         let on = || devices.iter().rev().filter(|device| device.on);
-        if let Some((device, (_, knob, inverted))) =
-            on().find_map(|device| self.table.limiters.iter().find(|(word, _, _)| device.name.contains(word)).map(|found| (device, found)))
+        if let Some((device, (_, knob, inverted))) = on()
+            .find_map(|device| self.table.limiters.iter().find(|(word, _, _)| device.own_name.contains(word)).map(|found| (device, found)))
         {
             return Some((device.clone(), knob, *inverted, true));
         }
         on().find_map(|device| {
-            self.table.gains.iter().find(|(word, _)| device.name.contains(word)).map(|(_, knob)| (device.clone(), *knob, false, false))
+            self.table.gains.iter().find(|(word, _)| device.own_name.contains(word)).map(|(_, knob)| (device.clone(), *knob, false, false))
         })
     }
 
@@ -1367,17 +1375,17 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let Ok(Ok(devices)) = self.devices(&master, &signal).await else { return unreadable() };
         let mut state = MainState::default();
         for device in devices.iter().filter(|device| device.on) {
-            if self.table.analyzers.iter().any(|word| device.name.contains(word)) {
+            if self.table.analyzers.iter().any(|word| device.own_name.contains(word)) {
                 continue;
             }
             // With tracks rendered through the master, what acts on one track as on the mix is in both already.
             if self.table.post_fader {
-                if !device.mixer && !self.table.linear.iter().any(|word| device.name.contains(word)) {
+                if !device.mixer && !self.table.linear.iter().any(|word| device.own_name.contains(word)) {
                     state.unfair.push(device.name.clone());
                 }
                 continue;
             }
-            let gain = match self.table.gains.iter().find(|(word, _)| device.name.contains(word)) {
+            let gain = match self.table.gains.iter().find(|(word, _)| device.own_name.contains(word)) {
                 Some((_, knob)) => match self.parameters(&device.reference, false, &signal).await {
                     Ok(Ok(rows)) => rows
                         .iter()
@@ -1490,7 +1498,7 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                 input[self.table.add_field] = add.into();
                 self.change(self.table.add_tool, input, signal.clone()).await?;
                 devices = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
-                let added = devices.iter().rev().find(|device| device.name.contains(name)).cloned();
+                let added = devices.iter().rev().find(|device| device.own_name.contains(name)).cloned();
                 let added = added.ok_or_else(|| format!("the {name} Kumi added didn't appear"))?;
                 let knob = self.table.gains.iter().find(|(word, _)| name.contains(word)).map_or("Gain", |(_, knob)| *knob);
                 (added, knob, false, false)
@@ -1509,7 +1517,8 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         if left.abs() >= 0.2 {
             let (add, name) = self.table.gain_device;
             let chain = self.devices(&scope, &signal).await.map_err(|error| error.to_string())??;
-            let found = chain.iter().rev().find(|row| row.on && self.table.gains.iter().any(|(word, _)| row.name.contains(word))).cloned();
+            let found =
+                chain.iter().rev().find(|row| row.on && self.table.gains.iter().any(|(word, _)| row.own_name.contains(word))).cloned();
             let (gainer, fresh) = match found {
                 Some(found) => (found, false),
                 None => {
@@ -1520,13 +1529,13 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
                     let added = chain
                         .iter()
                         .rev()
-                        .find(|row| row.name.contains(name))
+                        .find(|row| row.own_name.contains(name))
                         .cloned()
                         .ok_or_else(|| format!("the {name} Kumi added didn't appear"))?;
                     (added, true)
                 }
             };
-            let gain_knob = self.table.gains.iter().find(|(word, _)| gainer.name.contains(word)).map_or("Gain", |(_, knob)| *knob);
+            let gain_knob = self.table.gains.iter().find(|(word, _)| gainer.own_name.contains(word)).map_or("Gain", |(_, knob)| *knob);
             self.turn_knob(&gainer, gain_knob, left, fresh, &signal).await?;
             label = format!("{label} and {} gain", plugin_name(&gainer.name));
         }
@@ -1635,7 +1644,8 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let long = self.link.book.borrow().lengthen(&json!({"ref": device}))["ref"].as_str().unwrap_or(device).to_owned();
         let read = self.link.call("read", self.read_placed(json!({"ref": long})), signal).await.ok()?.ok()?;
         let row = read.pointer("/items/0")?;
-        let name = text(row, "name")?;
+        // (by the plug-in's own name, whatever the producer renamed the FX)
+        let name = text(row, "originalName").or_else(|| text(row, "name"))?;
         // REAPER: "VST3: Pro-Q 3 (FabFilter)" is Pro-Q 3; Renoise: a native device by its path's last part.
         let kind = match text(row, "path").filter(|path| path.contains("/Native/")) {
             Some(path) => path.rsplit('/').next().unwrap_or(&name).to_owned(),
@@ -2127,8 +2137,8 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 fn seen(device: &DeviceRow) -> Seen {
     Seen {
         reference: device.reference.clone(),
-        name: plugin_name(&device.name),
-        class: if device.plugin { "PluginDevice".into() } else { plugin_name(&device.name) },
+        name: plugin_name(&device.own_name),
+        class: if device.plugin { "PluginDevice".into() } else { plugin_name(&device.own_name) },
         off: !device.on,
         ..Default::default()
     }
