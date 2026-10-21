@@ -144,6 +144,14 @@ impl Chains {
         chain.insert(((at.max(2) - 1) as usize).min(chain.len()), made);
     }
 
+    /// The producer turns a parameter (by its device's place and its name) in Renoise.
+    pub fn set_value(&mut self, track: u64, at: u64, name: &str, value: f64) {
+        let device = self.tracks.get_mut(&track).and_then(|chain| chain.get_mut(at.checked_sub(1)? as usize));
+        if let Some(param) = device.and_then(|device| device.params.iter_mut().find(|param| param.name == name)) {
+            param.value = value.clamp(param.min, param.max);
+        }
+    }
+
     /// A parameter's value now, by its device's place and its name.
     pub fn value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
         let device = self.tracks.get(&track)?.get(at.checked_sub(1)? as usize)?;

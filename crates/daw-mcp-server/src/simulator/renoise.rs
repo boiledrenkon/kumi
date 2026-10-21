@@ -323,6 +323,11 @@ impl RenoiseScript {
             .unwrap_or_default()
     }
 
+    /// The producer turns a parameter of a track's device (its place from 1) in Renoise.
+    pub fn set_device_value(&self, track: u64, at: u64, name: &str, value: f64) {
+        self.state.lock().unwrap().chains.set_value(track, at, name, value);
+    }
+
     /// A parameter's value on a track's device (its place from 1), by the parameter's name.
     pub fn device_value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
         self.state.lock().unwrap().chains.value(track, at, name)
@@ -1078,6 +1083,18 @@ impl RenoiseScript {
                         page["project"] = project;
                     }
                     Self::digest_now(&state, page)
+                }));
+            }
+            // (a track the producer renamed reads with its name now, as the digest says it)
+            if method == "read" && wanted["kind"] == "track" && !state.names.is_empty() {
+                return Some(response.map(|mut page| {
+                    for row in page["items"].as_array_mut().into_iter().flatten() {
+                        let number = row["ref"].as_str().and_then(|r| r.rsplit(':').next()).and_then(|n| n.parse::<u64>().ok());
+                        if let Some(name) = number.and_then(|n| state.names.get(&n)) {
+                            row["name"] = json!(name);
+                        }
+                    }
+                    page
                 }));
             }
             return Some(response);

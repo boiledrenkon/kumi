@@ -1404,6 +1404,220 @@ async fn a_goal_never_searches_where_a_meta_device_aims() {
         .await;
 }
 
+/// (#361 final review) Two tracks called "Bass" (one duplicated): a goal's slot is the track it searched, as the book
+/// follows it, never the first track of that name.
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_goals_slot_is_its_own_track_when_another_has_its_name() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.add_device(3, "EQ 10");
+            let eq = script.add_device(4, "EQ 10");
+            script.rename_track(3, "Bass");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let rig = renoise.goal(&goal_request(home.path(), "1:track:4"), Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name.starts_with("Gain 2 ")).cloned().collect();
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[6.], Signal::new()).await.unwrap(), None);
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(6.), "the track the goal searched");
+            assert_eq!(script.device_value(3, eq, "Gain 2 (63 Hz)"), Some(0.), "the other “Bass” is untouched");
+            rig.close().await.unwrap();
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#361 final review) A settle sets only what won, and never a knob the producer turned on the track since the search
+/// began (it says so); when nothing won, nothing is set.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_settles_only_what_won_and_leaves_a_knob_the_producer_turned_since() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let eq = script.add_device(4, "EQ 10");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let rig = renoise.goal(&goal_request(home.path(), "Bass"), Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0]
+                .knobs
+                .iter()
+                .filter(|knob| knob.name.starts_with("Gain 2 ") || knob.name.starts_with("Gain 3 "))
+                .cloned()
+                .collect();
+            assert_eq!(knobs.len(), 2, "{knobs:?}");
+            let settles = || {
+                script.asked().into_iter().filter(|(method, params)| method == "change_apply" && params["kind"] == "device-params").count()
+            };
+            // Nothing won: the track stays as it is.
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[0., 0.], Signal::new()).await.unwrap(), None);
+            assert_eq!(settles(), 0, "nothing set when nothing won");
+            // The producer turns Gain 2 meanwhile: it stays as they set it, and Gain 3's win is set.
+            script.set_device_value(4, eq, "Gain 2 (63 Hz)", 3.);
+            let said = rig.settle(&slots[0].name, &knobs, &[6., -2.], Signal::new()).await.unwrap();
+            assert!(said.as_deref().is_some_and(|said| said.contains("you turned EQ 10 Gain 2 (63 Hz)")), "{said:?}");
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(3.), "the producer's turn stays");
+            assert_eq!(script.device_value(4, eq, "Gain 3 (125 Hz)"), Some(-2.), "the winner of the knob they left");
+            rig.close().await.unwrap();
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#361 final review) A track that already ends in the producer's own Maximizer gets no safety limiter, and a settle
+/// leaves their Maximizer's Boost as they set it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settle_leaves_the_producers_own_limiter_as_they_set_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let eq = script.add_device(4, "EQ 10");
+            let theirs = script.add_device(4, "Maximizer");
+            script.set_device_value(4, theirs, "Boost", 4.);
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let rig = renoise.goal(&goal_request(home.path(), "Bass"), Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            assert_eq!(slots[0].chain, "TrackVolPan → EQ 10 → Maximizer", "no safety Maximizer after theirs");
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name.starts_with("Gain 2 ")).cloned().collect();
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[6.], Signal::new()).await.unwrap(), None);
+            assert_eq!(script.device_value(4, eq, "Gain 2 (63 Hz)"), Some(6.));
+            assert_eq!(script.device_value(4, theirs, "Boost"), Some(4.), "the producer's Boost stays as they set it");
+            rig.close().await.unwrap();
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#361 final review) A settle over two devices is one row of HISTORY, and Kumi's undo of it takes both back.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goals_settle_over_two_devices_is_one_change_kumis_undo_takes_back() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            let eq = script.add_device(4, "EQ 10");
+            let gainer = script.add_device(4, "Gainer");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let rig = renoise.goal(&goal_request(home.path(), "Bass"), Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0]
+                .knobs
+                .iter()
+                .filter(|knob| knob.name.starts_with("Gain 2 ") || (knob.device.ends_with("Gainer") && knob.name == "Gain"))
+                .cloned()
+                .collect();
+            assert_eq!(knobs.len(), 2, "{knobs:?}");
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[6., 2.], Signal::new()).await.unwrap(), None);
+            assert_eq!((script.device_value(4, eq, "Gain 2 (63 Hz)"), script.device_value(4, gainer, "Gain")), (Some(6.), Some(2.)));
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            let undo = tool(&observed, "undo_change").execute(object(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!undo.is_error, "{}", undo.text);
+            assert_eq!(
+                (script.device_value(4, eq, "Gain 2 (63 Hz)"), script.device_value(4, gainer, "Gain")),
+                (Some(0.), Some(1.)),
+                "one row: both back ({})",
+                undo.text
+            );
+            rig.close().await.unwrap();
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#361 final review) A paused goal's best waits muted. When the producer worked on it, a better best can't take it away
+/// (Kumi's undo refuses), and it stays muted rather than playing beside the original.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_best_the_producer_worked_on_stays_muted_when_a_better_one_comes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_fx("r:track:{T0002}", "ReaEQ");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let rig = reaper.goal(&goal_request(home.path(), "Track 2"), Signal::new()).await.unwrap().unwrap();
+            let slots = rig.slots();
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name == "Gain-Band 2").cloned().collect();
+            let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![0.7], fresh: None };
+            rig.generation(&[trial], Signal::new(), None).await.unwrap();
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let first = script.listening().kept();
+            assert!(script.listening().kept_muted(&first[0].0), "the best waits muted");
+            // The producer works on it (renames it): it's theirs now.
+            script.listening().work_on_kept(&first[0].0, "My best");
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            assert!(script.listening().is_kept(&first[0].0), "the producer's stays");
+            assert!(script.listening().kept_muted(&first[0].0), "and stays muted: {:?}", told.borrow());
+            rig.close().await.unwrap();
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#361 final review) A stop (or a failed read) right after the safety limiter's add still takes it off when the goal
+/// doesn't open: it's kept before the chain is read again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_that_fails_right_after_its_safety_limiters_add_takes_it_off_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.add_device(4, "EQ 10");
+            let paths = BridgePaths::new(home.path(), Daw::Renoise);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            script.listening().set_folder(&paths.root.join("listening"));
+            let mut config = script.config(secret, "/lab/Renoise");
+            config.discovery_dir = Some(paths.discovery());
+            // The chain's read right after the Maximizer's add fails once.
+            let inner = config.respond.take().unwrap();
+            let added = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            config.respond = Some(Arc::new(move |method: &str, params: &Value| {
+                use std::sync::atomic::Ordering::SeqCst;
+                if method == "change_apply" && params["kind"] == "device-add" {
+                    added.store(true, SeqCst);
+                } else if method == "read" && params["kind"] == "device" && added.swap(false, SeqCst) {
+                    return Some(Err(("busy".to_string(), "Renoise is showing a dialog".to_string())));
+                }
+                inner(method, params)
+            }));
+            let simulator = Simulator::start(config).await.unwrap();
+            let (renoise, _) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let refused = renoise.goal(&goal_request(home.path(), "Bass"), Signal::new()).await.unwrap();
+            assert!(refused.is_err(), "the goal doesn't open");
+            assert_eq!(
+                script.device_paths(4),
+                ["Audio/Effects/Native/TrackVolPan", "Audio/Effects/Native/EQ 10"],
+                "the safety Maximizer is gone"
+            );
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 final review) A pattern's audio is a render in Renoise: the tempo its tempo commands played into the transport
 /// goes back as the call ends, said as a step of Renoise's undo, as a listen's does.
 #[tokio::test(flavor = "current_thread")]

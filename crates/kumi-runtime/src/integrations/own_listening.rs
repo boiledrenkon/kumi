@@ -289,6 +289,9 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     /// The changes that kept the last goal's best on a track of its own (its keep, then the mute a paused goal put on it):
     /// taken back, the last first, when a better one replaces it, by this goal or a resumed one.
     pub(super) goal_best: RefCell<Vec<String>>,
+    /// The track that best is on (its short ref, which the book follows): muted again when its mute was taken back and its
+    /// keep's undo then refused.
+    pub(super) goal_best_track: RefCell<Option<String>>,
     /// A render stopping Kumi's own play was said in this run (a new answer's run says it again).
     pub(super) stop_told: Cell<bool>,
     /// The last render's notes, told as it ended: the engine passing them on doesn't tell them again.
@@ -430,6 +433,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             parts: RefCell::default(),
             played: RefCell::default(),
             goal_best: RefCell::default(),
+            goal_best_track: RefCell::default(),
             stop_told: Cell::new(false),
             told_notes: RefCell::default(),
             tempo_back: RefCell::default(),
@@ -882,14 +886,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             self.tell_app(note);
         }
         *self.told_notes.borrow_mut() = notes.clone();
-        let mut files = IndexMap::new();
-        for file in done.get("files").and_then(Value::as_array).into_iter().flatten() {
-            let (Some(id), Some(path)) = (text(file, "id"), text(file, "file")) else { continue };
-            let start = file.get("start").and_then(Value::as_f64).unwrap_or(0.);
-            let seconds = file.get("seconds").and_then(Value::as_f64).map(|seconds| (seconds - start).max(0.));
-            files.insert(id, (Render { file: path, start, seconds }, file.clone()));
-        }
-        Ok(Ok((files, notes)))
+        notes
     }
 
     /// Sets back the tempo renders played into the transport, as one setting of each that moved (quietly: Kumi's undo
