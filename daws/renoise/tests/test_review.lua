@@ -1923,6 +1923,14 @@ test("run-lua: a chunk that runs too long is stopped where it is, inside its tim
   failure(run_lua(peer, "return 1", "Kumi: Ran Lua (kl07)", { timeoutMs = 5000 }), "bad-params")
 end)
 
+test("run-lua: a huge returned text or printed line is bounded before it is encoded (#361 N-N1)", function()
+  local env, peer = setup()
+  local done = run_lua(peer, "print(string.rep('p', 100000))\nreturn string.rep('x', 3000000)", "Kumi: Ran Lua (kl20)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.result, "(a text of 3000000 bytes, not sent)")
+  ok(#done.result.applied.printed[1] < 5000 and done.result.applied.printed[1]:find("100000 bytes in all", 1, true), "the printed line is cut")
+end)
+
 test("run-lua: the time limit stops a chunk whose calls fire the tool's notifiers, and each notifier runs whole (#361 N4)", function()
   local env, peer = setup()
   local patterns = #mock.data.patterns

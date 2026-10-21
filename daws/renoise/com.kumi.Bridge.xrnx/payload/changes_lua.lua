@@ -18,6 +18,7 @@ local M = {}
 M.DEFAULT_MS, M.MOST_MS = 500, 800
 local MOST_CODE = 256 * 1024
 local MOST_PRINTED = 200
+local MOST_LINE = 4096
 local MOST_RESULT = 256 * 1024
 
 -- What a chunk may write, read from its text (its comments and strings blanked first): "none" when it sets no field but
@@ -162,6 +163,8 @@ end
 -- A value as JSON can carry it: tables copied (to a depth), Renoise's objects and functions as their names.
 local function plain(value, depth)
   local kind = type(value)
+  -- (a text past the bound isn't copied or encoded: its length says what it was)
+  if kind == "string" and #value > MOST_RESULT then return string.format("(a text of %d bytes, not sent)", #value) end
   if kind == "nil" or kind == "boolean" or kind == "string" then return value end
   if kind == "number" then return (value == value and value ~= math.huge and value ~= -math.huge) and value or tostring(value) end
   if kind ~= "table" or depth > 6 then return tostring(value) end
@@ -194,7 +197,10 @@ local function apply(song, env, input, fence, desc)
       if #printed >= MOST_PRINTED then return end
       local parts = {}
       for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-      printed[#printed + 1] = table.concat(parts, "\t")
+      local text = table.concat(parts, "\t")
+      -- (a line past the bound is cut, so a big print never fills the answer)
+      if #text > MOST_LINE then text = text:sub(1, MOST_LINE) .. string.format("\226\128\166 (%d bytes in all)", #text) end
+      printed[#printed + 1] = text
     end,
   }, { __index = _G })
   setfenv(chunk, scope)
