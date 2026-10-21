@@ -43,13 +43,16 @@ and migration checks do not replace a new real-Live acceptance run.
   bridge 1.0.71): installing the bridge into a moved User Library, the Remote
   Script loading, and Kumi connecting. There's no record file for this yet.
 - **REAPER and Renoise on macOS** (REAPER 7.82 evaluation, portable; Renoise
-  3.5.4; October 2026): each change applied through Kumi, undone through Kumi,
-  then undone and redone with the DAW's own undo (REAPER: 140 of 141 kinds, one
-  known limit; Renoise: 121 of 132 cases, 11 known limits), big projects
-  (REAPER 200 tracks and 2,000 items, Renoise 64 tracks and 100 patterns), and
-  listening. The limits are in [known limits](KUMI_CHANGES.md#known-limits).
-  There's no record file for these yet. REAPER and Renoise on Windows and Linux
-  are untested.
+  3.5.4; 20 October 2026): each change applied through Kumi, undone through
+  Kumi, then undone and redone with the DAW's own undo, big projects (REAPER 200
+  tracks and 2,000 items, Renoise 64 tracks and 100 patterns), and listening.
+  - REAPER, at commit `c80eb1e7`: 140 of its 141 kinds then, one known limit.
+    `drum_kit`, `scratch_keep` and `metronome_switch` came later and weren't run.
+  - Renoise, at commit `78faa00f`: 121 of 132 cases, 11 known limits.
+    `instrument_kit` and `scratch_keep` came later and weren't run.
+  - The limits are in [known limits](KUMI_CHANGES.md#known-limits). There's no
+    record file for these yet. REAPER and Renoise on Windows and Linux are
+    untested.
 
 ## Evidence
 

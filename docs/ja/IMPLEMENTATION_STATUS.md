@@ -23,7 +23,10 @@
 - **すべてのプルリクエスト：** ネイティブ Rust のビルドとテスト、Remote Script と Live 拡張機能のテスト、6 ターゲットのバンドル、インストールと移行のテスト。[CI](TESTING.md#ci) を参照してください。
 - **macOS 上の本物の Live**（Apple silicon、Live 12.4.15 beta）：Kumi が行うあらゆる種類の変更と、そのそれぞれを Kumi で取り消すこと（ブリッジ 1.0.62 と 1.0.63 で 65 件中 65 件、19 トラックと 200 トラックの Set で）、再生、バウンス、聴き取り、監視、Kumi の拡張機能によるオフラインレンダリングと右クリックメニュー、そして Willington による編集。
 - **Windows 上の本物の Live**（Windows 10、Live 12.4.15 beta、Kumi 1.6.0 とブリッジ 1.0.71）：移動した User Library へのブリッジのインストール、Remote Script の読み込み、Kumi の接続。これについての記録ファイルはまだありません。
-- **macOS 上の REAPER と Renoise**（REAPER 7.82 評価版・ポータブル、Renoise 3.5.4、2026 年 10 月）：各変更を Kumi で適用し、Kumi で取り消し、DAW 自身の取り消しとやり直しにかけること（REAPER は 141 種類中 140、既知の制限が一つ。Renoise は 132 ケース中 121、既知の制限が 11）、大きなプロジェクト（REAPER は 200 トラックと 2,000 アイテム、Renoise は 64 トラックと 100 パターン）、聴くこと。制限は[既知の制限](KUMI_CHANGES.md#既知の制限)にあります。これらの記録ファイルはまだありません。Windows と Linux の REAPER と Renoise は未テストです。
+- **macOS 上の REAPER と Renoise**（REAPER 7.82 評価版・ポータブル、Renoise 3.5.4、2026 年 10 月 20 日）：各変更を Kumi で適用し、Kumi で取り消し、DAW 自身の取り消しとやり直しにかけること、大きなプロジェクト（REAPER は 200 トラックと 2,000 アイテム、Renoise は 64 トラックと 100 パターン）、聴くこと。
+  - REAPER（コミット `c80eb1e7`）：当時の 141 種類中 140、既知の制限が一つ。`drum_kit`、`scratch_keep`、`metronome_switch` はその後に加わり、実行していません。
+  - Renoise（コミット `78faa00f`）：132 ケース中 121、既知の制限が 11。`instrument_kit` と `scratch_keep` はその後に加わり、実行していません。
+  - 制限は[既知の制限](KUMI_CHANGES.md#既知の制限)にあります。これらの記録ファイルはまだありません。Windows と Linux の REAPER と Renoise は未テストです。
 
 ## エビデンス
 

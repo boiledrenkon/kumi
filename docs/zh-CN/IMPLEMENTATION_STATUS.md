@@ -23,7 +23,10 @@
 - **每个拉取请求：** 原生 Rust 构建和测试、Remote Script 和 Live 扩展的测试、六个目标平台的发行包，以及安装和迁移测试；见 [CI](TESTING.md#ci)。
 - **macOS 上的真实 Live**（Apple 芯片，Live 12.4.15 beta）：Kumi 做出的每一类修改，且每一项都通过 Kumi 撤销（在桥接 1.0.62 和 1.0.63 上 65 项全部通过，分别在 19 条和 200 条轨道的工程中），播放、并轨（bounce）、聆听和观看，通过 Kumi 扩展进行的离线渲染和右键菜单，以及 Willington 编辑。
 - **Windows 上的真实 Live**（Windows 10，Live 12.4.15 beta，Kumi 1.6.0 配合桥接 1.0.71）：把桥接安装到移动过的 User Library、Remote Script 加载，以及 Kumi 连接。这部分目前还没有记录文件。
-- **macOS 上的 REAPER 和 Renoise**（REAPER 7.82 评估版、便携版；Renoise 3.5.4；2026 年 10 月）：每项修改通过 Kumi 应用、通过 Kumi 撤销，再用 DAW 自己的撤销和重做（REAPER：141 类中 140 类通过，一项已知限制；Renoise：132 个用例中 121 个通过，11 项已知限制），大型工程（REAPER 200 条轨道和 2,000 个对象，Renoise 64 条轨道和 100 个模式），以及聆听。这些限制列在[已知限制](KUMI_CHANGES.md#已知限制)中。这些目前还没有记录文件。Windows 和 Linux 上的 REAPER 与 Renoise 尚未测试。
+- **macOS 上的 REAPER 和 Renoise**（REAPER 7.82 评估版、便携版；Renoise 3.5.4；2026 年 10 月 20 日）：每项修改通过 Kumi 应用、通过 Kumi 撤销，再用 DAW 自己的撤销和重做，大型工程（REAPER 200 条轨道和 2,000 个对象，Renoise 64 条轨道和 100 个模式），以及聆听。
+  - REAPER（提交 `c80eb1e7`）：当时 141 类中 140 类通过，一项已知限制。`drum_kit`、`scratch_keep` 和 `metronome_switch` 是之后加入的，未运行。
+  - Renoise（提交 `78faa00f`）：132 个用例中 121 个通过，11 项已知限制。`instrument_kit` 和 `scratch_keep` 是之后加入的，未运行。
+  - 这些限制列在[已知限制](KUMI_CHANGES.md#已知限制)中。这些目前还没有记录文件。Windows 和 Linux 上的 REAPER 与 Renoise 尚未测试。
 
 ## 证据
 
