@@ -503,7 +503,9 @@ impl Library {
         // Another DAW's library is never offered here, even where a folder offered here holds it (a Live Place around
         // Renoise's User Library): what that library's own walk reads stays out of this index.
         let hidden: Vec<Source> = hidden.into_iter().filter(Source::is_daw_library).collect();
-        let key = format!("{daw:?}\n{}", current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n"));
+        // Live's when none is known, as `offered_in` reads it: the warm-up's index (built with none) is Live's own.
+        let key =
+            format!("{:?}\n{}", daw.unwrap_or(DawId::Ableton), current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n"));
         let rebuild =
             self.held.borrow().as_ref().is_none_or(|held| {
                 held.key != key || (self.stale.get() && (self.progress.borrow().is_none() || now_ms() - held.at >= 3000))
