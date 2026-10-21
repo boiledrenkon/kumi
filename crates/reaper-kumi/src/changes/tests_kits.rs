@@ -89,6 +89,18 @@ fn a_pads_file_in_kumis_own_folder_plays_from_a_copy_in_the_projects_media_folde
 }
 
 #[test]
+fn a_drum_kit_records_no_automation_under_a_global_override_that_writes() {
+    // The pads' and the choke's parameter writes would be recorded under a global override in latch (review R5).
+    let lab = Lab::new();
+    let (_dir, paths) = sounds(&["Kick", "Closed Hat", "Open Hat"]);
+    state(|s| s.automation_override = 4);
+    let tracks = state(|s| s.tracks.len());
+    lab.make("drum-kit", kit(&paths, json!({})), "Kumi: kit (kq001)");
+    let recorded: usize = state(|s| s.tracks[tracks..].iter().map(|t| t.envelopes.len()).sum());
+    assert_eq!((recorded, state(|s| s.automation_override)), (0, 4), "nothing recorded, the override put back");
+}
+
+#[test]
 fn a_drum_kit_is_a_folder_a_midi_track_and_a_sampler_per_pad_its_hats_choking_and_one_undo_point() {
     let lab = Lab::new();
     fake::extra(|e| e.stable_chunks = true);

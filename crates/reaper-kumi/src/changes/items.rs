@@ -648,21 +648,18 @@ pub fn split_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
-    if !restore.discard {
-        if Some(left_print.as_str()) != restore.applied["left"].as_str() {
-            return Err(changed(format!("{words} has been changed in REAPER since Kumi split it")));
+    // (discard too: the item's whole state from before goes back over both parts, which would take the producer's edits
+    // since with it, or bring back a part they deleted)
+    let whole = "putting the item back whole would write over that too, so Kumi leaves it, even with discard";
+    if Some(left_print.as_str()) != restore.applied["left"].as_str() {
+        return Err(changed(format!("{words} has been changed in REAPER since Kumi split it: {whole}")));
+    }
+    match right {
+        None => return Err(changed(format!("the right part of the split has been deleted in REAPER since: {whole}"))),
+        Some(right) if chunks::item_print(reaper, right).as_deref() != restore.applied["right"].as_str() => {
+            return Err(changed(format!("the right part of the split has been changed in REAPER since Kumi split it: {whole}")));
         }
-        match right {
-            None => {
-                return Err(changed(
-                    "the right part of the split has been deleted in REAPER since: putting the item back whole would bring it back",
-                ))
-            }
-            Some(right) if chunks::item_print(reaper, right).as_deref() != restore.applied["right"].as_str() => {
-                return Err(changed("the right part of the split has been changed in REAPER since Kumi split it"));
-            }
-            Some(_) => {}
-        }
+        Some(_) => {}
     }
     if let Some(right) = right {
         let track = reaper.item_track(right).ok_or_else(|| failed("the right part isn't on a track"))?;
@@ -1609,10 +1606,22 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = guid_of_ref(&restore.target["ref"], "target")?;
     if let Some(item) = item_by_guid(ctx, &guid) {
         let back = chunks::item_print(ctx.reaper, item).as_deref() == restore.prior["print"].as_str();
-        if back || restore.discard {
+        if back {
             return Ok(Restored {
                 restored: json!({"ref": refs::item_ref(&guid)}),
                 display: json!({"title": format!("{} is back already", label_opening(ctx, item))}),
+                unwritten: true,
+            });
+        }
+        // (with discard: it is there, but not as it was; nothing is written over it)
+        if restore.discard {
+            let name = label_opening(ctx, item);
+            return Ok(Restored {
+                restored: json!({"ref": refs::item_ref(&guid)}),
+                display: json!({
+                    "title": format!("{name} is in the project again, changed since"),
+                    "note": "It is in the project again, changed since it was deleted: Kumi left it as it is.",
+                }),
                 unwritten: true,
             });
         }

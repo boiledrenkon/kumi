@@ -114,6 +114,8 @@ impl Loaded {
         };
         let config = Config::from_reference(&reference);
         log::set_dir(config.log_dir.clone());
+        // (run-lua's scripts go to the bridge's own folder, beside its secret: Kumi keeps it owner-only)
+        reaper::generic::set_scripts_dir(config.secret_file.parent().map(|root| root.join("scripts")));
         // M5 listening (m5-reaper): renders, captures and scratch notes go into Kumi's folder beside the discovery folder.
         if let Some(folder) = listening::folder_beside(&config.discovery_dir) {
             self.extension.set_listening_folder(folder);

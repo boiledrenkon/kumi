@@ -336,6 +336,12 @@ fn param_named(reaper: &Reaper, fx: Fx, name: &str, place: i32) -> i32 {
 
 /// One pad's sampler, set: its file, played as it is, on its one note, obeying note-offs or not.
 fn set_pad(reaper: &Reaper, fx: Fx, pad: &Pad) -> Done<()> {
+    // (parameter writes: REAPER would record them under a global override in touch, latch or write)
+    let track = match fx.owner {
+        FxOwner::Track(track) => Some(track),
+        FxOwner::Take(_) => None,
+    };
+    let _quiet = fxchain::QuietAutomation::around(reaper, track);
     reaper.fx_set_config(fx, "FILE0", &pad.path);
     reaper.fx_set_config(fx, "DONE", "");
     reaper.fx_set_config(fx, "MODE", "1");
@@ -353,6 +359,7 @@ fn set_pad(reaper: &Reaper, fx: Fx, pad: &Pad) -> Done<()> {
 /// The choke ahead of the pads in a chain, at `place` on: one JS: MIDI Choke a run of open-hat notes. False when REAPER
 /// has no such JS (the kit is made without the choke, and says so).
 fn add_chokes(reaper: &Reaper, track: Track, place: i32, plan: &ChokePlan, channel: i64) -> bool {
+    let _quiet = fxchain::QuietAutomation::around(reaper, Some(track));
     let owner = FxOwner::Track(track);
     for (n, (start, count)) in plan.cuts.iter().enumerate() {
         let at = place + n as i32;

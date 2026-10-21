@@ -143,6 +143,24 @@ fn watch_through(lab: &Lab, each: impl Fn(u8)) {
 }
 
 #[test]
+fn a_tick_looks_again_at_one_fx_at_a_time() {
+    // Every FX due at once (up to 8 of 4,096 parameters each, every 100 ms) held REAPER's main thread (review R16).
+    let lab = Lab::new();
+    for n in 0..3 {
+        lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), &format!("Kumi: Added ReaEQ (ko00{n})"));
+    }
+    let before = super::volatile::looks_left();
+    assert_eq!(before, [RELOOKS; 3]);
+    std::thread::sleep(RELOOK_EVERY + Duration::from_millis(2));
+    lab.tick();
+    let after = super::volatile::looks_left();
+    assert_eq!(after.iter().filter(|left| **left == RELOOKS - 1).count(), 1, "one FX looked at: {after:?}");
+    lab.tick();
+    lab.tick();
+    assert_eq!(super::volatile::looks_left(), [RELOOKS - 1; 3], "the others in the next ticks");
+}
+
+#[test]
 fn a_meter_found_moving_after_kumi_added_its_plug_in_does_not_refuse_the_undo_but_a_tweak_does() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ (km001)");

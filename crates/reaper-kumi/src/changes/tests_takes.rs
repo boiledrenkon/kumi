@@ -171,14 +171,16 @@ fn a_take_playing_a_file_is_added_without_playing_when_asked() {
 }
 
 #[test]
-fn an_added_take_is_kept_once_the_producer_has_changed_the_item_unless_discarded() {
+fn an_added_take_is_kept_once_the_producer_has_changed_the_item_even_with_discard() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("take-add", json!({"ref": K1}));
     state(|s| s.tracks[1].items[0].position = 0.25);
     assert_eq!(code(lab.undo("take-add", &preview, &applied)), "changed");
     assert_eq!(item("{ITEM-K1}").unwrap().1.takes.len(), 2);
-    lab.undo_with("take-add", &preview, &applied, true).unwrap();
-    assert_eq!(item("{ITEM-K1}").unwrap().1.takes.len(), 1);
+    // The item's whole state from before would move it back too (review R4).
+    let (code_, why) = lab.undo_with("take-add", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!((item("{ITEM-K1}").unwrap().1.takes.len(), item("{ITEM-K1}").unwrap().1.position), (2, 0.25));
 }
 
 // ----- deleting a take -----

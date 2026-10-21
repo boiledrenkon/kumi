@@ -455,9 +455,15 @@ impl Drop for ChainFile {
 
 /// Makes REAPER keep an undo point for an FX whose change it doesn't notice by itself (a state chunk, a modulation
 /// value, a container's macro taken off): a nudge of the FX's wet control, there and back (measured: a block with only
-/// those writes makes no point, and REAPER's undo of a neighbouring step then loses them).
+/// those writes makes no point, and REAPER's undo of a neighbouring step then loses them). The nudge is a parameter
+/// write: on a track in touch, latch or write mode REAPER would record it, so it is made inside `QuietAutomation`.
 pub(crate) fn mark_fx(reaper: &Reaper, fx: Fx) {
     let Some(wet) = reaper.fx_ident(fx, ":wet") else { return };
+    let track = match fx.owner {
+        FxOwner::Track(track) => Some(track),
+        FxOwner::Take(take) => reaper.take_item(take).and_then(|item| reaper.item_track(item)),
+    };
+    let _quiet = QuietAutomation::around(reaper, track);
     let now = reaper.param_normalized(fx, wet);
     let nudge = if now >= 0.5 { now - 1e-6 } else { now + 1e-6 };
     reaper.fx_set_param(fx, wet, nudge);

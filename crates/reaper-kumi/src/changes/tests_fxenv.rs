@@ -706,6 +706,12 @@ fn a_parameter_written_on_a_track_in_touch_mode_records_nothing_and_the_override
     lab.make("fx-bypass", json!({"ref": fx_ref("{K-MAIN}"), "bypass": true}));
     lab.make("fx-wet", json!({"ref": fx_ref("{K-MAIN}"), "wet": 0.5}));
     assert_eq!(envelopes(), before);
+    // The wet nudge that makes REAPER keep a point of a pin map or a modulation is a write too (review R5).
+    let (pins_preview, pins) = lab.make("fx-pins", json!({"ref": fx_ref("{K-MAIN}"), "pins": [{"pin": 1, "channels": [2]}]}));
+    lab.undo("fx-pins", &pins_preview, &pins).unwrap();
+    lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    assert_eq!(envelopes(), before, "the nudge recorded nothing");
+    assert_eq!(state(|s| s.automation_override), -1);
     // A global override in latch mode is the producer's: it is put back as it was.
     state(|s| s.automation_override = 4);
     lab.make("fx-param", json!({"ref": fx_ref("{K-MAIN}"), "param": "Gain", "normalized": 0.2}));
@@ -1118,11 +1124,15 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
     assert_eq!(count(), 0, "out of the track's list again");
     let again = lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(again["undo"]["entry"], false);
-    // The producer drew a point since: refused; discard puts it back hidden and empty.
+    // The producer drew a point since: refused, discard or not (the envelope's state from before would take their point).
     let (preview, applied) = lab.make("envelope-show", input.clone());
     state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().push(FakePoint::at(3.0, 0.5))));
     assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap_err().0, "changed");
-    lab.discard("envelope-show", &preview, &applied).unwrap();
+    let (code, why) = lab.discard("envelope-show", &preview, &applied).unwrap_err();
+    assert!(code == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(count(), 1, "the producer's point stays");
+    state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().pop()));
+    lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(count(), 0);
     // The fence: shown by the producer between the preview and the apply.
     let preview = lab.preview("envelope-show", input.clone()).unwrap();

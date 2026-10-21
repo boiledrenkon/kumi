@@ -364,9 +364,10 @@ fn a_split_is_undone_only_while_both_parts_are_as_it_left_them() {
     let (preview, applied) = lab.make("item-split", json!({"ref": K1, "position": 1.0}));
     state(|s| s.tracks[1].items[0].extra.insert("D_VOL".into(), 0.5));
     assert_eq!(code(lab.undo("item-split", &preview, &applied)), "changed");
-    // discard puts it back anyway.
-    lab.undo_with("item-split", &preview, &applied, true).unwrap();
-    assert_eq!(item("{ITEM-K1}").unwrap().1.length, 2.0);
+    // Discard too: the whole item from before would write over the producer's volume (review R4).
+    let (code_, why) = lab.undo_with("item-split", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.extra.get("D_VOL"), Some(&0.5), "the producer's edit stays");
 }
 
 #[test]
@@ -641,6 +642,11 @@ fn a_deleted_item_back_in_the_project_but_changed_is_the_producers() {
     });
     assert_eq!(code(lab.undo("item-delete", &preview, &applied)), "changed");
     assert_eq!(state(|s| s.tracks[1].items.iter().filter(|i| i.guid == "{ITEM-K1}").count()), 1, "no second item with its id");
+    // With discard: said as it is, there but changed and left so, not "back already" (review R18).
+    let left = lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert_eq!(left["display"]["note"], "It is in the project again, changed since it was deleted: Kumi left it as it is.");
+    assert!(!left["display"]["title"].as_str().unwrap().contains("back already"), "{left}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 3.0);
     // Back as it was: back already.
     state(|s| s.tracks[1].items.iter_mut().find(|i| i.guid == "{ITEM-K1}").unwrap().position = was.position);
     let again = lab.undo("item-delete", &preview, &applied).unwrap();

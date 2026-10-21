@@ -534,6 +534,8 @@ pub struct State {
     pub calls: u64,
     /// ReaScripts registered as actions: (command id, file).
     pub scripts: Vec<(i32, String)>,
+    /// Every script file registered, with its permission bits (unix) as it was registered.
+    pub script_files: Vec<(String, u32)>,
     /// Called, with no borrow of the state held, with a registered script's text when it is run: a test's stand-in for
     /// REAPER's Lua (it does what the script would, and leaves its answer in the ext state).
     pub on_script: Option<fn(&str)>,
@@ -620,6 +622,7 @@ impl Default for State {
             project_ext: Default::default(),
             calls: 0,
             scripts: vec![],
+            script_files: vec![],
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
@@ -1077,6 +1080,14 @@ unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *co
         }
         if add {
             let id = 60_000 + s.scripts.len() as c_int + s.actions.len() as c_int;
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(&file).map_or(0, |m| m.permissions().mode() & 0o777)
+            };
+            #[cfg(not(unix))]
+            let mode = 0;
+            s.script_files.push((file.clone(), mode));
             s.scripts.push((id, file));
             id
         } else {
@@ -1477,6 +1488,22 @@ unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, par
             name.inspect(|name| write(buf, 4096, name)).is_some()
         }
         _ => false,
+    })
+}
+/// Writes as much as it's told (the size given, less the NUL: 'A's) and says how much it wrote: what a buffer handed to it
+/// must hold.
+unsafe extern "C" fn get_track_midi_lyrics(track: *mut MediaTrack, _flag: c_int, buf: *mut c_char, size: *mut c_int) -> bool {
+    counted(|s| {
+        if track_of(s, track as u64).is_none() || buf.is_null() || size.is_null() {
+            return false;
+        }
+        let told = unsafe { *size }.max(1) as usize;
+        unsafe {
+            ptr::write_bytes(buf.cast::<u8>(), b'A', told - 1);
+            *buf.add(told - 1) = 0;
+            *size = (told - 1) as c_int;
+        }
+        true
     })
 }
 unsafe extern "C" fn get_track_name(track: *mut MediaTrack, buf: *mut c_char, size: c_int) -> bool {
@@ -3129,6 +3156,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetMediaTrackInfo" => get_set_media_track_info as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_void) -> *mut c_void,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
+        b"GetTrackMIDILyrics" => get_track_midi_lyrics as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut c_char, *mut c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
         b"SetProjExtState" => set_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *const c_char) -> c_int,
         b"TrackFX_AddByName" => track_fx_add_by_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool, c_int) -> c_int,
