@@ -124,3 +124,34 @@ fn doctor_and_report_take_the_daw_asked_for() {
     assert_eq!(config(&["report"], &wrong).unwrap(), r#"{"mode":"report"}"#);
     assert!(config(&["doctor", "--verbose"], &env).is_err());
 }
+
+/// "live" is another name for Live's DAW, as /daw live takes it: `--daw live` and KUMI_DAW=live choose Live, and nothing
+/// writes it (review L10).
+#[test]
+fn live_is_another_name_for_ableton() {
+    let env = env();
+    for asked in [vec!["--daw", "live"], vec!["--daw=live"], vec!["--daw", "ableton"]] {
+        assert_eq!(config(&asked, &env), config(&[], &env), "{asked:?}");
+    }
+    let mut live = env.clone();
+    live.insert("KUMI_DAW".into(), "live".into());
+    assert_eq!(config(&[], &live), config(&[], &env));
+    assert_eq!(config(&["bridge"], &live), config(&["bridge"], &env));
+    assert_eq!(config(&["--daw", "live", "doctor"], &env).unwrap(), r#"{"mode":"doctor","json":false,"daw":"ableton"}"#);
+}
+
+/// A bridge configuration given (`--bridge-config <Live's file>`) starts Live whatever KUMI_DAW says; --daw still says
+/// whose it is (review L10).
+#[test]
+fn a_bridge_configuration_given_is_lives_unless_daw_says_whose() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bridge.json");
+    std::fs::write(&file, "{}").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let mut chosen = env();
+    chosen.insert("KUMI_DAW".into(), "reaper".into());
+    let started = config(&["--bridge-config", &path], &chosen).unwrap();
+    assert!(started.contains(r#""mode":"live""#) && !started.contains(r#""daw""#), "{started}");
+    let asked = config(&["--daw", "reaper", "--bridge-config", &path], &env()).unwrap();
+    assert!(asked.contains(r#""daw":"reaper""#), "{asked}");
+}

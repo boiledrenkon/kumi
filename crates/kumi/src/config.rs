@@ -157,9 +157,10 @@ fn registered_daws() -> String {
     kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ")
 }
 
-/// A DAW this Kumi integrates, by its name.
+/// A DAW this Kumi integrates, by its name: "live" is another name for Live's ("ableton", the one written), as /daw takes it.
 fn known_daw(text: &str) -> Option<DawId> {
-    DawId::parse(text).filter(|daw| kumi_runtime::integrations::profile(*daw).is_some())
+    let daw = if text == "live" { Some(DawId::Ableton) } else { DawId::parse(text) };
+    daw.filter(|daw| kumi_runtime::integrations::profile(*daw).is_some())
 }
 
 /// The DAW asked for with `--daw <id>` (or `--daw=<id>`) alone, and the arguments left: what `bridge` and
@@ -910,6 +911,8 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             "Bridge configuration must be an existing readable file; its contents are validated by the MCP server.",
         ));
     }
+    // A bridge configuration given is Live's unless --daw says whose: KUMI_DAW doesn't move it to another DAW.
+    let daw = flagged;
     Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into(), resume, daw })
 }
 /// Node's stripVTControlCharacters expression, for the same diagnostic and terminal input treatment.
