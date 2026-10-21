@@ -69,8 +69,8 @@ extension SDK, vendored unmodified in `crates/reaper-kumi/sdk/`: `reaper_plugin.
 from https://github.com/justinfrankel/reaper-sdk at commit c0eafe87863b2bf69c5c822760f1b32a753b211b ("sdk 7.82").
 Copyright (C) 2006-2015, Cockos Incorporated (`reaper_plugin.h`), and Copyright 2006 and later, Cockos Incorporated
 (`reaper_plugin_functions.h`). The extension's table of REAPER's functions is generated from them when it's built
-(`crates/reaper-kumi/build.rs`), and `crates/reaper-kumi/shim/csurf.cpp` repeats the SDK's `IReaperControlSurface`
-declaration.
+(`crates/reaper-kumi/build.rs`); `crates/reaper-kumi/shim/csurf.cpp` repeats the SDK's `IReaperControlSurface`
+declaration, and `crates/reaper-kumi/shim/preview.cpp` its `preview_register_t`.
 
 The extension was written with reaper-rs (https://github.com/helgoboss/reaper-rs, MIT License) as a reference; it
 carries none of reaper-rs's code.

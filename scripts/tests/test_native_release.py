@@ -777,7 +777,15 @@ class NativeRelease(unittest.TestCase):
         self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", section)
         self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", (sdk / "reaper_plugin.h").read_text(encoding="utf-8"))
         self.assertIn("reaper-rs", section)
-        self.assertIn("../sdk/LICENSE", (release.ROOT / release.REAPER_CRATE / "shim/csurf.cpp").read_text(encoding="utf-8"))
+        # Each shim repeats an SDK declaration: each names its copyright and license, and the notice names each. A new
+        # shim is added to this list, and so to the notice.
+        shims = ("csurf.cpp", "preview.cpp")
+        self.assertEqual(sorted(path.name for path in (release.ROOT / release.REAPER_CRATE / "shim").iterdir()), list(shims))
+        for shim in shims:
+            text = (release.ROOT / release.REAPER_CRATE / "shim" / shim).read_text(encoding="utf-8")
+            self.assertIn("../sdk/LICENSE", text, shim)
+            self.assertIn("Cockos", text, shim)
+            self.assertIn(f"crates/reaper-kumi/shim/{shim}", section, shim)
 
     def test_every_packaged_document_rewrites_its_links(self):
         revision = "a" * 40

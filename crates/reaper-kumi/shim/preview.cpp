@@ -4,7 +4,8 @@
 // set the volume. src/listening/audition.rs calls these functions.
 //
 // The struct is declared here as reaper_plugin.h declares it (the header needs SWELL outside Windows); build.rs checks
-// that its fields are the header's, in the header's order.
+// that its fields are the header's, in the header's order. That declaration is Cockos' (Copyright (C) 2006-2015, Cockos
+// Incorporated), under the REAPER SDK's zlib license: ../sdk/LICENSE.
 
 #ifdef _WIN32
 #include <windows.h>
