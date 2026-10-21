@@ -348,6 +348,9 @@ macro_rules! live_word {
     (midi_file_import) => {
         "put it on a MIDI track in Live (drag it in) and give that clip as reference"
     };
+    (preset_kinds) => {
+        &["instrument", "audio effect", "midi effect", "drum rack", "plug-in"]
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -810,7 +813,7 @@ impl DawProfile {
             midi_file_import: crate::live_word!(midi_file_import),
             sample_tools: "load_sample and the other sample tools",
             preset_loading: "",
-            preset_kinds: &["instrument", "audio effect", "midi effect", "drum rack", "plug-in"],
+            preset_kinds: crate::live_word!(preset_kinds),
             // (and every format no other DAW names: its .adv, .adg and .amxd files, plug-ins' own presets)
             preset_formats: &["vstpreset"],
         },
