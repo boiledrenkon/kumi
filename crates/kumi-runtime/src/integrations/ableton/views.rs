@@ -417,6 +417,7 @@ pub async fn clip_view(host: &dyn ViewHost, slot_ref: &str, signal: Signal) -> R
                 .collect(),
             beats_per_bar: None,
             lanes: vec![],
+            note_count: None,
         }))
     }
     .await;

@@ -177,7 +177,8 @@ impl TuiApp {
                     "chain" => IconKind::Chain,
                     _ => IconKind::Device,
                 };
-                self.0.state.borrow_mut().pinned = Some(Pin { pin, kind });
+                let row = pin.r#ref.clone();
+                self.0.state.borrow_mut().pinned = Some(Pin { pin, kind, row });
             }
             "resumed" => {
                 let when = since(n("savedAt"), now_ms_f64());

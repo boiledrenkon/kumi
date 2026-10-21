@@ -240,7 +240,11 @@ impl TuiApp {
             } else {
                 format!("{} beats", number::to_string(number::round(clip.length * 100.) / 100.))
             },
-            format!("{} {}", clip.notes.len(), if clip.notes.len() == 1 { "note" } else { "notes" }),
+            // (every note the clip has: the view holds the first of a big one's)
+            match clip.note_count.unwrap_or(0).max(clip.notes.len()) {
+                1 => "1 note".to_owned(),
+                count => format!("{count} notes"),
+            },
         ];
         if selected > 0 {
             facts.push(format!("{selected} selected"));
@@ -909,7 +913,7 @@ impl TuiApp {
             let mut column = screen.put(x, row, &item.prefix, &st::FAINT);
             let mark = icon(item.kind, self.0.icons, None);
             column = screen.put(column, row, &mark.text, &mark.style) + 1;
-            let pinned = self.0.state.borrow().pinned.as_ref().is_some_and(|p| p.pin.r#ref == item.r#ref);
+            let pinned = self.0.state.borrow().pinned.as_ref().is_some_and(|p| p.row == item.r#ref);
             let label = if pinned { "pinned" } else { "" };
             let style = if item.role == TreeRole::Focus {
                 st::ACCENT

@@ -985,3 +985,78 @@ case!(renoises_pattern_follows_the_cursor_and_playback_between_reads, async {
     assert_eq!(reads(&h), read + 2);
     h.close().await;
 });
+// (review K35) Tab goes into the chain FOCUS shows, a take's FX too; a device the DAW names no ref for (in a Splitter's lane)
+// is pinned with its container's ref, which the tools read, and the row pinned is the one marked.
+case!(tab_enters_a_takes_fx_and_a_device_without_a_ref_pins_its_container, async {
+    work_with(DawId::Reaper);
+    let c = Rc::new(Control::default());
+    let body = json!({"ref": "r:take:{K}", "owner": "take", "ownerName": "kick.wav", "nodes": [
+        fx_node("r:fx:{TP}", "VST3: ReaPitch (Cockos)", json!({})), fx_node("r:fx:{TD}", "VST: ReaDelay (Cockos)", json!({}))]});
+    let Some(FocusBody::Tree(tree)) = (reaper::DAW.to_body)(&BodyRequest::Tree { track_ref: "r:take:{K}".into() }, &body) else { panic!() };
+    *c.tree.borrow_mut() = Some(tree);
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let focus = json!({"view": "fx", "selection": {"track": {"name": "Kick", "type": "audio"}, "trackRef": "r:track:{KT}",
+        "fxRef": "r:fx:{TD}", "fxName": "VST: ReaDelay (Cockos)", "fxChainRef": "r:take:{K}"}});
+    h.emit(focus_of(reaper::DAW.fill_focus, focus));
+    shows(&h, "take “kick.wav”").await;
+    h.type_text("\t").await;
+    assert!(h.has_selection_highlight(), "into the take's chain:\n{}", h.screen().join("\n"));
+    h.close().await;
+
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    let body = json!({"epoch": "e1", "ref": "e1:track:2", "name": "Bass", "nodes": [
+        {"ref": "e1:device:2.3", "name": "Bands", "enabled": true, "plugin": false, "container": true, "lanes": ["Low"],
+            "childNodes": [{"at": [3, 1], "name": "Compressor", "lane": 1, "enabled": true, "plugin": false, "container": false, "childNodes": []}]}]});
+    let Some(FocusBody::Tree(tree)) = (renoise::DAW.to_body)(&BodyRequest::Tree { track_ref: "e1:track:2".into() }, &body) else {
+        panic!()
+    };
+    *c.tree.borrow_mut() = Some(tree);
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let focus = |device: &str, reference: &str| {
+        json!({"view": "pattern", "dspVisible": true, "selection": {"track": {"name": "Bass", "type": "sequencer"}, "trackRef": "e1:track:2",
+            "patternRef": "e1:pattern:1", "deviceName": device, "deviceRef": reference}})
+    };
+    // (another device on the same track: the DSP chain shows)
+    h.emit(focus_of(renoise::DAW.fill_focus, focus("Mixer", "e1:device:2.1")));
+    delay(10).await;
+    h.emit(focus_of(renoise::DAW.fill_focus, focus("Bands", "e1:device:2.3")));
+    shows(&h, "FOCUS · DSP").await;
+    // Into the tree (on Bands), down past the Low lane to the Compressor, and pin it.
+    h.type_text("\t").await;
+    h.type_text("\x1b[B").await;
+    h.type_text("\x1b[B").await;
+    h.type_text("\r").await;
+    let lines = h.screen();
+    let row = lines.iter().find(|line| line.contains("◇  Compressor")).unwrap_or_else(|| panic!("{}", lines.join("\n")));
+    assert!(row.contains("pinned"), "the row pinned is marked:\n{}", lines.join("\n"));
+    h.type_text("what is this\r").await;
+    let pins = c.pins.borrow();
+    let pin = pins.last().cloned().flatten().expect("the pin went with the turn");
+    assert_eq!((pin.r#ref.as_str(), pin.name.as_str()), ("e1:device:2.3", "Compressor"));
+    drop(pins);
+    h.close().await;
+});
+// (review K35) A big take says every note it has, not the count of the first ones the body lists.
+case!(a_big_takes_note_count_is_the_takes, async {
+    work_with(DawId::Reaper);
+    let c = Rc::new(Control::default());
+    let body = json!({"ref": "r:take:{T1}", "name": "Arp", "length": 16.0, "beatsPerBar": 4.0, "noteCount": 1200,
+        "notes": [{"pitch": 60, "start": 0.0, "length": 0.25, "velocity": 100}, {"pitch": 64, "start": 0.25, "length": 0.25, "velocity": 100}]});
+    let Some(FocusBody::Notes(view)) = (reaper::DAW.to_body)(&BodyRequest::Notes { item_ref: "r:take:{T1}".into() }, &body) else {
+        panic!()
+    };
+    *c.clip.borrow_mut() = Some(view);
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let midi = json!({"track":{"name":"Keys","kind":"midi"},"trackRef":"r:track:{K}","mainView":{"kind":"timeline","label":"Arrange"},
+        "editorView":{"kind":"note-editor","label":"MIDI editor"},"item":{"kind":"take","itemRef":"r:take:{T1}","name":"Arp"}});
+    h.emit(json!({"type":"focus","focus":midi}));
+    shows(&h, "4 bars · 1200 notes").await;
+    h.close().await;
+});

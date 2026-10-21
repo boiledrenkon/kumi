@@ -190,7 +190,11 @@ impl TuiApp {
         if name == "tab" && menu.is_empty() && !ctrl && !alt {
             let eligible = {
                 let state = self.0.state.borrow();
-                state.tree.as_ref().is_some_and(|t| state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&t.track_ref))
+                // (the chain FOCUS shows: a take's FX chain where one is open, else the track's)
+                state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|t| state.focus.as_ref().and_then(|f| f.chain_ref.as_ref().or(f.track_ref.as_ref())) == Some(&t.track_ref))
             };
             if eligible {
                 self.0.state.borrow_mut().tree_cursor = Some(0);

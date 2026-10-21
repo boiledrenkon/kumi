@@ -241,6 +241,8 @@ struct Held {
 struct Pin {
     pin: PinnedNode,
     kind: IconKind,
+    /// The FOCUS row pinned, by its ref (the pin's own, or one FOCUS made up for a node the DAW names none for).
+    row: String,
 }
 struct Kept {
     key: String,

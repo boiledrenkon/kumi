@@ -728,6 +728,9 @@ pub struct ClipView {
     /// Its controller lanes (REAPER's CC lanes: a controller, pitch bend, program, pressure), each a few points.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<ControllerLane>,
+    /// Every note it has, when `notes` holds only some of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_count: Option<usize>,
 }
 
 /// One controller lane of a MIDI take: what it controls ("CC 1", "Pitch") and its values as `[beat, value]` from the

@@ -966,6 +966,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 ],
                 beats_per_bar: None,
                 lanes: vec![],
+                note_count: None,
             },
             ClipView {
                 slot_ref: "7:clip_slot:1:0".into(),
@@ -974,6 +975,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 notes: vec![],
                 beats_per_bar: None,
                 lanes: vec![],
+                note_count: None,
             },
         ],
         session_strips: vec![SessionStrip {

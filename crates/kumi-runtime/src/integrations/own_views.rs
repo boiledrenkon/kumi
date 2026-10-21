@@ -150,6 +150,7 @@ pub fn notes(item_ref: &str, body: &Value) -> NoteView {
         length: number(body, "length").unwrap_or(0.),
         notes,
         beats_per_bar: number(body, "beatsPerBar"),
+        note_count: number(body, "noteCount").map(|n| n.max(0.) as usize),
         lanes: list(body, "ccLanes")
             .take(16)
             .filter_map(|lane| {

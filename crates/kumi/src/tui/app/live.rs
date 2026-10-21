@@ -416,11 +416,15 @@ impl TuiApp {
         let Some(track_ref) = focus.track_ref.clone().filter(|s| !s.is_empty()) else {
             return;
         };
+        // A node the DAW names no ref for (a device in Renoise's Doofer or in a Splitter's lane, REAPER's input FX as a
+        // chain) has one FOCUS made up after a '#': the pin names it with its container's ref, which the tools read.
+        let reference = row.r#ref.split_once('#').map_or(row.r#ref.as_str(), |(container, _)| container).to_owned();
         state.pinned = Some(Pin {
             kind: row.kind,
+            row: row.r#ref.clone(),
             pin: PinnedNode {
                 track_ref,
-                r#ref: row.r#ref.clone(),
+                r#ref: reference,
                 node: match row.node {
                     TreeNode::Device => PinKind::Device,
                     TreeNode::Chain => PinKind::Chain,
