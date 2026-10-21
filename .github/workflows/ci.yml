@@ -45,12 +45,20 @@ jobs:
             *) base= ;;
           esac
           # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
-          if [[ -n "$base" ]]; then changed="$(git diff --name-only "$base...HEAD")"; fi
+          if [[ -n "$base" ]]; then
+            changed="$(git diff --name-only "$base...HEAD")"
+            moved="$(git diff --name-only --diff-filter=ADR "$base...HEAD")"
+          fi
           # Each world's jobs run for the changes they test (main runs every one): Rust's for all but the Renoise tool's
           # Lua alone; REAPER's extension for its crate, the parts of daw-bridge it links, the lockfile and the release
           # script's check; Renoise's tool for its folder. CI's own workflow runs them all.
+          # Kumi's Rust tests read some of the tool, so they run for those: its change kinds (changes*.lua, against Kumi's
+          # list of them), its version, its entry and manifest, and files added to it, removed or renamed (the folder as
+          # it's installed).
+          tool='^daws/renoise/com\.kumi\.Bridge\.xrnx/(main\.lua|manifest\.xml|payload/(changes[^/]*|version)\.lua)$'
           code=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$' <<<"$changed" && echo true || echo false )
-          rust=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$|^daws/renoise/' <<<"$changed" && echo true || echo false )
+          rust=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$|^daws/renoise/' <<<"$changed" \
+            || grep -q -E "$tool" <<<"$changed" || grep -q -E '^daws/renoise/com\.kumi\.Bridge\.xrnx/' <<<"$moved" && echo true || echo false )
           ci='^\.github/workflows/ci\.yml$'
           reaper=$( [[ -z "$base" ]] || grep -q -E "$ci|^crates/reaper-kumi/|^crates/daw-bridge/(Cargo\.toml|src/(lib|auth|contract|daw|files|frame|handshake|loopback|owner|paths|wire)\.rs)|^Cargo\.(toml|lock)$|^scripts/build-native-release\.py$" <<<"$changed" && echo true || echo false )
           renoise=$( [[ -z "$base" ]] || grep -q -E "$ci|^daws/renoise/" <<<"$changed" && echo true || echo false )
