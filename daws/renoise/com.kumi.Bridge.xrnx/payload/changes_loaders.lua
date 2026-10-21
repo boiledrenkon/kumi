@@ -326,6 +326,7 @@ base.register({
     local i = plan.n[1]
     local instrument = song:instrument(i)
     local selected_i, selected_p = song.selected_instrument_index, song.selected_phrase_index
+    local program_before = phrases_.program_of(instrument)
     song:describe_undo(desc)
     instrument:insert_phrase_at(plan.index)
     -- (Renoise loads a phrase file into the selected phrase: the new one)
@@ -342,11 +343,14 @@ base.register({
     end
     local phrase = instrument.phrases[plan.index]
     local m = { i, plan.index }
+    -- (the program plays the phrase it played before the new one came)
+    local program_place, program_after = phrases_.keep_program(env, instrument, i, program_before, plan.index)
     -- (whether it plays as the program now: Renoise's doing, so Kumi's undo may take it; see changes_phrases.lua's in_use)
     local program = instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == plan.index
     return {
       applied = { index = plan.index, print = phrases_.phrase_print(phrase), program = program or nil }, created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase" },
-      material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
+      material = { made = places_.place_of(env, "phrase", m), program = program_place, programAfter = program_after },
+      target = places_.target_of(env, "phrase", m),
       display = {
         title = string.format("Loaded the phrase %s into %s", q(places_.phrase_label(plan.index, phrase)), q(plan.label)),
         before = { phrases = plan.count }, after = { phrases = plan.count + 1 },

@@ -117,6 +117,38 @@ test("phrases: Kumi's undo of a phrase delete leaves out the 0Z commands of a pa
   ok((undone.result.display.note or ""):find("weren't written again", 1, true), tostring(undone.result.display.note))
 end)
 
+test("phrases: a phrase made at or before the program, and Kumi's undo of a delete below it, leave the program on the phrase it played (#361 N-S23, final review)", function()
+  local env, peer = setup()
+  local bass = mock.song:instrument(2)
+  bass:insert_phrase_at(2).name = "P2"
+  bass:insert_phrase_at(3).name = "P3"
+  bass.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_SELECTIVE
+  bass.phrase_program = 2
+  mock.data.undo.stack = {}
+  local function playing() return bass:phrase(bass.phrase_program).name end
+  eq(playing(), "P2")
+  -- (made at the program's place: Renoise leaves the number, which would name the new phrase)
+  local added = change(peer, "phrase-add", { ref = iref(place(peer), 2), index = 2, name = "New" })
+  eq(bass:phrase(2).name, "New")
+  eq(playing(), "P2", "the program plays the phrase it played")
+  ok(restore(peer, "phrase-add", added).result)
+  eq(#bass.phrases, 3)
+  eq(playing(), "P2")
+  -- (a delete below it: Renoise moves the number with it; the phrase put back below leaves the number, naming the one before)
+  bass.phrase_program = 3
+  local deleted = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 1) })
+  eq(playing(), "P3")
+  local undone = restore(peer, "phrase-delete", deleted)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#bass.phrases, 3)
+  eq(playing(), "P3", "the program plays the phrase it played")
+  -- (one the producer chose since stays theirs)
+  local again = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 1) })
+  bass.phrase_program = 1
+  ok(restore(peer, "phrase-delete", again).result)
+  eq(bass.phrase_program, 1)
+end)
+
 test("phrases: a new phrase's loop is checked against the 32 lines Renoise makes it with (#361 N-N4)", function()
   local env, peer = setup()
   local record, done = change(peer, "phrase-add", { ref = iref(place(peer), 2), loopEnd = 24 })

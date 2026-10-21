@@ -282,6 +282,46 @@ local function phrase_print(phrase)
   return { name = phrase.name, lines = phrase.number_of_lines, empty = phrase.is_empty, mode = phrase.playback_mode, print = lines_print(phrase) }
 end
 
+-- The phrase the instrument's program plays (its number, 1 to the count) when it plays phrases by program; nil for none.
+local function program_of(instrument)
+  if instrument.phrase_playback_mode ~= renoise.Instrument.PHRASES_PLAY_SELECTIVE then return nil end
+  local program = instrument.phrase_program
+  if program >= 1 and program <= #instrument.phrases then return program end
+  return nil
+end
+
+-- After a phrase was made at `index` (or deleted from it: `deleted`), the program plays the phrase it played (`program`, its
+-- number before): Renoise leaves the number as a phrase is made at or before it, and moves it, not always with its phrase, as
+-- one is deleted (lab 2026-10-21). The place of that phrase and the program as left, for the undo to put it back on that
+-- phrase; nil when there's no program, or (a delete) it was the phrase deleted.
+local function keep_program(env, instrument, i, program, index, deleted)
+  if not program or (deleted and program == index) then return nil, nil end
+  local plays
+  if deleted then plays = program > index and program - 1 or program else plays = program >= index and program + 1 or program end
+  if instrument.phrase_program ~= plays then pcall(function() instrument.phrase_program = plays end) end
+  return places_.place_of(env, "phrase", { i, plays }), instrument.phrase_program
+end
+
+-- The program on the phrase now at `on`, unless the producer chose another since the change left it at `after`.
+local function program_back(instrument, on, after)
+  if not on then return end
+  pcall(function()
+    local program = instrument.phrase_program
+    if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and program ~= on
+      and (program == 0 or program > #instrument.phrases or (after ~= nil and program == after)) then
+      instrument.phrase_program = on
+    end
+  end)
+end
+
+-- The program on the phrase kept as `place` (keep_program's), wherever that is now.
+local function program_back_to(env, instrument, i, place, after)
+  if type(place) ~= "table" then return end
+  local now = places_.follow(env, place)
+  if now and now[1] == i then program_back(instrument, now[2], after) end
+end
+M.program_of, M.keep_program, M.program_back_to = program_of, keep_program, program_back_to
+
 -- (" with 12 lines" in a title, when the phrase is made with its lines)
 local function with_lines(input)
   if type(input.content) ~= "table" then return "" end
@@ -306,6 +346,7 @@ local function add_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(plan) end
   if plan.count ~= fence.phrases or plan.index ~= fence.index then fail("changed", q(plan.label) .. "'s phrases changed since the preview") end
   local instrument = song:instrument(plan.n[1])
+  local program_before = program_of(instrument)
   song:describe_undo(desc)
   local phrase = instrument:insert_phrase_at(plan.index)
   local set, err = pcall(write_settings, phrase, plan.settings)
@@ -321,13 +362,16 @@ local function add_apply(song, env, input, fence, desc)
     end
   end
   local m = { plan.n[1], plan.index }
+  -- (the program plays the phrase it played before the new one came)
+  local program_place, program_after = keep_program(env, instrument, plan.n[1], program_before, plan.index)
   -- (whether the new phrase plays as the program now: Renoise's doing, not the producer's, so Kumi's undo may take it)
   local program = instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == plan.index
   return {
     applied = { index = plan.index, print = phrase_print(phrase), program = program or nil },
     -- (M7: its place too, which Kumi finds it by after other phrases came and went)
     created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase", place = places_.place_of(env, "phrase", m) },
-    material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
+    material = { made = places_.place_of(env, "phrase", m), program = program_place, programAfter = program_after },
+    target = places_.target_of(env, "phrase", m),
     display = { title = string.format("Added phrase %s to %s%s", q(places_.phrase_label(plan.index, phrase)), q(plan.label), with_lines(input)), before = { phrases = plan.count }, after = { phrases = plan.count + 1 } },
     undo = { desc = desc, entry = true }, prior = { phrases = plan.count }, place = places_.journal_place("phrase", m), shape = "made",
   }
@@ -368,6 +412,8 @@ local function remove_made(song, env, restore, desc, kind)
   end
   song:describe_undo(desc)
   objects.instrument:delete_phrase_at(n[2])
+  -- (the program back on the phrase it played when Kumi made this one: Renoise moves it as it deletes one)
+  program_back_to(env, objects.instrument, n[1], material.program, material.programAfter)
   base.note_restored_at(env.journal, kind, places_.journal_place("phrase", n))
   return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
 end
@@ -498,12 +544,15 @@ local function delete_apply(song, env, input, fence, desc)
   }
   -- (the 0Z commands that name it: those Renoise clears are kept, to be written again when it comes back)
   local named = zero_z_cells(song, n[2])
+  local program_before = program_of(instrument)
   song:describe_undo(desc)
   instrument:delete_phrase_at(n[2])
   material.instrument = places_.place_of(env, "instrument", { n[1] })
   material.after = env.list_mark and env.list_mark("phrases", n[1]) or nil
+  -- (a program on another phrase plays that one still: Renoise may move it as it deletes this one)
+  material.programPhrase = keep_program(env, instrument, n[1], program_before, n[2], true)
   -- (the program Renoise moved it to, for the undo to know the producer didn't choose another since)
-  if material.program then material.programAfter = instrument.phrase_program end
+  if material.program or material.programPhrase then material.programAfter = instrument.phrase_program end
   local note
   if named then
     local cleared, patterns = {}, {}
@@ -571,14 +620,11 @@ local function delete_restore(song, env, restore, desc)
     if not mapped then notes[#notes + 1] = string.format("Its keys (%d-%d) weren't mapped again: %s.", material.mapping.noteRange[1], material.mapping.noteRange[2], why_not) end
   end
   if material.program then
-    pcall(function()
-      local program = instrument.phrase_program
-      -- (Renoise moved the program off the phrase it deleted: unless the producer chose another since, it plays this one again)
-      if instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE
-        and (program == 0 or program > #instrument.phrases or (material.programAfter ~= nil and program == material.programAfter)) then
-        instrument.phrase_program = at
-      end
-    end)
+    -- (Renoise moved the program off the phrase it deleted: unless the producer chose another since, it plays this one again)
+    program_back(instrument, at, material.programAfter)
+  else
+    -- (a program on another phrase: the phrase put back below it leaves its number, which then names the phrase before it)
+    program_back_to(env, instrument, n[1], material.programPhrase, material.programAfter)
   end
   -- The 0Z commands Renoise cleared, written again naming it where they still are empty (the patterns followed through the pool,
   -- the tracks through the layout).
