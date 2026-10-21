@@ -252,6 +252,14 @@ pub(super) unsafe extern "C" fn mark_track_items_dirty(track: *mut MediaTrack, _
 }
 
 pub(super) unsafe extern "C" fn add_media_item_to_track(track: *mut MediaTrack) -> *mut MediaItem {
+    // As REAPER 7.82's: the new-item fades unless the producer turned them off (splitautoxfade &8), deffadelen long.
+    let fades = super::extra(|e| {
+        let number = |name: &str| e.config.get(name).and_then(|value| value.trim().parse::<f64>().ok());
+        match (number("splitautoxfade"), number("deffadelen")) {
+            (Some(flags), Some(length)) if flags as i64 & 8 == 0 => length,
+            _ => 0.0,
+        }
+    });
     counted(|s| {
         let at = unpack(track as u64).1;
         if at == MASTER || track_of(s, track as u64).is_none() {
@@ -260,8 +268,13 @@ pub(super) unsafe extern "C" fn add_media_item_to_track(track: *mut MediaTrack) 
         let id = new_id(s, "ITEM");
         let t = &mut s.tracks[at as usize];
         let mut item = FakeItem::new(&id, 0.0, 0.0, vec![]);
-        // As REAPER 7.82's: an item this makes loops its source whatever the preferences say (m7 KP1 lab).
+        // As REAPER 7.82's: an item this makes loops its source whatever the preferences say, and has the new-item fades
+        // (m7 KP1 lab).
         item.extra.insert("B_LOOPSRC".into(), 1.0);
+        if fades > 0.0 {
+            item.extra.insert("D_FADEINLEN".into(), fades);
+            item.extra.insert("D_FADEOUTLEN".into(), fades);
+        }
         t.items.push(item);
         s.undo_dirty = true;
         item_ptr(at as usize, t.items.len() - 1)

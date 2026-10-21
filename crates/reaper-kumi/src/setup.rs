@@ -65,9 +65,10 @@ fn render(reaper: &Reaper, proj: Project) -> Value {
         _ if settings & 32 != 0 => "selected media items",
         _ if settings & 64 != 0 => "selected media items via master",
         _ if settings & 128 != 0 => "selected tracks via master",
-        _ if settings & 3 == 0 => "master mix",
+        _ if settings & 3 == 3 => "stems (selected tracks)",
         _ if settings & 3 == 1 => "master mix and stems",
-        _ => "stems (selected tracks)",
+        // (2 alone renders the master and lists no targets, 7.82 lab)
+        _ => "master mix",
     };
     let bounds = match number("RENDER_BOUNDSFLAG") as i64 {
         0 => "custom time range",
@@ -247,6 +248,19 @@ mod tests {
         let snapshot = crate::read::Reads::default().snapshot(&Reaper::new(&api)).unwrap();
         assert_eq!(snapshot["setup"]["loopSourceOfNewItems"], json!({"imported": true, "midi": true}));
         assert_eq!(snapshot["setup"]["render"]["source"], json!("master mix"));
+    }
+
+    #[test]
+    fn render_settings_two_alone_is_the_master_mix_reaper_renders() {
+        for (settings, source) in
+            [(0.0, "master mix"), (1.0, "master mix and stems"), (2.0, "master mix"), (3.0, "stems (selected tracks)")]
+        {
+            fake::reset();
+            fake::with(|s| s.listening.numbers.insert("RENDER_SETTINGS".into(), settings));
+            let api = fake::api();
+            let reaper = Reaper::new(&api);
+            assert_eq!(setup(&reaper, reaper.current_project().unwrap().ptr)["render"]["source"], json!(source), "{settings}");
+        }
     }
 
     #[test]

@@ -231,6 +231,18 @@ fn an_imported_file_loops_as_the_producers_reaper_loops_imported_media() {
     assert_eq!(loops(&lab), Some(0.0), "the producer's setting holds for Kumi's imports too");
 }
 
+#[test]
+fn an_imported_file_has_no_fades_as_the_producers_own_import_has_none() {
+    let lab = Lab::new();
+    let path = media_file("kick.wav", "WAVE", 0.5, false);
+    // REAPER's factory setup: new items get 10 ms fades, but Insert Media's items get none, and an imported kick keeps
+    // its hit.
+    let (_, applied) = lab.make("item-import", json!({"ref": SNARE, "path": path, "position": 0.0}));
+    let (_, imported) = item(&guid_in(&applied["created"]["ref"])).unwrap();
+    let fade = |key: &str| imported.extra.get(key).copied().unwrap_or(0.0);
+    assert_eq!((fade("D_FADEINLEN"), fade("D_FADEOUTLEN")), (0.0, 0.0));
+}
+
 /// Kumi's own folder with a render in it, and the project's media folder: the render's path and the folders (kept alive).
 pub(super) fn kumi_render(lab: &Lab, name: &str) -> (tempfile::TempDir, tempfile::TempDir, String) {
     let kumi = tempfile::tempdir().unwrap();
