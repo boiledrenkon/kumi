@@ -2685,3 +2685,38 @@ test("changes: Kumi's undo of a slot it made with a new pattern refuses once the
   eq(seq_text(), "1,2,1,3")
   H.no_dialogs()
 end)
+
+test("changes: Kumi's undo of columns it showed refuses to hide them when the track is too big to look through, then or now; discard hides them (#361 N-S7, final review)", function()
+  local env, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_tracks.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local lowered, n = text:gsub("M%.HIDDEN_READS = %d+", "M.HIDDEN_READS = 20")
+    assert(n == 1, "HIDDEN_READS was not found to set")
+    f = assert(io.open(path, "wb"))
+    f:write(lowered)
+    f:close()
+  end })
+  -- (more lines than the look reads: some in a pattern it never reaches)
+  for p = 1, 3 do
+    for k = 1, 16 do mock.ops.set_note(p, 3, k, 1, { note = 48 }) end
+  end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3), noteColumns = 4 }
+  local previewed = preview(peer, "track-columns", input)
+  local done = apply(peer, "track-columns", input, "Kumi: columns (kc81)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.heldHidden, "unknown")
+  mock.ops.set_note(3, 3, 16, 4, { note = 52 }) -- the producer's chord note, past where the look reads
+  H.tick(2)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied }
+  local refused = restore(peer, "track-columns", record, "Kumi: undo columns (kc82)", done.result.epoch, done.result.layout)
+  failure(refused, "changed")
+  ok(refused.error.message:find("too big", 1, true), refused.error.message)
+  eq(mock.song:track(3).visible_note_columns, 4, "still shown")
+  local forced = restore(peer, "track-columns", record, "Kumi: undo columns (kc83)", done.result.epoch, done.result.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(mock.song:track(3).visible_note_columns, 2)
+end)

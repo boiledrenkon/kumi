@@ -1393,9 +1393,9 @@ for _, sub in ipairs(SUBCOLUMNS) do
   }
 end
 
--- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil (and nil past what is worth
--- reading through).
-local HIDDEN_READS = 40000
+-- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil when they hold nothing; nil
+-- and "unknown" past what is worth reading through.
+M.HIDDEN_READS = 40000
 local function hidden_note(loc, wanted)
   local song, track, index = renoise.song(), loc.object, loc.place.track
   if not song then return nil end
@@ -1435,11 +1435,11 @@ local function hidden_note(loc, wanted)
             end
           end
         end
-        if found or reads > HIDDEN_READS then break end
+        if found or reads > M.HIDDEN_READS then break end
       end
     end
     if found then patterns = patterns + 1 end
-    if reads > HIDDEN_READS then return nil end
+    if reads > M.HIDDEN_READS then return nil, "unknown" end
   end
   if patterns == 0 then return nil end
   return string.format("What it hides holds notes in %s: Renoise keeps them, hidden (and plays them).",
@@ -1449,12 +1449,26 @@ end
 local columns_spec = base.settings({
   kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
 })
-columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+columns_spec.note = function(loc, _, wanted)
+  local note, why = hidden_note(loc, wanted)
+  if why == "unknown" then
+    return "The track is too big for Kumi to look through what it hides: it may hold notes, which Renoise keeps, hidden (and plays)."
+  end
+  return note
+end
 -- (the undo hides columns again: what they held when Kumi showed them may be hidden again, but what the producer wrote in
--- them since is refused, unless discard)
-columns_spec.keep = function(loc, before) return { heldHidden = hidden_note(loc, before) ~= nil } end
+-- them since is refused, unless discard; and so is hiding columns Kumi couldn't look through, then or now)
+columns_spec.keep = function(loc, before)
+  local note, why = hidden_note(loc, before)
+  return { heldHidden = note ~= nil or (why == "unknown" and "unknown") or false }
+end
 columns_spec.before_restore = function(loc, _, prior, applied)
-  if type(applied) == "table" and applied.heldHidden == false and hidden_note(loc, prior) ~= nil then
+  if type(applied) ~= "table" or applied.heldHidden == true or applied.heldHidden == nil then return end
+  local note, why = hidden_note(loc, prior)
+  if applied.heldHidden == "unknown" or why == "unknown" then
+    fail("changed", loc.name .. " is too big for Kumi to tell whether the columns it showed hold notes written since: hiding them again might hide those, so Kumi left them")
+  end
+  if note ~= nil then
     fail("changed", loc.name .. "'s columns Kumi showed hold notes written since: hiding them again would hide those, so Kumi left them")
   end
 end
