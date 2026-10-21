@@ -87,3 +87,15 @@ pub fn recent_projects(options: &crate::library::sources::SourceOptions) -> Vec<
     debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's projects");
     crate::library::sources::recent_sets(options)
 }
+
+/// REAPER's and Renoise's instructions, packs included, keep within the budget Live's instructions keep. (Here, because
+/// only the registry may name Live's integration outside it.)
+#[cfg(test)]
+#[test]
+fn each_own_daws_instructions_keep_within_lives() {
+    let live = ableton::context::INSTRUCTIONS.len();
+    for daw in [&reaper::DAW, &renoise::DAW] {
+        let text = own_bridge::instructions_of(daw);
+        assert!(text.len() <= live, "{}'s instructions are {} bytes, over Live's {live}", daw.profile.words.app, text.len());
+    }
+}

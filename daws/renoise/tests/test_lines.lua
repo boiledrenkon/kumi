@@ -47,6 +47,24 @@ test("lines: notes transposed in a range move by the semitones; OFF and empty ce
   H.no_dialogs()
 end)
 
+test("lines: older sample-offset spellings (09xx, Sxx, -Sxx) are written as Renoise's 0Sxx, and the change says so", function()
+  local _, peer = setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "notes-write", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), merge = true, lines = {
+    { line = 1, effects = { { col = 1, number = "09", amount = "C0" } } },
+    { line = 3, notes = { { col = 1, fx = "S40" } } },
+    { line = 7, effects = { { col = 1, number = "-s", amount = "20" } } },
+  } })
+  local function effect(l) local fx = mock.song:pattern(1):track(3):line(l):effect_column(1) return fx.number_string .. fx.amount_string end
+  eq(effect(2), "0SC0")
+  eq(column(1, 3, 4, 1).effect_number_string .. column(1, 3, 4, 1).effect_amount_string, "0S40")
+  eq(effect(8), "0S20")
+  local said = "Read 09C0 as 0SC0, S40 as 0S40, -S20 as 0S20: Renoise's sample offset is 0Sxx."
+  eq(record.previewed.display.note, said)
+  eq(record.result.display.note, said)
+  eq(notes(1, 3, 1, 8), "1=C-4 3=E-4 5=OFF", "the notes stay")
+end)
+
 test("lines: a note that would leave C-0..B-9 refuses the whole transposition, and a hidden column given is shown first", function()
   local _, peer = setup()
   local E = K.place(peer)

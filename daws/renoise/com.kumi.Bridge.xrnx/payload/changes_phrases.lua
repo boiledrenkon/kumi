@@ -1099,13 +1099,13 @@ end
 local function lines_plan(phrase, input)
   local shape_pattern = { number_of_lines = phrase.number_of_lines }
   local shape_track = { max_note_columns = 12, max_effect_columns = 8 }
-  local wants = cells.parse_cells(shape_pattern, shape_track, input)
+  local wants, _, read_as = cells.parse_cells(shape_pattern, shape_track, input)
   cells.add_cleared(phrase, input, wants)
   local prior, after = cells.plan_of(phrase, wants, input.merge == true)
   if cells.writes_of(after) > M.MAX_WRITES then
     bad(string.format("that is %d writes, more than one phrase change takes (%d): split it into several", cells.writes_of(after), M.MAX_WRITES))
   end
-  return prior, after
+  return prior, after, read_as
 end
 
 local function lines_title(verb, cells_, label)
@@ -1129,17 +1129,17 @@ local function lines_kind(spec)
     local n, objects, label = places_.locate(song, env, "phrase", input, kind)
     local phrase = objects.phrase
     local request = build(phrase, input)
-    local prior, after
+    local prior, after, read_as
     if #(request.lines or {}) == 0 and kind == "phrase-clear" then
       prior, after = {}, {}
     else
-      prior, after = lines_plan(phrase, request)
+      prior, after, read_as = lines_plan(phrase, request)
     end
-    return { n = n, label = label, phrase = phrase, prior = prior, after = after, columns = phrase_columns(phrase) }
+    return { n = n, label = label, phrase = phrase, prior = prior, after = after, columns = phrase_columns(phrase), note = cells.read_as_note(read_as or {}) }
   end
   local function preview(song, env, input)
     local p = plan(song, env, input)
-    local display = { title = lines_title(verb, #p.after > 0 and p.after or p.prior, p.label), before = cells.counts_of(p.prior), after = cells.counts_of(p.after) }
+    local display = { title = lines_title(verb, #p.after > 0 and p.after or p.prior, p.label), before = cells.counts_of(p.prior), after = cells.counts_of(p.after), note = p.note }
     if #p.after == 0 then display.unchanged = true end
     return {
       target = places_.target_of(env, "phrase", p.n), prior = { cells = p.prior, columns = p.columns },
@@ -1183,7 +1183,7 @@ local function lines_kind(spec)
         cells = result, columns = phrase_columns(p.phrase),
         touch = env.phrase_touch_mark and env.phrase_touch_mark(p.n[1], p.n[2]) or nil, lines = p.phrase.number_of_lines,
       },
-      target = places_.target_of(env, "phrase", p.n), display = { title = display.title, before = display.before, after = cells.counts_of(result) },
+      target = places_.target_of(env, "phrase", p.n), display = { title = display.title, before = display.before, after = cells.counts_of(result), note = p.note },
       undo = { desc = desc, entry = true }, prior = { cells = p.prior, columns = p.columns }, place = places_.journal_place("phrase", p.n),
     }
   end

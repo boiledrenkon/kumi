@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use daw_bridge::Daw;
 use daw_mcp_server::host::Host;
 use futures::FutureExt;
-use kumi::config::{load_inference_config, safe_error};
+use kumi::config::{load_inference_config, load_tools_dir, safe_error};
 use kumi_common::{
     abort::Signal,
     js::{json::stringify, string::head},
@@ -28,7 +28,7 @@ use kumi_runtime::{
         error::LanguageModelError,
         types::{CallOptions, StreamPart, StreamParts},
     },
-    core::{context::IntegrationContext, contracts::WatchEvent, daw::DawProfile, memory::MemoryStoreOptions},
+    core::{context::IntegrationContext, contracts::WatchEvent, daw::DawProfile, memory::MemoryStoreOptions, session::VideoDirectories},
     create_agent_kernel, create_memory_store, create_session,
     integrations::{
         own_bridge::{Connect, OwnOptions},
@@ -56,260 +56,16 @@ use std::{
     time::Instant,
 };
 
-#[path = "../../kumi-runtime/tests/support/in_process.rs"]
+#[path = "../../../kumi-runtime/tests/support/in_process.rs"]
 mod in_process;
 use in_process::InProcess;
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Scenarios
-
-struct Scenario {
-    id: &'static str,
-    daw: Daw,
-    /// What the producer says, turn by turn.
-    says: &'static [&'static str],
-    /// Lua the fixture is built with, in the DAW (REAPER's `reaper`, Renoise's `song`), as one step of its undo.
-    fixture: &'static str,
-    /// Whether the producer asks for notes to be written (else none may be added).
-    generates: bool,
-    /// Names Kumi's answer should use, saying what it found or changed (any one of them).
-    names: &'static [&'static str],
-    /// The scenario's own checks, on the state before and after.
-    expect: fn(&Value, &Value) -> Vec<Check>,
-}
-
-fn scenarios() -> Vec<Scenario> {
-    vec![
-        Scenario {
-            id: "P30",
-            daw: Daw::Reaper,
-            says: &["The kick is way too loud and I can't find why"],
-            // Kick sits in the Drums folder (to the master through it) and also sends to Drum Bus, which goes to the master:
-            // it reaches the master twice.
-            fixture: r#"
-for i = reaper.CountTracks(0) - 1, 0, -1 do reaper.DeleteTrack(reaper.GetTrack(0, i)) end
-local _, markers, regions = reaper.CountProjectMarkers(0)
-for i = markers + regions - 1, 0, -1 do reaper.DeleteProjectMarkerByIndex(0, i) end
-local function track(name)
-  local at = reaper.CountTracks(0)
-  reaper.InsertTrackAtIndex(at, true)
-  local t = reaper.GetTrack(0, at)
-  reaper.GetSetMediaTrackInfo_String(t, "P_NAME", name, true)
-  return t
-end
-local drums, kick, snare, bus, bass = track("Drums"), track("Kick"), track("Snare"), track("Drum Bus"), track("Bass")
-reaper.SetMediaTrackInfo_Value(drums, "I_FOLDERDEPTH", 1)
-reaper.SetMediaTrackInfo_Value(snare, "I_FOLDERDEPTH", -1)
-reaper.CreateTrackSend(kick, bus)
-for _, t in ipairs({kick, snare, bass}) do reaper.CreateNewMIDIItemInProj(t, 0, 8, false) end
-reaper.UpdateArrange()
-return "ok"
-"#,
-            generates: false,
-            names: &["Drum Bus", "send", "folder", "Drums"],
-            expect: |before, after| {
-                let mut checks = vec![];
-                let paths = |state: &Value| reaper_paths(state, "Kick");
-                checks.push(Check::new("the kick reached the master twice before", paths(before) == 2, format!("{} paths", paths(before))));
-                checks.push(Check::new("one route to the master is left", paths(after) == 1, format!("{} paths", paths(after))));
-                for name in ["Snare", "Bass", "Drum Bus", "Drums"] {
-                    let same = reaper_track(before, name).map(|t| (&t["volume"], &t["mute"], &t["mainSend"]))
-                        == reaper_track(after, name).map(|t| (&t["volume"], &t["mute"], &t["mainSend"]));
-                    checks.push(Check::new(&format!("{name} left as it was"), same, String::new()));
-                }
-                let kick_volume = |state: &Value| reaper_track(state, "Kick").map(|t| t["volume"].clone());
-                checks.push(Check::new(
-                    "the kick's fader is left alone (the route is the cause)",
-                    kick_volume(before) == kick_volume(after),
-                    format!("{:?} → {:?}", kick_volume(before), kick_volume(after)),
-                ));
-                checks
-            },
-        },
-        Scenario {
-            id: "R31",
-            daw: Daw::Renoise,
-            says: &["Put an S40 on the second snare and 09C0 on line 20"],
-            // Snare hits on lines 04, 12, 20 and 28 of the first pattern (LPB 4, 32 lines), on the song's first track.
-            fixture: r#"
-song.transport.lpb = 4
-local t = song:track(1)
-t.name = "Snare"
-for i = 2, song.sequencer_track_count do
-  if song:track(i).name == "Snare" then song:track(i).name = "Track " .. i end
-end
-local pattern = song:pattern(song.sequencer:pattern(1))
-pattern.number_of_lines = 32
-local pt = pattern:track(1)
-pt:clear()
-for _, line in ipairs({4, 12, 20, 28}) do
-  local nc = pt:line(line + 1):note_column(1)
-  nc.note_string = "C-4"
-  nc.instrument_value = 0
-end
-return "ok"
-"#,
-            generates: false,
-            names: &["Snare", "0S40", "0SC0", "line 12", "line 20"],
-            expect: |before, after| {
-                let mut checks = vec![];
-                let offset = |state: &Value, line: u64| renoise_effects(state, line).iter().any(|fx| fx == "0S40");
-                let offset_c0 = |state: &Value, line: u64| renoise_effects(state, line).iter().any(|fx| fx == "0SC0");
-                checks.push(Check::new(
-                    "0S40 on the second snare (line 12)",
-                    offset(after, 12),
-                    format!("{:?}", renoise_effects(after, 12)),
-                ));
-                checks.push(Check::new("0SC0 on line 20", offset_c0(after, 20), format!("{:?}", renoise_effects(after, 20))));
-                let notes = |state: &Value| state["snare"]["notes"].clone();
-                checks.push(Check::new("the snare's notes are as they were", notes(before) == notes(after), format!("{}", notes(after))));
-                let others: Vec<u64> = (0..32)
-                    .filter(|line| ![12, 20].contains(line) && renoise_effects(before, *line) != renoise_effects(after, *line))
-                    .collect();
-                checks.push(Check::new("no other line's effects changed", others.is_empty(), format!("{others:?}")));
-                checks
-            },
-        },
-    ]
-}
-
-/// A REAPER track of the state, by name.
-fn reaper_track<'a>(state: &'a Value, name: &str) -> Option<&'a Value> {
-    state["tracks"].as_array()?.iter().find(|track| track["name"] == name)
-}
-
-/// How many ways a track's sound reaches the master: through its folder (its parent send, up the folders) and through
-/// each unmuted send whose destination reaches it.
-fn reaper_paths(state: &Value, name: &str) -> usize {
-    fn reach(state: &Value, name: &str, depth: usize) -> usize {
-        let Some(track) = reaper_track(state, name) else { return 0 };
-        if depth > 16 {
-            return 0;
-        }
-        let up = if track["mainSend"] == true {
-            match track["parent"].as_str() {
-                Some(parent) => reach(state, parent, depth + 1),
-                None => 1,
-            }
-        } else {
-            0
-        };
-        let sends: usize = track["sends"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|send| send["mute"] != true && send["volume"].as_f64().unwrap_or(0.0) > 0.0)
-            .map(|send| reach(state, send["to"].as_str().unwrap_or_default(), depth + 1))
-            .sum();
-        up + sends
-    }
-    reach(state, name, 0)
-}
-
-/// The effects on a line of the snare track (effect columns and the note column's own), as "0S40".
-fn renoise_effects(state: &Value, line: u64) -> Vec<String> {
-    state["snare"]["lines"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|row| row["line"] == line)
-        .and_then(|row| row["effects"].as_array())
-        .map(|effects| effects.iter().filter_map(|fx| fx.as_str().map(str::to_owned)).collect())
-        .unwrap_or_default()
-}
-
-/// What the state readers return: REAPER's tracks (with their folder parent, sends and volume), its MIDI note count and
-/// its preferences that the setup reads; Renoise's snare track's lines, its note count and its editing settings.
-const REAPER_STATE: &str = r#"
-local out, parents = {tracks = {}, notes = 0}, {}
-local function name_of(t) local _, n = reaper.GetSetMediaTrackInfo_String(t, "P_NAME", "", false) return n end
-for i = 0, reaper.CountTracks(0) - 1 do
-  local t = reaper.GetTrack(0, i)
-  local parent = reaper.GetParentTrack(t)
-  local sends = {}
-  for s = 0, reaper.GetTrackNumSends(t, 0) - 1 do
-    local dest = reaper.GetTrackSendInfo_Value(t, 0, s, "P_DESTTRACK")
-    sends[#sends + 1] = {to = name_of(dest), mute = reaper.GetTrackSendInfo_Value(t, 0, s, "B_MUTE") ~= 0,
-      volume = reaper.GetTrackSendInfo_Value(t, 0, s, "D_VOL")}
-  end
-  out.tracks[#out.tracks + 1] = {name = name_of(t), parent = parent and name_of(parent) or nil,
-    mainSend = reaper.GetMediaTrackInfo_Value(t, "B_MAINSEND") ~= 0, mute = reaper.GetMediaTrackInfo_Value(t, "B_MUTE") ~= 0,
-    volume = math.floor(reaper.GetMediaTrackInfo_Value(t, "D_VOL") * 1e6 + 0.5) / 1e6, sends = sends}
-  for k = 0, reaper.CountTrackMediaItems(t) - 1 do
-    local take = reaper.GetActiveTake(reaper.GetTrackMediaItem(t, k))
-    if take and reaper.TakeIsMIDI(take) then local _, n = reaper.MIDI_CountEvts(take) out.notes = out.notes + n end
-  end
-end
-local prefs = {}
-for _, name in ipairs({"deffadelen", "splitautoxfade", "loopnewitems", "deftrackvol", "itemtimelock", "tempoenvtimelock", "autoxfade"}) do
-  local ok, value = reaper.get_config_var_string(name)
-  prefs[name] = ok and value or ""
-end
-for _, key in ipairs({"RENDER_SETTINGS", "RENDER_BOUNDSFLAG", "RENDER_SRATE", "RENDER_CHANNELS", "RENDER_TAILFLAG"}) do
-  prefs[key] = reaper.GetSetProjectInfo(0, key, 0, false)
-end
-for _, key in ipairs({"RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT"}) do
-  local _, value = reaper.GetSetProjectInfo_String(0, key, "", false)
-  prefs[key] = value
-end
-out.prefs = prefs
-return out
-"#;
-
-const RENOISE_STATE: &str = r#"
-local out = {notes = 0, snare = {lines = {}, notes = {}}}
-for p = 1, #song.patterns do
-  for t = 1, song.sequencer_track_count do
-    for _, line in ipairs(song:pattern(p):track(t).lines) do
-      for c = 1, 12 do
-        local nc = line:note_column(c)
-        if nc.note_value < 120 then out.notes = out.notes + 1 end
-      end
-    end
-  end
-end
-local snare
-for t = 1, song.sequencer_track_count do if song:track(t).name == "Snare" then snare = t break end end
-if snare then
-  local pt = song:pattern(song.sequencer:pattern(1)):track(snare)
-  for l = 1, song:pattern(song.sequencer:pattern(1)).number_of_lines do
-    local line = pt:line(l)
-    local effects = {}
-    for c = 1, 8 do
-      local fx = line:effect_column(c)
-      if not fx.is_empty then effects[#effects + 1] = fx.number_string .. fx.amount_string end
-    end
-    for c = 1, 12 do
-      local nc = line:note_column(c)
-      if nc.effect_number_value ~= 0 or nc.effect_amount_value ~= 0 then
-        effects[#effects + 1] = nc.effect_number_string .. nc.effect_amount_string
-      end
-      if nc.note_value < 120 then out.snare.notes[#out.snare.notes + 1] = (l - 1) .. " " .. nc.note_string end
-    end
-    if #effects > 0 then out.snare.lines[#out.snare.lines + 1] = {line = l - 1, effects = effects} end
-  end
-end
-local tr = song.transport
-out.prefs = {editStep = tr.edit_step, octave = tr.octave, follow = tr.follow_player, editMode = tr.edit_mode,
-  quantize = tr.record_quantize_enabled, quantizeLines = tr.record_quantize_lines, wrap = tr.wrapped_pattern_edit,
-  singleTrack = tr.single_track_edit_mode, metronome = tr.metronome_enabled, lpb = tr.lpb, bpm = tr.bpm}
-return out
-"#;
+mod media;
+mod scenarios;
+use scenarios::{Check, Scenario, Seen};
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Checks and outcomes
-
-struct Check {
-    name: String,
-    passed: bool,
-    detail: String,
-}
-
-impl Check {
-    fn new(name: &str, passed: bool, detail: String) -> Check {
-        Check { name: name.to_owned(), passed, detail }
-    }
-}
+// Outcomes
 
 struct Outcome {
     id: &'static str,
@@ -364,13 +120,19 @@ fn every_scenario(scenario: &Scenario, run: &Run) -> Vec<Check> {
         .collect();
     checks.push(Check::new("no extension called unchecked", unchecked.is_empty(), unchecked.join(", ")));
     // The DAW's own words in what Kumi said and in HISTORY.
+    // ("Set" as the verb is any producer's word: "Set up", "Set the"…)
+    let verbs = Regex::new(r"\bSet (up|the|it|to|a|an|your|my)\b").unwrap();
     let heard: Vec<String> = std::iter::once(run.said.as_str())
         .chain(run.changes.iter().map(|change| change.title.as_str()))
-        .flat_map(|text| LIVE.find_iter(text).map(|m| m.as_str().to_owned()).collect::<Vec<_>>())
+        .flat_map(|text| LIVE.find_iter(&verbs.replace_all(text, "")).map(|m| m.as_str().to_owned()).collect::<Vec<_>>())
         .collect();
     checks.push(Check::new("the DAW's own words, never Live's", heard.is_empty(), heard.join(", ")));
     let named = scenario.names.iter().any(|name| run.said.to_lowercase().contains(&name.to_lowercase()));
     checks.push(Check::new("says what it found or changed, by name", named, head(&run.said.replace('\n', " "), 160)));
+    // An outcome stays honest: a turn that ended in an error isn't a pass.
+    if let Some(error) = &run.error {
+        checks.push(Check::new("the turn ended without an error", false, error.clone()));
+    }
     // Nothing generated unasked.
     let notes = |state: &Value| state["notes"].as_u64().unwrap_or(0);
     if !scenario.generates {
@@ -391,6 +153,7 @@ struct Run {
     said: String,
     calls: Vec<String>,
     changes: Vec<ChangeRecord>,
+    error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -418,12 +181,21 @@ async fn host_call(host: &InProcess, name: &str, args: Value) -> Result<Value, S
 }
 
 /// Lua run in the DAW through the host as a run-lua change that no session keeps (no HISTORY row), and what it returned.
-async fn lua(host: &InProcess, code: &str) -> Result<Value, String> {
+async fn lua(host: &InProcess, code: &str, timeout_ms: u64) -> Result<Value, String> {
     thread_local!(static NEXT: Cell<u64> = const { Cell::new(0) });
-    let project = host_call(host, "snapshot", json!({})).await?;
-    let preview =
-        host_call(host, "change_preview", json!({"kind": "run-lua", "input": {"code": code, "timeoutMs": 800}, "epoch": project["epoch"]}))
-            .await?;
+    // (a fixture that replaced every track reads as another project a moment later: the epoch moves, so read it again)
+    let mut tries = 0;
+    let preview = loop {
+        let project = host_call(host, "snapshot", json!({})).await?;
+        let input = json!({"kind": "run-lua", "input": {"code": code, "timeoutMs": timeout_ms}, "epoch": project["epoch"]});
+        match host_call(host, "change_preview", input).await {
+            Err(why) if why.contains("earlier epoch") && tries < 5 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            answer => break answer?,
+        }
+    };
     let (Some(id), Some(confirmation)) = (preview["transactionId"].as_str(), preview["confirmation"].as_str()) else {
         return Err(format!("no transaction: {preview}"));
     };
@@ -487,20 +259,78 @@ impl Model {
 // ---------------------------------------------------------------------------------------------------------------------
 // One scenario
 
-async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path) -> Result<Outcome, RuntimeError> {
+/// Where a run's files go: the sounds the fixtures load, the songs they save, Kumi's tools (yt-dlp, whisper) and videos.
+struct Dirs {
+    media: PathBuf,
+    songs: PathBuf,
+    tools: String,
+    videos: PathBuf,
+}
+
+async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path, dirs: &Dirs) -> Result<Outcome, RuntimeError> {
     let started = Instant::now();
     let failure = |e: String| RuntimeError::plain(e);
     let host = Rc::new(InProcess { host: Arc::new(Host::new(scenario.daw, home)), id: Cell::new(0) });
-    let status = host_call(&host, "status", json!({})).await.map_err(failure)?;
+    // (a DAW just started takes a while to load its bridge)
+    let mut status = Value::Null;
+    for _ in 0..60 {
+        status = host_call(&host, "status", json!({})).await.map_err(failure)?;
+        if status.get("connected") == Some(&Value::Bool(true)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     if status.get("connected") != Some(&Value::Bool(true)) {
         return Err(RuntimeError::plain(format!("the lab DAW isn't connected: {status}")));
     }
-    let reader = match scenario.daw {
-        Daw::Reaper => REAPER_STATE,
-        Daw::Renoise => RENOISE_STATE,
+    // (Renoise stops a callback at 800 ms; REAPER's chunks may take longer on a big template)
+    let (prelude, state, timeout) = match scenario.daw {
+        Daw::Reaper => (scenarios::REAPER_PRELUDE, scenarios::REAPER_STATE, 5_000),
+        Daw::Renoise => (scenarios::RENOISE_PRELUDE, scenarios::RENOISE_STATE, 800),
     };
-    lua(&host, scenario.fixture).await.map_err(|e| failure(format!("fixture: {e}")))?;
-    let before = lua(&host, reader).await.map_err(|e| failure(format!("state before: {e}")))?;
+    let places = format!("local MEDIA = {:?}\nlocal SONGS = {:?}\n", dirs.media.to_string_lossy(), dirs.songs.to_string_lossy());
+    let reader = format!("{state}\n{}\nreturn out", scenario.read);
+    // The first chunk starts from a plain project or song; `before` is what Kumi saw when it last looked (the host keeps
+    // its snapshot), the fixture what happened since.
+    if let Some(before) = scenario.before {
+        lua(&host, &format!("{places}{prelude}\n{before}"), timeout).await.map_err(|e| failure(format!("before: {e}")))?;
+        host_call(&host, "catch_up", json!({})).await.map_err(|e| failure(format!("catch_up: {e}")))?;
+        lua(&host, &format!("{places}{}", scenario.fixture), timeout).await.map_err(|e| failure(format!("fixture: {e}")))?;
+    } else {
+        lua(&host, &format!("{places}{prelude}\n{}", scenario.fixture), timeout).await.map_err(|e| failure(format!("fixture: {e}")))?;
+    }
+    // A fixture that replaced every track reads as another project a moment later (#393): wait for the epoch to settle, so
+    // the session's refs aren't retired under it.
+    let mut last = Value::Null;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let epoch = host_call(&host, "snapshot", json!({})).await.map_err(failure)?["epoch"].clone();
+        if epoch == last {
+            break;
+        }
+        last = epoch;
+    }
+    let before = lua(&host, &reader, timeout).await.map_err(|e| failure(format!("state before: {e}")))?;
+    // EVAL_DRY=1: the fixture and its state only, no session (no model calls): to check the fixtures in the lab.
+    if std::env::var_os("EVAL_DRY").is_some_and(|dry| !dry.is_empty()) {
+        if let Some(teardown) = scenario.teardown {
+            lua(&host, teardown, timeout).await.ok();
+        }
+        let mut summary = format!("{} bytes of state: {}", stringify(&before).len(), head(&stringify(&before), 300));
+        // (with a `before`: what catch-up tells of the fixture, as the session's first look would)
+        if scenario.before.is_some() {
+            let told = host_call(&host, "catch_up", json!({})).await.unwrap_or_else(|why| json!({"refused": why}));
+            summary.push_str(&format!(" | catch-up: {}", head(&stringify(&told), 600)));
+        }
+        return Ok(Outcome {
+            id: scenario.id,
+            checks: vec![Check::new("fixture built and read", true, summary)],
+            said: String::new(),
+            tools: vec![],
+            seconds: started.elapsed().as_secs_f64(),
+            error: None,
+        });
+    }
     let setup = host_call(&host, "snapshot", json!({})).await.map_err(failure)?["setup"].clone();
 
     let changes = Rc::new(RefCell::new(Vec::<ChangeRecord>::new()));
@@ -572,29 +402,30 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path) -> Result
         Daw::Reaper => DawProfile::REAPER,
         Daw::Renoise => DawProfile::RENOISE,
     };
-    options.timeout_ms = Some(300_000);
+    // (a tutorial is fetched and transcribed inside the turn)
+    options.timeout_ms = Some(900_000);
     options.listen = true;
+    options.watch = Some(VideoDirectories { videos_dir: dirs.videos.to_string_lossy().into_owned(), tools_dir: dirs.tools.clone() });
     options.memory = Some(create_memory_store(MemoryStoreOptions {
         projects_dir: folder.path().join("projects"),
         producer_file: folder.path().join("memory.json"),
     }));
     let session = Rc::new(create_session(options)?);
     *controller.borrow_mut() = Some(Rc::downgrade(&session));
-    let conversation = async {
+    let turns = async {
         session.start().await?;
         for words in scenario.says {
             session.submit(words, None).await?;
         }
-        let held = kernel.borrow().clone();
-        Ok::<_, RuntimeError>(match held {
-            Some(kernel) => Kernel::checkpoint(kernel.as_ref())?.messages,
-            None => vec![],
-        })
+        Ok::<_, RuntimeError>(())
     }
     .await;
-    let closed = session.close().await;
-    let messages = conversation?;
-    closed?;
+    // A turn that failed still leaves its state to score, and the failure is a failed check.
+    let error = turns.err().map(|error| safe_error(Some(&error), &[]));
+    let held = kernel.borrow().clone();
+    let messages =
+        held.and_then(|kernel| Kernel::checkpoint(kernel.as_ref()).ok()).map(|checkpoint| checkpoint.messages).unwrap_or_default();
+    session.close().await.ok();
     // Each tool call's input, as text (a plan's steps inside it), for the extension check.
     let mut calls = vec![];
     for part in messages.iter().filter_map(|message| message.get("content").and_then(Value::as_array)).flatten() {
@@ -613,13 +444,22 @@ async fn run_scenario(model: &Model, scenario: &Scenario, home: &Path) -> Result
             _ => {}
         }
     }
-    let after = lua(&host, reader).await.map_err(|e| failure(format!("state after: {e}")))?;
-    let run = Run { before, after, setup, said: said.borrow().clone(), calls, changes: changes.borrow().clone() };
-    let mut checks = (scenario.expect)(&run.before, &run.after);
+    let after = lua(&host, &reader, timeout).await.map_err(|e| failure(format!("state after: {e}")))?;
+    if let Some(teardown) = scenario.teardown {
+        lua(&host, teardown, timeout).await.ok();
+    }
+    let tools_used = tools.borrow().clone();
+    let run = Run { before, after, setup, said: said.borrow().clone(), calls, changes: changes.borrow().clone(), error };
+    let mut checks = (scenario.expect)(&Seen {
+        before: &run.before,
+        after: &run.after,
+        said: &run.said,
+        tools: &tools_used,
+        changes: run.changes.len(),
+    });
     checks.extend(every_scenario(scenario, &run));
     folder.close().ok();
-    let tools = tools.borrow().clone();
-    Ok(Outcome { id: scenario.id, checks, said: run.said, tools, seconds: started.elapsed().as_secs_f64(), error: None })
+    Ok(Outcome { id: scenario.id, checks, said: run.said, tools: tools_used, seconds: started.elapsed().as_secs_f64(), error: None })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -668,9 +508,16 @@ async fn run() -> Result<i32, RuntimeError> {
     let model = Model { binding: Rc::new(binding), shared };
     let mut outcomes = vec![];
     let mut text = format!("# eval_daws: {} with {}\n\n", daw.name(), config.model.as_deref().unwrap_or("undefined"));
-    for scenario in scenarios().iter().filter(|s| s.daw == daw && (only.is_empty() || only.iter().any(|o| o == s.id))) {
+    // The fixtures' sounds and songs beside the lab's kumi-home; Kumi's own tools (yt-dlp, whisper) where Kumi keeps them.
+    let lab = home.parent().map(Path::to_path_buf).unwrap_or_else(|| home.clone()).join("m7g");
+    let videos = tempfile::Builder::new().prefix("kumi-eval-videos-").tempdir().map_err(|e| RuntimeError::plain(e.to_string()))?;
+    let dirs =
+        Dirs { media: lab.join("media"), songs: lab.join("songs"), tools: load_tools_dir(&env)?, videos: videos.path().to_path_buf() };
+    media::write_all(&dirs.media).map_err(|e| RuntimeError::plain(format!("the fixtures' sounds: {e}")))?;
+    std::fs::create_dir_all(&dirs.songs).map_err(|e| RuntimeError::plain(e.to_string()))?;
+    for scenario in scenarios::all().iter().filter(|s| s.daw == daw && (only.is_empty() || only.iter().any(|o| o == s.id))) {
         println!("== {} {}", scenario.id, scenario.says.join(" / "));
-        let outcome = match run_scenario(&model, scenario, &home).await {
+        let outcome = match run_scenario(&model, scenario, &home, &dirs).await {
             Ok(outcome) => outcome,
             Err(error) => Outcome {
                 id: scenario.id,
