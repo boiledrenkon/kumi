@@ -7,6 +7,7 @@ pub mod logic_changes;
 pub mod logic_curves;
 pub mod logic_library;
 pub mod logic_listening;
+pub mod logic_manual;
 pub mod logic_project;
 pub mod none;
 pub mod own_bridge;
@@ -64,10 +65,11 @@ pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
     }
 }
 
-/// A registered DAW's manual as a tool, for a DAW whose manual Kumi reads (Live's).
-pub fn manual_tool(id: DawId, options: live_manual::ManualOptions) -> Option<std::rc::Rc<dyn crate::core::contracts::KernelTool>> {
+/// A registered DAW's manual as a tool, for a DAW whose manual Kumi reads: Live's, and Apple's guide to Logic Pro.
+pub fn manual_tool(id: DawId, options: shared::manual::ManualOptions) -> Option<std::rc::Rc<dyn crate::core::contracts::KernelTool>> {
     match id {
         DawId::Ableton => Some(live_manual::manual_tool(options)),
+        DawId::Logic => Some(logic_manual::manual_tool(options)),
         _ => None,
     }
 }

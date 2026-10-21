@@ -112,7 +112,7 @@ impl ToolRole {
 
 /// Kumi's own tools that only read away from the DAW: several calls to them run at once.
 pub const CONCURRENT: &[&str] =
-    &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
+    &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "logic_manual", "search_conversations"];
 
 #[async_trait(?Send)]
 pub trait KernelTool {

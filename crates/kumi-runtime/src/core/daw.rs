@@ -796,6 +796,8 @@ impl DawProfile {
             open_project: true,
             ui_hands: true,
             catch_up: true,
+            // (M7) Its manual is Apple's Logic Pro User Guide, searched by a tool as Live's manual is.
+            manual: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -1045,6 +1047,8 @@ mod tests {
         assert!(DawProfile::LOGIC.vocab.listen_method.contains("captures what it outputs after the Stereo Out"));
         assert!(DawProfile::LOGIC.vocab.gain_stage.contains("Adaptive Limiter or Limiter, else its last Gain plug-in"));
         assert_eq!(cant_yet(&DawProfile::LOGIC, "pursue a goal"), "Kumi can't pursue a goal in Logic Pro yet.");
+        // (M7) Logic's manual is read as Live's is; REAPER's and Renoise's aren't.
+        assert!(DawProfile::LOGIC.caps.manual && !DawProfile::REAPER.caps.manual && !DawProfile::RENOISE.caps.manual);
     }
 
     #[test]
