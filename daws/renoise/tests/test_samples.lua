@@ -108,7 +108,7 @@ test("places, sample × insert before, swap, delete before, Kumi's own load: the
       local f = assert(io.open(wav, "wb"))
       f:write("RIFF\0\0\0\0WAVE" .. string.rep("c", 288))
       f:close()
-      change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav, index = 1 })
+      change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav, index = 0 })
       at = 3
     end
     eq(sample(1, at).name, "Snare", how)
@@ -223,7 +223,7 @@ end
 
 test("samples: a sample file loads as a new sample at its place; Kumi's undo deletes it, refused once the producer changed it", function()
   local env, peer = setup()
-  local record, done = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 2 })
+  local record, done = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 1 })
   eq(sample_names(1), "Kick,Clap,Snare,Hat")
   eq(sample(1, 2).buffer.frames, 256)
   eq(done.created.kind, "sample")
@@ -241,7 +241,7 @@ end)
 test("samples: after Renoise's own undo and redo of a sample Kumi loaded, Kumi's undo deletes it; changed since: refused", function()
   for _, changed in ipairs({ false, true }) do
     local env, peer = setup()
-    local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 2 })
+    local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 1 })
     mock.song:undo()
     eq(sample_names(1), "Kick,Snare,Hat")
     mock.song:redo()

@@ -21,7 +21,7 @@ local KINDS = {
   { "keyzone-overlap", function(E) return { ref = iref(E, 2), mode = "cycle" } end, function(i) return data(i).overlap == 0 end },
   { "phrase-set", function(E) return { ref = pref(E, 2, 1), lpb = 8 } end, function(i) return data(i).phrases[1].lpb == 4 end },
   { "phrase-playback", function(E) return { ref = iref(E, 2), mode = "keymap" } end, function(i) return data(i).phrase_playback_mode == 2 end },
-  { "phrase-write", function(E) return { ref = pref(E, 2, 1), lines = { { line = 3, notes = { { col = 1, note = "C-4" } } } } } end,
+  { "phrase-write", function(E) return { ref = pref(E, 2, 1), lines = { { line = 2, notes = { { col = 1, note = "C-4" } } } } } end,
     function(i) local line = data(i).phrases[1].data[3] return line == nil or line.notes == nil or line.notes[1] == nil or line.notes[1].note == 121 end },
   { "modset-set", function(E) return { ref = E .. ":modset:2.1", pitchRange = 24 } end, function(i) return data(i).sets[1].pitch_range == 12 end },
   { "chain-add", function(E) return { ref = iref(E, 2), name = "Verb" } end, function(i) return #data(i).chains == 0 end },
@@ -34,7 +34,7 @@ local DISRUPTIONS = {
   { "an instrument made before it", function() mock.ops.insert_instrument_at(1, { name = "New" }) end, 3 },
   { "an instrument deleted before it", function() mock.ops.remove_instrument(1) end, 1 },
   { "swapped with the one after it", function() mock.ops.swap_instruments(2, 3) end, 3 },
-  { "Kumi's own instrument made before it", function(peer) change(peer, "instrument-add", { index = 1, name = "Made" }) end, 3 },
+  { "Kumi's own instrument made before it", function(peer) change(peer, "instrument-add", { index = 0, name = "Made" }) end, 3 },
   { "deleted", function() mock.ops.remove_instrument(2) end, nil },
 }
 

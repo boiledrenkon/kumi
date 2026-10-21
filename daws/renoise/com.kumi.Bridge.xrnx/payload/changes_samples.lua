@@ -484,8 +484,10 @@ local function load_plan(song, env, input)
   local instrument = objects.instrument
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then bad(q(label) .. " is sliced: Renoise takes no other samples in it") end
   local count = #instrument.samples
-  local index = input.index == nil and count + 1 or input.index
-  if not whole(1, count + 1)(index) then bad(string.format("index is a place from 1 to %d among the samples", count + 1)) end
+  -- (`index` by Renoise's number, from 0, as it numbers samples from 00)
+  local index = input.index == nil and count or input.index
+  if not whole(0, count)(index) then bad(string.format("index is a sample's number from 0 to %d, as Renoise numbers them (00 the first)", count)) end
+  index = index + 1
   return { path = path, instrument = n[1], index = index, count = count, label = label }
 end
 

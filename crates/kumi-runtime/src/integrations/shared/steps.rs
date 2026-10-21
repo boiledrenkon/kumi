@@ -11,7 +11,16 @@ const WHAT: usize = 72;
 /// One line a step that isn't a tool of its own gets in make_changes' description: its name, what it does, and
 /// the fields its input takes (`?` after one it can leave out), from its own schema.
 pub fn step_line(name: &str, description: &str, schema: &JsonObject) -> String {
-    let mut what = clause(description);
+    line_of(name, clause(description), schema)
+}
+
+/// The same line for a step of Kumi's own bridges (REAPER, Renoise): what it does is its first clause whole, the asides
+/// in parentheses left out rather than ending it ("Add (insert), delete or move slice markers" says all three).
+pub fn own_step_line(name: &str, description: &str, schema: &JsonObject) -> String {
+    line_of(name, whole_clause(description), schema)
+}
+
+fn line_of(name: &str, mut what: String, schema: &JsonObject) -> String {
     if what.len() > WHAT {
         let cut = head(&what, WHAT);
         what = format!("{}…", cut.rfind(' ').filter(|at| *at > WHAT / 2).map_or(cut.as_str(), |at| &cut[..at]));
@@ -50,6 +59,42 @@ fn clause(description: &str) -> String {
     trim(text[..end].trim_end_matches('.')).to_string()
 }
 
+/// What a tool does, from its description: its first sentence or clause, ended only outside parentheses, with what's in
+/// them left out. Parentheses that don't close end it as `clause` does.
+fn whole_clause(description: &str) -> String {
+    let text = trim(description);
+    let (mut depth, mut end, mut what) = (0usize, text.len(), String::new());
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 && [". ", ": ", "; ", " — "].iter().any(|stop| text[at..].starts_with(stop)) => {
+                end = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        return clause(description);
+    }
+    depth = 0;
+    for c in text[..end].chars() {
+        match c {
+            '(' => {
+                if depth == 0 && what.ends_with(' ') {
+                    what.pop();
+                }
+                depth += 1;
+            }
+            ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => what.push(c),
+            _ => {}
+        }
+    }
+    trim(what.trim_end_matches('.')).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +115,20 @@ mod tests {
         let many: serde_json::Map<String, serde_json::Value> = (0..40).map(|n| (format!("field{n}"), json!({"type": "number"}))).collect();
         let wide = step_line("wide", "Many fields.", &json!({"type":"object","properties":many}).as_object().unwrap().clone());
         assert!(wide.len() <= LINE + 4 && wide.ends_with("…)") && !wide.contains("?…"), "{wide}");
+    }
+
+    #[test]
+    fn an_own_bridges_step_line_keeps_its_first_clause_whole_without_its_asides() {
+        let schema = json!({"type":"object","required":["ref"],"properties":{"ref":{"type":"string"}}});
+        let schema = schema.as_object().unwrap();
+        let slices = "Add (insert), delete or move ({from, to}) slice markers of a sample (from 1): Renoise makes a sample of each.";
+        assert_eq!(own_step_line("sample_slices", slices, schema), "sample_slices: Add, delete or move slice markers of a sample (ref)");
+        assert_eq!(step_line("sample_slices", slices, schema), "sample_slices: Add (ref)", "Live's lines stay as they were");
+        assert_eq!(
+            own_step_line("track_channels", "Give a track (ref) channels (2 to 128). More.", schema),
+            "track_channels: Give a track channels (ref)"
+        );
+        // Parentheses that never close: the clause ends at the first, as Live's does.
+        assert_eq!(own_step_line("odd", "Make a thing (or two; more", schema), "odd: Make a thing (ref)");
     }
 }

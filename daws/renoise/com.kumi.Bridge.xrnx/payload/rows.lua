@@ -1,5 +1,7 @@
 -- The song as rows (contract §3). Everything here is addressed by index and looked up again where it is used: nothing
 -- keeps a Renoise object from one slice of a job to the next (the song can change between slices).
+-- Rows number things as Renoise shows them: lines, patterns, instruments and samples from 0 (a Lua index less one); tracks,
+-- phrases, sequence slots and places in a chain from 1, as their Lua index.
 
 local import = ...
 local json = import("json")
@@ -239,6 +241,7 @@ local function sequence_row(song, epoch, s, tracks)
   return {
     ref = refs.make(epoch, "seq", s),
     patternRef = refs.make(epoch, "pattern", sequencer:pattern(s)),
+    pattern = sequencer:pattern(s) - 1,
     section = sequencer:sequence_is_start_of_section(s) and sequencer:sequence_section_name(s) or json.null,
     mutedTracks = array(muted),
   }
@@ -250,13 +253,14 @@ local function pattern_row(song, epoch, p, tracks)
   for t = 1, tracks do
     local pattern_track = pattern:track(t)
     local alias = pattern_track.alias_pattern_index
-    if alias > 0 then aliases[tostring(t)] = alias end
+    if alias > 0 then aliases[tostring(t)] = alias - 1 end
     -- M4 (n-song): the slot colours of the pattern's tracks in the matrix
     local color = pattern_track.color
     if color then colors[tostring(t)] = hex(color) end
   end
   local row = {
     ref = refs.make(epoch, "pattern", p),
+    number = p - 1,
     name = pattern.name,
     lines = pattern.number_of_lines,
     aliases = next(aliases) and aliases or json.object(),
@@ -307,7 +311,7 @@ local function instrument_row(song, epoch, i)
   local trigger = instrument.trigger_options
   local row = {
     ref = refs.make(epoch, "instrument", i),
-    index = i,
+    index = i - 1,
     name = instrument.name,
     kind = kind,
     sampleCount = #instrument.samples,
@@ -355,7 +359,7 @@ local function sample_row(song, epoch, i, s)
   local mapping = sample.sample_mapping
   local row = {
     ref = refs.make(epoch, "sample", i, s),
-    index = s,
+    index = s - 1,
     name = sample.name,
     baseNote = mapping.base_note,
     noteRange = range(mapping.note_range),
@@ -412,8 +416,8 @@ local function phrase_row(song, epoch, i, p)
     -- n-instruments
     playback = PLAY_NAMES[phrase.playback_mode] or phrase.playback_mode,
     baseNote = phrase.base_note,
-    loopStart = phrase.loop_start,
-    loopEnd = phrase.loop_end,
+    loopStart = phrase.loop_start - 1,
+    loopEnd = phrase.loop_end - 1,
     shuffle = phrase.shuffle,
     autoseek = phrase.autoseek,
     noteColumns = phrase.visible_note_columns,
@@ -590,7 +594,7 @@ local function line_row(line, number, note_columns, effect_columns, scan_hidden)
 end
 
 -- M4 (n-song): the automation of a pattern's track, as the automation-write kind takes it: per automated parameter its ref,
--- names, play mode and points (time in lines from 1, value 0 to 1 of the parameter's range).
+-- names, play mode and points (time in lines from 0, value 0 to 1 of the parameter's range).
 local PLAYMODE_NAMES = { "points", "linear", "curves" }
 function M.envelopes(song, epoch, p, t)
   local track, pattern_track, out = song:track(t), song:pattern(p):track(t), {}
@@ -602,7 +606,7 @@ function M.envelopes(song, epoch, p, t)
         local automation = pattern_track:find_automation(parameter)
         if automation then
           local points = {}
-          for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+          for i, point in ipairs(automation.points) do points[i] = { time = point.time - 1, value = point.value, scaling = point.scaling } end
           table.sort(points, function(a, b) return a.time < b.time end)
           out[#out + 1] = {
             ref = refs.make(epoch, "param", t, d, k), device = device.display_name ~= "" and device.display_name or device.name,

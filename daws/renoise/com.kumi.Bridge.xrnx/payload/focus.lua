@@ -42,7 +42,8 @@ local function selection_of(song, epoch)
     patternName = song:pattern(song.selected_pattern_index).name,
     instrumentName = song:instrument(song.selected_instrument_index).name,
     sequence = song.selected_sequence_index,
-    line = song.selected_line_index,
+    -- (lines by Renoise's numbers, from 0)
+    line = song.selected_line_index - 1,
   }
   local sample, phrase, device = song.selected_sample_index, song.selected_phrase_index, song.selected_track_device_index
   if sample > 0 then selection.sampleRef = refs.make(epoch, "sample", song.selected_instrument_index, sample) end
@@ -54,7 +55,7 @@ local function selection_of(song, epoch)
   local note_column, effect_column = song.selected_note_column_index, song.selected_effect_column_index
   selection.cursor = {
     sequence = song.selected_sequence_index,
-    line = song.selected_line_index,
+    line = song.selected_line_index - 1,
     track = song.selected_track_index,
     column = note_column > 0 and note_column or effect_column,
     columnKind = note_column > 0 and "note" or "effect",
@@ -62,8 +63,8 @@ local function selection_of(song, epoch)
   local block = song.selection_in_pattern
   if block then
     selection.range = {
-      startLine = block.start_line,
-      endLine = block.end_line,
+      startLine = block.start_line - 1,
+      endLine = block.end_line - 1,
       startTrack = block.start_track,
       endTrack = block.end_track,
     }
@@ -106,7 +107,7 @@ local function transport_of(song)
       block = transport.loop_block_enabled,
     },
     sequence = sequence,
-    line = line,
+    line = line - 1,
   }
 end
 

@@ -320,7 +320,8 @@ case!(renoises_cursor_line_stays_in_view_deep_in_a_pattern, async {
     h.emit(json!({"type":"focus","focus":focus}));
     shows(&h, "FOCUS · Pattern").await;
     let lines = h.screen();
-    let cursor = lines.iter().find(|line| line.contains(" 40 ")).unwrap_or_else(|| panic!("line 40 on screen:\n{}", lines.join("\n")));
+    // (the cursor's line as Renoise numbers it: 39, the 40th)
+    let cursor = lines.iter().find(|line| line.contains(" 39 ")).unwrap_or_else(|| panic!("line 39 on screen:\n{}", lines.join("\n")));
     assert!(cursor.contains("OFF 01"), "{cursor}");
     h.close().await;
 });

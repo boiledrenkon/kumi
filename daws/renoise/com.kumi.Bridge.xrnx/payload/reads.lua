@@ -244,10 +244,11 @@ function M.read(job, params, epoch)
     local total = song:pattern(pattern_at).number_of_lines
     -- An alias shows the lines of another pattern: they are that pattern's, and a write to them changes it.
     local alias = song:pattern(pattern_at):track(track_at).alias_pattern_index
-    local extra = alias > 0 and { aliasOf = alias, aliasRef = refs.make(epoch, "pattern", alias) } or {}
+    local extra = alias > 0 and { aliasOf = alias - 1, aliasRef = refs.make(epoch, "pattern", alias) } or {}
     extra.mutedColumns = rows.column_state(track)
+    -- (each line by Renoise's number, from 0)
     return page(job, epoch, params, total, function(i)
-      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns, params.hidden == true)
+      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i - 1, note_columns, effect_columns, params.hidden == true)
     end, true, extra)
   elseif kind == "automation" then
     -- M4 (n-song): the automation of one pattern's track, an envelope a row

@@ -46,7 +46,7 @@ test("continuity: a sample and a phrase Kumi deleted and put back keep their ear
   mock.ops.insert_sample(1)
   undone(peer, "sample-set", volume)
   eq(instrument(1).samples[2].volume, 1)
-  local lines = change(peer, "phrase-write", { ref = pref(place(peer), 2, 1), lines = { { line = 2, notes = { { col = 1, note = "C-4" } } } } })
+  local lines = change(peer, "phrase-write", { ref = pref(place(peer), 2, 1), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } })
   local lpb = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), lpb = 8 })
   local gone = change(peer, "phrase-delete", { ref = pref(place(peer), 2, 1) })
   undone(peer, "phrase-delete", gone)

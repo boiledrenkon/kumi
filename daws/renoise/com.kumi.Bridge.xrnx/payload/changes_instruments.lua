@@ -339,13 +339,14 @@ local function check_removable(song, i, instrument, applied, discard, label)
   end
 end
 
+-- Where a new instrument goes: `index` by Renoise's number (from 0, as it shows instruments from 00), to its place from 1.
 local function index_input(input, count, what)
   local index = input.index
   if index == nil then return count + 1 end
-  if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > count + 1 then
-    bad(string.format("%s is a place from 1 to %d (the instruments are numbered from 1 here; Renoise shows them from 00)", what or "index", count + 1))
+  if type(index) ~= "number" or index ~= math.floor(index) or index < 0 or index > count then
+    bad(string.format("%s is an instrument's number from 0 to %d, as Renoise numbers them (00 the first)", what or "index", count))
   end
-  return index
+  return index + 1
 end
 
 local function song_target(env) return { ref = refs.make(env.epoch(), "song", 1), kind = "song" } end
@@ -900,14 +901,15 @@ base.register({
   restore = function(song, env, restore, desc) return remove_made(song, env, restore, desc, "instrument-duplicate", "the copy") end,
 })
 
--- instrument-move {ref, index}: the instrument ends at `index` (from 1), the others keep their order (swaps of neighbours;
--- Renoise renumbers the notes with each).
+-- instrument-move {ref, index}: the instrument ends at `index` (Renoise's number, from 0), the others keep their order (swaps of
+-- neighbours; Renoise renumbers the notes with each).
 
 local function move_plan(song, env, input)
   local n, _, label = places_.locate(song, env, "instrument", input, "instrument-move")
   local count = #song.instruments
   local to = input.index
-  if type(to) ~= "number" or to ~= math.floor(to) or to < 1 or to > count then bad(string.format("index is a place from 1 to %d", count)) end
+  if type(to) ~= "number" or to ~= math.floor(to) or to < 0 or to >= count then bad(string.format("index is an instrument's number from 0 to %d, as Renoise numbers them (00 the first)", count - 1)) end
+  to = to + 1
   if math.abs(to - n[1]) > M.MAX_MOVE_SWAPS then
     bad(string.format("that moves it past %d instruments, more than Kumi moves in one step (each place renumbers the whole song's notes): move it in steps", math.abs(to - n[1])))
   end

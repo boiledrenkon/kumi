@@ -1229,9 +1229,9 @@ local function write_input(epoch)
   return {
     pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
     lines = {
-      { line = 1, notes = { { col = 1, note = "c-2", instrument = 0, volume = "40" }, { col = 3, note = "E-2", instrument = "01", delay = "10", fx = "0a20" } },
+      { line = 0, notes = { { col = 1, note = "c-2", instrument = 0, volume = "40" }, { col = 3, note = "E-2", instrument = "01", delay = "10", fx = "0a20" } },
         effects = { { col = 2, number = "0A", amount = "20" } } },
-      { line = 5, notes = { { col = 1, note = "OFF" } } },
+      { line = 4, notes = { { col = 1, note = "OFF" } } },
     },
   }
 end
@@ -1331,14 +1331,14 @@ end)
 test("changes: merge keeps the fields a cell isn't given, and without it a cell is written whole", function()
   local env, peer = setup()
   local epoch, layout = place(peer)
-  local first = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 2, notes = { { col = 1, note = "A-3", instrument = "02", volume = "30" } } } } }
+  local first = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "A-3", instrument = "02", volume = "30" } } } } }
   local p1 = preview(peer, "notes-write", first)
   ok(apply(peer, "notes-write", first, "Kumi: a (kn41)", p1.fence, epoch, layout).result)
-  local merged = { pattern = first.pattern, track = first.track, merge = true, lines = { { line = 2, notes = { { col = 1, volume = "50" } } } } }
+  local merged = { pattern = first.pattern, track = first.track, merge = true, lines = { { line = 1, notes = { { col = 1, volume = "50" } } } } }
   local p2 = preview(peer, "notes-write", merged)
   ok(apply(peer, "notes-write", merged, "Kumi: b (kn42)", p2.fence, epoch, layout).result)
   eq(cell(1, 3, 2, 1), "A-3 02 50 .. .. 0000")
-  local whole = { pattern = first.pattern, track = first.track, lines = { { line = 2, notes = { { col = 1, volume = "60" } } } } }
+  local whole = { pattern = first.pattern, track = first.track, lines = { { line = 1, notes = { { col = 1, volume = "60" } } } } }
   local p3 = preview(peer, "notes-write", whole)
   ok(apply(peer, "notes-write", whole, "Kumi: c (kn43)", p3.fence, epoch, layout).result)
   eq(cell(1, 3, 2, 1), "--- .. 60 .. .. 0000")
@@ -1362,7 +1362,7 @@ test("changes: lines are cleared with every cell on them, hidden columns too, an
   effect.number_value, effect.amount_value = 10, 32
   mock.data.undo.stack, mock.data.undo.redo = {}, {}
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 4, clear = true } } }
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 3, clear = true } } }
   local previewed = preview(peer, "notes-write", input)
   eq(previewed.display.title, "Wrote 1 line in “Pattern 00” on “Bass”")
   eq(#previewed.prior.cells, 2, "the note in column 5 and the effect in column 2")
@@ -1374,7 +1374,7 @@ test("changes: lines are cleared with every cell on them, hidden columns too, an
   eq(cell(1, 3, 4, 5), "D-4 01 .. .. .. 0000")
   eq(effect_cell(1, 3, 4, 2), "0A20")
   -- a range
-  local range = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), first = 1, last = 5 }
+  local range = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), first = 0, last = 4 }
   local p2 = preview(peer, "notes-clear", range)
   eq(p2.display.title, "Cleared 2 lines in “Pattern 00” on “Bass”")
   eq(p2.display.before.notes, 2)
@@ -1401,33 +1401,33 @@ test("changes: lines are refused when what they name isn't there or isn't text R
     for k, v in pairs(more or {}) do input[k] = v end
     return ask(peer, "change_preview", "notes-write", input)
   end
-  failure(with({ { line = 0, notes = { { col = 1, note = "C-4" } } } }), "bad-params")
-  failure(with({ { line = 33, notes = { { col = 1, note = "C-4" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 13, note = "C-4" } } } }), "bad-params")
-  failure(with({ { line = 1, effects = { { col = 9, number = "0A" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, note = "H-4" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, note = "E#4" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, instrument = "ZZ" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, volume = "400" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, fx = "0A" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1 } } } }), "bad-params")
-  failure(with({ { line = 1 } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, note = "C-4" }, { col = 1, note = "D-4" } } } }), "bad-params")
-  failure(with({ { line = 1, notes = { { col = 1, note = "C-4" } } }, { line = 1, notes = { { col = 2, note = "C-4" } } } }), "bad-params")
+  failure(with({ { line = -1, notes = { { col = 1, note = "C-4" } } } }), "bad-params")
+  failure(with({ { line = 32, notes = { { col = 1, note = "C-4" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 13, note = "C-4" } } } }), "bad-params")
+  failure(with({ { line = 0, effects = { { col = 9, number = "0A" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, note = "H-4" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, note = "E#4" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, instrument = "ZZ" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, volume = "400" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, fx = "0A" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1 } } } }), "bad-params")
+  failure(with({ { line = 0 } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, note = "C-4" }, { col = 1, note = "D-4" } } } }), "bad-params")
+  failure(with({ { line = 0, notes = { { col = 1, note = "C-4" } } }, { line = 0, notes = { { col = 2, note = "C-4" } } } }), "bad-params")
   failure(with({}), "bad-params")
   failure(with(nil), "bad-params")
-  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 9), track = track_ref(epoch, 3), lines = { { line = 1, clear = true } } }), "gone")
-  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 9), lines = { { line = 1, clear = true } } }), "gone")
+  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 9), track = track_ref(epoch, 3), lines = { { line = 0, clear = true } } }), "gone")
+  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 9), lines = { { line = 0, clear = true } } }), "gone")
   -- the master has no note columns, but takes effects
-  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 5), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } }), "bad-params")
-  local master = ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 5), lines = { { line = 1, effects = { { col = 1, number = "0A", amount = "10" } } } } })
+  failure(ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 5), lines = { { line = 0, notes = { { col = 1, note = "C-4" } } } } }), "bad-params")
+  local master = ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 5), lines = { { line = 0, effects = { { col = 1, number = "0A", amount = "10" } } } } })
   ok(master.result, json.encode(master.error or {}))
   -- an alias writes nowhere
   mock.song:pattern(2):track(3).alias_pattern_index = 1
   local before = steps()
-  local alias = ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } })
+  local alias = ask(peer, "change_preview", "notes-write", { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 0, notes = { { col = 1, note = "C-4" } } } } })
   failure(alias, "bad-params")
-  ok(alias.error.message:find("alias of pattern 1", 1, true), alias.error.message)
+  ok(alias.error.message:find("alias of pattern 00", 1, true), alias.error.message)
   eq(steps(), before)
   H.no_dialogs()
 end)
@@ -1436,7 +1436,7 @@ test("changes: a sequence slot names its pattern, and Renoise refusing the text 
   local env, peer = setup()
   local epoch, layout = place(peer)
   -- slot 4 is pattern 3
-  local input = { pattern = epoch .. ":seq:4", track = track_ref(epoch, 1), lines = { { line = 2, notes = { { col = 1, note = "C-5" } } } } }
+  local input = { pattern = epoch .. ":seq:4", track = track_ref(epoch, 1), lines = { { line = 1, notes = { { col = 1, note = "C-5" } } } } }
   local previewed = preview(peer, "notes-write", input)
   eq(previewed.target.ref, epoch .. ":ptrack:3.1")
   local done = apply(peer, "notes-write", input, "Kumi: slot (kn61)", previewed.fence, epoch, layout)
@@ -1445,7 +1445,7 @@ test("changes: a sequence slot names its pattern, and Renoise refusing the text 
   eq(cell(1, 1, 2, 1), "--- .. .. .. .. 0000")
   -- a text that Renoise itself refuses (QQ is no effect command) leaves the pattern as it was
   local column = mock.song:pattern(1):track(2):line(3):note_column(1)
-  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "QQ20" } } } } }
+  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 2, notes = { { col = 1, note = "C-4", fx = "QQ20" } } } } }
   local p2 = preview(peer, "notes-write", refused)
   local before = steps()
   failure(apply(peer, "notes-write", refused, "Kumi: bad (kn62)", p2.fence, epoch, layout), "failed")
@@ -1465,7 +1465,7 @@ test("changes: a big restore is numbered steps, and the producer's undo of lines
   end })
   local epoch, layout = place(peer)
   local lines = {}
-  for l = 1, 12 do lines[l] = { line = l, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
+  for l = 1, 12 do lines[l] = { line = l - 1, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: many (kn71)", previewed.fence, epoch, layout)
@@ -1508,7 +1508,7 @@ end)
 test("changes: a track made before the pattern's track carries the restore to where the lines are now", function()
   local env, peer = setup()
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 1, notes = { { col = 1, note = "C-3" } } } } }
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 0, notes = { { col = 1, note = "C-3" } } } } }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: shift (kn81)", previewed.fence, epoch, layout).result
   mock.api.insert_track_at(1)
@@ -2216,26 +2216,27 @@ test("changes: playing starts the transport where it is or at a line, and the em
   eq(call(peer, "transport_play", {}).result.started, false, "already playing")
   eq(call(peer, "transport_stop", {}).result.stopped, true)
   -- a line of a slot
-  local at = call(peer, "transport_play", { sequence = 3, line = 5, epoch = epoch })
+  local at = call(peer, "transport_play", { sequence = 3, line = 4, epoch = epoch })
   ok(at.result, json.encode(at.error or {}))
   eq(at.result.started, true)
   eq(at.result.playing, true)
   eq(at.result.sequence, 3)
-  eq(at.result.line, 5)
+  eq(at.result.line, 4, "Renoise's line 04")
   eq(mock.data.started_at.sequence, 3)
-  eq(mock.data.started_at.line, 5)
+  eq(mock.data.started_at.line, 5, "its fifth")
   call(peer, "transport_stop", {})
   -- a slot alone starts at its first line; a line alone is a line of the pattern being edited
-  eq(call(peer, "transport_play", { sequence = 2 }).result.line, 1)
+  eq(call(peer, "transport_play", { sequence = 2 }).result.line, 0)
   call(peer, "transport_stop", {})
-  local line_only = call(peer, "transport_play", { line = 7 })
+  local line_only = call(peer, "transport_play", { line = 6 })
   ok(line_only.result, json.encode(line_only.error or {}))
   eq(mock.data.started_at, 7)
-  eq(line_only.result.line, 7)
+  eq(line_only.result.line, 6)
   call(peer, "transport_stop", {})
   failure(call(peer, "transport_play", { sequence = 3, line = 5, epoch = "ffff" }), "stale")
   failure(call(peer, "transport_play", { sequence = 9, line = 5 }), "bad-params")
   failure(call(peer, "transport_play", { sequence = 3, line = 99 }), "bad-params")
+  failure(call(peer, "transport_play", { line = -1 }), "bad-params")
   failure(call(peer, "transport_play", { sequence = 0 }), "bad-params")
   failure(call(peer, "transport_play", { line = 1.5 }), "bad-params")
   mock.data.song_fields.rendering = true
@@ -2396,7 +2397,7 @@ test("changes: a device change leaves tracks, patterns, slots and instruments as
   ok(not kinds.device and not kinds.param, "the device numbers moved: " .. json.encode(added.result.kept))
   eq(added.result.kept.tracks, true)
   -- notes are written to a pattern and a track the request names by refs from before the device was made
-  local notes = { pattern = pattern_ref(e1, 1), track = track_ref(e1, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } }
+  local notes = { pattern = pattern_ref(e1, 1), track = track_ref(e1, 3), lines = { { line = 0, notes = { { col = 1, note = "C-4" } } } } }
   local e2, l2 = added.result.epoch, added.result.layout
   local pv = call(peer, "change_preview", { kind = "notes-write", input = notes, epoch = e2, layout = l2 })
   ok(pv.result, json.encode(pv.error or {}))

@@ -74,7 +74,7 @@ end)
 
 test("kits: notes, first, white keys, a group named and the choke turned off are kept; the kit goes at index", function()
   local env, peer = setup()
-  local input = kit_input({ first = 36, whiteKeys = true, index = 1 })
+  local input = kit_input({ first = 36, whiteKeys = true, index = 0 })
   input.samples[2].note = 37
   local record = change(peer, "instrument-kit", input)
   eq(names(), "Tight Kit,Drums,Bass synth,Pad")
@@ -132,7 +132,7 @@ test("kits: into an empty instrument (its name kept), refused into one that isn'
   eq(again.result.display.title, "\226\128\156Pad\226\128\157 is empty already")
   epoch = place(peer)
   failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 1) }), epoch = epoch }), "bad-params")
-  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3), index = 1 }), epoch = epoch }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3), index = 0 }), epoch = epoch }), "bad-params")
 end)
 
 test("kits: a file that isn't audio, a missing one or too many samples are refused before Renoise sees them; one Renoise refuses leaves nothing", function()

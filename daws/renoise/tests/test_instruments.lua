@@ -202,7 +202,7 @@ test("places, instrument × insert, delete before, swap: Kumi's undo follows the
       mock.ops.swap_instruments(2, 3)
       at = 3
     else
-      change(peer, "instrument-add", { index = 1, name = "Made" })
+      change(peer, "instrument-add", { index = 0, name = "Made" })
       at = 3
     end
     eq(instrument(at).name, "Acid", how)
@@ -304,7 +304,7 @@ end)
 test("instruments: an instrument added at 1 renumbers the notes after it (Renoise's own doing); Kumi's undo takes it away", function()
   local env, peer = setup()
   note_at(1, 1) -- plays Bass synth (value 1)
-  local record, done = change(peer, "instrument-add", { index = 1, name = "Lead" })
+  local record, done = change(peer, "instrument-add", { index = 0, name = "Lead" })
   eq(names(), "Lead,Drums,Bass synth,Pad")
   eq(note_value(1), 2, "the note still plays Bass synth")
   eq(done.created.kind, "instrument")
@@ -337,7 +337,7 @@ end)
 
 test("instruments: the producer's undo of Kumi's add is told, and Kumi's undo after it is gone", function()
   local env, peer = setup()
-  local record = change(peer, "instrument-add", { index = 2 }, "Kumi: add (k300)")
+  local record = change(peer, "instrument-add", { index = 1 }, "Kumi: add (k300)")
   told(peer)
   mock.song:undo()
   local events = told(peer)
@@ -459,7 +459,7 @@ end
 test("instruments: an .xrni, an .sfz and a sample file load into a new instrument; Kumi's undo takes it away", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 2)
-  local record, done = change(peer, "instrument-load", { path = xrni, index = 1 })
+  local record, done = change(peer, "instrument-load", { path = xrni, index = 0 })
   eq(names(), "Bass synth,Drums,Bass synth,Pad")
   eq(done.created.kind, "instrument")
   eq(steps(), 1)
@@ -486,7 +486,7 @@ end)
 test("instruments: Renoise's empty instrument after a load into the last one is taken out again: a load at the end, into the last, a delete's undo", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 2)
-  local record = change(peer, "instrument-load", { path = xrni, index = 4 })
+  local record = change(peer, "instrument-load", { path = xrni, index = 3 })
   eq(names(), "Drums,Bass synth,Pad,Bass synth", "no empty instrument after it")
   ok(restore(peer, "instrument-load", record).result)
   eq(names(), "Drums,Bass synth,Pad")
@@ -503,7 +503,7 @@ end)
 test("instruments: Renoise's undo and redo of an instrument loaded as the last one are told", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 2)
-  change(peer, "instrument-load", { path = xrni, index = 4 }, "Kumi: load (k430)")
+  change(peer, "instrument-load", { path = xrni, index = 3 }, "Kumi: load (k430)")
   told(peer)
   mock.song:undo()
   eq(names(), "Drums,Bass synth,Pad")
@@ -519,9 +519,9 @@ end)
 
 test("instruments: after Renoise's own undo and redo of an instrument Kumi added, duplicated or loaded, or a phrase it added, Kumi's undo takes it away; changed since: refused", function()
   local cases = {
-    { "instrument-add", function(E) return { index = 4, name = "New" } end, "Drums,Bass synth,Pad" },
+    { "instrument-add", function(E) return { index = 3, name = "New" } end, "Drums,Bass synth,Pad" },
     { "instrument-duplicate", function(E) return { ref = iref(E, 2) } end, "Drums,Bass synth,Pad" },
-    { "instrument-load", function(E, peer) return { path = saved_instrument(peer, 2), index = 1 } end, "Drums,Bass synth,Pad" },
+    { "instrument-load", function(E, peer) return { path = saved_instrument(peer, 2), index = 0 } end, "Drums,Bass synth,Pad" },
   }
   for _, case in ipairs(cases) do
     for _, changed in ipairs({ false, true }) do
@@ -637,14 +637,14 @@ end)
 test("instruments: a move to 3 keeps the others in order and renumbers notes; Kumi's undo moves it back, refused after the producer moved others", function()
   local env, peer = setup()
   note_at(1, 0) -- Drums
-  local record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 3 })
+  local record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 2 })
   eq(names(), "Bass synth,Pad,Drums")
   eq(note_value(1), 2, "the note plays Drums still")
   local undone = restore(peer, "instrument-move", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(names(), "Drums,Bass synth,Pad")
   eq(note_value(1), 0)
-  record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 3 })
+  record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 2 })
   mock.ops.insert_instrument_at(1, { name = "New" })
   failure(restore(peer, "instrument-move", record), "changed")
   eq(names(), "New,Bass synth,Pad,Drums")

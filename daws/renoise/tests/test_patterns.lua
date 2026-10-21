@@ -94,7 +94,7 @@ test("patterns: a shorter pattern keeps its lines hidden, and Kumi's undo shows 
   mock.ops.set_note(1, 1, 30, 1, { note = 48 })
   local record = K.change(peer, "pattern-length", { ref = K.ref(E, "pattern", 1), lines = 16 }, "Kumi: length (kl01)")
   eq(record.result.display.title, "Pattern 00 16 lines")
-  eq(record.result.display.note, "Lines 17 to 32 are kept, hidden: making it longer again shows them.")
+  eq(record.result.display.note, "Lines 16 to 31 are kept, hidden: making it longer again shows them.")
   eq(pattern(1).lines, 16)
   eq(K.steps(), 1)
   ok(K.restore(peer, record).result)
@@ -112,14 +112,14 @@ test("patterns: Kumi's undo of a longer pattern is refused once the producer wro
   eq(pattern(2).lines, 48)
   mock.ops.set_note(2, 3, 40, 1, { note = 60 }) -- the producer, in a line the change showed
   local message = K.failure(K.restore(peer, record), "changed")
-  ok(message:find("lines 33 to 48", 1, true), message)
+  ok(message:find("lines 32 to 47", 1, true), message)
   eq(pattern(2).lines, 48, "left as it is")
   ok(K.restore(peer, record, nil, { discard = true }).result, "discard hides them")
   eq(pattern(2).lines, 32)
   eq(note_at(2, 3, 40), "C-5", "hidden, not deleted")
   -- a lengthening that shows what was kept says so
   local shown = K.preview(peer, "pattern-length", { ref = K.ref(E, "pattern", 2), lines = 64 })
-  eq(shown.display.note, "Lines 33 to 64 hold what was kept there, hidden: it shows again.")
+  eq(shown.display.note, "Lines 32 to 63 hold what was kept there, hidden: it shows again.")
   H.no_dialogs()
 end)
 

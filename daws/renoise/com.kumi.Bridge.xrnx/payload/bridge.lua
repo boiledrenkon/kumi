@@ -1284,7 +1284,7 @@ function handlers.transport_stop()
 end
 
 -- Play: from where the pattern is (no arguments), or from a line of a sequence slot, or of the pattern being edited when only
--- `line` is given. Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
+-- `line` is given (Renoise's number, from 0). Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
 -- may name the epoch it was read in.
 function handlers.transport_play(params)
   local song = rows.the_song()
@@ -1303,11 +1303,11 @@ function handlers.transport_play(params)
       bad(string.format("sequence is a sequence slot from 1 to %d", slots))
     end
     local pattern = sequence and song:pattern(song.sequencer:pattern(sequence)) or song:pattern(song.selected_pattern_index)
-    if line == nil then line = 1 end
-    if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > pattern.number_of_lines then
-      bad(string.format("line is a line of that pattern, from 1 to %d", pattern.number_of_lines))
+    if line == nil then line = 0 end
+    if type(line) ~= "number" or line ~= math.floor(line) or line < 0 or line >= pattern.number_of_lines then
+      bad(string.format("line is a line of that pattern, from 0 to %d", pattern.number_of_lines - 1))
     end
-    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line)) else transport:start_at(line) end
+    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line + 1)) else transport:start_at(line + 1) end
     started = true
   elseif not transport.playing then
     transport:start(renoise.Transport.PLAYMODE_CONTINUE_PATTERN)
@@ -1316,7 +1316,7 @@ function handlers.transport_play(params)
   local position = transport.playback_pos
   return {
     epoch = epoch(), layout = layout_now(), started = started, playing = transport.playing,
-    sequence = sequence or position.sequence, line = sequence and line or (line or position.line),
+    sequence = sequence or position.sequence, line = sequence and line or (line or position.line - 1),
   }
 end
 

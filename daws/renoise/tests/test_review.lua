@@ -361,7 +361,7 @@ test("review M-3: notes written under the wrong pairing go to no other track", f
   local epoch, layout = place(peer)
   local input = {
     pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
-    lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } },
+    lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00" } } } },
   }
   mock.ops.insert_track(1, { name = "New" })
   H.tick(2)
@@ -489,7 +489,7 @@ end)
 
 local function write_notes(peer, cells, desc)
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 1, notes = cells } } }
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 0, notes = cells } } }
   local previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   if not previewed.result then return previewed end
   return apply(peer, "notes-write", input, desc, previewed.result.fence, epoch, layout)
@@ -518,7 +518,7 @@ test("review N-5: letter commands in the volume, panning and effect columns are 
   local epoch, layout = place(peer)
   local input = {
     pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
-    lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00", volume = "G3", panning = "U4", fx = "ZB10" } } } },
+    lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00", volume = "G3", panning = "U4", fx = "ZB10" } } } },
   }
   local previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   ok(previewed.result, json.encode(previewed.error or {}))
@@ -541,7 +541,7 @@ test("review N-5: letter commands in the volume, panning and effect columns are 
     "Kumi: undo n (kr37)", undone.result.epoch, undone.result.layout), "changed")
   epoch, layout = place(peer)
   input.pattern, input.track = pattern_ref(epoch, 1), track_ref(epoch, 3)
-  input.lines[1].line = 2
+  input.lines[1].line = 1
   previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   done = apply(peer, "notes-write", input, "Kumi: n (kr38)", previewed.result.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -558,7 +558,7 @@ test("review M-1: a sliced notes restore stops when the producer makes a track b
   local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) })
   local epoch, layout = place(peer)
   local lines = {}
-  for l = 1, 12 do lines[l] = { line = l, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
+  for l = 1, 12 do lines[l] = { line = l - 1, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: many (kr38)", previewed.fence, epoch, layout)
@@ -1124,7 +1124,7 @@ test("review S-7: one notes-write is no more than a callback's budget", function
     for l = first, last do
       local notes = {}
       for c = 1, 12 do notes[c] = { col = c, note = "C-4", instrument = "00" } end
-      out[#out + 1] = { line = l, notes = notes }
+      out[#out + 1] = { line = l - 1, notes = notes }
     end
     return out
   end
@@ -1738,7 +1738,7 @@ end
 local function bass_notes(peer, first, last, tag)
   local epoch, layout = place(peer)
   local lines = {}
-  for l = first, last do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "C-4", instrument = "00" } } } end
+  for l = first, last do lines[#lines + 1] = { line = l - 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: n (" .. tag .. ")", previewed.fence, epoch, layout)
@@ -2316,8 +2316,8 @@ test("review MUST 5: a row inserted among the lines a write emptied, the empty s
     bass_set({ 103 }, G4)
     bass_set({ 110 }, D4)
     local epoch, layout = place(peer)
-    local lines = { { line = 100, notes = { { col = 1, note = "C-4", instrument = "00" } } } }
-    for l = 101, 103 do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "---", instrument = ".." } } } end
+    local lines = { { line = 99, notes = { { col = 1, note = "C-4", instrument = "00" } } } }
+    for l = 101, 103 do lines[#lines + 1] = { line = l - 1, notes = { { col = 1, note = "---", instrument = ".." } } } end
     local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
     local previewed = preview(peer, "notes-write", input)
     local done = apply(peer, "notes-write", input, "Kumi: n (km5e)", previewed.fence, epoch, layout)
@@ -2335,7 +2335,7 @@ test("review MUST 5: a row deleted in Kumi's column alone, where only that colum
   bass_set({ 104 }, D4, 1) -- (the whole line differs at 104: only column 2's run reaches 105)
   local epoch, layout = place(peer)
   local lines = {}
-  for l = 100, 103 do lines[#lines + 1] = { line = l, notes = { { col = 2, note = "C-4", instrument = "00" } } } end
+  for l = 100, 103 do lines[#lines + 1] = { line = l - 1, notes = { { col = 2, note = "C-4", instrument = "00" } } } end
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
   local previewed = preview(peer, "notes-write", input)
   local done = apply(peer, "notes-write", input, "Kumi: n (km5g)", previewed.fence, epoch, layout)
@@ -2362,7 +2362,7 @@ test("plain rule: an edit in another pattern, or Kumi's change there, doesn't bl
   local previewed, done = bass_notes(peer, 100, 103, "km5k")
   mock.song:pattern(2):track(3):line(100):note_column(1).note_string = "E-4"
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 3), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "D-4", instrument = "00" } } } } }
+  local input = { pattern = pattern_ref(epoch, 3), track = track_ref(epoch, 3), lines = { { line = 0, notes = { { col = 1, note = "D-4", instrument = "00" } } } } }
   local other = preview(peer, "notes-write", input)
   ok(apply(peer, "notes-write", input, "Kumi: n (km5l)", other.fence, epoch, layout).result)
   H.tick(2)
@@ -2573,7 +2573,7 @@ test("aliases: Kumi doesn't write lines through an alias (they are the pattern's
   mock.ops.alias(2, 3, 1)
   H.tick(2)
   local epoch, layout = place(peer)
-  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
+  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 0, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
   local response = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
   ok(response.error and response.error.message:find("alias", 1, true), json.encode(response))
 end)

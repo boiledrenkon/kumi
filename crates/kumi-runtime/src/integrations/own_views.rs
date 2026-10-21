@@ -324,7 +324,8 @@ pub fn matrix(body: &Value) -> SequenceMatrix {
         tracks: list(body, "tracks").filter_map(Value::as_str).map(str::to_owned).collect(),
         slots: list(body, "slots")
             .map(|slot| SequenceSlot {
-                pattern: number(slot, "pattern").unwrap_or(0.).max(0.) as usize,
+                // (a pattern by Renoise's number, from 0)
+                pattern: number(slot, "pattern").unwrap_or(1.).max(1.) as usize - 1,
                 section: slot.get("section").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
                 muted: list(slot, "mutedTracks").filter_map(Value::as_f64).filter(|n| *n >= 1.).map(|n| n as usize - 1).collect(),
             })
@@ -611,7 +612,7 @@ mod tests {
         let body = json!({"tracks": ["Kick"], "slots": [slot(7), slot(8), slot(9)], "current": 42, "from": 41, "slotCount": 300});
         let matrix = matrix(&body);
         assert_eq!((matrix.first, matrix.current), (40, Some(1)), "slot 42 is the second of those shown from slot 41");
-        assert_eq!(matrix.slots[matrix.current.unwrap()].pattern, 8);
+        assert_eq!(matrix.slots[matrix.current.unwrap()].pattern, 7, "the bridge's pattern 8 (a Lua index) is Renoise's 07");
         let whole = super::matrix(&json!({"tracks": ["Kick"], "slots": [slot(1), slot(2)], "current": 2}));
         assert_eq!((whole.first, whole.current), (0, Some(1)));
     }

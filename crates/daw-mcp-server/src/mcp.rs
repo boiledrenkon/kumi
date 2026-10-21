@@ -118,10 +118,10 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "transport_play",
             "title": format!("Play {daw}"),
-            "description": format!("Starts {daw}'s playback from where it is, or (Renoise) from sequence (a slot, from 1) and line."),
+            "description": format!("Starts {daw}'s playback from where it is, or (Renoise) from sequence (a slot, from 1) and line (from 0, as Renoise numbers lines)."),
             "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                 "sequence": {"type": "integer", "minimum": 1},
-                "line": {"type": "integer", "minimum": 1},
+                "line": {"type": "integer", "minimum": 0},
                 "epoch": {"type": "string"},
             })), "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},

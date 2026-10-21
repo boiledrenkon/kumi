@@ -156,13 +156,14 @@ local function kit_print(instrument)
 end
 M.kit_print = kit_print
 
+-- (`index` by Renoise's number, from 0, to a place from 1)
 local function index_input(input, count)
   local index = input.index
   if index == nil then return count + 1 end
-  if not whole(1, count + 1)(index) then
-    bad(string.format("index is a place from 1 to %d (the instruments are numbered from 1 here; Renoise shows them from 00)", count + 1))
+  if not whole(0, count)(index) then
+    bad(string.format("index is an instrument's number from 0 to %d, as Renoise numbers them (00 the first)", count))
   end
-  return index
+  return index + 1
 end
 
 local function plan_of(song, env, input, applying)

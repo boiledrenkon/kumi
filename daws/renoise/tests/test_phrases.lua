@@ -67,7 +67,7 @@ end)
 
 test("phrases: settings change and go back (lines, LPB, loop, shuffle, key tracking, base note, columns); a loop past its lines is bad-params", function()
   local env, peer = setup()
-  local record = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), lines = 32, lpb = 16, loopStart = 17, loopEnd = 32, shuffle = 0.5, keyTracking = "offset", baseNote = 36, noteColumns = 4, delayColumn = true })
+  local record = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), lines = 32, lpb = 16, loopStart = 16, loopEnd = 31, shuffle = 0.5, keyTracking = "offset", baseNote = 36, noteColumns = 4, delayColumn = true })
   local data = phrase(2, 1)
   eq(data.lines, 32)
   eq(data.loop_start, 17)
@@ -131,7 +131,7 @@ test("phrases: the instrument's phrase playback: program mode playing a phrase (
   local record, done = change(peer, "phrase-playback", { ref = iref(epoch, 2), mode = "program", programRef = pref(epoch, 2, 2) })
   eq(instrument(2).phrase_playback_mode, 2)
   eq(instrument(2).phrase_program, 2)
-  ok(done.display.title:find("plays phrase 01 on every key", 1, true), done.display.title)
+  ok(done.display.title:find("plays phrase 02 on every key", 1, true), done.display.title)
   local undone = restore(peer, "phrase-playback", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(instrument(2).phrase_playback_mode, 2, "program mode, as a new instrument has it")
@@ -152,8 +152,8 @@ end)
 test("phrases: lines written in Renoise's own text, columns shown first; Kumi's undo puts the cells back and hides the columns again", function()
   local env, peer = setup()
   local input = { ref = pref(place(peer), 2, 1), lines = {
-    { line = 1, notes = { { col = 1, note = "C-4", instrument = "00", volume = "40" }, { col = 2, note = "G-4", delay = "10" } } },
-    { line = 5, notes = { { col = 1, note = "OFF" } }, effects = { { col = 1, number = "0A", amount = "20" } } },
+    { line = 0, notes = { { col = 1, note = "C-4", instrument = "00", volume = "40" }, { col = 2, note = "G-4", delay = "10" } } },
+    { line = 4, notes = { { col = 1, note = "OFF" } }, effects = { { col = 1, number = "0A", amount = "20" } } },
   } }
   local record, done = change(peer, "phrase-write", input, "Kumi: arp (k600)")
   eq(cell(2, 1, 1, 1).note_string, "C-4")
@@ -172,7 +172,7 @@ end)
 
 test("phrases: a line the producer edited anywhere in the phrase since refuses the undo of Kumi's lines (the plain rule), nothing written", function()
   local env, peer = setup()
-  local record = change(peer, "phrase-write", { ref = pref(place(peer), 2, 1), lines = { { line = 2, notes = { { col = 1, note = "D-4" } } } } })
+  local record = change(peer, "phrase-write", { ref = pref(place(peer), 2, 1), lines = { { line = 1, notes = { { col = 1, note = "D-4" } } } } })
   cell(2, 1, 16).note_string = "A-3" -- far below Kumi's line
   local refused = restore(peer, "phrase-write", record)
   failure(refused, "changed")
@@ -196,7 +196,7 @@ test("phrases: a clear of lines keeps the cells and puts them back; a write too 
   for l = 1, 16 do
     local notes = {}
     for c = 1, 12 do notes[c] = { col = c, note = "C-4", instrument = "00", volume = "40", panning = "40", delay = "01", fx = "0A10" } end
-    lines[l] = { line = l, notes = notes }
+    lines[l] = { line = l - 1, notes = notes }
   end
   mock.song:instrument(2):phrase(1).number_of_lines = 16
   local epoch = place(peer)

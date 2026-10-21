@@ -18,7 +18,8 @@ M.fail, M.bad = fail, bad
 local function q(text) return "\226\128\156" .. tostring(text) .. "\226\128\157" end
 M.q = q
 
--- What the producer calls each object: its name, or the number Renoise shows (instruments, samples and phrases count from 00).
+-- What the producer calls each object: its name, or the number Renoise shows (instruments and samples count from 00, in hex;
+-- phrases from 01, as Renoise names a new one).
 function M.instrument_label(i, instrument)
   local name = instrument.name
   if name == nil or name == "" then return string.format("Instrument %02X", i - 1) end
@@ -33,7 +34,7 @@ end
 
 function M.phrase_label(ph, phrase)
   local name = phrase.name
-  if name == nil or name == "" then return string.format("Phrase %02X", ph - 1) end
+  if name == nil or name == "" then return string.format("Phrase %02d", ph) end
   return name
 end
 
