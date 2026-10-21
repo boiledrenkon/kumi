@@ -1551,7 +1551,9 @@ function M.start(h, reloading)
       b.remake = "too many connections held open after being refused (" .. open .. ")"
     end,
   })
-  b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
+  -- (a random start: two Renoise running at once never count through the same epochs, so a ref or a change from one is
+  -- refused as stale by the other)
+  b.epoch_n = b.epoch_n or wire.random28()
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.ids = b.ids or 0
   b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")

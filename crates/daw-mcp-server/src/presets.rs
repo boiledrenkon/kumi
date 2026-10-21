@@ -2270,7 +2270,7 @@ impl crate::host::Host {
             "fence": {"id": read.get("id").cloned().unwrap_or(Value::Null), "shape": read.get("shape").cloned().unwrap_or(Value::Null)},
             "display": display,
         });
-        match self.journal().previewed(kind, input, &answer, layout) {
+        match self.journal().previewed(kind, input, &answer, layout, pick.clone()) {
             Ok(record) => {
                 let mut reply = json!({"transactionId": record.id, "confirmation": record.confirmation, "prior": prior_for_kumi(&record.prior), "display": record.display, "target": record.target});
                 crate::changes::place(&mut reply, record.epoch.as_deref(), record.layout);
@@ -2291,10 +2291,8 @@ impl crate::host::Host {
         }
         let mut params = read_params(&record.input, &record.kind);
         crate::changes::place(&mut params, record.epoch.as_deref(), record.input_layout);
-        let read = self
-            .call("preset_read", params, &crate::host::Pick::default(), crate::changes::CHANGE_TIMEOUT)
-            .await
-            .map_err(|e| self.call_error(&e))?;
+        let read =
+            self.call("preset_read", params, &record.instance, crate::changes::CHANGE_TIMEOUT).await.map_err(|e| self.call_error(&e))?;
         let device = Device::from_read(&read);
         if read.get("id") != record.fence.get("id") {
             return Err(
@@ -2392,7 +2390,7 @@ impl crate::host::Host {
             "fence": {"ids": ids},
             "display": display_of(&edited, false),
         });
-        match self.journal().previewed("doofer-make", input, &answer, layout) {
+        match self.journal().previewed("doofer-make", input, &answer, layout, pick.clone()) {
             Ok(record) => {
                 let mut reply = json!({"transactionId": record.id, "confirmation": record.confirmation, "prior": record.prior, "display": record.display, "target": record.target});
                 crate::changes::place(&mut reply, record.epoch.as_deref(), record.layout);
@@ -2403,8 +2401,7 @@ impl crate::host::Host {
     }
 
     async fn make_apply_params(&self, record: &crate::changes::Record) -> Result<Value, Value> {
-        let (lanes, track_name) =
-            self.make_reads(&record.input, record.epoch.as_deref(), record.input_layout, &crate::host::Pick::default()).await?;
+        let (lanes, track_name) = self.make_reads(&record.input, record.epoch.as_deref(), record.input_layout, &record.instance).await?;
         let ids: Vec<Value> = lanes.iter().flatten().map(|(_, read)| read.get("id").cloned().unwrap_or(Value::Null)).collect();
         if Value::Array(ids.clone()) != record.fence["ids"] {
             return Err(
@@ -2448,10 +2445,8 @@ impl crate::host::Host {
         let material = record.material.clone().unwrap_or(Value::Null);
         let mut params = json!({"at": material});
         crate::changes::place(&mut params, record.epoch.as_deref(), record.layout);
-        let read = self
-            .call("preset_read", params, &crate::host::Pick::default(), crate::changes::CHANGE_TIMEOUT)
-            .await
-            .map_err(|e| self.call_error(&e))?;
+        let read =
+            self.call("preset_read", params, &record.instance, crate::changes::CHANGE_TIMEOUT).await.map_err(|e| self.call_error(&e))?;
         let device = Device::from_read(&read);
         let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
         let applied = record.applied.clone().unwrap_or(Value::Null);

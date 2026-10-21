@@ -140,6 +140,62 @@ async fn a_change_previewed_in_another_project_is_refused_and_released_changes_a
     assert!(is_error && bad["code"] == "bad-params", "{bad}");
 }
 
+// A change keeps the instance it was previewed in: its apply and undo go there whichever REAPER the host talks to since,
+// and are refused once that one quits (the other has a track 1 too).
+#[tokio::test]
+async fn a_change_goes_to_the_reaper_it_was_previewed_in_and_is_refused_once_that_one_quits() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Reaper);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let mut started = Vec::new();
+    for resource in ["/lab/REAPER", "/lab/REAPER portable"] {
+        let script = ReaperScript::new(3, 0);
+        let mut config = script.config(secret.clone(), resource);
+        config.discovery_dir = Some(paths.discovery());
+        started.push((script, Simulator::start(config).await.unwrap()));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let mut session = Session::start(Daw::Reaper, home.path());
+    let volume = json!({"ref": "r:track:{T0001}", "volumeDb": -6.0});
+    let (preview, is_error) =
+        session.tool_full(1, "change_preview", json!({"kind": "track-volume", "input": volume, "resource": "/lab/REAPER"}), false).await;
+    assert!(!is_error, "{preview}");
+    let (_, is_error) = session.tool_full(2, "read", json!({"kind": "track", "resource": "/lab/REAPER portable"}), false).await;
+    assert!(!is_error);
+    let id = preview["transactionId"].clone();
+    let (applied, is_error) = session
+        .tool_full(3, "change_apply", json!({"transactionId": id, "confirmation": preview["confirmation"], "idempotencyKey": "a1"}), false)
+        .await;
+    assert!(!is_error && applied["state"] == "applied", "{applied}");
+    assert_eq!((started[0].0.volume(1), started[1].0.volume(1)), (-6.0, 0.0));
+    let (_, is_error) = session.tool_full(4, "read", json!({"kind": "track", "resource": "/lab/REAPER portable"}), false).await;
+    assert!(!is_error);
+    let (undone, is_error) =
+        session.tool_full(5, "change_undo", json!({"transactionId": id, "confirmation": "undo", "idempotencyKey": "u1"}), false).await;
+    assert!(!is_error && undone["state"] == "undone", "{undone}");
+    assert_eq!(started[0].0.undo_history().len(), 2);
+    assert!(started[1].0.undo_history().is_empty(), "nothing reached the other REAPER");
+
+    let (preview, is_error) =
+        session.tool_full(6, "change_preview", json!({"kind": "track-volume", "input": volume, "resource": "/lab/REAPER"}), false).await;
+    assert!(!is_error, "{preview}");
+    started[0].1.stop();
+    let (refused, is_error) = session
+        .tool_full(
+            7,
+            "change_apply",
+            json!({"transactionId": preview["transactionId"], "confirmation": preview["confirmation"], "idempotencyKey": "a2"}),
+            false,
+        )
+        .await;
+    assert!(is_error && refused["code"] == "stale", "{refused}");
+    let said = refused["error"].as_str().unwrap();
+    assert!(said.starts_with("this change was made in another REAPER (pid ") && said.contains("/lab/REAPER)"), "{said}");
+    assert_eq!(started[1].0.volume(1), 0.0);
+    assert!(started[1].0.undo_history().is_empty());
+    session.finish().await;
+}
+
 #[tokio::test]
 async fn an_undo_the_daw_couldnt_say_it_finished_is_never_sent_again() {
     let mut lab = Lab::start().await;

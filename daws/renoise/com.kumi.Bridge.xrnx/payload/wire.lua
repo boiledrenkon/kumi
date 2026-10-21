@@ -151,6 +151,18 @@ function M.nonce(secret)
   return sub(sha256.tohex(sha256.hmac(entropy .. (secret or ""), input)), 1, 32)
 end
 
+-- A number below 2^28 nobody can guess (/dev/urandom, else the nonce's hash where it is missing: Windows).
+function M.random28()
+  local f = io.open("/dev/urandom", "rb")
+  local bytes = f and f:read(4)
+  if f then f:close() end
+  if bytes and #bytes == 4 then
+    local b1, b2, b3, b4 = byte(bytes, 1, 4)
+    return ((b1 % 16 * 256 + b2) * 256 + b3) * 256 + b4
+  end
+  return tonumber(sub(M.nonce(), 1, 7), 16)
+end
+
 -- Secrets: one line of 32 to 512 printable ASCII characters without spaces.
 function M.secret_from_file_text(text)
   if sub(text, -1) == "\n" then
