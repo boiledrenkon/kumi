@@ -18,6 +18,7 @@ use crate::{
         steps::{own_step_line, plan_tool},
         undo::undo_change_with,
     },
+    kernel::schema,
     mcp::client::McpEndpoint,
 };
 use async_trait::async_trait;
@@ -1394,10 +1395,18 @@ impl<S: RefScheme + 'static> PlanHost for OwnPlan<S> {
     fn batch_input(&self, _batch: &Batch, _group: &[JsonObject]) -> JsonObject {
         JsonObject::new()
     }
+    /// A step is held to its kind's schema, as a call of its own tool is: a field the kind doesn't take, one it needs
+    /// that's missing, or one of the wrong type is refused in words, never sent to the bridge to be dropped or guessed.
     async fn change(&self, kind: &'static OwnKind, input: JsonObject, signal: Signal, _confirmed: bool) -> ChangeOutcome {
+        if let Some(problem) = schema::problem(&Value::Object(kind.input_schema()), &Value::Object(input.clone())) {
+            return ChangeOutcome::error(format!("{}: {problem}", kind.tool));
+        }
         self.one_change(kind, input, signal).await
     }
     async fn act(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
+        if let Some(problem) = schema::problem(&Value::Object(action.input_schema()), &Value::Object(input.clone())) {
+            return ActionOutcome::error(format!("{}: {problem}", action.tool));
+        }
         self.one_action(action, input, signal).await
     }
     async fn safety_copy(&self, _signal: Signal) -> Result<Option<String>, RuntimeError> {
@@ -1689,6 +1698,26 @@ mod tests {
         let big = folder.path().join("Big.rpp");
         std::fs::File::create(&big).unwrap().set_len(MOST_COPIED + 1).unwrap();
         assert_eq!(copy_beside(&big), Copied::TooBig(MOST_COPIED + 1));
+    }
+
+    /// Review K34: a plan's step is held to its kind's schema, as a call of the kind's own tool is: a misspelled or
+    /// unknown field, a missing one or one of the wrong type is refused in words, and nothing goes to the bridge (this
+    /// engine has none to go to).
+    #[tokio::test]
+    async fn a_step_its_kinds_schema_doesnt_take_is_refused_in_words_before_the_bridge() {
+        let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+        let volume = plan.change_kind("track_volume").unwrap();
+        for (input, said) in [
+            (json!({"ref": "track:1", "volumeDb": -6, "stag": "pre"}), "The input has no field `stag` (it takes "),
+            (json!({"volumeDb": -6}), "The input needs `ref`."),
+            (json!({"ref": "track:1", "volumeDb": "loud"}), "`volumeDb` must be a number, not a string."),
+            (json!({"ref": "track:1", "volumeDb": -6, "stage": "mid"}), "`stage` must be one of \"post\", \"pre\", not \"mid\"."),
+        ] {
+            let outcome = PlanHost::change(&*plan, volume, input.as_object().unwrap().clone(), Signal::new(), false).await;
+            assert!(outcome.is_error && !outcome.stops, "{}", outcome.text);
+            assert!(outcome.text.starts_with(&format!("track_volume: {said}")), "{}", outcome.text);
+        }
+        assert_eq!(plan.history.changes_this_turn.get(), 0, "nothing was counted, let alone sent");
     }
 
     #[tokio::test]
