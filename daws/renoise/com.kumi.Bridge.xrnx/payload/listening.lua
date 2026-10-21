@@ -1124,14 +1124,47 @@ local function slot_of(song, p)
   return nil
 end
 
+-- A slice's frames written as a 16-bit WAV, read value by value from its sample (Renoise saves only whole samples): for a
+-- slice up to SLICE_VALUES values (a few seconds), so a tune loop on slices of a long break doesn't write the whole break each time.
+M.SLICE_VALUES = 600000
+local function write_slice(path, buffer, first, last)
+  local channels, rate = buffer.number_of_channels, buffer.sample_rate
+  local frames = last - first + 1
+  local function u32le(n) return string.char(n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256) end
+  local function u16le(n) return string.char(n % 256, math.floor(n / 256) % 256) end
+  local bytes = frames * channels * 2
+  local f = io.open(path, "wb")
+  if not f then return false end
+  f:write("RIFF", u32le(36 + bytes), "WAVE", "fmt ", u32le(16), u16le(1), u16le(channels), u32le(rate), u32le(rate * channels * 2),
+    u16le(channels * 2), u16le(16), "data", u32le(bytes))
+  local chunk = {}
+  for frame = first, last do
+    for channel = 1, channels do
+      local value = buffer:sample_data(channel, frame)
+      value = tonumber(type(value) == "table" and value[1] or value) or 0
+      local n = math.floor(math.max(-1, math.min(1, value)) * 32767 + 0.5)
+      if n < 0 then n = n + 65536 end
+      chunk[#chunk + 1] = string.char(n % 256, math.floor(n / 256))
+    end
+    if #chunk >= 4096 then
+      f:write(table.concat(chunk))
+      chunk = {}
+    end
+  end
+  f:write(table.concat(chunk))
+  f:close()
+  return true
+end
+
 local function export_sample(song, env, i, s, job_id, free)
   local instrument = song:instrument(i)
   local sample = instrument:sample(s)
   local name = sample.name ~= "" and sample.name or string.format("Sample %02d", s - 1)
-  local offset, length
+  local offset, length, span
   local source = sample
   if sample.is_slice_alias then
-    -- (a slice plays a part of the instrument's first sample: that one is saved, with where the slice is in it)
+    -- (a slice plays a part of the instrument's first sample: its frames alone are written when they're few enough, else
+    -- that sample is saved, with where the slice is in it)
     source = instrument:sample(1)
     local markers = source.slice_markers
     local k = s - 1
@@ -1139,18 +1172,22 @@ local function export_sample(song, env, i, s, job_id, free)
     if markers[k] and rate then
       local last = markers[k + 1] or (source.sample_buffer.number_of_frames + 1)
       offset, length = (markers[k] - 1) / rate, (last - markers[k]) / rate
+      if (last - markers[k]) * source.sample_buffer.number_of_channels <= M.SLICE_VALUES then span = { markers[k], last - 1 } end
     end
   end
   local buffer = source.sample_buffer
   if not buffer.has_sample_data then fail("failed", "That sample has no audio") end
-  M.check_room(free, buffer.number_of_frames * buffer.number_of_channels * 4 * 1.5, "this sample")
+  local frames = span and (span[2] - span[1] + 1) or buffer.number_of_frames
+  M.check_room(free, frames * buffer.number_of_channels * 4 * 1.5, "this sample")
   local folder, why = M.ensure_folder(env.cfg())
   if not folder then fail("failed", why) end
   local _, sep = M.folder(env.cfg())
   local path = folder .. sep .. job_id .. "-sample.wav"
   if io.exists(path) then bad("a file of job " .. job_id .. " is in Kumi's folder already") end
+  if span then offset, length = nil, nil end
   -- (Renoise shows its own errors from save_as in a dialog: the folder is checked first, and that is all Kumi can do)
-  local ok = buffer:save_as(path, "wav")
+  local ok
+  if span then ok = write_slice(path, buffer, span[1], span[2]) else ok = buffer:save_as(path, "wav") end
   local info = ok and M.wav_info(path) or nil
   if not info then
     remove(path)
