@@ -105,7 +105,7 @@ fn value_lines(value: &PictureValue, cols: usize) -> Vec<Vec<Span>> {
     vec![fit(line, cols), fit(vec![styled(format!("  {asked_words}"), palette::WARN)], cols)]
 }
 
-/// A tracker's line before and after, in the DAW's text: "  9 E-4 01 40 .. .. → OFF .. .. .. ..", or on two rows
+/// A tracker's line before and after, in the DAW's text: " 09 E-4 01 40 .. .. → OFF .. .. .. ..", or on two rows
 /// where that doesn't fit (the line before, then what it is now under it).
 fn tracker_lines(line: &PictureLine, cols: usize) -> Vec<Vec<Span>> {
     // (as the tracker shows it: two digits at least, 00 the first line)
@@ -419,8 +419,8 @@ mod tests {
     fn a_trackers_lines_read_before_and_after_and_fold_where_they_dont_fit() {
         let line = PictureLine { line: 9, before: "E-4 01 40 .. ..".into(), after: "OFF .. .. .. ..".into() };
         let picture = ChangePicture::Lines { lines: vec![line], more: 2 };
-        assert_eq!(text(&lines_of(&picture, 60)), ["  9 E-4 01 40 .. .. → OFF .. .. .. ..", "    and 2 more lines"]);
-        assert_eq!(text(&lines_of(&picture, 24)), ["  9 E-4 01 40 .. ..", "  → OFF .. .. .. ..", "    and 2 more lines"]);
+        assert_eq!(text(&lines_of(&picture, 60)), [" 09 E-4 01 40 .. .. → OFF .. .. .. ..", "    and 2 more lines"]);
+        assert_eq!(text(&lines_of(&picture, 24)), [" 09 E-4 01 40 .. ..", "  → OFF .. .. .. ..", "    and 2 more lines"]);
         let drawn = draw(&picture, 60, 6, Graphics::Cells, 1, palette::GROUND);
         assert!(drawn.rows.is_empty() && drawn.image.is_none(), "words everywhere");
         assert_eq!(text(&drawn.lines), text(&lines_of(&picture, 60)));
