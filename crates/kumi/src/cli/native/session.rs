@@ -212,8 +212,14 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         kumi_runtime::core::conversations::create_conversation_store_in(&projects_dir, keep_days, kumi_runtime::integrations::PLACES)
     });
     // The conversation asked for is found before anything shows: a word that names none says so, and Kumi stops there.
+    // Only this DAW's conversations (and imported ones) go on here: another DAW's goes on in that DAW (review L4).
+    let ours = |place: &str| kumi_runtime::core::place::kept_for(place, provider.id());
     let (taken_up, choose, resume_notice) = match (&resume, &conversations) {
         (Some(Resume::Named(word)), Some(store)) => match store.find(word).await? {
+            ConversationMatch::One(row) if !ours(&row.place) => {
+                io.err.write(&format!("{}\n", elsewhere_words(&row, io.command())));
+                return Ok(1);
+            }
             ConversationMatch::One(row) => (Some((row.place, row.id)), None, None),
             ConversationMatch::Several(_) => (None, Some(word.clone()), None),
             ConversationMatch::Gone => {
@@ -226,7 +232,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
                 return Ok(1);
             }
         },
-        (Some(Resume::Last), Some(store)) => match store.all().await?.into_iter().next() {
+        (Some(Resume::Last), Some(store)) => match store.all().await?.into_iter().find(|row| ours(&row.place)) {
             Some(row) => (Some((row.place, row.id)), None, None),
             None => (None, None, Some("No conversation is kept yet, so this one starts afresh.".to_string())),
         },
@@ -849,6 +855,19 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     } else {
         Ok(code)
     }
+}
+/// What `-r` says of a conversation kept in another DAW's place: whose it is, and the command that carries it on there.
+fn elsewhere_words(row: &kumi_runtime::core::contracts::ConversationSummary, command: &str) -> String {
+    let daw = kumi_runtime::core::place::Place::parse(&row.place).and_then(|place| place.daw());
+    let (app, noun) = daw.and_then(kumi_runtime::integrations::profile).map_or(("another DAW", "project"), |profile| profile.word_pair());
+    let title: String = row.title().chars().filter(|c| !c.is_control()).collect();
+    format!(
+        "“{}” is about {} {app} {noun}: {command} --daw {} -r {} carries it on in {app}.",
+        string::head(&title, 60),
+        if app.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" },
+        daw.map(crate::daw::command_name).unwrap_or_default(),
+        row.id
+    )
 }
 /// What Kumi opens again with after an update: the same arguments, but a conversation asked for (`-c`, `-r`) is the
 /// one going on as it closed.

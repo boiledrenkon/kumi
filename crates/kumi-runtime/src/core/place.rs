@@ -111,6 +111,12 @@ impl Place {
     }
 }
 
+/// Whether a conversation kept in `place` belongs with sessions in `daw`: one of that DAW's places, or imported from a
+/// file (which carries on in a copy anywhere). Another DAW's goes on only with that DAW.
+pub fn kept_for(place: &str, daw: DawId) -> bool {
+    Place::parse(place).and_then(|place| place.daw()).is_none_or(|own| own == daw)
+}
+
 /// A DAW's place for its projects not saved yet: "unsaved" for Live's.
 pub fn unsaved(daw: DawId) -> &'static str {
     match daw {
@@ -140,6 +146,13 @@ mod tests {
         for daw in [DawId::Ableton, DawId::Reaper, DawId::Renoise] {
             assert_eq!(Place::parse(unsaved(daw)), Some(Place::Unsaved(daw)));
         }
+    }
+
+    #[test]
+    fn a_conversation_belongs_with_its_places_daw_and_an_imported_one_anywhere() {
+        assert!(kept_for(ID, DawId::Ableton) && kept_for("unsaved", DawId::Ableton) && kept_for("imported", DawId::Reaper));
+        assert!(kept_for(&format!("reaper-{ID}"), DawId::Reaper) && kept_for("renoise-unsaved", DawId::Renoise));
+        assert!(!kept_for(&format!("reaper-{ID}"), DawId::Ableton) && !kept_for(ID, DawId::Renoise));
     }
 
     #[test]
