@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 52] = [
+const SCENES: [&str; 53] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -78,6 +78,7 @@ const SCENES: [&str; 52] = [
     "change-export-tracks",
     "change-undo-m4b",
     "read-smart-none",
+    "change-fx-param-exact",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -1071,4 +1072,20 @@ fn a_track_whose_strip_has_nothing_smart_controls_map_reads_none_of_them() {
     let reads = of(&replayed, "read");
     assert_eq!(reads[0].result(), &json!({"items": [], "total": 0, "epoch": "1"}));
     assert_eq!(reads[1].result()["items"][0]["name"], "Channel EQ");
+}
+
+#[test]
+fn a_parameter_lands_on_the_number_asked_when_its_steps_allow() {
+    // The Stereo Out's Gain asked for -3 dB: its bisection used to stop at the first reading within a quarter of a dB
+    // (-3.1 dB), and goes on now until one reads -3 exactly, which raw 930 does.
+    let replayed = replay("change-fx-param-exact");
+    let applies = of(&replayed, "change_apply");
+    let set = applies[1].result();
+    assert_eq!(set["applied"]["params"][0], json!({"index": 2, "name": "Gain", "value": 930.0, "text": "-3.0 dB"}));
+    assert!(set["display"].get("note").is_none(), "the number was reached: no resolution to say");
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["text"], "-3.0 dB");
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"]["params"][0]["text"], "0.0 dB");
+    assert_eq!(restores[1].result()["restored"]["deleted"], "1:plugin:0.1.1");
+    assert_eq!(of(&replayed, "read")[1].result()["items"], json!([]));
 }

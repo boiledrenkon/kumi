@@ -372,7 +372,12 @@ titles.
   ("Undo", "Redo") and not for the project.
 - A **plug-in's parameters are reached in its window's Controls View** (the view menu, a standard menu
   read through the pop-up), whose sliders take an exact value; Logic's own plug-ins expose their
-  sliders in the editor view too, but the Controls View lists every plug-in's. A parameter moved there
+  sliders in the editor view too, but the Controls View lists every plug-in's. A number asked as `value`
+  (what the view shows: -3 for "-3.0 dB") is found by a bisection over the slider's raw values, each set
+  and its text read: it goes on until a value reads the number exactly (the Stereo Out's Gain reads
+  -3.0 dB at raw 930, where the first reading within a quarter dB, -3.1 dB, used to end it), and when no
+  value does, the nearest within the number's own precision is set and `display.note` says the slider's
+  step there. A parameter moved there
   and a preset loaded are steps of the plug-in window's own undo (its Undo and Redo buttons), never of
   the project's, so `outside_undo` holds them and the restore is by value (a preset's by the window's
   Undo). The setting (preset) menu is Logic's own too: a preset is reached through the next and

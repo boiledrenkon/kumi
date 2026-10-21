@@ -432,14 +432,28 @@ pub fn reading(text: &str) -> Option<f64> {
     crate::rows::first_number(&text.replace('\u{2212}', "-"))
 }
 
+/// A slider's raw value found for a number asked: the raw value, what its text reads, and, when no raw value reads the
+/// number exactly, the slider's resolution there (how far its text moves for one raw step).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Found {
+    pub raw: f64,
+    pub reading: f64,
+    pub step: Option<f64>,
+}
+
 /// The raw value of a slider whose text reads `wanted`, found by setting it (each set is exact) and reading the text:
-/// a bisection over the range, the text rising or falling with the value. None when no value reads it.
-pub fn find_raw(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: f64, tolerance: f64) -> Done<Option<f64>> {
+/// a bisection over the range, the text rising or falling with the value, kept on until a value reads `wanted`
+/// exactly or the range is down to two neighbours (a reading merely close, -3.1 for -3, doesn't end it), then the
+/// range's two ends read; when none of those reads `wanted` exactly, the best one's neighbours too (a slider whose
+/// text rounds may show the number a step over), and the slider's resolution there is said. None when no value reads
+/// within `tolerance`.
+pub fn find_raw(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: f64, tolerance: f64) -> Done<Option<Found>> {
     let (Some(min), Some(max)) = (param.min, param.max) else { return Ok(None) };
     let read_at = |ctx: &mut Ctx, raw: f64| -> Done<Option<f64>> {
         let after = write(ctx, shown, param, raw)?;
         Ok(reading(&after.text))
     };
+    let exact = |at: f64| (at - wanted).abs() < 1e-6;
     let (Some(low), Some(high)) = (read_at(ctx, min)?, read_at(ctx, max)?) else { return Ok(None) };
     if wanted < low.min(high) - tolerance || wanted > low.max(high) + tolerance {
         return Ok(None);
@@ -447,16 +461,17 @@ pub fn find_raw(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: f64, tolera
     let rising = high >= low;
     let (mut lo, mut hi) = (min, max);
     let mut best: Option<(f64, f64)> = None;
+    let better = |best: &Option<(f64, f64)>, at: f64| best.is_none_or(|(_, b)| (at - wanted).abs() < (b - wanted).abs());
     for _ in 0..32 {
         if hi - lo <= 1.0 {
             break;
         }
         let mid = ((lo + hi) / 2.0).round();
         let Some(at) = read_at(ctx, mid)? else { break };
-        if best.is_none_or(|(_, b)| (at - wanted).abs() < (b - wanted).abs()) {
+        if better(&best, at) {
             best = Some((mid, at));
         }
-        if (at - wanted).abs() <= tolerance / 2.0 {
+        if exact(at) {
             break;
         }
         if (at < wanted) == rising {
@@ -467,12 +482,31 @@ pub fn find_raw(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: f64, tolera
     }
     for raw in [lo, hi] {
         if let Some(at) = read_at(ctx, raw)? {
-            if best.is_none_or(|(_, b)| (at - wanted).abs() < (b - wanted).abs()) {
+            if better(&best, at) {
                 best = Some((raw, at));
             }
         }
     }
-    Ok(best.filter(|(_, at)| (at - wanted).abs() <= tolerance).map(|(raw, _)| raw))
+    let mut step = None;
+    if let Some((raw, _)) = best.filter(|(_, at)| !exact(*at)) {
+        let mut around = vec![];
+        for near in [raw - 1.0, raw + 1.0] {
+            if (min..=max).contains(&near) {
+                if let Some(at) = read_at(ctx, near)? {
+                    around.push(at);
+                    if better(&best, at) {
+                        best = Some((near, at));
+                    }
+                }
+            }
+        }
+        if let (Some((_, at)), [below, above]) = (best, around.as_slice()) {
+            if !exact(at) {
+                step = Some(((above - below) / 2.0).abs());
+            }
+        }
+    }
+    Ok(best.filter(|(_, at)| (at - wanted).abs() <= tolerance).map(|(raw, reading)| Found { raw, reading, step }))
 }
 
 /// A parameter as a test makes one.

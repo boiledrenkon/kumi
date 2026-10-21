@@ -85,9 +85,25 @@ fn tolerance(text: &str) -> f64 {
     0.5 * 10f64.powi(-(decimals as i32)) + 1e-9
 }
 
-/// The raw value a wanted value is for this parameter: computed for a share, found by reading for a number, the
-/// option's place for a name.
-fn raw_for(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: &Wanted) -> Done<f64> {
+/// The raw value a wanted value is for this parameter: computed for a share, found by reading for a number (with the
+/// slider's resolution there when no value reads the number exactly), the option's place for a name.
+fn raw_for(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: &Wanted) -> Done<(f64, Option<f64>)> {
+    if let (Wanted::Reading(n, tolerance), Kind::Slider) = (wanted, param.kind) {
+        let found = window::find_raw(ctx, shown, param, *n, *tolerance)?.ok_or_else(|| {
+            failed(format!(
+                "no value of {}'s {} reads {n} (it reads {} now; read its parameters for the range)",
+                quoted(&shown.plugin),
+                param.name,
+                param.text
+            ))
+        })?;
+        return Ok((found.raw, found.step));
+    }
+    raw_of(param, wanted).map(|raw| (raw, None))
+}
+
+/// The raw value of a share, an option or a switch's word.
+fn raw_of(param: &Param, wanted: &Wanted) -> Done<f64> {
     match (wanted, param.kind) {
         (Wanted::Normalized(n), Kind::Slider) => {
             let (min, max) = (param.min.unwrap_or(0.0), param.max.unwrap_or(1.0));
@@ -95,14 +111,6 @@ fn raw_for(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: &Wanted) -> Done
         }
         (Wanted::Normalized(n), Kind::Choice) => Ok((n * (param.choices.len().saturating_sub(1)) as f64).round()),
         (Wanted::Normalized(n), Kind::Switch) => Ok(if *n >= 0.5 { 1.0 } else { 0.0 }),
-        (Wanted::Reading(n, tolerance), Kind::Slider) => window::find_raw(ctx, shown, param, *n, *tolerance)?.ok_or_else(|| {
-            failed(format!(
-                "no value of {}'s {} reads {n} (it reads {} now; read its parameters for the range)",
-                quoted(&shown.plugin),
-                param.name,
-                param.text
-            ))
-        }),
         (Wanted::Option(name), Kind::Choice) => {
             param.choices.iter().position(|(title, _)| title.eq_ignore_ascii_case(name)).map(|i| i as f64).ok_or_else(|| {
                 let options: Vec<&str> = param.choices.iter().map(|(t, _)| t.as_str()).collect();
@@ -112,7 +120,7 @@ fn raw_for(ctx: &mut Ctx, shown: &Shown, param: &Param, wanted: &Wanted) -> Done
         (Wanted::Option(name), Kind::Switch) if ["on", "off"].contains(&name.to_lowercase().as_str()) => {
             Ok(if name.eq_ignore_ascii_case("on") { 1.0 } else { 0.0 })
         }
-        _ => Err(bad(format!("{}'s {} doesn't take that value (it shows {})", quoted(&shown.plugin), param.name, param.text))),
+        _ => Err(bad(format!("{} doesn't take that value (it shows {})", param.name, param.text))),
     }
 }
 
@@ -231,8 +239,9 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value, many: bool) -> Done<Ap
             return Err(changed(format!("{} changed in Logic Pro since the preview", quoted(&shown.plugin))));
         }
         let mut after: Vec<Value> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
         for ((_, wanted), param) in asks.iter().zip(&chosen) {
-            let raw = raw_for(ctx, &shown, param, wanted)?;
+            let (raw, step) = raw_for(ctx, &shown, param, wanted)?;
             let read = window::write(ctx, &shown, param, raw)?;
             let shows = match wanted {
                 Wanted::Option(name) => read.text.eq_ignore_ascii_case(name) || (read.kind == Kind::Switch && read.value == Some(raw)),
@@ -248,13 +257,21 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value, many: bool) -> Done<Ap
                     read.text
                 )));
             }
+            if let (Some(step), Wanted::Reading(n, _)) = (step, wanted) {
+                notes.push(format!(
+                    "{} moves {} a step here, so {} is the nearest it shows to {n}.",
+                    param.name,
+                    (step * 1000.0).round() / 1000.0,
+                    read.text
+                ));
+            }
             after.push(state(&read));
         }
-        Ok(Applied {
-            applied: json!({"plugin": shown.plugin, "params": after}),
-            display: json!({"title": title(&shown.plugin, &shown.strip, &after), "lines": lines(&after)}),
-            ..Applied::default()
-        })
+        let mut display = json!({"title": title(&shown.plugin, &shown.strip, &after), "lines": lines(&after)});
+        if !notes.is_empty() {
+            display["note"] = notes.join(" ").into();
+        }
+        Ok(Applied { applied: json!({"plugin": shown.plugin, "params": after}), display, ..Applied::default() })
     })();
     window::hide(ctx, shown);
     result
