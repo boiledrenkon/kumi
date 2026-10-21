@@ -236,15 +236,34 @@ bridge, the version given is the one in the commit that added it.
   and an import makes a track of its own. The tempo takes whole BPM. Saving
   keeps no versions (that is REAPER's). Logic Pro 11 and Intel Macs are out of
   scope. See [the Logic contract](LOGIC_CONTRACT.md).
+- Logic Pro keeps no id Kumi could put inside a project, so Kumi knows a Logic
+  project by its path (the bridge's id is a hash of it): a project moved or
+  saved under another name is a new one for catching up and for memory.
+  Catching up and `watch_me` compare
+  snapshots Kumi reads through the bridge: tracks are matched by name and order
+  (a track renamed in its place and kind is told as renamed), regions by their
+  track and start, plug-ins by their order on the strip and markers by
+  position, and what can't be told apart is said to be unclear. They don't
+  compare notes or plug-in settings yet, and see only the Tempo List's first
+  tempo, since the bridge's tempo row carries no later event. A project in
+  Logic's Project Templates folder is never caught up on.
 
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: M6 (catch-up and `watch_me`, instant phrases, change pictures of
+- Logic Pro: the rest of M6 (instant phrases, change pictures of
   Channel EQ and Compressor, Logic's library and places, the export's words,
   middle C), M7 (the manual, the instruction pack, knowledge probes and evals)
   and M8 (the release); the goal search over Logic (a `GoalRig`); a region's
   notes past the rows the Event List shows on its screen.
+- Logic Pro, M6: catching up on a saved project as it opens or is switched to,
+  and `watch_me`, run over the simulated Logic (the snapshot is kept in the
+  project store under the project's place, `logic-<id>`, beside its
+  conversations, saved again every five minutes and after Kumi's own changes);
+  the gate runs them against the real Logic. By the M2 gate's read times a
+  snapshot of Scratch takes about 2 to 4 seconds there, the Mixer and the List
+  Editors opening for a moment as the bridge reads the strips, the markers and
+  the Tempo and Signature Lists.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

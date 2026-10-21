@@ -53,6 +53,7 @@ pub const DAW: OwnDaw = OwnDaw {
     open_project: Some(open_project),
     // (M5) Logic is heard: a part played and what it outputs captured, a part bounced offline (`logic_listening`).
     listening: Some(super::logic_listening::hook),
+    project: Some(&super::logic_project::PROJECT),
 };
 
 /// Logic's bundle id: what a project is opened with when the bridge hasn't said which Logic it attached to.
@@ -430,13 +431,19 @@ impl RefScheme for LogicRefs {
 pub const PRESENTATION: ToolPresentation = ToolPresentation {
     label: |tool| match tool {
         "logic_read" => Some("looked at your project"),
+        "watch_me" => Some("watched you work"),
         _ => None,
     },
     doing: |tool| match tool {
         "logic_read" => Some("looking at your project"),
+        "watch_me" => Some("comparing your project"),
         _ => None,
     },
-    activity: |tool| (tool == "logic_read").then_some(ToolActivity::Read),
+    activity: |tool| match tool {
+        "logic_read" => Some(ToolActivity::Read),
+        "watch_me" => Some(ToolActivity::Look),
+        _ => None,
+    },
     plan: |tool| tool == "make_changes",
     acts: |_| false,
     read_prefix: Some("logic_"),

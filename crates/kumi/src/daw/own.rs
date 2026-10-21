@@ -501,8 +501,11 @@ impl DawProvider for Own {
     fn min_major(&self) -> u32 {
         self.min_major
     }
-    fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
+    fn integration(&self, mut context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
+        // The session's project store: a DAW Kumi catches up on keeps its projects' baselines there, beside their
+        // conversations.
+        context.project_store = Some(session.project_store.clone());
         (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect, open_file: None })
     }
     fn probe(&self, _bridge_config: String, _factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {

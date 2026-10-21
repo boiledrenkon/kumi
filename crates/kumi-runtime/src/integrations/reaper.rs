@@ -35,6 +35,7 @@ pub const DAW: OwnDaw = OwnDaw {
     changes: &super::reaper_changes::CHANGES,
     open_project: None,
     listening: None,
+    project: None,
 };
 
 /// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's

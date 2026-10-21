@@ -3822,11 +3822,13 @@ impl State {
                 Some(at) => page_of(self.regions[at].note_rows(at + 1), asked),
                 None => Err(gone(params["parent"].as_str().unwrap_or_default())),
             },
-            "read" if kind == Some("project") => recorded("read", asked.clone()).map(|mut page| {
-                patch_project(&mut page["items"][0]);
-                page
+            // (M6) The project's row and the tempo row are paged as any kind's (catch-up's snapshot asks for a page).
+            "read" if kind == Some("project") => recorded("read", json!({"kind": "project"})).and_then(|page| {
+                let mut row = page["items"][0].clone();
+                patch_project(&mut row);
+                page_of(vec![row], asked)
             }),
-            "read" if kind == Some("tempo") => recorded("read", asked.clone()).map(|mut page| {
+            "read" if kind == Some("tempo") => recorded("read", json!({"kind": "tempo"})).and_then(|mut page| {
                 let row = &mut page["items"][0];
                 row["bpm"] = self.tempo.into();
                 // (M4) The Signature List as changed (the tempo row lists no tempo events, as the bridge's doesn't).
@@ -3838,7 +3840,7 @@ impl State {
                     }));
                     row["signatures"] = Value::Array(signatures);
                 }
-                page
+                page_of(vec![page["items"][0].clone()], asked)
             }),
             "snapshot" => recorded("snapshot", asked.clone()).map(|mut snapshot| {
                 patch_project(&mut snapshot["project"]);

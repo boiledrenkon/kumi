@@ -16,6 +16,7 @@ use crate::{
         none::no_access,
         own_changes::{Ending, Link, OwnPlan},
         own_listening::{ListenHook, OwnListenLink, OwnListening},
+        own_project::{OwnProject, Remember, Seen},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
@@ -85,6 +86,9 @@ pub struct OwnDaw {
     /// (M5) Hears the DAW: builds the listening tools' `Renderer`, and what answers `hear` and `audio_file`, over Kumi's
     /// link to its host (Logic's); None for a DAW Kumi can't hear yet, whose integration offers no listening.
     pub listening: Option<ListenHook>,
+    /// How Kumi catches up on the DAW's saved projects and watches the producer work (watch_me): its snapshot of a
+    /// project and how two differ, in its words. None for a DAW that has neither yet.
+    pub project: Option<&'static OwnProject>,
 }
 
 /// Opens a project's file with the DAW that's running (`resource`: the running DAW as the host's status names it,
@@ -164,6 +168,8 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     project_changed: Rc<Cell<bool>>,
     /// (M5) The DAW's listening, when its hook gives one: the listening tools and what hears for `hear`.
     listening: Option<OwnListening>,
+    /// What Kumi keeps of the saved project open, for catching up and watch_me, for a DAW that has them.
+    remember: Option<Rc<Remember>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -185,7 +191,27 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         maybe_redone: RefCell::default(),
     });
     let context = &options.context;
-    let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
+    // (the session's project store, from the neutral context: none keeps no baseline)
+    let remember = daw.project.map(|project| {
+        let store = context.project_store.clone();
+        Remember::new(project, daw.profile, store, link.endpoint.clone(), link.connected.clone(), link.lifetime.clone(), context)
+    });
+    // Kumi's own changes are kept in the baseline soon after, so the next catch-up doesn't tell them as the producer's.
+    let on_change = match &remember {
+        Some(remember) => {
+            let (remember, told) = (Rc::downgrade(remember), context.on_change.clone());
+            Some(Rc::new(move |record: ChangeRecord| {
+                if let Some(remember) = remember.upgrade() {
+                    remember.keep_soon();
+                }
+                if let Some(told) = &told {
+                    told(record);
+                }
+            }) as Rc<dyn Fn(ChangeRecord)>)
+        }
+        None => context.on_change.clone(),
+    };
+    let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = daw.listening.map(|hook| {
         let reach = Rc::new(OwnListenLink { link: link.clone(), plan: changes.clone(), on_action: context.on_action.clone() });
         OwnListening::new(hook, reach, context)
@@ -219,6 +245,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         projects: Rc::new(tokio::sync::watch::channel(None).0),
         project_changed: Rc::default(),
         listening,
+        remember,
     })
 }
 
@@ -649,6 +676,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         if let Some(listening) = &self.listening {
             tools.extend(listening.tools());
         }
+        if let Some(remember) = &self.remember {
+            tools.push(remember.watch_tool());
+        }
         tools
     }
 
@@ -705,6 +735,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
 
     /// The observation from the host's snapshot.
     fn observation(&self, snapshot: &Value, pinned: Option<&PinnedNode>) -> Observation {
+        // (the DAW went away since the look before, and is back: its project's identity went with it)
+        let came_back = self.identity.borrow().is_none();
         self.see_epoch(snapshot.get("epoch").and_then(Value::as_str));
         note_epoch(&self.seen_in, &self.book.borrow().scheme, snapshot);
         if self.layout.get().is_none() {
@@ -805,6 +837,16 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             }
         } else if !markers.is_null() {
             context["markers"] = markers;
+        }
+        // A saved project opened or switched to is caught up on, and what changed since Kumi last saw it is told here.
+        if let Some(remember) = &self.remember {
+            let playing =
+                ["playing", "recording"].iter().any(|key| snapshot.pointer(&format!("/transport/{key}")) == Some(&Value::Bool(true)));
+            let path = project.get("path").and_then(Value::as_str);
+            remember.seen(Seen { id: saved, path, name: &name, came_back, playing });
+            if let Some(since) = remember.context() {
+                context["sinceLastTime"] = Value::Object(since);
+            }
         }
         if let Some(latest) = self.changes.latest() {
             context["kumiChanges"] = latest;
@@ -1085,6 +1127,10 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
     }
     async fn close(&self) -> Result<(), RuntimeError> {
+        // The saved project's baseline, kept as Kumi leaves it if the DAW answers at once.
+        if let Some(remember) = self.remember.as_ref().filter(|_| !self.closed.get()) {
+            remember.close().await;
+        }
         self.closed.set(true);
         self.lifetime.cancel();
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {

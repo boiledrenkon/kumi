@@ -753,7 +753,8 @@ impl DawProfile {
         // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window. Kumi's
         // changes in Logic are undone through its host's journal (M3), each as a new step of Logic's own undo. (M5) Kumi
         // hears Logic: it plays a part and captures what Logic outputs, and auditions candidates a pass each; a region's
-        // audio file waits for the bridge's rows to name it, and a goal's render rig for a later slice.
+        // audio file waits for the bridge's rows to name it, and a goal's render rig for a later slice. A saved project is
+        // caught up on as it opens (M6), from the snapshot Kumi kept of it; its id is its path's, not kept inside it.
         caps: Capabilities {
             undo: true,
             hear: true,
@@ -766,6 +767,7 @@ impl DawProfile {
             recording_state: true,
             open_project: true,
             ui_hands: true,
+            catch_up: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {

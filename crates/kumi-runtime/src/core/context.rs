@@ -1,6 +1,7 @@
 //! What a DAW's integration tells the app and asks of it, whichever DAW it is: the neutral half of a DAW's options
 //! (Live's are `AbletonOptions`, built from this plus what only Live has: its bridge, User Library, Ears, hands).
 use super::contracts::{ActionEvent, AuditionEvent, CatchUp, ChangeRecord, ConnectionListener, PinnedNode};
+use super::project::ProjectStore;
 use super::view::{DawFocus, Transport};
 use chrono::{DateTime, Utc};
 use futures::future::LocalBoxFuture;
@@ -39,6 +40,9 @@ pub struct IntegrationContext {
     pub on_look_again: Option<Rc<dyn Fn()>>,
     pub change_timeout_ms: Option<u64>,
     pub on_catch_up: Option<Rc<dyn Fn(CatchUp)>>,
+    /// Where saved projects' baselines are kept (the session's store, each project under its place), for a DAW Kumi
+    /// catches up on; None keeps none.
+    pub project_store: Option<Rc<dyn ProjectStore>>,
     pub reconnect_interval_ms: Option<u64>,
     pub restore_file: Option<String>,
     pub on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
@@ -69,6 +73,7 @@ impl IntegrationContext {
             on_look_again: None,
             change_timeout_ms: None,
             on_catch_up: None,
+            project_store: None,
             reconnect_interval_ms: None,
             restore_file: None,
             on_audition: None,
