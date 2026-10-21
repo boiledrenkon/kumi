@@ -677,6 +677,49 @@ async fn a_renoise_goal_settles_its_winner_as_one_device_params_change_that_kumi
         .await;
 }
 
+/// (#361 review K27) A Renoise goal that fails to open takes its safety Maximizers off again, each found on its track's
+/// chain as it is now: the second one's add moved the device refs the first was added under.
+#[tokio::test(flavor = "current_thread")]
+async fn a_renoise_goal_that_fails_to_open_takes_its_safety_maximizers_off_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.add_device(4, "EQ 10");
+            script.add_device(3, "EQ 10");
+            script.listening().refuse_copies_of("track:3", "Renoise can't copy a group track for Kumi");
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let candidate = |track: &str| AuditionCandidate { track: track.into(), clip: None, label: None, mix: None };
+            let request = AuditionRequest {
+                candidates: vec![candidate("Bass"), candidate("Drums")],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let refused = renoise.goal(&request, Signal::new()).await.unwrap().err().expect("the group can't be copied");
+            assert!(refused.contains("group"), "{refused}");
+            for track in [4, 3] {
+                assert_eq!(
+                    script.device_paths(track),
+                    ["Audio/Effects/Native/TrackVolPan", "Audio/Effects/Native/EQ 10"],
+                    "track {track}'s safety Maximizer is gone: {:?}",
+                    told.borrow()
+                );
+            }
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (#361 review K17) A song with tempo commands: each render plays them into Renoise's transport. The producer's tempo
 /// is set back once for a whole goal (before its best plays out loud), as one step of Renoise's undo that Kumi says.
 #[tokio::test(flavor = "current_thread")]

@@ -73,6 +73,8 @@ struct State {
     next_notes: Vec<String>,
     /// What the next render tells of the tempo it played into the transport.
     next_tempo: Option<Value>,
+    /// Tracks whose scratch copies are refused (by ref, or a Renoise track's place: "track:3"), and why.
+    refused_copies: Vec<(String, String)>,
     /// The marks the next capture answers (where the playhead was at its first frame and at each jump).
     capture_marks: Option<Value>,
     /// What part of its source an item plays (REAPER): offset and length in the file, its play rate, reversed.
@@ -150,6 +152,7 @@ impl SimListening {
                 silent_refs: vec![],
                 next_notes: vec![],
                 next_tempo: None,
+                refused_copies: vec![],
                 capture_marks: None,
                 item_part: None,
             })),
@@ -183,6 +186,11 @@ impl SimListening {
 
     pub fn set_tempo(&self, tempo: f64) {
         self.state.lock().unwrap().tempo = tempo;
+    }
+
+    /// A track the bridge won't make scratch copies of (by ref, or a Renoise track's place: "track:3"), and why.
+    pub fn refuse_copies_of(&self, track: &str, why: &str) {
+        self.state.lock().unwrap().refused_copies.push((track.into(), why.into()));
     }
 
     /// What the next render tells of the tempo it played into the transport ({before: {bpm, lpb}, bpm, lpb}): Renoise's
@@ -714,6 +722,11 @@ impl SimListening {
                 let source = params["ref"].as_str().unwrap_or_default().to_string();
                 if !known(&source) {
                     return Err(("gone".into(), format!("{source} isn't in the project any more: read again")));
+                }
+                if let Some((_, why)) =
+                    state.refused_copies.iter().find(|(track, _)| source == *track || source.ends_with(&format!(":{track}")))
+                {
+                    return Err(("failed".into(), why.clone()));
                 }
                 let count = params["count"].as_u64().unwrap_or(1);
                 let tag: String = id.chars().rev().take(4).collect();

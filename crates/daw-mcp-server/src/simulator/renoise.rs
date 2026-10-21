@@ -304,6 +304,18 @@ impl RenoiseScript {
         state.epoch += 1;
     }
 
+    /// A track's chain as device paths, in order (TrackVolPan first), when a test gave it one.
+    pub fn device_paths(&self, track: u64) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .chains
+            .tracks
+            .get(&track)
+            .map(|chain| chain.iter().map(|device| device.path.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// A parameter's value on a track's device (its place from 1), by the parameter's name.
     pub fn device_value(&self, track: u64, at: u64, name: &str) -> Option<f64> {
         self.state.lock().unwrap().chains.value(track, at, name)
@@ -548,6 +560,37 @@ impl RenoiseScript {
         }
         if matches!(kind, "song-bpm" | "loop-range" | "loop-pattern" | "metronome-switch" | "track-solo") {
             return Self::phrase_change(state, method, params);
+        }
+        // `device-delete {ref: device}` on a track a test gave a chain: by the device's place in this epoch only (a
+        // device-add since moves it, as the tool's refs do), one step of Renoise's undo.
+        if kind == "device-delete" {
+            let Some((from, at)) = place(params["input"]["ref"].as_str(), "device") else { return Err(bad("ref must be a device's ref")) };
+            if method != "change_restore" && from != epoch {
+                return Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again")));
+            }
+            let (track, device) = (at.first().copied().unwrap_or(0), at.get(1).copied().unwrap_or(0));
+            let target = json!({"ref": format!("{epoch}:track:{track}"), "kind": "track"});
+            let display = json!({"title": format!("Removed device {device} from “Track {track}”")});
+            return match method {
+                "change_preview" => Ok(
+                    json!({"target": target, "prior": {"device": device}, "fence": {"device": device}, "display": display, "epoch": epoch.to_string(), "layout": 0}),
+                ),
+                "change_apply" => {
+                    if !state.chains.removed(track, device) {
+                        return Err(("gone".into(), "that device isn't there any more".into()));
+                    }
+                    if let Some(count) = state.devices.get_mut(&track) {
+                        *count = count.saturating_sub(1);
+                    }
+                    state.epoch += 1;
+                    let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                    state.undo.push(desc.clone());
+                    Ok(
+                        json!({"applied": {"device": device}, "display": display, "undo": {"desc": desc, "entry": true}, "epoch": state.epoch.to_string(), "layout": 0, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
+                    )
+                }
+                _ => Err(("daw-only".into(), "the sim doesn't put a deleted device back".into())),
+            };
         }
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),

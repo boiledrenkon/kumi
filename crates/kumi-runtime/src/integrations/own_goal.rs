@@ -79,8 +79,9 @@ pub(super) struct OwnGoalRig<S: RefScheme + 'static> {
     focus: Option<Focus>,
     screen: Option<Screen>,
     heard: RefCell<IndexMap<String, Cached>>,
-    /// The safety limiters this rig put on candidates (their refs): taken back if the goal never opens.
-    limiters: RefCell<Vec<String>>,
+    /// The safety limiters this rig put on candidates: each track (its ref as the book follows it), its name, and the
+    /// limiter's place in its chain. Taken back if the goal never opens.
+    limiters: RefCell<Vec<(String, String, u64)>>,
 }
 
 fn key(knob: &Knob) -> String {
@@ -143,8 +144,8 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
             match rig.adopt(&candidate.track, &label, window, &signal).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(why)) => {
-                    rig.abandon().await;
-                    return Ok(Err(why));
+                    let stays = rig.abandon().await;
+                    return Ok(Err(std::iter::once(why).chain(stays).collect::<Vec<_>>().join(" ")));
                 }
                 Err(error) => {
                     rig.abandon().await;
@@ -213,7 +214,8 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
                 Err(why) => return Ok(Err(why)),
             };
             if let Some(added) = devices.last().filter(|device| device.own_name.contains(limiter)) {
-                self.limiters.borrow_mut().push(added.reference.clone());
+                let short = r.link.book.borrow_mut().short_ref(&track);
+                self.limiters.borrow_mut().push((short, name.clone(), added.index));
             }
             r.tell_app(&format!("Kumi put a safety {limiter} last on “{name}” for the goal's search"));
         }
@@ -343,13 +345,38 @@ impl<S: RefScheme + 'static> OwnGoalRig<S> {
         Ok(Ok(()))
     }
 
-    /// A goal that never opened: its copies go, and the safety limiters it put on candidates are taken off again.
-    async fn abandon(&self) {
+    /// A goal that never opened: its copies go, and the safety limiters it put on candidates are taken off again, each
+    /// found on its track's chain as it is now (Renoise's device refs go stale as soon as a device list changes). What
+    /// stays is said.
+    async fn abandon(&self) -> Vec<String> {
         self.drop_copies().await;
         let r = &self.renderer;
-        for limiter in self.limiters.take() {
-            let _ = r.plan.history.quietly(None, r.change(r.table.delete_tool, json!({"ref": limiter}), r.cleanup_signal())).await;
+        let (_, limiter) = r.table.safety_limiter;
+        let signal = r.cleanup_signal();
+        let mut stays = vec![];
+        for (short, name, place) in self.limiters.take() {
+            let track = r.link.book.borrow().lengthen(&json!({"ref": short}))["ref"].as_str().unwrap_or(&short).to_owned();
+            let found = match r.devices(&track, &signal).await {
+                Ok(Ok(chain)) => chain
+                    .iter()
+                    .find(|device| device.index == place && device.own_name.contains(limiter))
+                    .or_else(|| chain.last().filter(|device| device.own_name.contains(limiter)))
+                    .map(|device| device.reference.clone()),
+                _ => None,
+            };
+            let gone = match found {
+                Some(reference) => {
+                    r.plan.history.quietly(None, r.change(r.table.delete_tool, json!({"ref": reference}), signal.clone())).await.is_ok()
+                }
+                None => false,
+            };
+            if !gone {
+                let note = format!("Kumi's safety {limiter} stays last on “{name}”: delete it if you don't want it there.");
+                r.tell_app(&note);
+                stays.push(note);
+            }
         }
+        stays
     }
 
     /// A slot's track now: by the ref it had where refs are identities (REAPER's GUIDs: a track inserted above an unnamed
