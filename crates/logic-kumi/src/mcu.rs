@@ -2,10 +2,11 @@
 //! installs a control surface by itself (it scans new ports and sends device queries; the bridge answers only as a
 //! Mackie Control, device 0x14, never as the extender or the C4, so one device is installed). From then on Logic
 //! streams its state to the surface, which the bridge reads: the transport LEDs (play, record, cycle), the timecode
-//! display (the playhead's bar and beat), the select LEDs (which of the bank's eight strips is selected) and the
-//! LCD (the eight strips' names, seven characters each). The bridge presses the surface's buttons too (select, the
-//! transport) when a reader needs Logic to select a track. The protocol as the lab measured it: `docs/evidence/
-//! logic-lab-2026-10-18.md`. [`Surface`] is the pure state machine over bytes; [`Mcu`] drives it through the helper.
+//! display (the playhead's bars, beats, divisions and ticks, which listening follows while Logic plays), the select
+//! LEDs (which of the bank's eight strips is selected) and the LCD (the eight strips' names, seven characters each).
+//! The bridge presses the surface's buttons too (select, solo, the transport). The protocol as the lab measured it:
+//! `docs/evidence/logic-lab-2026-10-18.md`. [`Surface`] is the pure state machine over bytes; [`Mcu`] drives it
+//! through the helper.
 
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ const LCD_WIDTH: usize = 56;
 
 /// The surface's buttons as note numbers (the Mackie Control's map).
 pub mod button {
+    /// The strips' solo buttons (and LEDs), the first strip's here, one note a strip.
+    pub const SOLO: u8 = 0x08;
     pub const SELECT: u8 = 0x18;
     /// The V-Pot assignment buttons: Pan shows the strips' names on the LCD, where select selects a track.
     pub const TRACK: u8 = 0x28;
@@ -43,6 +46,10 @@ pub mod button {
     pub const STOP: u8 = 0x5D;
     pub const PLAY: u8 = 0x5E;
     pub const RECORD: u8 = 0x5F;
+    /// The timecode display's mode: the button that switches it, and the two LEDs that say which it shows.
+    pub const SMPTE_BEATS: u8 = 0x35;
+    pub const SMPTE_LED: u8 = 0x71;
+    pub const BEATS_LED: u8 = 0x72;
 }
 
 /// What the surface learned from Logic since the last look.
@@ -56,7 +63,9 @@ pub struct State {
     pub selected: Option<usize>,
     /// The LCD's two lines of 56 characters.
     pub lcd: [String; 2],
-    /// The timecode display's twelve digits (bars, beats, divisions, ticks in Logic's "Beats" mode), as characters.
+    /// The assignment display's two characters ("PN" in the Pan view, controllers 0x4B and 0x4A) and the timecode
+    /// display's ten digits after them (controllers 0x49 to 0x40): in Logic's Beats mode three for the bar, two each
+    /// for the beat and the division, three for the tick ("  1 1 1  1"), as characters.
     pub timecode: [char; 12],
     /// The LEDs lit, by note number.
     pub leds: Vec<u8>,
@@ -70,14 +79,38 @@ impl State {
             .collect()
     }
 
-    /// The playhead's bar and beat from the timecode display (Logic shows "bars.beats.divisions.ticks" in it).
-    pub fn playhead(&self) -> Option<(u32, u32)> {
-        let text: String = self.timecode.iter().collect();
-        let mut parts = text.split(|c: char| !c.is_ascii_digit()).filter(|part| !part.is_empty());
-        let bar = parts.next()?.parse().ok()?;
-        let beat = parts.next().and_then(|beat| beat.parse().ok()).unwrap_or(1);
-        Some((bar, beat))
+    /// The timecode display's ten digits, without the assignment display's two characters before them.
+    pub fn digits(&self) -> String {
+        self.timecode[2..].iter().collect()
     }
+
+    /// The playhead as the timecode display shows it in Logic's Beats mode: bar, beat, division and tick, each in its
+    /// own run of digits. None while the display shows something else (SMPTE time, or digits on their way).
+    pub fn position(&self) -> Option<[i64; 4]> {
+        bbt(&self.digits())
+    }
+
+    /// The playhead's bar and beat from the timecode display.
+    pub fn playhead(&self) -> Option<(u32, u32)> {
+        let [bar, beat, _, _] = self.position()?;
+        Some((u32::try_from(bar).ok()?, u32::try_from(beat).ok()?))
+    }
+
+    /// Whether the timecode display shows bars and beats (its BEATS LED lit), not SMPTE time.
+    pub fn beats_mode(&self) -> bool {
+        self.leds.contains(&button::BEATS_LED) && !self.leds.contains(&button::SMPTE_LED)
+    }
+}
+
+/// Ten timecode digits in Logic's Beats mode read as bar (three), beat (two), division (two) and tick (three); a
+/// field that isn't a number (blank, or SMPTE's) is None.
+pub fn bbt(digits: &str) -> Option<[i64; 4]> {
+    let chars: Vec<char> = digits.chars().collect();
+    if chars.len() != 10 {
+        return None;
+    }
+    let field = |from: usize, to: usize| chars[from..to].iter().collect::<String>().trim().parse::<i64>().ok();
+    Some([field(0, 3)?, field(3, 5)?, field(5, 7)?, field(7, 10)?])
 }
 
 /// What the state machine wants done after some bytes: bytes to send back, and the events the change deserves.
@@ -87,6 +120,9 @@ pub struct Reaction {
     pub transport_changed: bool,
     pub selection_changed: bool,
     pub names_changed: bool,
+    /// The LCD's whole top line was written (Logic names the strips so; a message it shows for a moment, such as
+    /// "Solo" over the first strip's name when a solo button is pressed, writes a few characters only).
+    pub names_written: bool,
 }
 
 /// The Mackie Control as a state machine over the bytes Logic sends.
@@ -195,6 +231,9 @@ impl Surface {
                     if self.state.names() != before {
                         reaction.names_changed = true;
                     }
+                    if offset == 0 && text.len() >= LCD_WIDTH {
+                        reaction.names_written = true;
+                    }
                 }
             }
             _ => {}
@@ -247,14 +286,15 @@ impl Surface {
         }
     }
 
-    /// The timecode display: controllers 0x40 to 0x4B, one a digit, right to left; the value's low bits are the
-    /// character (0x30 + digit), bit 6 a dot after it.
+    /// The timecode and assignment displays: controllers 0x40 to 0x4B, one a character, right to left. The value's
+    /// low six bits are the character in the Mackie's seven-segment set (0x20 to 0x3F as in ASCII, so 0x31 is "1"
+    /// and 0x20 a blank; 0x01 to 0x1F the letters, 0x40 on), bit 6 a dot after it, which isn't kept.
     fn control(&mut self, controller: u8, value: u8) {
         if (0x40..=0x4B).contains(&controller) {
             self.state.installed = true;
             let digit = 11 - (controller - 0x40) as usize;
             let c = value & 0x3F;
-            self.state.timecode[digit] = if c == 0 { ' ' } else { char::from(0x20 + c) };
+            self.state.timecode[digit] = if c < 0x20 { char::from(0x40 + c) } else { char::from(c) };
         }
     }
 }
@@ -289,7 +329,8 @@ pub fn from_hex(text: &str) -> Vec<u8> {
 pub struct Mcu {
     pub surface: Surface,
     pub open: bool,
-    /// The strips' names Logic last wrote on the LCD, so a track's bank place can be looked up by name.
+    /// The strips' names Logic last wrote on the LCD's whole top line, so a track's bank place can be looked up by
+    /// name (a message Logic shows over a name for a moment doesn't change them).
     pub names: Vec<String>,
     /// How many of Logic's packets were logged: the first few, for the lab.
     logged: u32,
@@ -344,7 +385,7 @@ impl Mcu {
                 crate::log::line(&format!("Mackie: couldn't answer: {error}"));
             }
         }
-        if reaction.names_changed {
+        if reaction.names_written {
             self.names = self.surface.state.names();
         }
         reaction
@@ -388,6 +429,33 @@ impl Mcu {
         Ok(true)
     }
 
+    /// The bank's strip (from 0) the LCD names `name` on, when exactly one does: Logic writes a name's first seven
+    /// characters there (a longer name it may shorten otherwise, and then it isn't found).
+    pub fn strip_named(&self, name: &str) -> Option<usize> {
+        let short: String = name.chars().take(LCD_COLUMNS).collect();
+        let short = short.trim();
+        if short.is_empty() {
+            return None;
+        }
+        let mut found = self.names.iter().enumerate().filter(|(_, n)| n.as_str() == short);
+        let strip = found.next()?.0;
+        found.next().is_none().then_some(strip)
+    }
+
+    /// Whether the strip's solo LED is lit.
+    pub fn soloed(&self, strip: usize) -> bool {
+        strip < STRIPS && self.surface.state.leds.contains(&(button::SOLO + strip as u8))
+    }
+
+    /// Presses the strip's solo button: Logic solos or unsolos its track.
+    pub fn press_solo(&mut self, strip: usize, helper: &mut dyn Helper) -> Result<bool, HelperError> {
+        if strip >= STRIPS {
+            return Ok(false);
+        }
+        self.press(button::SOLO + strip as u8, helper)?;
+        Ok(true)
+    }
+
     /// Waits for Logic's bytes for a while, answering them: used right after the ports open, for the install.
     pub fn pump(&mut self, helper: &mut dyn Helper, wait: Duration) -> Reaction {
         let mut all = Reaction::default();
@@ -398,6 +466,7 @@ impl Mcu {
             all.transport_changed |= reaction.transport_changed;
             all.selection_changed |= reaction.selection_changed;
             all.names_changed |= reaction.names_changed;
+            all.names_written |= reaction.names_written;
         }
         all
     }
@@ -444,24 +513,35 @@ mod tests {
         let reaction = surface.receive(second);
         assert!(reaction.names_changed);
         assert_eq!(&surface.state.names()[..3], ["Vocal", "Keys", ""]);
-        // The timecode display: bar 9, beat 1, written right to left.
-        for (controller, c) in [
-            (0x4B, b'9' - 0x20),
-            (0x4A, 0),
-            (0x49, 0),
-            (0x48, b'1' - 0x20),
-            (0x47, 0),
-            (0x46, b'1' - 0x20),
-            (0x45, 0),
-            (0x44, 0),
-            (0x43, b'1' - 0x20),
-            (0x42, 0),
-            (0x41, 0),
-            (0x40, 0),
+        // The timecode and assignment displays as Logic writes them (the lab's bytes): "PN" in the assignment
+        // display, then bar 7 at its first beat, division and tick, digit by digit from the left, each its ASCII.
+        for packet in [
+            "B0 49 20",
+            "B0 48 20",
+            "B0 47 37",
+            "B0 46 20",
+            "B0 45 31",
+            "B0 44 20",
+            "B0 43 31",
+            "B0 42 20 B0 41 20",
+            "B0 40 31",
+            "B0 4B 10",
+            "B0 4A 0E",
         ] {
-            surface.receive(&[0xB0, controller, c]);
+            surface.receive(&from_hex(packet));
         }
-        assert_eq!(surface.state.playhead(), Some((9, 1)));
+        assert_eq!(surface.state.timecode.iter().collect::<String>(), "PN  7 1 1  1");
+        assert_eq!((surface.state.digits().as_str(), surface.state.position()), ("  7 1 1  1", Some([7, 1, 1, 1])));
+        assert_eq!(surface.state.playhead(), Some((7, 1)));
+        // Playing: the ticks' digits move on their own (bar 1, beat 1, division 1, tick 183), and a dot bit is dropped.
+        for packet in ["B0 49 20", "B0 48 20", "B0 47 31", "B0 45 71", "B0 43 31", "B0 42 31", "B0 41 38", "B0 40 33"] {
+            surface.receive(&from_hex(packet));
+        }
+        assert_eq!(surface.state.position(), Some([1, 1, 1, 183]));
+        assert_eq!(bbt("  1 1 1   "), None, "a field on its way isn't a number");
+        assert!(!surface.state.beats_mode(), "no BEATS LED yet");
+        surface.receive(&from_hex("90 72 7F"));
+        assert!(surface.state.beats_mode());
         assert_eq!(press(button::SELECT), vec![vec![0x90, 0x18, 0x7F], vec![0x90, 0x18, 0x00]]);
         assert_eq!(hex(&[0x90, 0x18, 0x7F]), "90 18 7F");
     }
@@ -474,6 +554,8 @@ mod tests {
         hands.reply("midi.send", Ok(json!({"sent": true})));
         hands.reply("midi.send", Ok(json!({"sent": true})));
         hands.reply("midi.send", Ok(json!({"sent": true})));
+        hands.reply("midi.send", Ok(json!({"sent": true})));
+        hands.reply("midi.send", Ok(json!({"sent": true})));
         hands.reply("midi.close", Ok(json!({"closed": true})));
         let mut launcher = hands.clone();
         let mut helper = crate::helper::Launch::launch(&mut launcher).unwrap();
@@ -482,23 +564,40 @@ mod tests {
         assert!(mcu.open);
         let reaction = mcu.on_event(&json!({"event": "midi", "hex": "F0 00 00 66 14 00 F7"}), helper.as_mut());
         assert_eq!(reaction.send.len(), 1);
-        let mut lcd = String::from("F0 00 00 66 14 12 00");
-        for byte in b"Vocal  Keys   " {
-            lcd.push_str(&format!(" {byte:02X}"));
-        }
-        lcd.push_str(" F7");
-        assert!(mcu.on_event(&json!({"event": "midi", "hex": lcd}), helper.as_mut()).names_changed);
+        let lcd = |offset: u8, text: &str| {
+            let mut hex = format!("F0 00 00 66 14 12 {offset:02X}");
+            for byte in text.bytes() {
+                hex.push_str(&format!(" {byte:02X}"));
+            }
+            hex + " F7"
+        };
+        // Logic names the strips by writing the LCD's whole top line.
+        let reaction = mcu.on_event(&json!({"event": "midi", "hex": lcd(0, &format!("{:56}", "Vocal  Keys"))}), helper.as_mut());
+        assert!(reaction.names_changed && reaction.names_written);
+        // A message over the first name for a moment ("Solo" when a solo button is pressed) leaves the names as they were.
+        let reaction = mcu.on_event(&json!({"event": "midi", "hex": lcd(0, "Solo ")}), helper.as_mut());
+        assert!(reaction.names_changed && !reaction.names_written);
+        assert_eq!(&mcu.surface.state.names()[..2], ["Solo", "Keys"]);
+        assert_eq!(&mcu.names[..2], ["Vocal", "Keys"]);
         assert!(mcu.select_named("Keys", helper.as_mut()).unwrap());
         assert!(!mcu.select_named("Drums", helper.as_mut()).unwrap());
         assert!(!mcu.select_strip(9, helper.as_mut()).unwrap());
         assert!(mcu.install_ms().is_some(), "the LCD write after the query dates the install");
+        // Solo by the strip the LCD names: the second strip's solo button, its LED read from Logic's feedback.
+        assert_eq!((mcu.strip_named("Keys"), mcu.strip_named("Drums"), mcu.strip_named("")), (Some(1), None, None));
+        assert!(mcu.press_solo(1, helper.as_mut()).unwrap());
+        assert!(!mcu.press_solo(8, helper.as_mut()).unwrap());
+        assert!(!mcu.soloed(1));
+        mcu.on_event(&json!({"event": "midi", "hex": "90 09 7F"}), helper.as_mut());
+        assert!(mcu.soloed(1) && !mcu.soloed(0));
         mcu.close(helper.as_mut());
         let ops: Vec<String> = hands.calls().into_iter().map(|(op, _)| op).collect();
-        assert_eq!(ops, ["midi.open", "midi.send", "midi.send", "midi.send", "midi.close"]);
+        assert_eq!(ops, ["midi.open", "midi.send", "midi.send", "midi.send", "midi.send", "midi.send", "midi.close"]);
         let sent: Vec<Value> =
             hands.calls().into_iter().filter(|(op, _)| op == "midi.send").map(|(_, params)| params["hex"].clone()).collect();
         assert_eq!(sent[1], "90 19 7F");
         assert_eq!(sent[2], "90 19 00");
+        assert_eq!((sent[3].as_str(), sent[4].as_str()), (Some("90 09 7F"), Some("90 09 00")));
         assert!(!mcu.open);
     }
 }

@@ -1,9 +1,10 @@
 // Kumi's hands for Logic Pro (made by Kumi). One JSON request a line on stdin, one JSON reply a line on stdout,
-// events in between. The helper knows macOS, not Logic: Accessibility reads and writes, menus, key events and
-// virtual MIDI ports, each exactly as asked. Its protocol is docs/en/LOGIC_CONTRACT.md, "Helper protocol".
+// events in between. The helper knows macOS, not Logic: Accessibility reads and writes, menus, key events, virtual
+// MIDI ports and process taps, each exactly as asked. Its protocol is docs/en/LOGIC_CONTRACT.md, "Helper protocol".
 import Cocoa
 import ApplicationServices
 import CoreMIDI
+import CoreAudio
 
 // MARK: - Lines out
 
@@ -608,9 +609,11 @@ final class Midi {
     MIDIObjectSetIntegerProperty(source, kMIDIPropertyUniqueID, uid)
     status = MIDIDestinationCreateWithBlock(client, name as CFString, &destination) { list, _ in
       let stamp = Int64(Date().timeIntervalSince1970 * 1000)
+      let arrived = mach_absolute_time()
       for packet in list.unsafeSequence() {
         let data = UnsafeRawPointer(packet).advanced(by: MemoryLayout<MIDIPacket>.offset(of: \MIDIPacket.data)!)
-        emit(["event": "midi", "hex": hex(Array(UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.length)))), "ms": stamp])
+        emit(["event": "midi", "hex": hex(Array(UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.length)))), "ms": stamp,
+              "hostTime": arrived, "timeStamp": packet.pointee.timeStamp])
       }
     }
     guard status == noErr else {
@@ -645,6 +648,555 @@ final class Midi {
   }
 }
 let midi = Midi()
+
+// MARK: - Process taps
+
+/** A Core Audio status as text: its four characters when they print ('!hog'), else the number. */
+func statusText(_ status: OSStatus) -> String {
+  let value = UInt32(bitPattern: status)
+  let bytes = [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: value >> UInt32($0)) }
+  if bytes.allSatisfy({ (0x20..<0x7F).contains($0) }), let text = String(bytes: bytes, encoding: .ascii) { return "'\(text)'" }
+  return String(status)
+}
+
+/** A Core Audio step that failed, as the reply says it: `denied` when macOS refused it for want of permission, else
+    `failed` with the step and the status. */
+func audioFailure(_ step: String, _ status: OSStatus, _ what: String) -> Failure {
+  if status == kAudioDevicePermissionsError {
+    return fail("denied", ["step": step, "status": Int(status), "detail": "macOS refused the process tap (\(statusText(status))): System Audio Recording is off for the app the helper runs under (System Settings > Privacy & Security > Screen & System Audio Recording)"])
+  }
+  return fail("failed", ["step": step, "status": Int(status), "detail": "\(what) (\(statusText(status)))"])
+}
+
+func audioAddress(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
+  AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+}
+
+/** A property of fixed size, read into `value`. */
+func audioRead<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ value: inout T, scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> OSStatus {
+  var address = audioAddress(selector, scope)
+  var size = UInt32(MemoryLayout<T>.size)
+  return withUnsafeMutablePointer(to: &value) { AudioObjectGetPropertyData(object, &address, 0, nil, &size, $0) }
+}
+
+/** A device's UID, which an aggregate device's composition names it by. */
+func deviceUID(_ device: AudioObjectID) -> String? {
+  var uid: Unmanaged<CFString>?
+  guard audioRead(device, kAudioDevicePropertyDeviceUID, &uid) == noErr, let uid = uid else { return nil }
+  return uid.takeRetainedValue() as String
+}
+
+/** The process object Core Audio keeps for a pid: kAudioObjectUnknown while the process makes no audio. */
+func audioProcess(_ pid: pid_t) -> (AudioObjectID, OSStatus) {
+  var address = audioAddress(kAudioHardwarePropertyTranslatePIDToProcessObject)
+  var qualifier = pid
+  var object = AudioObjectID(kAudioObjectUnknown)
+  var size = UInt32(MemoryLayout<AudioObjectID>.size)
+  let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, UInt32(MemoryLayout<pid_t>.size), &qualifier, &size, &object)
+  return (object, status)
+}
+
+/** The channels of each buffer a device's IOProc gets for a scope, in order. */
+func bufferChannels(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) -> [Int] {
+  var address = audioAddress(kAudioDevicePropertyStreamConfiguration, scope)
+  var size: UInt32 = 0
+  guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr, size >= UInt32(MemoryLayout<AudioBufferList>.size) else { return [] }
+  let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+  defer { raw.deallocate() }
+  guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, raw) == noErr else { return [] }
+  return UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self)).map { Int($0.mNumberChannels) }
+}
+
+/** What the IO thread and the writer share, allocated before the IOProc exists and freed after it is destroyed: plain
+    numbers and pointers, so the IO thread never allocates, locks, retains or touches a file. The IO thread puts each
+    buffer in the ring as a record, then signals; the writer takes one record a signal (the semaphore orders the
+    samples before it) and writes back only `taken`, from which the IO thread reckons the room left. */
+struct TapRing {
+  let samples: UnsafeMutablePointer<Float>
+  /** The ring's size in samples, a whole number of frames. */
+  let capacity: Int
+  /** Each record's frames, by record number modulo `slots`. */
+  let lengths: UnsafeMutablePointer<Int>
+  let slots: Int
+  let channels: Int
+  let maxFrames: Int
+  /** Frames between two anchors: a quarter second. */
+  let anchorEvery: Int
+  /** Anchors in pairs: the frame in the file, then the host time of the buffer that starts there. */
+  let anchors: UnsafeMutablePointer<UInt64>
+  let anchorSlots: Int
+  let signal: Unmanaged<DispatchSemaphore>
+  /** The samples and the records the writer has taken: the writer writes them, the IO thread only reads them. */
+  let taken: UnsafeMutablePointer<Int>
+  // The IO thread's own.
+  var put = 0
+  var records = 0
+  /** Frames taken in: the file's length once the writer catches up. */
+  var frames = 0
+  var anchorCount = 0
+  var lastAnchor = -1
+  var anchorDue = false
+  var lastFrame = -1
+  var lastHost: UInt64 = 0
+  /** Where the next buffer should start on the device's timeline. */
+  var expected = Float64.nan
+  var dropped = 0
+  var truncated = false
+}
+
+/** One IO cycle on Core Audio's real-time thread: the tap's frames into the ring, an anchor when one is due, a signal. */
+func tapTake(_ ring: UnsafeMutablePointer<TapRing>, _ input: UnsafePointer<AudioBufferList>, _ time: UnsafePointer<AudioTimeStamp>) {
+  let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+  let channels = ring.pointee.channels
+  guard let lead = buffers.first else { return }
+  var count = Int(lead.mDataByteSize) / (Int(max(lead.mNumberChannels, 1)) * MemoryLayout<Float>.size)
+  guard count > 0 else { return }
+  let stamp = time.pointee
+  // A jump on the device's timeline is frames this thread never saw: dropped, with an anchor after them.
+  if stamp.mFlags.contains(.sampleTimeValid) {
+    let gap = stamp.mSampleTime - ring.pointee.expected
+    if gap > 0.5 && gap < 1e12 {
+      ring.pointee.dropped += Int(gap.rounded())
+      ring.pointee.anchorDue = true
+    } else if gap < -0.5 {
+      ring.pointee.anchorDue = true
+    }
+    ring.pointee.expected = stamp.mSampleTime + Float64(count)
+  }
+  if ring.pointee.truncated { return }
+  if count >= ring.pointee.maxFrames - ring.pointee.frames {
+    count = ring.pointee.maxFrames - ring.pointee.frames
+    ring.pointee.truncated = true
+    if count <= 0 { return }
+  }
+  let wanted = count * channels
+  let taken = ring.pointee.taken
+  if wanted > ring.pointee.capacity - (ring.pointee.put - taken[0]) || ring.pointee.records - taken[1] >= ring.pointee.slots {
+    // The writer is behind: these frames are lost, and the next buffer kept says where the file goes on.
+    ring.pointee.dropped += count
+    ring.pointee.anchorDue = true
+    return
+  }
+  let frame = ring.pointee.frames
+  if stamp.mFlags.contains(.hostTimeValid) {
+    if ring.pointee.anchorDue || ring.pointee.lastAnchor < 0 || frame - ring.pointee.lastAnchor >= ring.pointee.anchorEvery {
+      let index = ring.pointee.anchorCount
+      if index < ring.pointee.anchorSlots {
+        ring.pointee.anchors[2 * index] = UInt64(frame)
+        ring.pointee.anchors[2 * index + 1] = stamp.mHostTime
+        ring.pointee.anchorCount = index + 1
+      }
+      ring.pointee.lastAnchor = frame
+      ring.pointee.anchorDue = false
+    }
+    ring.pointee.lastFrame = frame
+    ring.pointee.lastHost = stamp.mHostTime
+  }
+  let samples = ring.pointee.samples, capacity = ring.pointee.capacity
+  let start = ring.pointee.put % capacity
+  if Int(lead.mNumberChannels) == channels, let data = lead.mData?.assumingMemoryBound(to: Float.self) {
+    let head = min(wanted, capacity - start)
+    (samples + start).update(from: data, count: head)
+    if wanted > head { samples.update(from: data + head, count: wanted - head) }
+  } else {
+    // One buffer a channel: interleaved on the way in.
+    for channel in 0..<channels {
+      let data = channel < buffers.count ? buffers[channel].mData?.assumingMemoryBound(to: Float.self) : nil
+      for index in 0..<count { samples[(start + index * channels + channel) % capacity] = data?[index] ?? 0 }
+    }
+  }
+  ring.pointee.lengths[ring.pointee.records % ring.pointee.slots] = count
+  ring.pointee.put += wanted
+  ring.pointee.records += 1
+  ring.pointee.frames = frame + count
+  _ = ring.pointee.signal._withUnsafeGuaranteedRef { $0.signal() }
+}
+
+let tapIOProc: AudioDeviceIOProc = { _, _, input, inputTime, _, _, client in
+  if let client = client { tapTake(client.assumingMemoryBound(to: TapRing.self), input, inputTime) }
+  return noErr
+}
+
+/** A 32-bit float WAV header (format 3) whose sizes say `bytes` of samples. */
+func wavHeader(rate: Int, channels: Int, bytes: Int) -> [UInt8] {
+  var header: [UInt8] = []
+  func text(_ value: String) { header += Array(value.utf8) }
+  func u32(_ value: Int) { withUnsafeBytes(of: UInt32(truncatingIfNeeded: value).littleEndian) { header += $0 } }
+  func u16(_ value: Int) { withUnsafeBytes(of: UInt16(truncatingIfNeeded: value).littleEndian) { header += $0 } }
+  text("RIFF"); u32(36 + bytes); text("WAVE")
+  text("fmt "); u32(16); u16(3); u16(channels); u32(rate); u32(rate * channels * 4); u16(channels * 4); u16(32)
+  text("data"); u32(bytes)
+  return header
+}
+
+/** The whole buffer written to the file, or errno. */
+func writeAll(_ fd: Int32, _ pointer: UnsafeRawPointer, _ bytes: Int) -> Int32 {
+  var done = 0
+  while done < bytes {
+    let wrote = Darwin.write(fd, pointer + done, bytes - done)
+    if wrote < 0 {
+      if errno == EINTR { continue }
+      return errno
+    }
+    done += wrote
+  }
+  return 0
+}
+
+/** One running tap: its Core Audio objects, the ring, the writer thread and the file. */
+final class Tap {
+  let path: String
+  let rate: Float64
+  let channels: Int
+  let ring: UnsafeMutablePointer<TapRing>
+  let semaphore = DispatchSemaphore(value: 0)
+  let fd: Int32
+  var tap = AudioObjectID(kAudioObjectUnknown)
+  var aggregate = AudioObjectID(kAudioObjectUnknown)
+  var proc: AudioDeviceIOProcID?
+  var hostTime: UInt64 = 0
+  // The writer's tallies, behind `lock` for tap.status.
+  let lock = NSLock()
+  var written = 0
+  var lost = 0
+  var peak: Float = 0
+  var squares: Double = 0
+  var writeError: Int32 = 0
+  var quitting = false
+  var patched = 0
+  let writerDone = DispatchSemaphore(value: 0)
+  /** Whether the writer thread runs. The thread holds the tap until it ends, so the ring outlives it. */
+  var writing = false
+
+  init(path: String, rate: Float64, channels: Int, maxSeconds: Double, fd: Int32) {
+    self.path = path
+    self.rate = rate
+    self.channels = channels
+    self.fd = fd
+    let perSecond = Int(rate.rounded())
+    // Four seconds of room and of records (a record a buffer, down to 16 frames a buffer) between the IO thread and the
+    // writer; an anchor a quarter second for the longest capture, and some to spare for the gaps.
+    let capacity = 4 * perSecond * channels
+    let slots = max(4 * perSecond / 16, 1024)
+    let maxFrames = max(min(Int(maxSeconds * rate), (Int(UInt32.max) - 36) / (channels * 4)), 1)
+    let anchorSlots = Int(maxSeconds * 4) + 1024
+    let taken = UnsafeMutablePointer<Int>.allocate(capacity: 2)
+    taken.initialize(repeating: 0, count: 2)
+    let samples = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+    samples.initialize(repeating: 0, count: capacity)
+    let lengths = UnsafeMutablePointer<Int>.allocate(capacity: slots)
+    lengths.initialize(repeating: 0, count: slots)
+    let anchors = UnsafeMutablePointer<UInt64>.allocate(capacity: 2 * anchorSlots)
+    anchors.initialize(repeating: 0, count: 2 * anchorSlots)
+    ring = UnsafeMutablePointer<TapRing>.allocate(capacity: 1)
+    ring.initialize(to: TapRing(samples: samples, capacity: capacity, lengths: lengths, slots: slots, channels: channels,
+                                maxFrames: maxFrames, anchorEvery: max(perSecond / 4, 1), anchors: anchors, anchorSlots: anchorSlots,
+                                signal: Unmanaged.passUnretained(semaphore), taken: taken))
+    // A wait that can't succeed makes the semaphore's kernel object here, so the IO thread's signal never has to.
+    _ = semaphore.wait(timeout: .now())
+  }
+
+  deinit {
+    ring.pointee.samples.deallocate()
+    ring.pointee.lengths.deallocate()
+    ring.pointee.anchors.deallocate()
+    ring.pointee.taken.deallocate()
+    ring.deallocate()
+  }
+
+  /** Starts a tap on the process `pid` writing to `path`: its process object, the tap, a private aggregate device
+      holding it, the file, the writer and the IOProc. Whatever was made goes again when a step fails. */
+  @available(macOS 14.2, *)
+  static func start(pid: pid_t, path: String, mute: Bool, maxSeconds: Double, deadline: Date) throws -> Tap {
+    guard processExists(pid) else { throw fail("failed", ["step": "process", "detail": "no process has pid \(pid)"]) }
+    let (process, translated) = audioProcess(pid)
+    guard translated == noErr else { throw audioFailure("process", translated, "Core Audio couldn't find the process of pid \(pid)") }
+    guard process != kAudioObjectUnknown else {
+      throw fail("failed", ["step": "process", "detail": "pid \(pid) makes no audio yet: Core Audio has no process object for it"])
+    }
+    let description = CATapDescription(stereoMixdownOfProcesses: [process])
+    description.uuid = UUID()
+    description.name = "Kumi tap"
+    description.isPrivate = true
+    description.muteBehavior = mute ? .mutedWhenTapped : .unmuted
+    var tap = AudioObjectID(kAudioObjectUnknown)
+    let created = AudioHardwareCreateProcessTap(description, &tap)
+    guard created == noErr, tap != kAudioObjectUnknown else { throw audioFailure("tap", created, "Core Audio couldn't make the process tap") }
+    var aggregate = AudioObjectID(kAudioObjectUnknown)
+    func undo() {
+      if aggregate != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregate) }
+      AudioHardwareDestroyProcessTap(tap)
+    }
+    var format = AudioStreamBasicDescription()
+    let read = audioRead(tap, kAudioTapPropertyFormat, &format)
+    guard read == noErr else { undo(); throw audioFailure("format", read, "Core Audio couldn't read the tap's format") }
+    let channels = Int(format.mChannelsPerFrame)
+    guard format.mFormatID == kAudioFormatLinearPCM, format.mFormatFlags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32,
+          channels > 0, format.mSampleRate >= 8000, format.mSampleRate <= 768_000 else {
+      undo()
+      throw fail("failed", ["step": "format", "detail": "the tap's format isn't 32-bit float PCM: \(format.mSampleRate) Hz, \(channels) channels, \(format.mBitsPerChannel) bits, flags \(format.mFormatFlags)"])
+    }
+    // Clocked by the default output device, with the tap's drift made up for; a device with inputs of its own would
+    // put them in the aggregate too, so then the tap is the aggregate's only member and its clock.
+    var output = AudioObjectID(kAudioObjectUnknown)
+    let found = audioRead(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, &output) == noErr
+    let clock = found && output != kAudioObjectUnknown && bufferChannels(output, kAudioObjectPropertyScopeInput).isEmpty ? deviceUID(output) : nil
+    var composition: [String: Any] = [
+      kAudioAggregateDeviceNameKey: "Kumi tap",
+      kAudioAggregateDeviceUIDKey: "kumi-tap-" + description.uuid.uuidString,
+      kAudioAggregateDeviceIsPrivateKey: 1,
+      kAudioAggregateDeviceIsStackedKey: 0,
+      kAudioAggregateDeviceTapAutoStartKey: 0,
+      kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: description.uuid.uuidString, kAudioSubTapDriftCompensationKey: 1]],
+    ]
+    if let clock = clock {
+      composition[kAudioAggregateDeviceMainSubDeviceKey] = clock
+      composition[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: clock]]
+    }
+    let made = AudioHardwareCreateAggregateDevice(composition as CFDictionary, &aggregate)
+    guard made == noErr, aggregate != kAudioObjectUnknown else {
+      aggregate = AudioObjectID(kAudioObjectUnknown)
+      undo()
+      throw audioFailure("aggregate", made, "Core Audio couldn't make the aggregate device for the tap")
+    }
+    // The IOProc's input is the tap's alone (one buffer of its channels, or one a channel), or nothing is recorded.
+    let buffers = bufferChannels(aggregate, kAudioObjectPropertyScopeInput)
+    guard buffers == [channels] || buffers == Array(repeating: 1, count: channels) else {
+      undo()
+      throw fail("failed", ["step": "streams", "detail": "the aggregate device's inputs \(buffers) aren't the tap's \(channels) channels"])
+    }
+    // The frames come at the aggregate's rate: the clock device's, which the tap is resampled to when its own differs.
+    var rate = Float64(0)
+    if audioRead(aggregate, kAudioDevicePropertyNominalSampleRate, &rate) != noErr || !(8000...768_000).contains(rate) { rate = format.mSampleRate }
+    let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+    guard fd >= 0 else {
+      let why = String(cString: strerror(errno))
+      undo()
+      throw fail("failed", ["step": "file", "detail": "couldn't make \(path): \(why)"])
+    }
+    let header = wavHeader(rate: Int(rate.rounded()), channels: channels, bytes: 0)
+    let wroteHeader = header.withUnsafeBytes { writeAll(fd, $0.baseAddress!, $0.count) }
+    guard wroteHeader == 0 else {
+      close(fd)
+      unlink(path)
+      undo()
+      throw fail("failed", ["step": "file", "detail": "couldn't write \(path): \(String(cString: strerror(wroteHeader)))"])
+    }
+    let running = Tap(path: path, rate: rate, channels: channels, maxSeconds: maxSeconds, fd: fd)
+    running.tap = tap
+    running.aggregate = aggregate
+    let writer = Thread { running.write() }
+    writer.name = "kumi-logic-hands.tap"
+    writer.qualityOfService = .userInitiated
+    running.writing = true
+    writer.start()
+    var proc: AudioDeviceIOProcID?
+    let added = AudioDeviceCreateIOProcID(aggregate, tapIOProc, UnsafeMutableRawPointer(running.ring), &proc)
+    guard added == noErr, let proc = proc else {
+      running.finish(keep: false)
+      throw audioFailure("ioproc", added, "Core Audio couldn't add the IOProc")
+    }
+    running.proc = proc
+    let started = AudioDeviceStart(aggregate, proc)
+    guard started == noErr else {
+      running.finish(keep: false)
+      throw audioFailure("start", started, "Core Audio couldn't start the aggregate device")
+    }
+    running.hostTime = mach_absolute_time()
+    // A start that took longer than the reply allows is taken back: the bridge heard `timeout` and owns no tap.
+    guard Date() < deadline else {
+      running.finish(keep: false)
+      throw fail("timeout", ["step": "start", "detail": "the tap took longer to start than 2 s allow"])
+    }
+    return running
+  }
+
+  /** The writer thread: one record a signal, until told to go. A capture that reached its length stops its IO, which
+      also ends the mute. */
+  func write() {
+    var stopped = false
+    while true {
+      semaphore.wait()
+      lock.lock()
+      let go = quitting
+      lock.unlock()
+      if go { break }
+      take()
+      lock.lock()
+      let full = written + lost >= ring.pointee.maxFrames
+      lock.unlock()
+      if full && !stopped, let proc = proc {
+        stopped = true
+        AudioDeviceStop(aggregate, proc)
+      }
+    }
+    writerDone.signal()
+  }
+
+  /** The next record from the ring into the file, measured on the way. The writer's, or the stopper's once the writer
+      has gone. After a write fails nothing more is written, so the file stays whole up to there. */
+  func take() {
+    let taken = ring.pointee.taken
+    let samples = ring.pointee.samples, capacity = ring.pointee.capacity
+    let frames = ring.pointee.lengths[taken[1] % ring.pointee.slots]
+    let count = frames * channels
+    let start = taken[0] % capacity
+    let head = min(count, capacity - start)
+    lock.lock()
+    let failed = writeError != 0
+    lock.unlock()
+    var error: Int32 = 0
+    var top: Float = 0
+    var sum: Double = 0
+    if !failed {
+      error = writeAll(fd, samples + start, head * MemoryLayout<Float>.size)
+      if error == 0 && count > head { error = writeAll(fd, samples, (count - head) * MemoryLayout<Float>.size) }
+      for index in 0..<count {
+        let sample = samples[(start + index) % capacity]
+        top = max(top, abs(sample))
+        sum += Double(sample) * Double(sample)
+      }
+    }
+    taken[0] += count
+    taken[1] += 1
+    lock.lock()
+    var patch = false
+    if failed || error != 0 {
+      lost += frames
+      if error != 0 {
+        writeError = error
+        log("tap: writing \(path) failed: \(String(cString: strerror(error)))")
+      }
+    } else {
+      written += frames
+      peak = max(peak, top)
+      squares += sum
+      patch = written - patched >= Int(rate)
+    }
+    lock.unlock()
+    if patch { patchHeader() }
+  }
+
+  /** The header's sizes as the file stands: patched as it grows and at the end, so a helper that dies leaves a file
+      that reads up to its last patch. */
+  func patchHeader() {
+    lock.lock()
+    let frames = written
+    patched = frames
+    lock.unlock()
+    let bytes = frames * channels * MemoryLayout<Float>.size
+    var riff = UInt32(truncatingIfNeeded: 36 + bytes).littleEndian
+    var data = UInt32(truncatingIfNeeded: bytes).littleEndian
+    _ = pwrite(fd, &riff, 4, 4)
+    _ = pwrite(fd, &data, 4, 40)
+  }
+
+  func status() -> [String: Any] {
+    lock.lock()
+    defer { lock.unlock() }
+    return ["running": true, "frames": written, "seconds": Double(written) / rate, "truncated": written + lost >= ring.pointee.maxFrames]
+  }
+
+  /** Stops the IOProc, finishes the file and destroys the aggregate device and the tap; the answer to tap.stop. With
+      `keep` false (a start that failed) the file goes too. */
+  @discardableResult
+  func finish(keep: Bool = true) -> [String: Any] {
+    if let proc = proc {
+      AudioDeviceStop(aggregate, proc)
+      AudioDeviceDestroyIOProcID(aggregate, proc)
+    }
+    // The IO thread is done; the writer is told to go, then whatever it left is taken here.
+    lock.lock()
+    quitting = true
+    lock.unlock()
+    semaphore.signal()
+    let joined = !writing || writerDone.wait(timeout: .now() + 1.5) == .success
+    if joined {
+      while ring.pointee.taken[1] < ring.pointee.records { take() }
+      patchHeader()
+      close(fd)
+      if !keep { unlink(path) }
+    } else {
+      log("tap: the writer didn't finish within 1.5 s; \(path) is left as it stands")
+    }
+    if aggregate != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregate) }
+    if #available(macOS 14.2, *), tap != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tap) }
+    aggregate = AudioObjectID(kAudioObjectUnknown)
+    tap = AudioObjectID(kAudioObjectUnknown)
+    lock.lock()
+    let frames = written, lostFrames = lost, top = peak, sum = squares
+    lock.unlock()
+    var anchors: [[UInt64]] = []
+    for index in 0..<ring.pointee.anchorCount where Int(ring.pointee.anchors[2 * index]) <= frames {
+      anchors.append([ring.pointee.anchors[2 * index], ring.pointee.anchors[2 * index + 1]])
+    }
+    let last = ring.pointee.lastFrame
+    if last >= 0, last <= frames, anchors.last.map({ Int($0[0]) < last }) ?? true {
+      anchors.append([UInt64(last), ring.pointee.lastHost])
+    }
+    var timebase = mach_timebase_info()
+    mach_timebase_info(&timebase)
+    let samples = frames * channels
+    return [
+      "file": path, "frames": frames, "seconds": Double(frames) / rate, "sampleRate": rate, "channels": channels,
+      "peak": Double(top), "rms": samples > 0 ? (sum / Double(samples)).squareRoot() : 0, "anchors": anchors,
+      "timebase": ["numer": Int(timebase.numer), "denom": Int(timebase.denom)], "dropped": ring.pointee.dropped + lostFrames,
+      "truncated": ring.pointee.truncated,
+    ]
+  }
+}
+
+/** The tap that runs, if one does. `tapLock` guards starting, stopping and finishing it; the IO thread never takes it. */
+let tapLock = NSLock()
+var currentTap: Tap?
+
+func tapStart(_ request: Request) throws -> [String: Any] {
+  let pid = try request.pid()
+  let path = try request.text("path")
+  guard path.hasPrefix("/") else { throw fail("bad-request", ["detail": "path is the whole path of the WAV file to make"]) }
+  if let mute = request.fields["mute"], CFGetTypeID(mute as AnyObject) != CFBooleanGetTypeID() {
+    throw fail("bad-request", ["detail": "mute is true or false"])
+  }
+  var maxSeconds = 600.0
+  if let raw = request.fields["maxSeconds"] {
+    guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue > 0, number.doubleValue <= 3600 else {
+      throw fail("bad-request", ["detail": "maxSeconds is a number of seconds above 0, up to 3600"])
+    }
+    maxSeconds = number.doubleValue
+  }
+  guard #available(macOS 14.2, *) else { throw fail("unsupported", ["detail": "process taps need macOS 14.2 or later"]) }
+  tapLock.lock()
+  defer { tapLock.unlock() }
+  guard currentTap == nil else { throw fail("busy", ["detail": "a tap runs already: tap.stop it first"]) }
+  let tap = try Tap.start(pid: pid_t(pid), path: path, mute: request.bool("mute", false), maxSeconds: maxSeconds,
+                          deadline: request.deadline.addingTimeInterval(0.15))
+  currentTap = tap
+  return ["sampleRate": tap.rate, "channels": tap.channels, "hostTime": tap.hostTime]
+}
+
+func tapStop() throws -> [String: Any] {
+  tapLock.lock()
+  defer { tapLock.unlock() }
+  guard let tap = currentTap else { throw fail("failed", ["detail": "no tap runs"]) }
+  currentTap = nil
+  return tap.finish()
+}
+
+func tapStatus() -> [String: Any] {
+  tapLock.lock()
+  defer { tapLock.unlock() }
+  return currentTap?.status() ?? ["running": false, "frames": 0, "seconds": 0, "truncated": false]
+}
+
+/** EOF, `quit` or a signal: the tap stops and its file is finished before the helper goes. */
+func finishTap() {
+  tapLock.lock()
+  defer { tapLock.unlock() }
+  if let tap = currentTap {
+    currentTap = nil
+    tap.finish()
+  }
+}
 
 // MARK: - The ops
 
@@ -806,8 +1358,14 @@ func handle(_ request: Request) throws -> [String: Any] {
     midi.close()
     return ["closed": true]
 
-  case "tap.start", "tap.stop":
-    throw fail("reserved", ["detail": "the process tap comes with M5"])
+  case "tap.start":
+    return try tapStart(request)
+
+  case "tap.stop":
+    return try tapStop()
+
+  case "tap.status":
+    return tapStatus()
 
   default:
     throw fail("unknown-op", ["op": request.op])
@@ -866,16 +1424,30 @@ func read() {
     }
     if (fields["op"] as? String) == "quit" {
       emit(["id": fields["id"] ?? NSNull(), "ok": true])
+      finishTap()
       midi.close()
       exit(0)
     }
     serve(fields)
   }
+  finishTap()
   midi.close()
   exit(0)
 }
 
 signal(SIGPIPE, SIG_IGN)
+// A helper told to go by a signal finishes its tap first, then goes as the signal says.
+let signalSources: [DispatchSourceSignal] = [SIGTERM, SIGINT, SIGHUP].map { number in
+  signal(number, SIG_IGN)
+  let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+  source.setEventHandler {
+    finishTap()
+    signal(number, SIG_DFL)
+    raise(number)
+  }
+  source.resume()
+  return source
+}
 let reader = Thread { read() }
 reader.name = "kumi-logic-hands.stdin"
 reader.start()

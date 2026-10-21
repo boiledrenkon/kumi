@@ -304,6 +304,17 @@ fn write(ctx: &mut Ctx, prop: &Prop, found: &Found, wanted: &Value) -> Done<Valu
     Ok((prop.read)(&after.header))
 }
 
+/// A track's solo turned on or off through its header's checkbox (a click with Logic in front), as `track-solo` does
+/// it; whether it shows soloed after.
+pub(crate) fn set_solo(ctx: &mut Ctx, place: usize, on: bool) -> Done<bool> {
+    let found = at(ctx, place)?;
+    if found.header.solo == on {
+        return Ok(on);
+    }
+    let after = write(ctx, &PROPS[3], &found, &json!({"solo": on}))?;
+    Ok(after["solo"] == Value::Bool(true))
+}
+
 fn probe(prop: &'static Prop, place: usize, prior: &Value, applied: &Value) -> Probe {
     Probe::Header { place, read: prop.read, same: prop.same, prior: prior.clone(), applied: applied.clone() }
 }

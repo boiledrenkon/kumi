@@ -23,8 +23,19 @@ use crate::ax::{Ax, AxError};
 use crate::changes::Changes;
 
 /// The methods that write to Logic: the focus is refreshed before their answer leaves.
-const WRITES: [&str; 8] =
-    ["change_apply", "change_restore", "transport_stop", "transport_play", "cursor_set", "project_save", "bounce", "export_tracks"];
+const WRITES: [&str; 11] = [
+    "change_apply",
+    "change_restore",
+    "transport_stop",
+    "transport_play",
+    "cursor_set",
+    "project_save",
+    "bounce",
+    "export_tracks",
+    "hear",
+    "audition",
+    "render",
+];
 use crate::focus::{self, Focus};
 use crate::helper::Helper;
 use crate::log;
@@ -258,6 +269,9 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
             changes.keys = crate::keys::KeyCommands::load(&bundle_of(app, config), home.as_deref());
             let (names, bindings) = changes.keys.counts();
             log::line(&format!("key commands: {names} names, {bindings} bindings from {:?}", changes.keys.source));
+            // Where Logic's playhead stands within its beat isn't known yet: the Mackie Control's timecode will say.
+            let mut project = Project::new(strings_for(app, config));
+            project.playhead_exact = false;
             Some(Attached {
                 pid: app.pid,
                 model,
@@ -265,7 +279,7 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 queue,
                 server,
                 hub,
-                project: Project::new(strings_for(app, config)),
+                project,
                 changes,
                 mcu: Mcu::default(),
                 mcu_opened: None,
@@ -349,6 +363,9 @@ impl Attached {
             }
         };
         notes.clear("read");
+        if look.transport.playing || look.transport.recording {
+            self.project.playhead_exact = false;
+        }
         if self.first_epoch_at.is_none() {
             self.first_epoch_at = Some(Instant::now());
             log::line(&format!("the project read in {} ms after attaching", self.attached_at.elapsed().as_millis()));
@@ -423,6 +440,12 @@ impl Attached {
         if crate::serve::CHANGE_METHODS.contains(&method) {
             return crate::serve::answer_change(&mut self.project, &mut self.changes, helper, self.pid, method, params);
         }
+        if crate::serve::LISTEN_METHODS.contains(&method) {
+            // Logic plays for a while: the hosts keep hearing the bridge's heartbeats meanwhile.
+            let hub = &self.hub;
+            let mcu = if self.mcu.open { Some(&mut self.mcu) } else { None };
+            return crate::serve::answer_listen(&mut self.project, mcu, helper, self.pid, method, params, &mut || hub.heartbeat());
+        }
         crate::serve::answer_keyed(&mut self.project, helper, self.pid, method, params, &self.changes.keys)
     }
 
@@ -453,6 +476,14 @@ impl Attached {
 
     fn on_midi(&mut self, event: &Value, helper: &mut dyn Helper) {
         let reaction = self.mcu.on_event(event, helper);
+        // The timecode says where the playhead stands within its beat, which the LCD doesn't: placing it from a
+        // division or a tick past 1 goes to the project's start first.
+        let state = &self.mcu.surface.state;
+        if state.installed && state.beats_mode() {
+            if let Some([_, _, division, tick]) = state.position() {
+                self.project.playhead_exact = !state.playing && !state.recording && division == 1 && tick == 1;
+            }
+        }
         if reaction.transport_changed {
             // The LEDs say before the control bar does: the next refresh carries the detail; the event goes now.
             let state = &self.mcu.surface.state;

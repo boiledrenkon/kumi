@@ -231,6 +231,32 @@ The channels, shapes and where Logic forces a difference are
 replayed by `tests/changes.rs` and `tests/reads.rs`; `record_changes` takes
 `{"restore": {"of": n}}` to put back an earlier change of the run.
 
+## What it hears (M5)
+
+`hear`, `audition` and `render` (`src/listen/`) let Kumi hear Logic, as
+methods of the bridge (no change, no row, no undo step), each putting Logic
+back as it found it:
+
+- `hear` and `audition` play the part and capture what Logic outputs through
+  the helper's process tap (`tap.*`), a WAV file under the folder the request
+  names: the solos each pass asks for (the Mackie Control's solo buttons, else
+  the headers' checkboxes), the metronome and the cycle off, the playhead
+  placed exactly on the part's first beat, then followed by the Mackie
+  Control's timecode (`follow.rs`: its digits' host times, a line of host time
+  against position) until it is past the part's end. A short play a bar past
+  the song's end with the metronome on measures how late the tap hears what the
+  timecode shows (it changes from tap to tap), and each part is cut out of the
+  capture by that (`audio.rs`: onsets, the cut, peak and RMS).
+- `render` bounces the part offline through M4b's `bounce`, the metronome off
+  and the track asked for soloed.
+
+The shapes, the alignment as measured and the numbers are
+`docs/en/LOGIC_CONTRACT.md`, "Listening". The scenes `listen-*` are recorded
+by `record_changes --mcu` (which opens the Mackie Control's ports and, for a
+listening step with `"onsets"`, measures the notes in the real audio before
+deleting it) and replayed by `tests/listen.rs`, which writes a synthesized file
+where a recorded part was cut, since a recording keeps no audio.
+
 ## Arguments
 
 ```sh
@@ -311,7 +337,8 @@ cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tes
 on canned windows, the helper's supervision on a mock and on shell scripts,
 the server against daw-bridge's conformance vectors over real sockets, the
 whole bridge on the mock helper (`tests/status.rs`), the reads over the
-recorded scenes (`tests/reads.rs`) and the changes over the recorded
-change scenes (`tests/changes.rs`). The isolated run
+recorded scenes (`tests/reads.rs`), the changes over the recorded
+change scenes (`tests/changes.rs`) and listening over the recorded listening
+scenes (`tests/listen.rs`). The isolated run
 `KUMI_PACKAGES="daw-bridge logic-kumi" sh scripts/test-isolated.sh` keeps the
 tests away from this machine's Kumi folder.

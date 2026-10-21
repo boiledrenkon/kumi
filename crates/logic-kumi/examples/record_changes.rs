@@ -3,7 +3,7 @@
 //! asked for, written as `scene.json.gz` under the folder given, for `tests/changes.rs` to replay without Logic. Opt-in:
 //! it changes the running Logic's project through the helper, as the bridge does, and puts it back as the steps say.
 //!
-//! cargo run -p logic-kumi --example record_changes -- --out crates/logic-kumi/tests/fixtures/<scene> --steps '<json>' [--helper <path>]
+//! cargo run -p logic-kumi --example record_changes -- --out crates/logic-kumi/tests/fixtures/<scene> --steps '<json>' [--helper <path>] [--mcu]
 //!
 //! `--steps` is a list: `{"preview": {"kind", "input"}}`, `{"apply": {"desc"}}` (the last preview's), `{"restore":
 //! {"desc", "discard"?, "of"?}}` (the last preview's and apply's, or with `of` the apply of that place in the run, from
@@ -24,7 +24,9 @@ use logic_kumi::changes::Changes;
 use logic_kumi::disk;
 use logic_kumi::fixtures::{Recorder, Scene, SCENE_FILE};
 use logic_kumi::helper::{ChildLauncher, Helper, Launch};
+use logic_kumi::listen::audio;
 use logic_kumi::logic::{self, Model, BUNDLES};
+use logic_kumi::mcu::Mcu;
 use logic_kumi::project::Project;
 use logic_kumi::serve;
 use serde_json::{json, Value};
@@ -41,13 +43,14 @@ fn with_epoch(step: &Value, epoch: u32) -> Value {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut out, mut helper_path, mut steps) = (None, None, None);
+    let (mut out, mut helper_path, mut steps, mut with_mcu) = (None, None, None, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = Some(PathBuf::from(args.next().expect("--out <dir>"))),
             "--helper" => helper_path = Some(PathBuf::from(args.next().expect("--helper <path>"))),
             "--steps" => steps = Some(args.next().expect("--steps <json>")),
-            other => panic!("unknown argument {other}; usage: record_changes --out <dir> --steps <json> [--helper <path>]"),
+            "--mcu" => with_mcu = true,
+            other => panic!("unknown argument {other}; usage: record_changes --out <dir> --steps <json> [--helper <path>] [--mcu]"),
         }
     }
     let out = out.expect("--out <dir>: where to write scene.json.gz");
@@ -98,6 +101,15 @@ fn main() {
         let mut ax = Ax::new(helper.as_mut(), app.pid);
         project.look(&mut ax, None).expect("a first look at the project");
     }
+    // The Mackie Control, as the bridge opens it once Logic can be read: Logic installs the surface meanwhile.
+    let mut mcu = Mcu::default();
+    let mut install_events = 0;
+    if with_mcu {
+        mcu.open(helper.as_mut()).expect("the Mackie Control's ports");
+        mcu.pump(helper.as_mut(), Duration::from_millis(1500));
+        install_events = scene.lock().unwrap().events.len();
+        eprintln!("Mackie Control installed {} ({install_events} events): {:?}", mcu.surface.state.installed, mcu.surface.state.names());
+    }
 
     let (mut preview, mut applied): (Option<(Value, Value)>, Option<Value>) = (None, None);
     // Every apply of the run with its preview, for a restore that names an earlier one.
@@ -107,6 +119,7 @@ fn main() {
     for step in steps {
         let step = with_epoch(&step, project.epoch);
         let started = Instant::now();
+        let mut checked: Option<Value> = None;
         let (what, answer): (Value, Option<Result<Value, (String, String)>>) = if let Some(wait) = step.get("wait").and_then(Value::as_u64)
         {
             std::thread::sleep(Duration::from_millis(wait));
@@ -156,9 +169,15 @@ fn main() {
             }
             let answer = if serve::CHANGE_METHODS.contains(&method) {
                 serve::answer_change(&mut project, &mut changes, helper.as_mut(), app.pid, method, &params)
+            } else if serve::LISTEN_METHODS.contains(&method) {
+                let surface = if mcu.open { Some(&mut mcu) } else { None };
+                serve::answer_listen(&mut project, surface, helper.as_mut(), app.pid, method, &params, &mut || {})
             } else {
                 serve::answer(&mut project, helper.as_mut(), app.pid, method, &params)
             };
+            if let (Ok(answered), true) = (&answer, serve::LISTEN_METHODS.contains(&method)) {
+                checked = Some(check_files(answered, &params, step.get("onsets"), step.get("keep") == Some(&json!(true))));
+            }
             (json!({"method": method, "params": params}), Some(answer))
         } else if step.get("poll").is_some() {
             let mut ax = Ax::new(helper.as_mut(), app.pid);
@@ -189,15 +208,28 @@ fn main() {
         };
         eprintln!("{} in {ms} ms -> {}", what, if kept.is_null() { "-".to_string() } else { kept.to_string() });
         if !kept.is_null() {
-            recorded.push(json!({"step": what, "answer": kept, "ms": ms}));
+            let mut record = json!({"step": what, "answer": kept, "ms": ms});
+            if let Some(onsets) = checked.filter(|onsets| !onsets.is_null()) {
+                eprintln!("  onsets: {onsets}");
+                record["onsets"] = onsets;
+            }
+            recorded.push(record);
         }
     }
-    while helper.event(Duration::from_millis(50)).is_some() {}
+    // The surface's ports closed first: Logic streams the Mackie Control's meters and timecode while they are open.
+    if mcu.open {
+        mcu.close(helper.as_mut());
+    }
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until && helper.event(Duration::from_millis(50)).is_some() {}
     helper.quit();
     disk::set_hook(None);
     {
         let mut scene = scene.lock().unwrap();
         let mut logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project_json, "steps": recorded, "undoneInDaw": events});
+        if with_mcu {
+            logic["installEvents"] = install_events.into();
+        }
         let looked = looked.borrow().clone();
         if !looked.is_empty() {
             logic["disk"] = Value::Array(looked);
@@ -207,4 +239,58 @@ fn main() {
     let scene = scene.lock().unwrap().clone();
     scene.save(&out).expect("write the scene");
     eprintln!("{} helper calls recorded to {}: {:?}", scene.calls.len(), out.join(SCENE_FILE).display(), scene.counts());
+}
+
+/// A listening answer's files: each one's onsets placed against the beats they were expected on (`expected`, beats
+/// from the project's start: where the beats say each lands in the file, at the tempo the file's length and the part's
+/// beats give), then the files deleted unless kept. The onsets as `[{file, beat, ms, error}]` (`error` the onset's
+/// distance from where the beat says, in milliseconds), or null when none were expected.
+fn check_files(answer: &Value, params: &Value, expected: Option<&Value>, keep: bool) -> Value {
+    let files: Vec<&Value> = match answer.get("candidates").and_then(Value::as_array) {
+        Some(candidates) => candidates.iter().collect(),
+        None => vec![answer],
+    };
+    let from = params.get("fromBeats").and_then(Value::as_f64).unwrap_or(0.0);
+    let beats = params.get("beats").and_then(Value::as_f64).unwrap_or(1.0);
+    let wanted: Vec<f64> =
+        expected.and_then(Value::as_array).map(|beats| beats.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    let mut found = vec![];
+    for take in files {
+        let Some(file) = take.get("file").and_then(Value::as_str).map(PathBuf::from) else { continue };
+        if !wanted.is_empty() {
+            let seconds = take.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+            let per_beat = if beats > 0.0 { seconds / beats } else { 0.0 };
+            let rate = take.get("sampleRate").and_then(Value::as_f64).unwrap_or(44100.0);
+            // Read with 20 ms of silence before the file, so a note right at its start is found too.
+            let onsets = audio::open(&file)
+                .and_then(|(mut opened, wav)| {
+                    let pad = (rate * 0.02) as usize;
+                    let mut samples = vec![0f32; pad * usize::from(wav.channels)];
+                    samples.extend(audio::read_frames(&mut opened, &wav, 0, wav.frames)?);
+                    Ok(audio::onsets(&samples, usize::from(wav.channels), rate)
+                        .into_iter()
+                        .map(|frame| frame - pad as f64)
+                        .collect::<Vec<f64>>())
+                })
+                .unwrap_or_default();
+            for beat in &wanted {
+                let at = (beat - from) * per_beat;
+                let nearest = onsets.iter().map(|frame| frame / rate).min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()));
+                found.push(json!({
+                    "file": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    "beat": beat,
+                    "ms": nearest.map(|onset| (onset * 1000.0 * 100.0).round() / 100.0),
+                    "error": nearest.map(|onset| ((onset - at) * 1000.0 * 100.0).round() / 100.0),
+                }));
+            }
+        }
+        if !keep {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+    if wanted.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(found)
+    }
 }

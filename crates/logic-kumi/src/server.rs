@@ -47,7 +47,7 @@ const WRITER_POLL: Duration = Duration::from_millis(50);
 
 /// The methods served: `ping`, `status` and `focus` answered from the last look and never waiting for Logic, the rest
 /// read or written through the helper on the run loop; and the events sent.
-pub const METHODS: [&str; 17] = [
+pub const METHODS: [&str; 20] = [
     "ping",
     "status",
     "focus",
@@ -65,11 +65,14 @@ pub const METHODS: [&str; 17] = [
     "project_save",
     "bounce",
     "export_tracks",
+    "hear",
+    "audition",
+    "render",
 ];
 pub const EVENTS: [&str; 5] =
     [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];
 /// The methods the run loop answers.
-const QUEUED_METHODS: [&str; 14] = [
+const QUEUED_METHODS: [&str; 17] = [
     "read",
     "snapshot",
     "focus_body",
@@ -84,10 +87,17 @@ const QUEUED_METHODS: [&str; 14] = [
     "project_save",
     "bounce",
     "export_tracks",
+    "hear",
+    "audition",
+    "render",
 ];
 /// How long a queued request waits for the run loop without a deadline of its own, and the most it may ask for.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 const MAX_WAIT: Duration = Duration::from_secs(60);
+/// The most a listening request (`hear`, `audition`, `render`) may be waited for, whatever its deadline: Logic plays
+/// the part through, so its wait is the part's length and a margin (`listen::bound_seconds`) unless the host's call
+/// says otherwise.
+const MOST_LISTENING: Duration = Duration::from_secs(2 * 3600);
 const CLOSING: &str = "the Logic Pro bridge is closing; nothing changed";
 /// What a read answers while the helper lacks the Accessibility grant: `failed`, never `busy`, with the status's
 /// `permission` naming what to grant.
@@ -459,15 +469,23 @@ impl Shared {
             return Frame::error(id, code::FAILED, UNTRUSTED);
         }
         let now = unix_ms();
+        // A listening request plays its part through: it waits that long and a margin, the rest the usual.
+        let (usual, most) = if crate::listen::METHODS.contains(&request.method.as_str()) {
+            let tempo = lock(&self.focus).transport.tempo;
+            let bound = Duration::from_secs_f64(crate::listen::bound_seconds(&request.method, &request.params, tempo));
+            (bound, MOST_LISTENING)
+        } else {
+            (DEFAULT_WAIT, MAX_WAIT)
+        };
         let wait = match request.deadline_ms {
             Some(deadline) if deadline <= now => {
                 return Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed")
             }
             Some(deadline) => Duration::from_millis(deadline - now),
-            None => DEFAULT_WAIT,
+            None => usual,
         };
         let waiter = self.queue.submit(&request.method, request.params);
-        match waiter.wait(wait.min(MAX_WAIT), &self.stopping) {
+        match waiter.wait(wait.min(most), &self.stopping) {
             Outcome::Answered(Ok(result)) => Frame::ok(id, result),
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
             Outcome::Cancelled => match lock(&self.model).busy {
@@ -986,7 +1004,10 @@ mod tests {
                 "undo_step_end",
                 "project_save",
                 "bounce",
-                "export_tracks"
+                "export_tracks",
+                "hear",
+                "audition",
+                "render"
             ])
         );
         assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw"]));

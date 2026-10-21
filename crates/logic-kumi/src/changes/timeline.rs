@@ -127,11 +127,33 @@ pub fn tempo_restore(ctx: &mut Ctx, restore: &Restore) -> Done<Restored> {
 // ----- the playhead -----
 
 /// Moves the playhead to a position through the LCD's bar and beat sliders: the position the control bar shows after
-/// (its bar and beat; the LCD shows no finer).
+/// (its bar and beat; the LCD shows no finer). The sliders keep the division and tick the playhead had, and a stop
+/// leaves those anywhere (Logic then plays from 2.1.3.162, and a split or a marker put at "bar 2" lands there), so a
+/// playhead not known to be on a beat ([`Project::playhead_exact`]) goes to the project's start first, with the Stop
+/// button that reads "Go to Beginning" while Logic is stopped away from it (at the start, where it reads "Stop", the
+/// playhead is on the beat already).
+///
+/// [`Project::playhead_exact`]: crate::project::Project::playhead_exact
 pub(crate) fn set_playhead(ctx: &mut Ctx, position: Position) -> Done<Transport> {
-    let (bar, transport) = control_bar(ctx)?;
+    let (mut bar, mut transport) = control_bar(ctx)?;
+    let stopped = !transport.playing && !transport.recording;
+    if stopped && !ctx.project.playhead_exact {
+        if let Some(button) = paths::transport_button(&bar, &ctx.project.strings, "Go to Beginning") {
+            nudge::wrote(nudge::press(ctx.ax, &Control::new(&ctx.project.root, &button.path), TRANSPORT_SETTLE_MS))?;
+            (bar, transport) = control_bar(ctx).map_err(|(_, why)| super::uncertain(why))?;
+        }
+    }
+    let after = place(ctx, &bar, &transport, position)?;
+    if stopped {
+        ctx.project.playhead_exact = true;
+    }
+    Ok(after)
+}
+
+/// The bar and beat sliders stepped from where the control bar shows the playhead.
+fn place(ctx: &mut Ctx, bar: &Node, transport: &Transport, position: Position) -> Done<Transport> {
     let strings = &ctx.project.strings;
-    let lcd = paths::lcd(&bar, strings).ok_or_else(|| failed("Logic Pro's control bar doesn't show its LCD"))?;
+    let lcd = paths::lcd(bar, strings).ok_or_else(|| failed("Logic Pro's control bar doesn't show its LCD"))?;
     let group = paths::playhead(lcd, strings).ok_or_else(|| failed("Logic Pro's control bar doesn't show the playhead"))?;
     let sliders: Vec<&Node> = group.children.iter().filter(|c| c.role == "AXSlider").collect();
     let (Some(bar_slider), Some(beat_slider)) = (sliders.first(), sliders.get(1)) else {
@@ -211,6 +233,50 @@ pub(crate) fn bar_text(position: &Position) -> String {
     text
 }
 
+/// Moves the playhead to a whole beat exactly whatever was known of it: taken as unsure, so it goes to the project's
+/// start first ([`set_playhead`]). `busy` while Logic plays.
+pub(crate) fn set_playhead_exactly(ctx: &mut Ctx, position: Position) -> Done<Transport> {
+    let (_, transport) = control_bar(ctx)?;
+    if transport.playing || transport.recording {
+        return Err(super::busy("Logic Pro is playing, so its playhead can't be placed; nothing changed"));
+    }
+    ctx.project.playhead_exact = false;
+    let after = set_playhead(ctx, position)?;
+    if (after.bar, after.beat) != (position.bar, position.beat) {
+        return Err(nudge::kept(
+            "the playhead",
+            format!("bar {} beat {}", position.bar, position.beat),
+            format!("bar {} beat {}", after.bar, after.beat),
+        ));
+    }
+    Ok(after)
+}
+
+/// The control bar's Metronome Click button turned on or off; whether it was on before. `failed` when the control bar
+/// shows no such button.
+pub(crate) fn set_metronome(ctx: &mut Ctx, on: bool) -> Done<bool> {
+    let (bar, _) = control_bar(ctx)?;
+    let button = paths::transport_button(&bar, &ctx.project.strings, METRONOME)
+        .ok_or_else(|| failed("Logic Pro's control bar doesn't show its Metronome Click button"))?;
+    let was = button.is_on();
+    if was != on {
+        nudge::wrote(nudge::press(ctx.ax, &Control::new(&ctx.project.root, &button.path), TRANSPORT_SETTLE_MS))?;
+        let (bar, _) = control_bar(ctx).map_err(|(_, why)| super::uncertain(why))?;
+        let now = paths::transport_button(&bar, &ctx.project.strings, METRONOME).is_some_and(Node::is_on);
+        if now != on {
+            return Err(nudge::kept("the metronome", if on { "on" } else { "off" }, if now { "on" } else { "off" }));
+        }
+    }
+    Ok(was)
+}
+
+/// Whether the control bar's Metronome Click button is on (false when it shows none).
+pub(crate) fn metronome_on(bar: &Node, strings: &crate::ax::strings::Strings) -> bool {
+    paths::transport_button(bar, strings, METRONOME).is_some_and(Node::is_on)
+}
+
+const METRONOME: &str = "Metronome Click";
+
 // ----- the transport -----
 
 fn transport_button(ctx: &mut Ctx, label: &str) -> Done<(Control, Transport)> {
@@ -226,6 +292,7 @@ pub fn play(ctx: &mut Ctx) -> Answer {
     if !before.playing {
         nudge::wrote(nudge::press(ctx.ax, &play, TRANSPORT_SETTLE_MS))?;
     }
+    ctx.project.playhead_exact = false;
     let (_, now) = control_bar(ctx).map_err(|(_, why)| super::uncertain(why))?;
     if !now.playing {
         return Err(super::uncertain("Logic Pro's Play button was pressed, but it doesn't show itself playing"));
@@ -239,6 +306,7 @@ pub fn stop(ctx: &mut Ctx) -> Answer {
     let (_, before) = control_bar(ctx)?;
     let was_running = before.playing || before.recording;
     if was_running {
+        ctx.project.playhead_exact = false;
         let (stop, _) = transport_button(ctx, "Stop")?;
         nudge::wrote(nudge::press(ctx.ax, &stop, TRANSPORT_SETTLE_MS))?;
         let (_, now) = control_bar(ctx).map_err(|(_, why)| super::uncertain(why))?;

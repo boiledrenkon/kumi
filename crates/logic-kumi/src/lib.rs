@@ -6,7 +6,8 @@
 //! M1, "bridges talk": the bridge finds Logic, attaches to it, follows the open project's identity through Logic's
 //! windows, answers `ping` and `status`, sends `project` events, keeps its discovery file and goes when Logic does. The
 //! rows, focus, bodies and actions of `docs/en/LOGIC_CONTRACT.md` come with M2; the changes, their undo and the
-//! producer's own undo named back with M3 (`changes`).
+//! producer's own undo named back with M3 (`changes`); hearing Logic play, auditioning and rendering with M5
+//! (`listen`).
 
 pub mod ax;
 pub mod bodies;
@@ -17,6 +18,7 @@ pub mod fixtures;
 pub mod focus;
 pub mod helper;
 pub mod keys;
+pub mod listen;
 pub mod log;
 pub mod logic;
 pub mod mcu;

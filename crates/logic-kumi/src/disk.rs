@@ -1,7 +1,9 @@
-//! What the bridge looks at on disk after Logic wrote there (a bounce, an export): whether a file is there and its
-//! size, a sound file's format and length from its header (WAVE or AIFF), and the files of a folder. Every look goes
-//! through one seam ([`set_hook`]), so the change recorder keeps what each look saw in the scene and a replay answers
-//! from it: the file a recorded bounce wrote isn't on the Mac that replays it. Without a hook, the disk itself.
+//! What the bridge looks at outside Logic: on disk after Logic wrote there (a bounce, an export, a listening pass's
+//! capture), whether a file is there and its size, a sound file's format and length from its header (WAVE or AIFF),
+//! the files of a folder, the onsets in a stretch of a capture, a part cut out of it, a file taken away; and the host
+//! clock a poll is dated by. Every look goes through one seam ([`set_hook`]), so the change recorder keeps what each
+//! look saw in the scene and a replay answers from it: the file a recorded bounce wrote isn't on the Mac that replays
+//! it, and a recording keeps no audio. Without a hook, the disk and the clock themselves.
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -115,6 +117,62 @@ pub fn list(path: &Path) -> Option<Vec<(String, u64)>> {
         .map(|files| files.iter().filter_map(|file| Some((file.get(0)?.as_str()?.to_string(), file.get(1)?.as_u64()?))).collect())
 }
 
+/// The onsets in frames `[from, to)` of the 32-bit float WAV at `path` (a capture), as frames of the file; None when
+/// it can't be read.
+pub fn onsets(path: &Path, from: u64, to: u64) -> Option<Vec<f64>> {
+    let owned = path.to_path_buf();
+    let value = look("onsets", path, &move || {
+        crate::listen::audio::onsets_in(&owned, from, to).map_or(Value::Null, |found| found.into_iter().map(Value::from).collect())
+    });
+    value.as_array().map(|found| found.iter().filter_map(Value::as_f64).collect())
+}
+
+/// Frames `[from, from + frames)` of the capture at `source` written into a new file at `dest`, measured; None when
+/// it couldn't be (a file there already, a capture that can't be read).
+pub fn cut(source: &Path, dest: &Path, from: u64, frames: u64) -> Option<crate::listen::audio::Cut> {
+    let (source, owned) = (source.to_path_buf(), dest.to_path_buf());
+    let value = look("cut", dest, &move || match crate::listen::audio::cut(&source, &owned, from, frames) {
+        Ok(cut) => json!({"frames": cut.frames, "rate": cut.rate, "channels": cut.channels, "peak": cut.peak, "rms": cut.rms}),
+        Err(error) => {
+            crate::log::line(&format!("couldn't cut {} from {}: {error}", owned.display(), source.display()));
+            Value::Null
+        }
+    });
+    Some(crate::listen::audio::Cut {
+        frames: value.get("frames")?.as_u64()?,
+        rate: u32::try_from(value.get("rate")?.as_u64()?).ok()?,
+        channels: u16::try_from(value.get("channels")?.as_u64()?).ok()?,
+        peak: value.get("peak")?.as_f64()?,
+        rms: value.get("rms")?.as_f64()?,
+    })
+}
+
+/// Takes the file at `path` away: whether it went.
+pub fn remove(path: &Path) -> bool {
+    let owned = path.to_path_buf();
+    look("remove", path, &move || std::fs::remove_file(&owned).is_ok().into()) == Value::Bool(true)
+}
+
+/// The host clock now, in `mach_absolute_time` ticks (CoreMIDI's and Core Audio's clock): what a poll of Logic is
+/// dated by.
+pub fn host_now() -> u64 {
+    look("clock", Path::new(""), &|| host_clock().into()).as_u64().unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn host_clock() -> u64 {
+    extern "C" {
+        fn mach_absolute_time() -> u64;
+    }
+    // SAFETY: mach_absolute_time takes nothing and only reads the clock.
+    unsafe { mach_absolute_time() }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_clock() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64)
+}
+
 /// Reads a sound file's header: WAVE (PCM, float or extensible) or AIFF/AIFF-C.
 pub fn read_sound(path: &Path) -> Option<Sound> {
     let mut file = File::open(path).ok()?;
@@ -220,7 +278,9 @@ pub fn recording(kept: std::rc::Rc<RefCell<Vec<Value>>>) -> Hook {
 }
 
 /// A replay's seam: each look answered with what the recording saw for the same kind and path, in order, the last
-/// one again once they run out; a look the recording never made answers nothing there.
+/// one again once they run out; a look the recording never made answers nothing there. Where a recorded cut wrote a
+/// file, the replay writes a short synthesized one of the same length and format (when its folder is there), since a
+/// recording keeps no audio.
 pub fn replaying(recorded: &[Value]) -> Hook {
     let mut queues: std::collections::HashMap<String, std::collections::VecDeque<Value>> = std::collections::HashMap::new();
     for look in recorded {
@@ -229,7 +289,7 @@ pub fn replaying(recorded: &[Value]) -> Hook {
     }
     Box::new(move |kind, path, _real| {
         let key = format!("{kind} {path}");
-        match queues.get_mut(&key) {
+        let answer = match queues.get_mut(&key) {
             Some(queue) if queue.len() > 1 => queue.pop_front().unwrap_or(Value::Null),
             Some(queue) => queue.front().cloned().unwrap_or(Value::Null),
             None => {
@@ -239,8 +299,26 @@ pub fn replaying(recorded: &[Value]) -> Hook {
                     Value::Null
                 }
             }
+        };
+        if kind == "cut" {
+            stand_in(Path::new(path), &answer);
         }
+        answer
     })
+}
+
+/// The synthesized file a replayed cut leaves where the recording's was: as many frames, at its rate and channels.
+fn stand_in(path: &Path, answer: &Value) {
+    let (Some(frames), Some(rate), Some(channels)) = (
+        answer.get("frames").and_then(Value::as_u64),
+        answer.get("rate").and_then(Value::as_u64),
+        answer.get("channels").and_then(Value::as_u64),
+    ) else {
+        return;
+    };
+    if path.parent().is_some_and(Path::is_dir) && !path.exists() {
+        let _ = crate::listen::audio::synthesize(path, rate as u32, channels as u16, frames);
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +407,48 @@ mod tests {
         assert_eq!(size(&path), Some(length), "the last answer again");
         assert_eq!(sound(&path).unwrap().seconds(), 0.1);
         assert!(!exists(&dir.path().join("never looked at")));
+        set_hook(None);
+    }
+
+    #[test]
+    fn a_listening_passs_looks_are_recorded_and_a_replay_leaves_a_stand_in_where_a_part_was_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("tap.wav");
+        // A 32-bit float capture: silence, a click at frame 2000.
+        let mut samples = vec![0f32; 2 * 8000];
+        for k in 0..32 {
+            samples[(2000 + k) * 2] = 0.5;
+            samples[(2000 + k) * 2 + 1] = 0.5;
+        }
+        let mut bytes = crate::listen::audio::header(44100, 2, 8000);
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&capture, bytes).unwrap();
+        let part = dir.path().join("part.wav");
+        let kept = std::rc::Rc::new(RefCell::new(Vec::new()));
+        set_hook(Some(recording(kept.clone())));
+        assert_eq!(onsets(&capture, 1000, 4000), Some(vec![2000.0]));
+        let made = cut(&capture, &part, 1000, 4000).unwrap();
+        assert_eq!((made.frames, made.rate, made.channels, made.peak), (4000, 44100, 2, 0.5));
+        assert!(cut(&capture, &part, 0, 10).is_none(), "never over a file");
+        let now = host_now();
+        assert!(now > 0);
+        assert!(remove(&capture) && !remove(&capture));
+        set_hook(None);
+        let recorded = kept.borrow().clone();
+        assert_eq!(
+            recorded.iter().map(|look| look["kind"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["onsets", "cut", "cut", "clock", "remove", "remove"]
+        );
+        // Replayed without the files: the same answers, and a stand-in of the part's length where it was cut.
+        std::fs::remove_file(&part).unwrap();
+        set_hook(Some(replaying(&recorded)));
+        assert_eq!(onsets(&capture, 1000, 4000), Some(vec![2000.0]));
+        assert_eq!(cut(&capture, &part, 1000, 4000), Some(made));
+        assert_eq!(read_sound(&part).map(|sound| (sound.frames, sound.rate, sound.channels, sound.float)), Some((4000, 44100, 2, true)));
+        assert_eq!(host_now(), now);
+        assert!(remove(&capture));
         set_hook(None);
     }
 }
