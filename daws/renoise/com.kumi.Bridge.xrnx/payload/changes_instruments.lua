@@ -398,9 +398,11 @@ end
 -- (`check(song, i)`, which `discard` skips) and no note plays it. The notes are looked for first, in one callback for a small
 -- song and in slices of a job for a big one (nothing written meanwhile); then `locate(song)` finds it again (its place, or a
 -- refusal), and `write(song, i, label, notes)` takes it away (or empties it) in one callback. Under discard the notes that
--- play it are counted and said.
-local function remove_checked(song, env, restore, locate, write)
-  local i = locate(song)
+-- play it are counted and said. With `no_notes` (an instrument Kumi filled, emptied again: Renoise clears no note, and notes
+-- that played it before Kumi are the producer's) none are looked for.
+local function remove_checked(song, env, restore, locate, write, no_notes)
+  local i, named = locate(song)
+  if no_notes then return write(song, i, named, {}) end
   local function finish(live, notes)
     local at, label = locate(live)
     if #notes > 0 and not restore.discard then
@@ -826,6 +828,8 @@ local function load_apply(song, env, input, fence, desc)
   if plan.into and not base.same_table(places_.instrument_print(song:instrument(plan.into)), fence.print) then fail("changed", q(plan.label) .. " changed since the preview") end
   local before = song.selected_instrument_index
   local i = plan.into or plan.index
+  -- (the empty slot's own name, which its undo gives back: Renoise names the instrument after the file)
+  local slot_name = plan.into and song:instrument(plan.into).name or nil
   song:describe_undo(desc)
   if not plan.into then song:insert_instrument_at(i) end
   local loaded_ok, loaded = pcall(load_into, song, i, plan.path, plan.extension)
@@ -848,7 +852,7 @@ local function load_apply(song, env, input, fence, desc)
     undo = { desc = desc, entry = true }, prior = { instruments = plan.count }, place = places_.journal_place("instrument", n),
   }
   if plan.into then
-    done.material = { into = places_.place_of(env, "instrument", n) }
+    done.material = { into = places_.place_of(env, "instrument", n), name = slot_name }
   else
     done.material = { made = places_.place_of(env, "instrument", n) }
     done.created = { ref = places_.ref_of(env, "instrument", n), kind = "instrument" }
@@ -874,6 +878,7 @@ local function load_restore(song, env, restore, desc)
   end
   song:describe_undo(desc)
   instrument:clear()
+  if type(material.name) == "string" and instrument.name ~= material.name then instrument.name = material.name end
   base.note_restored_at(env.journal, "instrument-load", places_.journal_place("instrument", n))
   return { restored = { emptied = true }, display = { title = string.format("Emptied %s again (put back)", q(label)) }, undo = { desc = desc, entry = true } }
 end

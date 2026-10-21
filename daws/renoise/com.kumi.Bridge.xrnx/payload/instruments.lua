@@ -291,11 +291,14 @@ function M.temp_file(extension)
   return own .. sep .. file
 end
 
--- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains or plug-in, and at most its one
--- modulation set, with no devices in it.
+-- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains, plug-in or MIDI output device
+-- (a hardware synth's slot is the producer's: clear() would reset its MIDI output), and at most its one modulation set, with
+-- no devices in it.
 function M.is_empty(instrument)
   local print = M.instrument_print(instrument)
   if print.samples > 0 or print.phrases > 0 or print.plugin ~= "" or print.chains > 0 or print.sets > 1 then return false end
+  local midi_ok, device = pcall(function() return instrument.midi_output_properties.device_name end)
+  if midi_ok and type(device) == "string" and device ~= "" then return false end
   return print.sets == 0 or #instrument:sample_modulation_set(1).devices == 0
 end
 

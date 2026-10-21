@@ -325,7 +325,7 @@ local function restore(song, env, restore, desc)
     base.note_restored_at(env.journal, "instrument-kit", places_.journal_place("instrument", { i }))
     label = places_.instrument_label(i, instrument)
     return { restored = { emptied = true }, display = { title = string.format("Emptied %s again (put back)", q(label)) }, undo = { desc = desc, entry = true } }
-  end)
+  end, material.into ~= nil)
 end
 
 base.register({

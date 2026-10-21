@@ -244,3 +244,27 @@ test("places, kit × insert before, delete before, swap: Kumi's undo follows the
   eq(events[1].data.descs[1], "Kumi: kit (k400)")
   failure(restore(peer, "instrument-kit", record), "gone")
 end)
+
+test("kits: Kumi's undo of a kit made into an empty instrument empties it again whatever notes played it before (#361 N-S11)", function()
+  local env, peer = setup()
+  note_at(1, 2) -- the producer's beat for empty instrument 02 (Pad), written before the kit
+  note_at(5, 2)
+  local input = kit_input({ ref = iref(place(peer), 3) })
+  input.name = nil
+  local record = change(peer, "instrument-kit", input)
+  eq(#instrument(3).samples, 4)
+  local undone = restore(peer, "instrument-kit", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#instrument(3).samples, 0, "emptied again")
+  eq(I.note_value(1), 2, "the producer's notes stay")
+end)
+
+test("kits: an instrument with a MIDI output device isn't empty, so no kit goes into it (#361 N-S12)", function()
+  local env, peer = setup()
+  mock.midi_outputs = { "IAC Driver Bus 1" }
+  mock.song:instrument(3).midi_output_properties.device_name = "IAC Driver Bus 1"
+  mock.midi_outputs = nil
+  local epoch = place(peer)
+  failure(call(peer, "change_preview", { kind = "instrument-kit", input = kit_input({ ref = iref(epoch, 3) }), epoch = epoch }), "bad-params")
+  eq(#instrument(3).samples, 0)
+end)
