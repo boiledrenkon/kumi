@@ -888,26 +888,24 @@ impl Accept {
                 Some(perf_now() - t0),
                 &format!("Kumi's undo of the key command is refused, the row kept: {}", short(&refused.text, 200)),
             );
-            // The marker it made, found by its place, taken away through Kumi.
-            let page = self.tool("read", json!({"kind": "marker", "limit": 200})).await;
-            let marker = page.body["items"].as_array().into_iter().flatten().find(|row| {
+            // The marker it made, found by its place, taken away through Kumi. The look names it by a short ref of its own
+            // (counted over the session, not the marker's place), so it is found there by its place too.
+            let at_beat = |row: &Value| {
                 let bar = row["position"]["bar"].as_f64().unwrap_or(0.0);
                 let beat = row["position"]["beat"].as_f64().unwrap_or(0.0);
                 ((bar - 1.0) * 4.0 + (beat - 1.0) - at).abs() < 0.5
-            });
+            };
+            let page = self.tool("read", json!({"kind": "marker", "limit": 200})).await;
+            let marker = page.body["items"].as_array().into_iter().flatten().find(|row| at_beat(row));
             match marker.and_then(|row| row["ref"].as_str().map(str::to_owned)) {
-                Some(marker_ref) => {
+                Some(_) => {
                     let look = self.observe().await?;
                     let marker_ref = serde_json::from_str::<Value>(&look.context).ok().and_then(|context| {
                         context["markers"]
                             .as_array()
                             .into_iter()
                             .flatten()
-                            .find(|row| {
-                                row["ref"]
-                                    .as_str()
-                                    .is_some_and(|short| marker_ref.ends_with(&short.replace("marker:", ":marker:")) || short == marker_ref)
-                            })
+                            .find(|row| at_beat(row))
                             .and_then(|row| row["ref"].as_str().map(str::to_owned))
                     });
                     let rows = self.changes.borrow().len();
