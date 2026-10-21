@@ -431,6 +431,12 @@ class DawEdits(unittest.TestCase):
             for name in FILES:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, root / name)
+            # This checkout's KUMI_CHANGES carry Logic Pro's bridge's own ships-with line, naming the release that brings
+            # it; the tests here write the lines they mean in docs of their own, so the copies leave it out.
+            for language, (pattern, *_) in release.DAW_SHIPS["logic"].items():
+                changes = root / "docs" / language / "KUMI_CHANGES.md"
+                if changes.exists():
+                    changes.write_text(re.sub(pattern, "", changes.read_text(encoding="utf-8")), encoding="utf-8")
             for name, text in (docs or {}).items():
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text(text, encoding="utf-8")
