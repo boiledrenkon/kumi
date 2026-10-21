@@ -631,11 +631,12 @@ impl<S: RefScheme + 'static> GoalRig for OwnGoalRig<S> {
                 return Ok(Err(self.moved_words(slot, &moved)));
             }
             // The last best goes (Kumi's undo of keeping it, whichever goal kept it), then a fresh copy of the slot at these
-            // values is kept.
+            // values is kept. One the producer worked on since stays theirs (the bridge refuses the undo).
             let previous = r.goal_best.borrow_mut().take();
             if let Some(previous) = previous {
                 if let Err(why) = r.undo(&previous).await {
-                    r.tell_app(&format!("Kumi couldn't take the last “{BEST}” away ({why}): delete it by hand"));
+                    let why = why.trim_end_matches('.');
+                    r.tell_app(&format!("The last “{BEST}” stays where it is ({why}); the new best goes on a track of its own"));
                 }
             }
             let args = json!({"action": "make", "ref": track, "count": 1, "label": "Kumi: goal best"});

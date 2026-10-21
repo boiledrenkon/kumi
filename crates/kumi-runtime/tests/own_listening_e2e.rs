@@ -437,6 +437,17 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
             let second = script.listening().kept();
             assert_eq!(second.len(), 1, "the last best went: {second:?}");
             assert_ne!(second[0].0, first[0].0, "a fresh copy is kept");
+            // One the producer worked on since stays theirs: the new best goes on a track of its own, and that's said.
+            script.listening().work_on_kept(&second[0].0, "My best");
+            assert_eq!(rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), "Kumi · Goal best");
+            let third = script.listening().kept();
+            assert_eq!(third.len(), 2, "the producer's stays: {third:?}");
+            assert!(third.iter().any(|(reference, name)| *reference == second[0].0 && name == "My best"), "{third:?}");
+            assert!(
+                told.borrow().iter().any(|title| title.starts_with("The last “Kumi · Goal best” stays where it is (")),
+                "{:?}",
+                told.borrow()
+            );
             // The producer put an FX first on the track meanwhile: the winner still lands on the ReaEQ, found by its id, as
             // one change (REAPER's fx-params).
             script.insert_fx_first("r:track:{T0002}", "Volume Adjustment");
@@ -463,7 +474,7 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
             assert!(kept.contains("moved or went"), "{kept}");
             rig.close().await.unwrap();
             assert_eq!(script.listening().scratch_copies(), 0, "the copies are gone");
-            assert_eq!(script.listening().kept().len(), 1, "the best stays a track of the project's");
+            assert_eq!(script.listening().kept().len(), 2, "the bests stay tracks of the project's");
             assert_ours(&told.borrow());
             reaper.close().await.unwrap();
             simulator.stop();

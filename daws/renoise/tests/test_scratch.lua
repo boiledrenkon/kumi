@@ -452,6 +452,41 @@ test("scratch-keep: Kumi's undo refuses `changed` once the producer worked on th
   H.no_dialogs()
 end)
 
+-- Work the counts don't see (the pattern already had lines, the same devices): Kumi's undo leaves the track, nothing written.
+for _, case in ipairs({
+  { "a note where it had lines", function(song) song:pattern(1):track(6):line(2):note_column(1).note_value = 77 end },
+  { "a knob", function(song) song:track(6):device(3):parameter(1).value = 5 end },
+  { "the fader", function(song) song:track(6).prefx_volume.value = 0.5 end },
+  { "an effect", function(song) song:pattern(3):track(6):line(5):effect_column(1).number_string = "0B" end },
+  { "a slot muted", function(song) song.sequencer:set_track_sequence_slot_is_muted(6, 2, true) end },
+}) do
+  test("scratch-keep: Kumi's undo leaves the kept track once the producer worked on it: " .. case[1], function()
+    local env, peer = setup()
+    local made = result(make(peer, "s16", 1))
+    local done = keep(peer, { ref = made.copies[1].ref, name = "Best" })
+    ok(type(done.material.print) == "string" and done.material.print ~= "unread", "printed")
+    case[2](mock.song)
+    local before = steps()
+    failure(undo(peer, done), "changed", "so Kumi leaves it")
+    eq(steps(), before, "nothing written")
+    eq(track(6).name, "Best", "the track stays")
+    H.no_dialogs()
+  end)
+end
+
+test("scratch-keep: a kept track untouched goes with Kumi's undo, also once the play head moved an automated knob", function()
+  local env, peer = setup()
+  local made = result(make(peer, "s17", 1))
+  mock.ops.automate(1, 6, 2, 1, { { time = 1, value = 0.2 } })
+  local done = keep(peer, { ref = made.copies[1].ref, name = "Best" })
+  -- (an automated knob moves as the song plays: its automation is what's printed)
+  ok(mock.song:track(6):device(2):parameter(1).is_automated, "automated")
+  mock.song:track(6):device(2):parameter(1).value = 9
+  eq(result(undo(peer, done), "undo").restored.deleted, true)
+  eq(names(), "Kick,Hat,Bass,Pad,Bus,Master,Send 1")
+  H.no_dialogs()
+end)
+
 test("scratch-keep: its track is followed through tracks made, deleted and swapped before it; another song or an unknown layout is stale", function()
   local function kept()
     local env, peer = setup()
