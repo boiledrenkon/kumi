@@ -457,8 +457,8 @@ local function remove_made(song, env, restore, desc, kind, noun)
     local named = places_.instrument_label(at[1], instrument)
     if #live.instruments == 1 then fail("changed", "it is the song's only instrument now: Renoise needs one") end
     local applied = restore.applied
-    if not restore.discard and type(applied) == "table" and type(applied.print) == "table" and not base.same_table(places_.instrument_print(instrument), applied.print) then
-      fail("changed", string.format("%s changed in Renoise since Kumi made it (samples, phrases, a plug-in or its name)", q(named)))
+    if not restore.discard and type(applied) == "table" and type(applied.print) == "table" and not base.same_table(places_.instrument_work(instrument), applied.print) then
+      fail("changed", string.format("%s changed in Renoise since Kumi made it (its samples or their settings, phrases, devices, macros, a plug-in or its name)", q(named)))
     end
     return at[1], named
   end
@@ -498,7 +498,7 @@ local function add_apply(song, env, input, fence, desc)
   local label = places_.instrument_label(index, instrument)
   local n = { index }
   return {
-    applied = { index = index, name = instrument.name, print = places_.instrument_print(instrument) },
+    applied = { index = index, name = instrument.name, print = places_.instrument_work(instrument) },
     created = { ref = places_.ref_of(env, "instrument", n), kind = "instrument" }, target = places_.target_of(env, "instrument", n),
     material = { made = places_.place_of(env, "instrument", n) },
     display = { title = "Added instrument " .. q(label), before = { instruments = count }, after = { instruments = count + 1, index = index } },
@@ -842,7 +842,7 @@ local function load_apply(song, env, input, fence, desc)
   local n = { i }
   local label = places_.instrument_label(i, instrument)
   local done = {
-    applied = { index = i, name = instrument.name, print = places_.instrument_print(instrument), path = plan.path },
+    applied = { index = i, name = instrument.name, print = places_.instrument_work(instrument), path = plan.path },
     target = places_.target_of(env, "instrument", n),
     display = { title = string.format("Loaded %s as %s", q(file_title(plan.path)), q(label)), before = { instruments = plan.count }, after = { instruments = #song.instruments } },
     undo = { desc = desc, entry = true }, prior = { instruments = plan.count }, place = places_.journal_place("instrument", n),
@@ -869,7 +869,7 @@ local function load_restore(song, env, restore, desc)
   if places_.is_empty(instrument) then
     return { restored = { emptied = true }, display = { title = q(label) .. " is empty already" }, undo = { desc = desc, entry = false }, unwritten = true }
   end
-  if not restore.discard and not base.same_table(places_.instrument_print(instrument), (restore.applied or {}).print) then
+  if not restore.discard and not base.same_table(places_.instrument_work(instrument), (restore.applied or {}).print) then
     fail("changed", string.format("%s changed in Renoise since Kumi loaded it", q(label)))
   end
   song:describe_undo(desc)
@@ -919,7 +919,7 @@ local function duplicate_apply(song, env, input, fence, desc)
   keep_selection(song, plan.index, before)
   local n = { plan.index }
   return {
-    applied = { index = plan.index, name = made.name, print = places_.instrument_print(made) },
+    applied = { index = plan.index, name = made.name, print = places_.instrument_work(made) },
     created = { ref = places_.ref_of(env, "instrument", n), kind = "instrument" }, target = places_.target_of(env, "instrument", n),
     material = { made = places_.place_of(env, "instrument", n) },
     display = { title = string.format("Duplicated %s as instrument %02X", q(plan.label), plan.index - 1), before = { instruments = plan.count }, after = { instruments = #song.instruments } },

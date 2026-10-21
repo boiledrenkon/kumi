@@ -221,6 +221,19 @@ local function wav_file(name, size)
   return path
 end
 
+test("samples: Kumi's undo of a sample it loaded refuses once the producer retuned it; of an instrument it made, once they worked in it (#361 N-S1)", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap", 4096), index = 1 })
+  mock.song:instrument(1):sample(2).transpose = 5 -- the producer retunes it
+  failure(restore(peer, "sample-load", record), "changed", "slices or settings")
+  eq(sample_names(1):sub(1, 10), "Kick,Clap,", "it stays")
+  local made = change(peer, "instrument-add", { name = "Lead" })
+  local lead = #mock.data.instruments
+  mock.song:instrument(lead):macro(1).name = "Cutoff" -- the producer names a macro of it
+  failure(restore(peer, "instrument-add", made), "changed", "macros")
+  eq(#mock.data.instruments, lead, "Lead stays")
+end)
+
 test("samples: a sample file loads as a new sample at its place; Kumi's undo deletes it, refused once the producer changed it", function()
   local env, peer = setup()
   local record, done = change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav_file("Clap"), index = 1 })

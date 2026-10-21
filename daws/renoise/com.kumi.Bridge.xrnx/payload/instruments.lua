@@ -231,6 +231,52 @@ function M.instrument_print(instrument)
   }
 end
 
+-- A sample's settings the producer works on (its slices, tuning, level, loop and keys): what the undo of a sample Kumi made
+-- compares, so their later work in it is never taken away unsaid.
+function M.sample_work(sample)
+  local mapping = sample.sample_mapping
+  return {
+    name = sample.name, slices = #sample.slice_markers, transpose = sample.transpose, fine = sample.fine_tune,
+    volume = string.format("%.5f", sample.volume), panning = string.format("%.5f", sample.panning), loop = sample.loop_mode,
+    loopStart = sample.loop_start, loopEnd = sample.loop_end, base = mapping.base_note, notes = mapping.note_range[1] .. "-" .. mapping.note_range[2],
+    velocity = mapping.velocity_range[1] .. "-" .. mapping.velocity_range[2],
+  }
+end
+
+-- A plug-in's state in brief (a sum over every seventh byte, and its length): its state can be megabytes.
+local function state_sum(data)
+  local sum = 0
+  for i = 1, #data, 7 do sum = (sum * 31 + data:byte(i)) % 4294967296 end
+  return string.format("%08x:%d", sum, #data)
+end
+
+-- What the producer works on in an instrument, beyond its print: the devices of each modulation set and FX chain, its macros
+-- and their mappings, its samples' settings and a plug-in's state. What the undo of an instrument Kumi made compares (M3 rule
+-- 3: never take the producer's later work away unsaid).
+function M.instrument_work(instrument)
+  local out = M.instrument_print(instrument)
+  local sets, chains, macros, samples = {}, {}, {}, {}
+  for m = 1, #instrument.sample_modulation_sets do
+    local set, names = instrument:sample_modulation_set(m), {}
+    for d = 1, #set.devices do names[d] = set:device(d).name end
+    sets[m] = table.concat(names, ",")
+  end
+  for c = 1, #instrument.sample_device_chains do
+    local chain, paths = instrument:sample_device_chain(c), {}
+    for d = 1, #chain.devices do paths[d] = chain:device(d).device_path end
+    chains[c] = table.concat(paths, ",")
+  end
+  for k = 1, 8 do
+    local ok, macro = pcall(function() return instrument:macro(k) end)
+    if ok and macro then macros[k] = string.format("%s=%.4f/%d", macro.name, macro.value, #macro.mappings) end
+  end
+  for s = 1, #instrument.samples do samples[s] = M.sample_work(instrument:sample(s)) end
+  out.setDevices, out.chainDevices, out.macros, out.sampleWork = sets, chains, macros, samples
+  local plugin = instrument.plugin_properties
+  if plugin.plugin_loaded then out.pluginState = state_sum(plugin.plugin_device.active_preset_data or "") end
+  return out
+end
+
 -- Where Kumi keeps what it saves to put back (a deleted instrument's .xrni, a sample's audio): a folder of its own in Renoise's
 -- temporary folder, which Renoise empties as it quits (Kumi's undo can't outlive the song anyway). Renoise's own name when that
 -- folder can't be made.

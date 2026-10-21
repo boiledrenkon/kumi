@@ -550,7 +550,7 @@ local function load_apply(song, env, input, fence, desc)
   if input.name ~= nil then sample.name = input.name elseif sample.name == "" then sample.name = file_name(plan.path) end
   local n = { plan.instrument, plan.index }
   return {
-    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name },
+    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name, work = places_.sample_work(sample) },
     created = { ref = places_.ref_of(env, "sample", n), kind = "sample" }, material = { made = places_.place_of(env, "sample", n) },
     target = sample_target(env, n),
     display = { title = string.format("Loaded %s into %s", q(file_name(plan.path)), q(plan.label)), before = { samples = plan.count }, after = { samples = #instrument.samples } },
@@ -572,8 +572,9 @@ local function load_restore(song, env, restore, desc)
   local label = string.format("%s in %s", q(places_.sample_label(n[2], sample)), q(places_.instrument_label(n[1], instrument)))
   local now = M.buffer_print(sample.sample_buffer)
   if material.made then
-    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name) then
-      fail("changed", label .. " changed in Renoise since Kumi loaded it")
+    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name
+      or (applied.work ~= nil and not base.same_table(places_.sample_work(sample), applied.work))) then
+      fail("changed", label .. " changed in Renoise since Kumi loaded it (its audio, slices or settings)")
     end
     song:describe_undo(desc)
     delete_sample(instrument, n[2])
