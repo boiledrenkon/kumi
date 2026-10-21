@@ -1209,8 +1209,19 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
 const MOST_COPIED: u64 = 512 * 1024 * 1024;
 const COPIES_KEPT: usize = 5;
 
-/// A copy of the project's saved file in "Kumi copies" beside it, named by when it was saved, so one saved version is
-/// copied once whatever the session: its path, or None when there's nothing to copy (never saved, copied already, or
+/// When a copy in "Kumi copies" was saved, from its name ("<stem> saved 2026-10-20 14.05.31 +0900<extension>"): its
+/// local time and offset, or UTC for a copy named before local time (no offset); None for a name that isn't one.
+fn copy_saved_at(name: &str, prefix: &str, extension: &str) -> Option<i64> {
+    let when = name.strip_prefix(prefix)?.strip_suffix(extension)?;
+    chrono::DateTime::parse_from_str(when, "%Y-%m-%d %H.%M.%S %z")
+        .map(|at| at.timestamp())
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%d %H.%M.%S").map(|at| at.and_utc().timestamp()))
+        .ok()
+}
+
+/// A copy of the project's saved file in "Kumi copies" beside it, named by when it was saved in the producer's local
+/// time (with its offset, so copies made in another time zone still sort by when they were saved), so one saved version
+/// is copied once whatever the session: its path, or None when there's nothing to copy (never saved, copied already, or
 /// over `MOST_COPIED`). The oldest copies of the project past `COPIES_KEPT` go.
 fn copy_beside(path: &Path) -> Copied {
     let Ok(stats) = std::fs::metadata(path) else { return Copied::Nothing };
@@ -1218,12 +1229,12 @@ fn copy_beside(path: &Path) -> Copied {
         return Copied::TooBig(stats.len());
     }
     let made = || -> Option<String> {
-        let saved: chrono::DateTime<Utc> = stats.modified().ok()?.into();
+        let saved: chrono::DateTime<chrono::Local> = stats.modified().ok()?.into();
         let folder = path.parent()?.join("Kumi copies");
         let stem = path.file_stem()?.to_string_lossy().into_owned();
         let extension = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
         let prefix = format!("{stem} saved ");
-        let name = format!("{prefix}{}{extension}", saved.format("%Y-%m-%d %H.%M.%S"));
+        let name = format!("{prefix}{}{extension}", saved.format("%Y-%m-%d %H.%M.%S %z"));
         let copy = folder.join(&name);
         if copy.exists() {
             return None;
@@ -1250,7 +1261,11 @@ fn copy_beside(path: &Path) -> Copied {
                     })
             })
             .collect();
-        copies.sort();
+        // Oldest first, by when each was saved (its name's time and offset), not by how its name sorts.
+        copies.sort_by_key(|kept| {
+            let name = kept.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            (copy_saved_at(&name, &prefix, &extension).unwrap_or(i64::MIN), name)
+        });
         for old in copies.iter().take((copies.len() + 1).saturating_sub(COPIES_KEPT)) {
             let _ = std::fs::remove_file(old);
         }
@@ -1572,6 +1587,39 @@ mod tests {
             made_in: RefCell::default(),
         });
         OwnPlan::new(link, None, None, None)
+    }
+
+    /// Review U18: a copy is named by when the project was saved in the producer's local time, with its offset, and the
+    /// oldest go by that time, whatever zone each copy was made in (or a copy named in UTC before).
+    #[test]
+    fn a_copy_is_named_by_local_save_time_and_the_oldest_go_by_time_not_by_name() {
+        let folder = tempfile::tempdir().unwrap();
+        let project = folder.path().join("Mix.rpp");
+        std::fs::write(&project, "<REAPER_PROJECT").unwrap();
+        let copies = folder.path().join("Kumi copies");
+        std::fs::create_dir_all(&copies).unwrap();
+        // Six kept already. In UTC: 00:30 (named before local time), 01:00 (made in Tokyo), then 02:00 to 05:00.
+        for name in [
+            "Mix saved 2026-10-20 00.30.00.rpp",
+            "Mix saved 2026-10-20 10.00.00 +0900.rpp",
+            "Mix saved 2026-10-20 02.00.00 +0000.rpp",
+            "Mix saved 2026-10-20 03.00.00 +0000.rpp",
+            "Mix saved 2026-10-20 04.00.00 +0000.rpp",
+            "Mix saved 2026-10-20 05.00.00 +0000.rpp",
+        ] {
+            std::fs::write(copies.join(name), "kept").unwrap();
+        }
+        let Copied::Made(copy) = copy_beside(&project) else { panic!("a copy") };
+        let saved: chrono::DateTime<chrono::Local> = std::fs::metadata(&project).unwrap().modified().unwrap().into();
+        let named = format!("Mix saved {}.rpp", saved.format("%Y-%m-%d %H.%M.%S %z"));
+        assert_eq!(Path::new(&copy).file_name().unwrap().to_string_lossy(), named, "local time, with its offset");
+        let mut left: Vec<String> =
+            std::fs::read_dir(&copies).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left.len(), COPIES_KEPT);
+        assert!(!left.contains(&"Mix saved 2026-10-20 00.30.00.rpp".to_string()), "the oldest went: {left:?}");
+        assert!(!left.contains(&"Mix saved 2026-10-20 10.00.00 +0900.rpp".to_string()), "the next oldest (01:00 UTC) went: {left:?}");
+        assert!(left.contains(&"Mix saved 2026-10-20 02.00.00 +0000.rpp".to_string()), "a later one stays: {left:?}");
     }
 
     #[test]
@@ -2156,7 +2204,7 @@ mod tests {
                 assert_eq!(put_back.state, ChangeState::Kept);
                 let note = put_back.note.unwrap();
                 assert!(
-                    note.contains("Renoise put it back with its own undo or redo") && note.contains("Renoise's own undo (Cmd-Z"),
+                    note.contains("Renoise put it back with its own undo or redo") && note.contains(DawProfile::RENOISE.vocab.own_undo),
                     "{note}"
                 );
                 assert!(row(&plain).note.unwrap().contains("is gone from the song"), "a change nothing put back still says it went");

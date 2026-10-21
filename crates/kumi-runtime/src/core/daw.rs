@@ -872,7 +872,8 @@ impl DawProfile {
             voice_project: "REAPER project",
             voice_devices: "ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth and ReaSamplOmatic5000",
             tutorial_words: "REAPER tutorial: ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth, ReaSamplOmatic5000, JSFX, FX chain, FX container, routing, sidechain, automation item, take, lane, region, marker, Serum, Vital.",
-            own_undo: "REAPER's own undo (Cmd-Z in REAPER)",
+            // (the key this computer undoes with: Cmd-Z on macOS, Ctrl-Z on Windows and Linux)
+            own_undo: if cfg!(target_os = "macos") { "REAPER's own undo (Cmd-Z in REAPER)" } else { "REAPER's own undo (Ctrl-Z in REAPER)" },
             refs_retired: "REAPER may have changed the tracks, so Kumi's references are retired: read them again before using any.",
             structure: "tracks",
             gain_stage: "the track's last limiter, else a gain FX it adds",
@@ -957,7 +958,7 @@ impl DawProfile {
             voice_project: "Renoise song",
             voice_devices: "Compressor, EQ 10, Maximizer, Delay, Reverb, Distortion, Doofer, Splitter and sample instruments",
             tutorial_words: "Renoise tutorial: pattern editor, pattern matrix, phrase editor, keyzones, effect commands, Doofer, Splitter, instrument macros, modulation, Compressor, EQ 10, Maximizer, Reverb, Delay, sidechain, LFO, envelope, Serum, Vital.",
-            own_undo: "Renoise's own undo (Cmd-Z in Renoise)",
+            own_undo: if cfg!(target_os = "macos") { "Renoise's own undo (Cmd-Z in Renoise)" } else { "Renoise's own undo (Ctrl-Z in Renoise)" },
             refs_retired: "Renoise may have moved the tracks, so Kumi's references are retired: read them again before using any.",
             structure: "tracks",
             gain_stage: "the track's last Maximizer, else a Gainer it adds",
@@ -1166,6 +1167,16 @@ mod tests {
         }
         assert_eq!(DawProfile::REAPER.word_pair(), ("REAPER", "project"));
         assert_eq!(DawProfile::RENOISE.word_pair(), ("Renoise", "song"));
+    }
+
+    /// HISTORY names the key this computer undoes with in REAPER and Renoise: Cmd-Z on macOS, Ctrl-Z on Windows and Linux
+    /// (review U14). Live's words are as they always were.
+    #[test]
+    fn reaper_and_renoise_name_this_computers_undo_key() {
+        let key = if cfg!(target_os = "macos") { "Cmd-Z" } else { "Ctrl-Z" };
+        assert_eq!(DawProfile::REAPER.vocab.own_undo, format!("REAPER's own undo ({key} in REAPER)"));
+        assert_eq!(DawProfile::RENOISE.vocab.own_undo, format!("Renoise's own undo ({key} in Renoise)"));
+        assert_eq!(DawProfile::ABLETON.vocab.own_undo, "Live's own undo (Cmd-Z in Live)");
     }
 
     #[test]
