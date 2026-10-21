@@ -232,12 +232,17 @@ pub enum Saved {
     Kept,
     /// Over what Kumi keeps (its size in bytes): catch-up has nothing to compare with next time.
     TooBig(usize),
+    /// Cut short (more than a digest reads): the whole snapshot kept before stays.
+    Partial,
 }
 
 impl Saved {
     /// `saved` in a tool's answer, and why not.
     fn tell(self, answer: &mut Value) {
         answer["saved"] = (self == Saved::Kept).into();
+        if self == Saved::Partial {
+            answer["why"] = "the project is bigger than Kumi reads at once: the snapshot kept before stays".into();
+        }
         if let Saved::TooBig(bytes) = self {
             const MIB: f64 = 1024.0 * 1024.0;
             answer["why"] = format!(
@@ -374,6 +379,12 @@ where
         return Ok(snapshot);
     }
     Err(CallError::Bridge { code: "changed".into(), message: "the project changed while Kumi read it: try again".into() })
+}
+
+/// Whether a snapshot read now is kept in place of the one kept before: a read cut short never replaces a whole one (what
+/// it didn't reach would read as added next time); with nothing whole kept, it's kept.
+fn replaces(kept: Option<&Snapshot>, now: &Snapshot) -> bool {
+    !semantic::cut(now) || kept.is_none_or(semantic::cut)
 }
 
 /// The project row a snapshot was read with.
@@ -540,6 +551,9 @@ impl Host {
 
     fn keep(&self, key: &Key, snapshot: &Snapshot) -> Result<Saved, String> {
         let state = self.catchup();
+        if !replaces(state.store.load(key).as_ref(), snapshot) {
+            return Ok(Saved::Partial);
+        }
         let saved = state.store.save(key, &kept(snapshot))?;
         if saved == Saved::Kept {
             if let Key::Saved { .. } = key {
@@ -876,6 +890,20 @@ mod tests {
         assert_eq!(answer["saved"], false);
         let why = answer["why"].as_str().unwrap();
         assert!(why.starts_with("the project's snapshot is 8.5 MiB, over the 8 MiB Kumi keeps"), "{why}");
+    }
+
+    #[test]
+    fn a_snapshot_cut_short_never_replaces_a_whole_one() {
+        let whole = snapshot("/a.rpp", "9:1", 120.);
+        let mut cut_short = whole.clone();
+        cut_short.bounded.insert("pages".into(), json!("more than 400 pages"));
+        assert!(!replaces(Some(&whole), &cut_short), "the whole one stays");
+        assert!(replaces(None, &cut_short), "nothing better kept");
+        assert!(replaces(Some(&cut_short), &cut_short));
+        assert!(replaces(Some(&cut_short), &whole));
+        let mut answer = json!({});
+        Saved::Partial.tell(&mut answer);
+        assert_eq!(answer["saved"], false);
     }
 
     #[test]

@@ -172,6 +172,11 @@ pub struct Diff {
     pub more: usize,
 }
 
+/// Whether a snapshot was cut short: the project had more pages or things than a digest reads, so it holds only some.
+pub fn cut(snapshot: &Snapshot) -> bool {
+    snapshot.bounded.contains_key("pages") || snapshot.bounded.contains_key("records")
+}
+
 impl Diff {
     pub fn is_empty(&self) -> bool {
         self.project.is_empty() && self.changes.is_empty() && self.more == 0
@@ -342,6 +347,9 @@ pub fn diff(before: &Snapshot, after: &Snapshot, watching: bool, firsts: &HashMa
     let after_keys: HashMap<String, &Record> = after.records.iter().map(|r| (r.key(), r)).collect();
     // Kinds either side summed up are compared through their parents' facets only.
     let bounded = |kind: &str| before.bounded.contains_key(kind) || after.bounded.contains_key(kind);
+    // A side cut short holds only some of the project: what it didn't reach is neither gone nor new, so only what both
+    // sides read is compared.
+    let partial = cut(before) || cut(after);
     let mut kinds: Vec<&str> = vec![];
     for record in after.records.iter().chain(&before.records) {
         if !kinds.contains(&record.k.as_str()) {
@@ -436,6 +444,9 @@ pub fn diff(before: &Snapshot, after: &Snapshot, watching: bool, firsts: &HashMa
                 moved: moves,
                 key: new.key(),
             });
+        }
+        if partial {
+            continue;
         }
         // What's gone with its parent, or came with it, is told by the parent.
         for old in olds.iter().filter(|r| !taken_old.contains(&r.key())) {
@@ -572,6 +583,28 @@ mod tests {
         after.records.retain(|r| r.k != "item");
         after.bounded.insert("item".into(), json!("more than 5,000 items"));
         assert_eq!(said(&diff(&before, &after, false, &HashMap::new())), ["~track Drums (items.count, items.itemsHash)"]);
+    }
+
+    #[test]
+    fn a_snapshot_cut_short_compares_only_what_both_sides_read() {
+        let tracks = |names: &[&str]| -> Vec<Value> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(o, name)| json!({"k": "track", "id": format!("{{{name}}}"), "n": name, "o": o, "f": {"mute": false}}))
+                .collect()
+        };
+        let whole = snapshot(tracks(&["Kick", "Snare", "Bass"]));
+        let mut cut_short = snapshot(tracks(&["Kick", "Snare"]));
+        cut_short.records[1].f = json!({"mute": true}).as_object().unwrap().clone();
+        cut_short.bounded.insert("pages".into(), json!("more than 400 pages"));
+        // Bass wasn't reached: not removed, and not added the time after; Snare, read on both sides, is compared.
+        assert_eq!(said(&diff(&whole, &cut_short, false, &HashMap::new())), ["~track Snare (mute)"]);
+        assert_eq!(said(&diff(&cut_short, &whole, false, &HashMap::new())), ["~track Snare (mute)"]);
+        let mut records = cut_short.clone();
+        records.bounded.clear();
+        records.bounded.insert("records".into(), json!("more than 20000 things"));
+        assert_eq!(said(&diff(&whole, &records, true, &HashMap::new())), ["~track Snare (mute)"], "watch_me drafts no track_add");
     }
 
     #[test]
