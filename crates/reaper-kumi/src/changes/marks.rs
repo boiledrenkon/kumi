@@ -66,11 +66,13 @@ fn label(marker: &Marker) -> String {
 }
 
 /// Where a time is, as a producer says it: `bar 33`, or `bar 33 beat 2.5` off the bar line.
-/// The project's tempo map as one word: its tempo and every tempo marker (time, tempo, signature, shape). A delete keeps
-/// it: put back at its old time after the map changed, a marker or an item would sit at another bar.
+/// The project's tempo map as one word: every tempo marker (time, tempo, signature, shape), or with none the project's
+/// tempo (REAPER's tempo there is the one at the edit or play position, which moves as the cursor crosses markers). A
+/// delete keeps it: put back at its old time after the map changed, a marker or an item would sit at another bar.
 pub fn tempo_print(reaper: &Reaper, proj: crate::reaper::Project) -> String {
-    let mut text = format!("{:?}", reaper.tempo());
-    for index in 0..reaper.tempo_marker_count(proj) {
+    let count = reaper.tempo_marker_count(proj);
+    let mut text = if count == 0 { format!("{:?}", reaper.tempo()) } else { String::new() };
+    for index in 0..count {
         if let Some(m) = reaper.tempo_marker(proj, index) {
             text += &format!("|{:.9} {:.6} {} {} {}", m.time, m.bpm, m.num, m.denom, m.linear);
         }
