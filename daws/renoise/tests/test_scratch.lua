@@ -287,8 +287,22 @@ test("scratch: drop after the producer's own undo took the copies: nothing to re
   H.no_dialogs()
 end)
 
+test("scratch: a copy's cost counts its patterns' lines, and one copy too big for a callback is refused before anything is made (#361 N-S18)", function()
+  local sequence = {}
+  for p = 1, 100 do sequence[p] = p end
+  local env, peer = setup({}, { patterns = 100, sequence_length = 100, sequence = sequence, pattern_lines = 512 })
+  for p = 1, 100 do mock.ops.set_note(p, 3, 1, 1, { note = 36, instrument = 0 }) end -- a long song's bass: 100 patterns of 512 lines
+  mock.data.undo.stack = {}
+  local tracks = #mock.data.tracks
+  local refused = make(peer, "s8", 1)
+  ok(refused.error and refused.error.code == "bad-params", json.encode(refused.result or refused.error))
+  ok(refused.error.message:find("give a range", 1, true), refused.error.message)
+  eq(#mock.data.tracks, tracks, "no copy made")
+  eq(steps(), 0)
+end)
+
 test("scratch: a make past about a second of work is numbered steps, each its own undo step, and says how many", function()
-  local env, peer = setup({}, { patterns = 12, sequence_length = 12, sequence = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 } })
+  local env, peer = setup({}, { patterns = 12, sequence_length = 12, sequence = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, pattern_lines = 64 })
   for p = 4, 12 do mock.ops.set_note(p, 3, 1, 1, { note = 36, instrument = 0 }) end
   mock.data.undo.stack = {}
   -- (the clock moves as the bridge reads it: a step's time runs out after a dozen copies)

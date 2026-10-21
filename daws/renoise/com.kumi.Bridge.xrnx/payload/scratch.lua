@@ -217,11 +217,15 @@ local function make_copy(song, source, at, name, patterns)
   return copy
 end
 
--- What one copy costs, about, in ms (measured: 8 copies of 5 devices and 4 dense patterns took 200 ms; a track insert grows with the
--- tracks, 11 ms at 90 and 385 ms at 566).
+-- What one copy costs, about, in ms (measured: 8 copies of 5 devices and 4 dense 64-line patterns took 200 ms; a track insert
+-- grows faster than the tracks, 11 ms at 90 and 385 ms at 566; a pattern's copy with its lines, about 4 ms a 64 lines).
 local function cost_of(song, source, patterns)
-  return 2 + 0.05 * rows.track_count(song) + 3 * (#song:track(source).devices - 1) + 4 * #patterns
+  local tracks, lines = rows.track_count(song), 0
+  for _, p in ipairs(patterns) do lines = lines + song:pattern(p).number_of_lines end
+  return 2 + 0.05 * tracks + 11 * (tracks / 90) ^ 2 + 3 * (#song:track(source).devices - 1) + 4 * lines / 64
 end
+-- One copy is one callback: one that would hold Renoise longer than this is refused (Renoise's watchdog speaks after ~10 s).
+M.MOST_COPY_MS = 3000
 
 -- The song, if Renoise isn't busy (set and drop name no refs of an epoch of their own: a copy's ref is checked by its name).
 local function ready(env)
@@ -268,6 +272,11 @@ local function make(params, env)
   local patterns = patterns_for(song, env, source, range)
   local tag = tag_of(id)
   local source_name = base.named(source, track)
+  local per_copy = cost_of(song, source, patterns)
+  if per_copy > M.MOST_COPY_MS then
+    bad(string.format("one copy of %s would hold Renoise about %.1f s (its lines in %d patterns, in a song of %d tracks): give a range, a few bars of it",
+      q(source_name), per_copy / 1000, #patterns, rows.track_count(song)))
+  end
   local names = {}
   for n = 1, count do names[n] = M.PREFIX .. tag .. " " .. n end
   for _, name in ipairs(names) do
@@ -287,7 +296,6 @@ local function make(params, env)
   for d = 1, #track.devices do session.devices[d] = track:device(d).device_path end
   S.live[id] = session
   local desc = string.format("Kumi: scratch copies of %s for %s (%s)", q(source_name), label, id)
-  local per_copy = cost_of(song, source, patterns)
   local total = math.max(1, math.ceil(per_copy * count / M.STEP_MS))
   local source_layout, source_id = env.layout(), base.track_id(track)
   -- Makes copies until the step's time is used (at least one; `budget` false: all of them); the source is found where the tracks
