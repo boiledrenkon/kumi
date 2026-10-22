@@ -300,6 +300,33 @@ impl<'a> Ax<'a> {
         Ok(Node::from_json(node))
     }
 
+    /// A subtree through a pop-up button (its menu, once the button is pressed): the helper's `popups` rule lifted
+    /// for this one read, which opens nothing the press hasn't.
+    pub fn tree_in_popup(
+        &mut self,
+        root: &Root,
+        path: &str,
+        depth: usize,
+        children: usize,
+        attrs: Option<&[&str]>,
+    ) -> Result<Node, AxError> {
+        let mut params = json!({"pid": self.pid, "root": root.to_json(), "path": path, "depth": depth.min(MAX_DEPTH), "children": children.min(MAX_CHILDREN), "popups": true});
+        if let Some(attrs) = attrs {
+            params["attrs"] = attrs.iter().map(|a| Value::String(a.to_string())).collect();
+        }
+        let reply = self.call("tree", params)?;
+        let node = reply.get("node").ok_or_else(|| AxError::Missing(format!("the element at {path:?}")))?;
+        Ok(Node::from_json(node))
+    }
+
+    /// An action on an element through a pop-up button (a menu item of its open menu).
+    pub fn action_in_popup(&mut self, root: &Root, path: &str, name: &str, settle_ms: u64) -> Result<Value, AxError> {
+        self.call(
+            "action",
+            json!({"pid": self.pid, "root": root.to_json(), "path": path, "name": name, "settleMs": settle_ms, "popups": true}),
+        )
+    }
+
     /// The attributes named of the element at `path` below `root`, by their AX names.
     pub fn get(&mut self, root: &Root, path: &str, attrs: &[&str]) -> Result<Map<String, Value>, AxError> {
         let params = json!({"pid": self.pid, "root": root.to_json(), "path": path, "attrs": attrs});
@@ -353,6 +380,12 @@ impl<'a> Ax<'a> {
         Ok(reply["active"] == Value::Bool(true))
     }
 
+    /// Posts a key given as the helper takes it (a name, a character or a virtual key code) with modifiers.
+    pub fn chord(&mut self, key: &Value, mods: &[&str]) -> Result<bool, AxError> {
+        let reply = self.call("keys", json!({"pid": self.pid, "key": key, "mods": mods}))?;
+        Ok(reply["active"] == Value::Bool(true))
+    }
+
     /// Presses a menu item by its titles from the menu bar down: the title as shown.
     pub fn menu(&mut self, titles: &[&str]) -> Result<String, AxError> {
         let reply = self.call("menu", json!({"pid": self.pid, "titles": titles}))?;
@@ -362,6 +395,12 @@ impl<'a> Ax<'a> {
     /// Clicks a point on the screen (the helper brings Logic in front first).
     pub fn click(&mut self, x: f64, y: f64) -> Result<(), AxError> {
         self.call("click", json!({"pid": self.pid, "x": x, "y": y}))?;
+        Ok(())
+    }
+
+    /// A click with modifier keys held (`shift` extends a track selection).
+    pub fn click_with(&mut self, x: f64, y: f64, mods: &[&str]) -> Result<(), AxError> {
+        self.call("click", json!({"pid": self.pid, "x": x, "y": y, "mods": mods}))?;
         Ok(())
     }
 

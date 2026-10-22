@@ -96,6 +96,7 @@ pub fn tempo_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied>
     Ok(Applied {
         applied: tempo_state(after),
         created: None,
+        target: None,
         material: None,
         display: json!({"title": format!("Tempo {after} BPM"), "before": now, "after": tempo_state(after)}),
         step: None,

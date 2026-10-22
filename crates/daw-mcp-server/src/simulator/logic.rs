@@ -26,6 +26,15 @@
 //! answer after (`uncertain_once`) is made and answered `uncertain`. The kinds the bridge can't make are refused saying
 //! why, as it refuses them; of the kinds it makes, the simulator makes those whose state is a value here (the strip's
 //! controls and its name, tracks added and deleted, markers and the tempo), and says so for the rest (notes, bypass).
+//!
+//! The M4 kinds answer as the bridge's recorded scenes over the real Logic do (`crates/logic-kumi/tests/fixtures`): a
+//! key command resolved by its name or id from Logic's own table (a few of them, with their factory chords), a row only
+//! when Logic's Edit menu names a step of it; regions moved in time, resized and split on whole beats, looped, renamed
+//! and deleted, each answering the region's state as the bridge keeps it and moving the epoch as it does; the cycle
+//! with its locators; the Tempo and Signature Lists; a MIDI file imported onto a new track Logic adds; Track Stacks
+//! Logic names and gathers. Logic's undo steps carry the titles its Edit menu gave them there ("Split Regions", "Loop
+//! Parameter Change", "Insert Tempo" then "Value Change", "Flatten Stack"), keyed by the change's kind and target as
+//! the bridge's undo watch keys them, so a restore through Logic's own undo finds its step on top or says it can't.
 use super::replay::{epoch_of, find, load_cases, normal, retag, Case, RECORDED_EPOCH};
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
@@ -43,8 +52,9 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
 /// The reads, in the order the bridge's welcome lists them after ping and status.
 const METHODS: [&str; 4] = ["focus", "read", "snapshot", "focus_body"];
-/// What the project answers besides: Kumi's changes, the transport and the playhead, and a plan's steps.
-const CHANGE_METHODS: [&str; 8] = [
+/// What the project answers besides: Kumi's changes, the transport and the playhead, a plan's steps, and (M4) the
+/// project saved, which is no change.
+const CHANGE_METHODS: [&str; 9] = [
     "change_preview",
     "change_apply",
     "change_restore",
@@ -53,10 +63,10 @@ const CHANGE_METHODS: [&str; 8] = [
     "cursor_set",
     "undo_step_begin",
     "undo_step_end",
+    "project_save",
 ];
 /// The kinds the bridge can't make yet, and why, as it refuses them.
 const NOT_YET: [(&str, &str); 9] = [
-    ("loop-range", "the cycle locators have no field Accessibility can set"),
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
     ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
     ("fx-delete", "the insert slot's pop-up menu can't be driven from outside"),
@@ -64,10 +74,65 @@ const NOT_YET: [(&str, &str); 9] = [
     ("fx-move", "the insert slots can't be rearranged from outside"),
     ("send-add", "the send slot's pop-up menu can't be driven from outside"),
     ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
-    ("track-move", "the track headers can't be dragged from outside"),
+    ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
+    ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
 ];
 /// The kinds the bridge makes whose state the simulator doesn't hold.
-const NOT_SIMULATED: [&str; 4] = ["notes-add", "notes-change", "notes-delete", "fx-bypass"];
+const NOT_SIMULATED: [&str; 5] = ["notes-add", "notes-change", "notes-delete", "notes-quantize", "fx-bypass"];
+/// The kinds the simulator makes, for the refusal that names them.
+const SIMULATED: &str = "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, track-stack, track-stack-flatten, marker-add, marker-move, marker-delete, tempo-set, tempo-marker-set, tempo-marker-delete, signature-set, loop-range, region-move, region-resize, region-split, region-loop, region-rename, region-delete, midi-import and key-command";
+/// (M4) What a key command's answers say of taking it back, and what one Logic kept no step of says, as the bridge
+/// says them (`changes/command.rs`).
+const KEY_NOTE: &str = "Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro).";
+const KEY_NO_STEP: &str = "Logic Pro made no undo step of it: it changed nothing its history keeps (a view, selection or transport command), so it has no row in HISTORY.";
+/// (M4) A key command the simulated Logic knows, as the bridge resolves it from `keys/names.json` and the factory U.S.
+/// bindings (`keys/us-bindings.json`): its id, its English name (none for an id Logic names nowhere), its chord as the
+/// Key Commands window shows it (none when unbound), and the step Logic's history takes for it (none for a selection).
+struct KeyCommand {
+    id: u32,
+    name: Option<&'static str>,
+    chord: Option<&'static str>,
+    step: Option<&'static str>,
+}
+
+impl KeyCommand {
+    /// The command as a title says it: its name in quotes, or its id.
+    fn label(&self) -> String {
+        match self.name {
+            Some(name) => quoted(name),
+            None => format!("key command {}", self.id),
+        }
+    }
+}
+
+static KEY_COMMANDS: [KeyCommand; 10] = [
+    KeyCommand { id: 766, name: Some("Select All"), chord: Some("⌘A"), step: None },
+    KeyCommand { id: 347, name: Some("Deselect All"), chord: Some("⇧D"), step: None },
+    KeyCommand { id: 513, name: Some("Create Marker"), chord: Some("⌥'"), step: Some("Create Marker") },
+    KeyCommand { id: 574, name: Some("Split Regions/Events at Playhead Position"), chord: Some("⌘T"), step: Some("Split Regions") },
+    KeyCommand { id: 503, name: Some("Set Left Locator by Playhead"), chord: None, step: None },
+    KeyCommand { id: 1749, name: Some("Bounce Tracks in Place"), chord: Some("⌃⌘B"), step: None },
+    KeyCommand { id: 761, name: Some("Undo"), chord: Some("⌘Z"), step: None },
+    KeyCommand { id: 796, name: Some("Redo"), chord: Some("⇧⌘Z"), step: None },
+    KeyCommand { id: 754, name: None, chord: Some("⌘S"), step: None },
+    KeyCommand { id: 32, name: None, chord: Some("⇧⌘S"), step: None },
+];
+/// The commands the bridge never runs as a change, by id: Save and Save As (`project_save`), Undo and Redo.
+const KEY_REFUSED_IDS: [(u32, &str); 4] = [
+    (754, "saves the project: use project_save"),
+    (32, "saves the project as: use project_save"),
+    (761, "moves Logic Pro's undo history under Kumi's HISTORY: Kumi's own changes are taken back by Kumi's undo, anything else is the producer's to undo in Logic Pro"),
+    (796, "moves Logic Pro's undo history under Kumi's HISTORY: anything to redo is the producer's to redo in Logic Pro (Shift-Cmd-Z)"),
+];
+/// (M4) Where the bridge writes the MIDI file it imports, the most notes one import takes, and what Logic names what
+/// the import makes: the file carries no track name, so the region is Logic's own "MIDI Region", on a new software
+/// instrument track named after Logic's default patch (as the M4 gate's run read them).
+const IMPORT_FOLDER: &str = "/tmp/kumi-logic";
+const MOST_IMPORTED: usize = 10_000;
+const IMPORT_REGION: &str = "MIDI Region";
+const IMPORT_TRACK: &str = "Studio Grand";
+/// (M4) The recorded project's cycle: off, its locators at bar 1 and bar 5 (as the M4 gate's scenes read them).
+const CYCLE: (bool, f64, f64) = (false, 0.0, 16.0);
 /// The recorded project's signature: four beats to the bar.
 const BEATS_PER_BAR: f64 = 4.0;
 /// Logic's resolution: 960 ticks to a beat, a division being a sixteenth of 240 ticks.
@@ -104,6 +169,8 @@ struct Track {
     mute: bool,
     solo: bool,
     armed: bool,
+    /// (M4) The Track Stack this track is in: its own track's id.
+    in_stack: Option<u64>,
 }
 
 impl Track {
@@ -119,6 +186,7 @@ impl Track {
             mute: row["mute"] == true,
             solo: row["solo"] == true,
             armed: row["armed"] == true,
+            in_stack: None,
         }
     }
 
@@ -129,7 +197,18 @@ impl Track {
             "kind": kind, "monitoring": false, "mute": false, "name": name, "output": "Stereo Output", "pan": 0,
             "ref": "", "selected": false, "solo": false, "volumeDb": 0.0,
         });
-        Track { id, row, name: name.into(), kind: kind.into(), volume_db: 0.0, pan_steps: 0, mute: false, solo: false, armed: false }
+        Track {
+            id,
+            row,
+            name: name.into(),
+            kind: kind.into(),
+            volume_db: 0.0,
+            pan_steps: 0,
+            mute: false,
+            solo: false,
+            armed: false,
+            in_stack: None,
+        }
     }
 
     /// The row as a read shows it at `place` (from 1) in the recorded epoch (the answer is retagged to the one now).
@@ -145,6 +224,36 @@ impl Track {
         row["solo"] = self.solo.into();
         row["armed"] = self.armed.into();
         row
+    }
+
+    /// (M4) A Track Stack's own track, as Logic makes it and the bridge's rows read it (`rows.rs`): a summing stack's
+    /// is an aux fed by the bus it mixes through, a folder stack's has no input or output of its own (the strip reads
+    /// as an external MIDI track's); its header row carries `stack: true`.
+    fn stack(id: u64, name: &str, kind: &str, bus: usize) -> Track {
+        let summing = kind == "summing";
+        let row_kind = if summing { "aux" } else { "external" };
+        let row = json!({
+            "armed": false, "color": null, "index": 0, "inputs": if summing { json!([format!("Bus {bus}")]) } else { json!([]) },
+            "kind": row_kind, "monitoring": false, "mute": false, "name": name, "output": if summing { "Stereo Output" } else { "" },
+            "pan": 0, "ref": "", "selected": false, "solo": false, "stack": true, "volumeDb": 0.0,
+        });
+        Track {
+            id,
+            row,
+            name: name.into(),
+            kind: row_kind.into(),
+            volume_db: 0.0,
+            pan_steps: 0,
+            mute: false,
+            solo: false,
+            armed: false,
+            in_stack: None,
+        }
+    }
+
+    /// Whether it is a Track Stack's own track.
+    fn is_stack(&self) -> bool {
+        self.row["stack"] == true
     }
 
     /// A prop's state as the bridge reads it from the header.
@@ -231,6 +340,205 @@ impl Marker {
             format!("marker {}", quoted(&self.name))
         }
     }
+}
+
+/// (M4) One of the project's regions, as Kumi's changes left it: the recorded row's fields, the track it sits on (by
+/// the track's id, through the places it has over the epochs), and its notes as the Event List lists them.
+#[derive(Clone)]
+struct Region {
+    /// Tells a region apart through the places it has over the epochs.
+    id: u64,
+    track: u64,
+    name: String,
+    kind: String,
+    start: f64,
+    end: f64,
+    /// The Region inspector's Loop checkbox (the Tracks area's rows never show it: their `looped` reads false).
+    looping: bool,
+    selected: bool,
+    /// Each note as its Event List row less its refs and position (`channel`, `lengthTicks`, `pitch`, `velocity`,
+    /// `selected` when it is), with `beat`: its start from the region's start, in beats.
+    notes: Vec<Value>,
+}
+
+impl Region {
+    /// A recorded row, with the notes recorded for it (their positions are the project's: made the region's).
+    fn recorded(id: u64, row: &Value, track: u64, notes: &[Value]) -> Region {
+        let start = row["startBeats"].as_f64().unwrap_or(0.0);
+        let notes = notes
+            .iter()
+            .map(|note| {
+                let mut kept = note.clone();
+                let beat = beats_of(&note["position"]) - start;
+                if let Some(map) = kept.as_object_mut() {
+                    map.remove("position");
+                    map.remove("ref");
+                    map.remove("regionRef");
+                }
+                kept["beat"] = beat.into();
+                kept
+            })
+            .collect();
+        Region {
+            id,
+            track,
+            name: row["name"].as_str().unwrap_or_default().to_string(),
+            kind: row["kind"].as_str().unwrap_or("midi").to_string(),
+            start,
+            end: row["endBeats"].as_f64().unwrap_or(start),
+            looping: row["looped"] == true,
+            selected: row["selected"] == true,
+            notes,
+        }
+    }
+
+    /// The row as a read shows it at `place` (from 1), its track at `track_place`, in the recorded epoch: `looped` as
+    /// the Tracks area reads it (never true: Accessibility shows no loop there).
+    fn row(&self, place: usize, track_place: usize) -> Value {
+        alphabetical(json!({
+            "endBeats": self.end, "kind": self.kind, "looped": false, "name": self.name,
+            "ref": format!("{RECORDED_EPOCH}:region:{place}"), "selected": self.selected, "startBeats": self.start,
+            "trackRef": format!("{RECORDED_EPOCH}:track:{track_place}"),
+        }))
+    }
+
+    /// The region as the Tracks area's lane lists it.
+    fn lane_row(&self, place: usize) -> Value {
+        alphabetical(json!({
+            "endBeats": self.end, "kind": self.kind, "name": self.name, "ref": format!("{RECORDED_EPOCH}:region:{place}"),
+            "selected": self.selected, "startBeats": self.start,
+        }))
+    }
+
+    /// Its notes as the Event List's rows, each at its place in the region (from 1), in the recorded epoch.
+    fn note_rows(&self, place: usize) -> Vec<Value> {
+        self.notes
+            .iter()
+            .enumerate()
+            .map(|(n, note)| {
+                let mut row = note.clone();
+                let beat = row.as_object_mut().and_then(|map| map.remove("beat")).and_then(|beat| beat.as_f64()).unwrap_or(0.0);
+                row["position"] = position_of(self.start + beat);
+                row["ref"] = format!("{RECORDED_EPOCH}:note:{place}.{}", n + 1).into();
+                row["regionRef"] = format!("{RECORDED_EPOCH}:region:{place}").into();
+                alphabetical(row)
+            })
+            .collect()
+    }
+
+    /// The region as a title says it: `region “Keys”`.
+    fn label(&self) -> String {
+        format!("region {}", quoted(&self.name))
+    }
+}
+
+/// A number in a state, NaN when it isn't there.
+fn number(value: &Value, key: &str) -> f64 {
+    value[key].as_f64().unwrap_or(f64::NAN)
+}
+
+/// (M4) Two positions in beats within a tick of each other, as the bridge compares them.
+fn close_beats(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1.0 / TICKS_PER_BEAT
+}
+
+/// (M4) Whether a position is on a beat (no division or tick past it): where Logic's playhead display can go.
+fn on_a_beat(beats: f64) -> bool {
+    let position = position_of(beats);
+    position["division"] == 1 && position["tick"] == 1
+}
+
+/// (M4) A position in beats on Logic's ticks (960 to a beat), where the LCD's locators sit.
+fn on_ticks(beats: f64) -> f64 {
+    (beats * TICKS_PER_BEAT).round() / TICKS_PER_BEAT
+}
+
+/// (M4) Names as a title lists them: `“Vocal”`, `“Vocal” and “Keys”`, `“Vocal”, “Keys” and “Bass”`.
+fn and_list<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let names: Vec<String> = names.map(quoted).collect();
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        n => format!("{} and {}", names[..n - 1].join(", "), names[n - 1]),
+    }
+}
+
+/// A row with its keys in alphabetical order, as the bridge writes its rows (the goldens are the wire's bytes).
+fn alphabetical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut fields: Vec<(String, Value)> = map.into_iter().map(|(key, field)| (key, alphabetical(field))).collect();
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(fields.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(alphabetical).collect()),
+        other => other,
+    }
+}
+
+/// (M4) A note of a MIDI import, as the bridge's file takes it: beats from the file's start, a length in beats, a
+/// channel from 1.
+#[derive(Clone, Copy)]
+struct ImportNote {
+    pitch: u8,
+    start: f64,
+    length: f64,
+    velocity: u8,
+    channel: u8,
+}
+
+impl ImportNote {
+    /// The note as the region holds it: an Event List row less its position, `beat` from the region's start.
+    fn row(&self) -> Value {
+        json!({
+            "beat": self.start, "channel": self.channel, "lengthTicks": (self.length * TICKS_PER_BEAT).round() as i64,
+            "pitch": self.pitch, "velocity": self.velocity,
+        })
+    }
+}
+
+/// (M4) The Standard MIDI File the bridge writes for an import (`changes/smf.rs`): format 0, one track, 480 ticks a
+/// quarter note, each note an on and an off (the offs first at a tick), no tempo, no running status. The bridge names
+/// the file by its bytes, so the simulator's answer names the file the bridge would write.
+fn midi_file(notes: &[ImportNote]) -> Vec<u8> {
+    const TICKS_PER_QUARTER: u16 = 480;
+    let ticks = |beats: f64| (beats.max(0.0) * f64::from(TICKS_PER_QUARTER)).round() as u64;
+    // (tick, 0 for an off and 1 for an on, status, pitch, velocity): the order the file's events go in
+    let mut events: Vec<(u64, u8, u8, u8, u8)> = Vec::with_capacity(notes.len() * 2);
+    for note in notes {
+        let channel = note.channel.clamp(1, 16) - 1;
+        let start = ticks(note.start);
+        events.push((start, 1, 0x90 | channel, note.pitch & 0x7F, note.velocity.clamp(1, 127)));
+        events.push((start + ticks(note.length).max(1), 0, 0x80 | channel, note.pitch & 0x7F, 0));
+    }
+    events.sort();
+    let mut track = Vec::with_capacity(events.len() * 5 + 4);
+    let mut at = 0;
+    for (tick, _, status, pitch, velocity) in events {
+        // The delta as a variable-length quantity.
+        let mut delta = tick - at;
+        let mut bytes = vec![(delta & 0x7F) as u8];
+        delta >>= 7;
+        while delta > 0 {
+            bytes.push((delta & 0x7F) as u8 | 0x80);
+            delta >>= 7;
+        }
+        bytes.reverse();
+        track.extend_from_slice(&bytes);
+        track.extend_from_slice(&[status, pitch, velocity]);
+        at = tick;
+    }
+    track.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+    let mut file = Vec::with_capacity(track.len() + 22);
+    file.extend_from_slice(b"MThd");
+    file.extend_from_slice(&6u32.to_be_bytes());
+    file.extend_from_slice(&0u16.to_be_bytes());
+    file.extend_from_slice(&1u16.to_be_bytes());
+    file.extend_from_slice(&TICKS_PER_QUARTER.to_be_bytes());
+    file.extend_from_slice(b"MTrk");
+    file.extend_from_slice(&(track.len() as u32).to_be_bytes());
+    file.extend_from_slice(&track);
+    file
 }
 
 /// A track attribute Kumi changes through its header or the Inspector: the input's field, its noun for the words, and
@@ -327,6 +635,15 @@ impl Prop {
     }
 }
 
+/// A step of Logic's undo history: the Edit menu's title for it; the `desc` the host sent with the change that made
+/// it (the bridge keeps a change under its last step, so the steps before it carry none, nor does a restore's step or
+/// a write Logic didn't answer after); and the change's kind and target, as the bridge's undo watch keys Kumi's steps.
+struct UndoStep {
+    title: String,
+    desc: Option<String>,
+    key: Option<String>,
+}
+
 struct State {
     /// The epoch the project is in now (the vectors were recorded in [`RECORDED_EPOCH`]).
     epoch: u32,
@@ -348,12 +665,35 @@ struct State {
     /// The number Logic gives the next marker it makes ("Marker 2").
     next_marker: usize,
     tempo: f64,
+    /// (M4) The project's regions, in the Tracks area's order (by track, then by start); which region stood at each
+    /// place in every epoch before this one, for a restore's ref; and the regions Kumi deleted, by the apply's `desc`,
+    /// which Logic's own undo brings back whole.
+    regions: Vec<Region>,
+    region_places: HashMap<u32, Vec<u64>>,
+    next_region: u64,
+    deleted_regions: HashMap<String, Region>,
+    /// (M4) The Tempo List past the project's tempo at the start: each change's beat and BPM, by beat; and the
+    /// Signature List: the project's signature at the start, and each change's beat and signature.
+    tempo_changes: Vec<(f64, f64)>,
+    signature: (i64, i64),
+    signature_changes: Vec<(f64, (i64, i64))>,
+    /// (M4) The cycle: on, and the locators in beats.
+    cycle: (bool, f64, f64),
+    /// (M4) How many summing and folder stacks Logic has made (it names them Sum 1, Folder 1); the tracks' order before
+    /// each stack Kumi made, by the apply's `desc` (Logic's own undo of it puts them back exactly); and each stack Kumi
+    /// flattened, its own track and its tracks, by the apply's `desc` (Logic's own undo brings it back).
+    summing_stacks: usize,
+    folder_stacks: usize,
+    stacked: HashMap<String, Vec<u64>>,
+    flattened: HashMap<String, (Track, Vec<u64>)>,
+    /// (M4) The package the project was saved as, if Kumi saved it as another; every path saved to.
+    saved_as: Option<String>,
+    saved_paths: Vec<String>,
     /// The playhead, in beats from the project's start.
     playhead: f64,
     playing: bool,
-    /// Logic's undo history, newest last: the Edit menu's title for each step, and the `desc` the host sent with the
-    /// change that made it (none for a restore's step, or a write Logic didn't answer after: the bridge names neither).
-    undo: Vec<(String, Option<String>)>,
+    /// Logic's undo history, newest last.
+    undo: Vec<UndoStep>,
     /// A plan's step, counted (Logic has no undo block): its id and label, and the changes applied in it so far.
     open_step: Option<(String, String, usize)>,
     steps: u32,
@@ -361,6 +701,8 @@ struct State {
     busy_once: bool,
     /// The next write (an apply or a restore) is made, and Logic doesn't answer after it.
     uncertain_once: bool,
+    /// The next restore alone is made, and Logic doesn't answer after it (REAPER's simulator's switch).
+    uncertain_restore_once: bool,
 }
 
 /// A project that answers like the bridge. Clones share the project.
@@ -436,6 +778,132 @@ fn on_the_beat(beats: f64) -> f64 {
     beats.floor()
 }
 
+/// A time signature from its text (`4/4`), as the Signature List shows it.
+fn signature_of(text: &str) -> Option<(i64, i64)> {
+    let (num, den) = text.split_once('/')?;
+    Some((num.trim().parse().ok()?, den.trim().parse().ok()?))
+}
+
+/// The rows a recorded read of `kind` under `parent` answered, if one was recorded.
+fn rows_of(cases: &[Case], kind: &str, parent: &str) -> Vec<Value> {
+    find(cases, "read", &json!({"kind": kind, "parent": parent}))
+        .and_then(|case| case.response.as_ref().ok())
+        .and_then(|page| page["items"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// (M4) A key command's name as the bridge matches it (`keys.rs`): lower-cased, without a trailing ellipsis, the
+/// spaces folded.
+fn folded(name: &str) -> String {
+    let mut text = name.trim().to_lowercase();
+    while text.ends_with('…') || text.ends_with("...") {
+        text = text.trim_end_matches('…').trim_end_matches("...").trim_end().to_string();
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// (M4) Why the bridge never runs a command it resolved, by its name (`changes/command.rs`): a dialog, leaving the
+/// project, a save, Logic's own undo history.
+fn refused_by_name(name: &str) -> Option<&'static str> {
+    if name.ends_with('…') || name.ends_with("...") {
+        return Some("opens a dialog, which Kumi never runs unattended");
+    }
+    let lower = name.to_lowercase();
+    let starts = |prefix: &str| lower.starts_with(prefix);
+    if starts("quit") {
+        return Some("quits Logic Pro");
+    }
+    if starts("open ") && !starts("open track stack") && !lower.contains("list") && !lower.contains("editor") && !lower.contains("window")
+        || starts("close project")
+        || starts("new project")
+        || starts("new from template")
+    {
+        return Some("opens, closes or switches projects");
+    }
+    if starts("save") || starts("revert to") {
+        return Some("saves or reverts the project: use project_save");
+    }
+    if starts("import") || starts("export") || starts("bounce") || starts("share") {
+        return Some("imports, exports or bounces through a dialog, which Kumi never runs unattended");
+    }
+    if lower == "undo" || lower == "redo" || starts("delete undo history") {
+        return Some("moves Logic Pro's undo history under Kumi's HISTORY");
+    }
+    None
+}
+
+/// (M4) The key command a request names, as the bridge resolves it (`keys.rs`): by its English name as Logic Pro's Key
+/// Commands window lists it (case, a trailing ellipsis and spaces aside) or by its id; then refused, as the bridge
+/// refuses it, when it saves, moves Logic's undo history, opens a dialog or leaves the project, or has no key. The
+/// simulated Logic knows the commands of `KEY_COMMANDS`: another name is one Logic hasn't (refused with the closest it
+/// knows), another id one the simulator doesn't model.
+fn key_command_of(input: &Value) -> Result<&'static KeyCommand, Fault> {
+    let asked = input.get("command").filter(|command| !command.is_null()).ok_or_else(|| {
+        bad("command: a key command's English name as Logic Pro's Key Commands window lists it (\"Select All\"), or its id")
+    })?;
+    let by_id = |id: u64| -> Result<&'static KeyCommand, Fault> {
+        let id = u32::try_from(id)
+            .ok()
+            .filter(|id| (1..5000).contains(id))
+            .ok_or_else(|| bad("command: an id is a whole number from 1 to 4999"))?;
+        KEY_COMMANDS.iter().find(|command| command.id == id).ok_or_else(|| {
+            let known: Vec<String> = KEY_COMMANDS.iter().map(|command| command.id.to_string()).collect();
+            bad(format!(
+                "the simulated Logic Pro knows only the key commands {} by id; the bridge resolves every id Logic Pro has",
+                known.join(", ")
+            ))
+        })
+    };
+    let command = match asked {
+        Value::Number(id) => by_id(id.as_u64().unwrap_or(0))?,
+        Value::String(text) if text.trim().parse::<u32>().is_ok() => by_id(text.trim().parse().unwrap_or(0))?,
+        Value::String(text) => key_command_named(text)?,
+        _ => return Err(bad("command: a key command's English name as Logic Pro's Key Commands window lists it, or its id")),
+    };
+    let refused =
+        KEY_REFUSED_IDS.iter().find(|(id, _)| *id == command.id).map(|(_, why)| *why).or_else(|| command.name.and_then(refused_by_name));
+    if let Some(why) = refused {
+        return Err(bad(format!("{} {why}: Kumi won't run it as a change", command.label())));
+    }
+    if command.chord.is_none() {
+        return Err(bad(format!(
+            "{} isn't bound to any key in Logic Pro's key command set, so Kumi can't post it: assign one in Logic Pro > Key Commands",
+            command.label()
+        )));
+    }
+    Ok(command)
+}
+
+/// (M4) A key command by its name, or the bridge's refusal naming the closest ones the simulated Logic knows.
+fn key_command_named(text: &str) -> Result<&'static KeyCommand, Fault> {
+    let wanted = folded(text);
+    if wanted.is_empty() {
+        return Err(bad("command: a key command's name, as Logic Pro's Key Commands window lists it"));
+    }
+    let named = || KEY_COMMANDS.iter().filter_map(|command| command.name.map(|name| (folded(name), name, command)));
+    if let Some((_, _, command)) = named().find(|(known, _, _)| *known == wanted) {
+        return Ok(command);
+    }
+    let words: Vec<&str> = wanted.split(' ').filter(|word| word.len() > 2).collect();
+    let mut close: Vec<(usize, String, &str)> = named()
+        .map(|(known, name, _)| (words.iter().filter(|word| known.contains(**word)).count(), known, name))
+        .filter(|(hits, _, _)| *hits > 0)
+        .collect();
+    close.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+    let close: Vec<String> = close.into_iter().take(5).map(|(_, _, name)| quoted(name)).collect();
+    Err(bad(if close.is_empty() {
+        format!("Logic Pro has no key command named {}", quoted(text))
+    } else {
+        format!("Logic Pro has no key command named {}; close: {}", quoted(text), close.join(", "))
+    }))
+}
+
+/// Thirty-two hex digits from a path, as the project's id is a hash of its path (the bridge's).
+fn id_of_path(path: &str) -> String {
+    let fnv = |seed: u64| path.bytes().fold(seed, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3));
+    format!("{:016x}{:016x}", fnv(0xcbf2_9ce4_8422_2325), fnv(0x84222325_cbf29ce4))
+}
+
 /// The project the vectors were recorded over, as the bridge's `status` named it: what the welcome and the discovery
 /// file carry.
 pub fn project() -> Project {
@@ -474,6 +942,33 @@ fn another_project(value: &Value, n: u32) -> Value {
             )
         }
         Value::Array(items) => Value::Array(items.iter().map(|item| another_project(item, n)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// (M4) The project row of `value`, if it holds one, as the package Kumi saved the project as: that path, its stem as
+/// the name and identity, and an id hashed from the path, as the bridge's ids are.
+fn saved_project(value: &Value, path: &str) -> Value {
+    match value {
+        Value::Object(map) => {
+            let is_project = map.get("id").and_then(Value::as_str).is_some_and(|id| id.len() == 32)
+                && (map.contains_key("path") || map.contains_key("identity"));
+            let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".logicx");
+            Value::Object(
+                map.iter()
+                    .map(|(key, field)| {
+                        let field = match (is_project, key.as_str()) {
+                            (true, "id") => Value::String(id_of_path(path)),
+                            (true, "identity" | "name") => Value::String(stem.to_string()),
+                            (true, "path") => Value::String(path.to_string()),
+                            _ => saved_project(field, path),
+                        };
+                        (key.clone(), field)
+                    })
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(|item| saved_project(item, path)).collect()),
         other => other.clone(),
     }
 }
@@ -579,10 +1074,22 @@ impl State {
                 length: row["length"].as_f64().unwrap_or(0.0),
             })
             .collect();
-        let tempo = rows("tempo").first().and_then(|row| row["bpm"].as_f64()).unwrap_or(120.0);
+        let tempo_row = rows("tempo").into_iter().next().unwrap_or(Value::Null);
+        let tempo = tempo_row["bpm"].as_f64().unwrap_or(120.0);
+        let signature = tempo_row["signatures"][0]["time"].as_str().and_then(signature_of).unwrap_or((4, 4));
+        // The regions as read through the project, each with the notes recorded for it, on the track its ref names.
+        let regions: Vec<Region> = rows("region")
+            .iter()
+            .enumerate()
+            .map(|(n, row)| {
+                let track = row["trackRef"].as_str().and_then(|r| r.rsplit(':').next()).and_then(|p| p.parse::<u64>().ok()).unwrap_or(1);
+                let notes = rows_of(&cases, "note", &format!("{RECORDED_EPOCH}:region:{}", n + 1));
+                Region::recorded(n as u64 + 1, row, track, &notes)
+            })
+            .collect();
         let focus = find(&cases, "focus", &json!({})).and_then(|case| case.response.as_ref().ok()).cloned().unwrap_or(Value::Null);
-        let (next_track, next_marker) = (tracks.len() as u64 + 1, markers.len() + 1);
-        State {
+        let (next_track, next_marker, next_region) = (tracks.len() as u64 + 1, markers.len() + 1, regions.len() as u64 + 1);
+        let mut state = State {
             epoch: RECORDED_EPOCH,
             project: 0,
             cases,
@@ -594,6 +1101,20 @@ impl State {
             markers,
             next_marker,
             tempo,
+            regions,
+            region_places: HashMap::new(),
+            next_region,
+            deleted_regions: HashMap::new(),
+            tempo_changes: vec![],
+            signature,
+            signature_changes: vec![],
+            cycle: CYCLE,
+            summing_stacks: 0,
+            folder_stacks: 0,
+            stacked: HashMap::new(),
+            flattened: HashMap::new(),
+            saved_as: None,
+            saved_paths: vec![],
             playhead: focus["transport"]["beat"].as_f64().unwrap_or(0.0),
             playing: focus["transport"]["playing"] == true,
             undo: vec![],
@@ -601,26 +1122,89 @@ impl State {
             steps: 0,
             busy_once: false,
             uncertain_once: false,
-        }
+            uncertain_restore_once: false,
+        };
+        state.keep_places();
+        state
     }
 
     fn epoch_text(&self) -> String {
         self.epoch.to_string()
     }
 
-    /// The epoch moves (a track added, deleted or renamed): the places of this one are kept, for a restore's ref.
+    /// The epoch moves (a track added, deleted or renamed; a region added, removed or moved): the places the tracks
+    /// and regions have in the new epoch are kept under it, for a restore's ref (a layout holds for a whole epoch,
+    /// since every change to it moves the epoch; the changes bump it once they have made the new layout).
     fn bump_epoch(&mut self) {
-        self.places.insert(self.epoch, self.tracks.iter().map(|track| track.id).collect());
         self.epoch += 1;
+        self.keep_places();
     }
 
-    /// The regions a track holds, as the recorded Tracks area has them (a track Kumi added holds none).
+    /// The places the tracks and regions have in the epoch now.
+    fn keep_places(&mut self) {
+        self.places.insert(self.epoch, self.tracks.iter().map(|track| track.id).collect());
+        self.region_places.insert(self.epoch, self.regions.iter().map(|region| region.id).collect());
+    }
+
+    /// The regions a track holds now.
     fn regions_of(&self, track: &Track) -> usize {
-        find(&self.cases, "focus_body", &json!({"kind": "timeline"}))
-            .and_then(|case| case.response.as_ref().ok())
-            .and_then(|whole| whole["lanes"].get(track.id as usize - 1))
-            .and_then(|lane| lane["regions"].as_array())
-            .map_or(0, Vec::len)
+        self.regions.iter().filter(|region| region.track == track.id).count()
+    }
+
+    /// The place (from 0) of the track with `id`, if it is in the project.
+    fn track_index(&self, id: u64) -> Option<usize> {
+        self.tracks.iter().position(|track| track.id == id)
+    }
+
+    /// The regions in the Tracks area's order: by their track's place, then by their start.
+    fn sort_regions(&mut self) {
+        let order: HashMap<u64, usize> = self.tracks.iter().enumerate().map(|(at, track)| (track.id, at)).collect();
+        self.regions.sort_by(|a, b| {
+            let (a_track, b_track) =
+                (order.get(&a.track).copied().unwrap_or(usize::MAX), order.get(&b.track).copied().unwrap_or(usize::MAX));
+            a_track.cmp(&b_track).then(a.start.total_cmp(&b.start)).then(a.id.cmp(&b.id))
+        });
+    }
+
+    /// The region a ref names, by its place now (from 0): a ref of the epoch now, or (a restore's) one of an earlier
+    /// epoch, carried to where that region is now.
+    fn region_at(&self, reference: Option<&str>, carry: bool) -> Result<usize, Fault> {
+        let text = reference.ok_or_else(|| bad("ref must be a region ref"))?;
+        let mut parts = text.splitn(3, ':');
+        let (epoch, kind, place) = (parts.next(), parts.next(), parts.next().and_then(|n| n.parse::<usize>().ok()));
+        let (Some(epoch), Some("region"), Some(place)) = (epoch.and_then(|e| e.parse::<u32>().ok()), kind, place) else {
+            return Err(bad(format!("ref must be a region ref ({}:region:1), not {text}", self.epoch)));
+        };
+        if epoch == self.epoch {
+            return (place >= 1 && place <= self.regions.len())
+                .then_some(place - 1)
+                .ok_or_else(|| failed(format!("{text} isn't in the project (deleted, or another project)")));
+        }
+        if !carry || epoch > self.epoch {
+            return Err(("stale".into(), format!("that ref is from an earlier epoch ({epoch}; now {}): read again", self.epoch)));
+        }
+        let id = self
+            .region_places
+            .get(&epoch)
+            .and_then(|places| places.get(place.wrapping_sub(1)))
+            .ok_or_else(|| gone(format!("the region {text} named isn't in the project any more (or that epoch is too far back)")))?;
+        self.regions
+            .iter()
+            .position(|region| region.id == *id)
+            .ok_or_else(|| gone(format!("the region {text} named isn't in the project any more (or that epoch is too far back)")))
+    }
+
+    fn region_ref(&self, place: usize) -> String {
+        format!("{}:region:{place}", self.epoch)
+    }
+
+    /// The region rows as a read shows them (in the recorded epoch, retagged later).
+    fn region_rows(&self) -> Vec<Value> {
+        self.regions
+            .iter()
+            .enumerate()
+            .map(|(at, region)| region.row(at + 1, self.track_index(region.track).map_or(0, |t| t + 1)))
+            .collect()
     }
 
     /// The track a ref names, by its place now: a ref of the epoch now, or (a restore's) one of an earlier epoch,
@@ -677,56 +1261,74 @@ impl State {
 
     /// What the Edit menu's Undo title says now.
     fn undo_title(&self) -> String {
-        self.undo.last().map_or(CANT_UNDO.to_string(), |(title, _)| title.clone())
+        self.undo.last().map_or(CANT_UNDO.to_string(), |step| step.title.clone())
     }
 
     /// A write made: the apply's `undo`. Logic's history takes a step for `step`, named by the Edit menu's title and
     /// by the host's `desc` (none for a header's control or the tempo); a write Logic doesn't answer after is
     /// `uncertain`, its step (if any) unnamed to Kumi.
     fn applied(&mut self, step: Option<&str>, desc: &str) -> Result<Value, Fault> {
-        let title = step.map(|step| format!("Undo {step}"));
-        if std::mem::take(&mut self.uncertain_once) {
-            if let Some(title) = title {
-                self.undo.push((title, None));
-            }
+        self.applied_steps(step.as_slice(), desc)
+    }
+
+    /// (M4) A write that made `steps` of Logic's undo, in order: the apply's `undo`, titled by the last (the Edit menu's
+    /// Undo title after the write). The bridge keeps the change under that step, so it alone carries the `desc`.
+    fn applied_steps(&mut self, steps: &[&str], desc: &str) -> Result<Value, Fault> {
+        let unanswered = std::mem::take(&mut self.uncertain_once);
+        for (n, step) in steps.iter().enumerate() {
+            let named = !unanswered && n + 1 == steps.len();
+            self.undo.push(UndoStep { title: format!("Undo {step}"), desc: named.then(|| desc.to_string()), key: None });
+        }
+        if unanswered {
             return Err(uncertain(UNANSWERED));
         }
-        match title {
-            Some(title) => {
-                self.undo.push((title.clone(), Some(desc.to_string())));
-                Ok(json!({"desc": desc, "entry": true, "title": title}))
-            }
-            None => Ok(json!({"desc": desc, "entry": false})),
-        }
+        Ok(match steps.last() {
+            Some(step) => json!({"desc": desc, "entry": true, "title": format!("Undo {step}")}),
+            None => json!({"desc": desc, "entry": false}),
+        })
+    }
+
+    /// Whether Logic doesn't answer after the restore being made now (either switch).
+    fn restore_unanswered(&mut self) -> bool {
+        let once = std::mem::take(&mut self.uncertain_once);
+        std::mem::take(&mut self.uncertain_restore_once) || once
     }
 
     /// A restore made by value: the restore's `undo`. Logic's history takes a step for `step` (a rename, a track
     /// deleted, a marker made, moved or deleted again), which the bridge doesn't name.
     fn restored(&mut self, step: Option<&str>, desc: &str) -> Result<Value, Fault> {
-        if std::mem::take(&mut self.uncertain_once) {
-            if let Some(step) = step {
-                self.undo.push((format!("Undo {step}"), None));
-            }
-            return Err(uncertain(UNANSWERED));
+        self.restored_steps(step.as_slice(), desc)
+    }
+
+    /// (M4) A restore by value that made `steps` of Logic's undo (a region's edges set back): none named.
+    fn restored_steps(&mut self, steps: &[&str], desc: &str) -> Result<Value, Fault> {
+        let unanswered = self.restore_unanswered();
+        for step in steps {
+            self.undo.push(UndoStep { title: format!("Undo {step}"), desc: None, key: None });
         }
-        if let Some(step) = step {
-            self.undo.push((format!("Undo {step}"), None));
+        if unanswered {
+            return Err(uncertain(UNANSWERED));
         }
         Ok(json!({"desc": desc, "entry": false}))
     }
 
     /// Logic's own undo of Kumi's step, through the Edit menu: only while its Undo title still names `step` and the top
-    /// step is Kumi's (`ours` says whether the top step's desc is the change's). The title pressed.
-    fn undo_in_logic(&mut self, step: &str, ours: impl Fn(&str) -> bool) -> Result<String, Fault> {
+    /// step is the change's (`ours` says so: by the change's kind and target, as the bridge's watch keys a step, or by
+    /// the `desc` the apply sent). The step taken off: its title is what was pressed.
+    fn undo_in_logic(&mut self, step: &str, ours: impl Fn(&UndoStep) -> bool) -> Result<UndoStep, Fault> {
         let title = self.undo_title();
-        let top = self.undo.last().and_then(|(_, desc)| desc.as_deref()).is_some_and(ours);
+        let top = self.undo.last().is_some_and(|top| top.desc.is_some() && ours(top));
         if title != format!("Undo {step}") || !top {
             return Err(failed(format!(
                 "Logic Pro's undo has other steps on top of this one (its Edit menu says {title:?}), so Kumi can't put it back; Cmd-Z in Logic Pro can, step by step"
             )));
         }
-        self.undo.pop();
-        Ok(title)
+        Ok(self.undo.pop().expect("the top step"))
+    }
+
+    /// (M4) The change a restore names, as the bridge's undo watch keys Logic's steps: its kind and its target's ref.
+    fn key_of(params: &Value) -> String {
+        format!("{} {}", params["kind"].as_str().unwrap_or_default(), params["target"]["ref"].as_str().unwrap_or_default())
     }
 
     // ----- the changes -----
@@ -749,22 +1351,208 @@ impl State {
         if let Some((_, why)) = NOT_YET.iter().find(|(not_yet, _)| *not_yet == kind) {
             return Err(bad(format!("Logic Pro's bridge can't make a {kind} change yet: {why}")));
         }
-        match kind.as_str() {
+        let steps = self.undo.len();
+        let answer = self.change_of(&kind, method, params);
+        // (M4) The bridge's watch keeps an apply's steps under the change's kind and its target's ref (the apply's own
+        // `target` when it answers one, the input's ref else): a restore through Logic's own undo checks the top step
+        // is the change's by them.
+        if let (Ok(applied), "change_apply") = (&answer, method) {
+            let target = applied["target"]["ref"].as_str().or_else(|| params["input"]["ref"].as_str()).unwrap_or_default();
+            for step in self.undo.iter_mut().skip(steps) {
+                step.key = Some(format!("{kind} {target}"));
+            }
+        }
+        answer
+    }
+
+    /// A change of `kind` previewed, applied or restored by the function that makes it.
+    fn change_of(&mut self, kind: &str, method: &str, params: &Value) -> Answer {
+        match kind {
             "track-add" => self.track_add(method, params),
             "track-delete" => self.track_delete(method, params),
+            "track-stack" => self.track_stack(method, params),
+            "track-stack-flatten" => self.track_stack_flatten(method, params),
             "marker-add" => self.marker_add(method, params),
             "marker-move" => self.marker_move(method, params),
             "marker-delete" => self.marker_delete(method, params),
             "tempo-set" => self.tempo_set(method, params),
+            "tempo-marker-set" => self.tempo_marker_set(method, params),
+            "tempo-marker-delete" => self.tempo_marker_delete(method, params),
+            "signature-set" => self.signature_set(method, params),
+            "loop-range" => self.loop_range(method, params),
+            "region-move" => self.region_move(method, params),
+            "region-resize" => self.region_resize(method, params),
+            "region-split" => self.region_split(method, params),
+            "region-loop" => self.region_loop(method, params),
+            "region-rename" => self.region_rename(method, params),
+            "region-delete" => self.region_delete(method, params),
+            "midi-import" => self.midi_import(method, params),
+            "key-command" => self.key_command(method, params),
             _ => match TRACK_PROPS.iter().find(|prop| prop.kind == kind) {
                 Some(prop) => self.track_prop(prop, method, params),
-                None if NOT_SIMULATED.contains(&kind.as_str()) => Err(bad(format!(
-                    "the simulated Logic Pro makes only {} (not {kind:?}); the bridge makes {} too",
-                    "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, marker-add, marker-move, marker-delete and tempo-set",
+                None if NOT_SIMULATED.contains(&kind) => Err(bad(format!(
+                    "the simulated Logic Pro makes only {SIMULATED} (not {kind:?}); the bridge makes {} too",
                     NOT_SIMULATED.join(", ")
                 ))),
                 None => Err(bad(format!("Logic Pro has no change kind {kind:?}"))),
             },
+        }
+    }
+
+    // ----- (M4) saving, and the escape hatch -----
+
+    /// `project_save {epoch, path?, version?}`: the package written where it is (Cmd-S), or as `path` (File > Save
+    /// As…, a `.logicx` that isn't there yet; the project is that file from then on). No change: nothing in the
+    /// project moves, and Logic's history takes no step. `version` is REAPER's: Logic keeps no versions.
+    fn project_save(&mut self, params: &Value) -> Answer {
+        let Some(sent) = params.get("epoch").and_then(Value::as_str) else {
+            return Err(bad("epoch: the epoch the refs were read in"));
+        };
+        if sent != self.epoch_text() {
+            return Err((
+                "stale".into(),
+                format!("those refs are from an earlier epoch ({sent}; now {}): the tracks or regions changed, read again", self.epoch),
+            ));
+        }
+        if params.get("version").is_some_and(|version| !version.is_null() && *version != false) {
+            return Err(bad(
+                "Logic Pro keeps no versions: give path (a .logicx that isn't there yet) to save a copy, or nothing to save in place",
+            ));
+        }
+        let now = self.project_path();
+        match params.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()) {
+            None => Ok(json!({"epoch": self.epoch_text(), "saved": now, "dirty": false})),
+            Some(path) => {
+                Self::save_path(path)?;
+                if path == now {
+                    return Err(bad("that is the project's own file: save in place (no path), or give another path"));
+                }
+                if self.saved_paths.iter().any(|saved| saved == path) {
+                    return Err(bad(format!("{path} is there already: Kumi never saves over a file")));
+                }
+                self.saved_as = Some(path.to_string());
+                self.saved_paths.push(path.to_string());
+                Ok(json!({"epoch": self.epoch_text(), "saved": path, "dirty": false}))
+            }
+        }
+    }
+
+    /// A save as's path as the bridge takes it (`save.rs`): a whole path to a `.logicx` package whose name Logic Pro can
+    /// save. (By its text, as macOS reads a path, whatever the system the simulator runs on.)
+    fn save_path(path: &str) -> Result<(), Fault> {
+        if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            return Err(bad("path must be a whole path, with no \"..\" in it"));
+        }
+        let file = path.rsplit('/').next().unwrap_or_default();
+        let (stem, extension) = match file.rfind('.') {
+            Some(dot) if dot > 0 => (&file[..dot], &file[dot + 1..]),
+            _ => (file, ""),
+        };
+        if !extension.eq_ignore_ascii_case("logicx") {
+            return Err(bad("path must name a .logicx package"));
+        }
+        if stem.is_empty() || stem.contains(':') || stem.chars().any(char::is_control) || stem.chars().count() > 200 {
+            return Err(bad("path must end in a file name Logic Pro can save: no colon or slash in it"));
+        }
+        Ok(())
+    }
+
+    /// The package the project is saved as now: the recorded one's, or the one Kumi saved it as.
+    fn project_path(&self) -> String {
+        self.saved_as.clone().unwrap_or_else(|| {
+            another_project(&serde_json::to_value(project()).unwrap_or(Value::Null), self.project)["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// `key-command {command}`: one of Logic's key commands, by its English name or its id (`key_command_of`), its
+    /// chord posted with Logic in front. Logic's history takes a step for an edit (Create Marker; a split, when the
+    /// playhead is inside a selected region) and none for a selection; the apply compares the Edit menu's Undo title
+    /// before and after, as the bridge does: moved, the change is a row named by Logic's step (`applied.step`), else no
+    /// row (`applied.changed: false`, `display.unchanged`, `undo.entry: false`). A restore is Logic's own undo's
+    /// business (`daw-only`).
+    fn key_command(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            return Err((
+                "daw-only".into(),
+                "Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)".into(),
+            ));
+        }
+        let command = key_command_of(&params["input"])?;
+        let chord = command.chord.map(|chord| format!(" ({chord})")).unwrap_or_default();
+        let title = format!("Ran key command {}{chord}", command.label());
+        if method == "change_preview" {
+            let mut target = json!({"kind": "action", "command": command.id});
+            if let Some(name) = command.name {
+                target["name"] = name.into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": target,
+                "prior": {},
+                "fence": {"command": command.id, "name": command.name},
+                "display": {"title": title, "note": format!("{KEY_NOTE} It acts on what the producer has selected now.")},
+            }));
+        }
+        if params["fence"]["command"] != command.id {
+            return Err(changed("the command isn't the one previewed"));
+        }
+        let desc = Self::desc(params)?;
+        // What the command does to the project: a marker at the playhead; every selected region the playhead is inside
+        // split there; the regions selected, or none.
+        let edited = match command.id {
+            513 => {
+                let beats = on_the_beat(self.playhead);
+                let marker = Marker { name: format!("Marker {}", self.next_marker), position_beats: beats, length: MARKER_LENGTH };
+                self.next_marker += 1;
+                self.markers.push(marker);
+                self.sort_markers();
+                true
+            }
+            574 => {
+                let playhead = self.playhead;
+                let split: Vec<u64> = self
+                    .regions
+                    .iter()
+                    .filter(|region| region.selected && region.start < playhead && playhead < region.end)
+                    .map(|region| region.id)
+                    .collect();
+                for id in &split {
+                    if let Some(at) = self.region_index(*id) {
+                        self.split_region(at, playhead);
+                    }
+                }
+                if !split.is_empty() {
+                    self.bump_epoch();
+                }
+                !split.is_empty()
+            }
+            766 | 347 => {
+                for region in &mut self.regions {
+                    region.selected = command.id == 766;
+                }
+                false
+            }
+            _ => false,
+        };
+        let mut applied = json!({"command": command.id, "name": command.name, "key": command.chord});
+        match command.step.filter(|_| edited) {
+            Some(step) => {
+                let undo = self.applied(Some(step), &desc)?;
+                applied["step"] = step.into();
+                Ok(json!({"epoch": self.epoch_text(), "applied": applied, "display": {"title": title, "note": KEY_NOTE}, "undo": undo}))
+            }
+            None => {
+                applied["changed"] = false.into();
+                Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "applied": applied,
+                    "display": {"title": title, "note": KEY_NO_STEP, "unchanged": true},
+                    "undo": {"desc": desc, "entry": false},
+                }))
+            }
         }
     }
 
@@ -963,8 +1751,8 @@ impl State {
                 }));
             }
             let step = material["step"].as_str().unwrap_or_default().to_string();
-            let pressed = self.undo_in_logic("Delete Tracks", |top| top == step)?;
-            if std::mem::take(&mut self.uncertain_once) {
+            let pressed = self.undo_in_logic("Delete Tracks", |top| top.desc.as_deref() == Some(step.as_str()))?.title;
+            if self.restore_unanswered() {
                 return Err(uncertain(format!("Logic Pro's {pressed:?} was pressed, but {} isn't back at place {place}", quoted(&name))));
             }
             let track = self.deleted.remove(&step).unwrap_or_else(|| {
@@ -1031,8 +1819,13 @@ impl State {
 
     /// A marker's position from an input: `positionBeats`, beats from the project's start (seconds are refused).
     fn position_input(input: &Value) -> Result<f64, Fault> {
+        Self::position_of_input(input, "markers")
+    }
+
+    /// `positionBeats` from an input, refusing REAPER's seconds in the bridge's words for `what` it places.
+    fn position_of_input(input: &Value, what: &str) -> Result<f64, Fault> {
         if input.get("position").is_some_and(|v| !v.is_null()) && input.get("positionBeats").is_none_or(Value::is_null) {
-            return Err(bad("Logic Pro's bridge places markers by positionBeats (beats from the project's start), not seconds"));
+            return Err(bad(format!("Logic Pro's bridge places {what} by positionBeats (beats from the project's start), not seconds")));
         }
         input
             .get("positionBeats")
@@ -1194,8 +1987,9 @@ impl State {
             );
             let desc = Self::desc(params)?;
             // Logic's own undo brings it back whole, name and all, while the Edit menu still names Kumi's deletion first.
-            if let Ok(pressed) = self.undo_in_logic("Delete", |top| top.starts_with("Kumi: Deleted marker")) {
-                if std::mem::take(&mut self.uncertain_once) {
+            let ours = |top: &UndoStep| top.desc.as_deref().is_some_and(|desc| desc.starts_with("Kumi: Deleted marker"));
+            if let Ok(UndoStep { title: pressed, .. }) = self.undo_in_logic("Delete", ours) {
+                if self.restore_unanswered() {
                     return Err(uncertain(format!("Logic Pro's {pressed:?} was pressed, but no marker is back at {}", bar_text(beats))));
                 }
                 self.markers.push(Marker { name: name.clone(), position_beats: beats, length });
@@ -1323,6 +2117,1467 @@ impl State {
         }
     }
 
+    // ----- (M4) regions -----
+
+    /// A region's state as the bridge keeps it (`regions.rs`): its edges, its name, its track's place (from 1), and
+    /// `looped` as the Tracks area reads it (never true: Accessibility shows no loop there).
+    fn region_state(&self, region: &Region) -> Value {
+        json!({
+            "startBeats": region.start,
+            "endBeats": region.end,
+            "name": region.name,
+            "track": self.track_index(region.track).map_or(0, |at| at + 1),
+            "looped": false,
+        })
+    }
+
+    /// The region whose track, name and edges are `state`'s now (where it is after a move or a resize), by its place
+    /// (from 0), as the bridge finds a region again.
+    fn region_by_state(&self, state: &Value) -> Option<usize> {
+        self.regions.iter().position(|region| {
+            let now = self.region_state(region);
+            now["track"] == state["track"]
+                && now["name"] == state["name"]
+                && close_beats(region.start, number(state, "startBeats"))
+                && close_beats(region.end, number(state, "endBeats"))
+        })
+    }
+
+    /// A region as a change's target: its ref in the epoch now.
+    fn region_target(&self, at: usize) -> Value {
+        json!({"ref": self.region_ref(at + 1), "kind": "region"})
+    }
+
+    /// The region a preview or an apply names (a ref of the epoch now; one gone since the preview is `changed`).
+    fn region_for(&self, method: &str, input: &Value) -> Result<usize, Fault> {
+        self.region_at(input["ref"].as_str(), false).map_err(|fault| match (method, fault.0.as_str()) {
+            ("change_apply", "failed") => changed(format!("{}: it went since the preview", fault.1)),
+            _ => fault,
+        })
+    }
+
+    /// The region a restore names: its ref from the change's epoch, carried to where the region is now.
+    fn region_for_restore(&self, params: &Value) -> Result<usize, Fault> {
+        self.region_at(params["target"]["ref"].as_str(), true).map_err(|fault| if fault.0 == "failed" { gone(fault.1) } else { fault })
+    }
+
+    /// The place (from 0) of the region with `id`.
+    fn region_index(&self, id: u64) -> Option<usize> {
+        self.regions.iter().position(|region| region.id == id)
+    }
+
+    /// The region with `id` alone selected, as the click the bridge makes to act on a region leaves it.
+    fn select_region(&mut self, id: u64) {
+        for region in &mut self.regions {
+            region.selected = region.id == id;
+        }
+    }
+
+    /// The region at `at` at new edges, the Tracks area's order kept; its place now (from 0).
+    fn place_region(&mut self, at: usize, start: f64, end: f64) -> usize {
+        let id = self.regions[at].id;
+        let region = &mut self.regions[at];
+        region.start = start;
+        region.end = end;
+        self.sort_regions();
+        self.region_index(id).unwrap_or(at)
+    }
+
+    /// `region-move {ref, positionBeats}`: the region's row at the Event List's region level (Leave Folder), its
+    /// Position stepped a segment at a time: in time only (the Event List moves a region along its own track, so a
+    /// `toRef` is refused). It keeps its length; the epoch moves, and the apply answers the region's ref in it as its
+    /// `target`. Its restore moves it back, by value.
+    fn region_move(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            if let Some(back) = self.region_by_state(&params["prior"]) {
+                let title = format!("{} is where it was", self.regions[back].label());
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": self.region_state(&self.regions[back]), "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+                );
+            }
+            let at = match self.region_by_state(&params["applied"]) {
+                Some(at) => at,
+                None if params["discard"] == true => self.region_for_restore(params)?,
+                None => return Err(changed("the region has been moved in Logic Pro since Kumi moved it")),
+            };
+            let to = params["prior"]["startBeats"].as_f64().ok_or_else(|| bad("prior.startBeats"))?;
+            let length = self.regions[at].end - self.regions[at].start;
+            let at = self.place_region(at, to, to + length);
+            self.bump_epoch();
+            let undo = self.restored(Some("Value Change"), &desc)?;
+            let region = &self.regions[at];
+            let title = format!("{} moved back to {}", region.label(), bar_text(region.start));
+            return Ok(
+                json!({"epoch": self.epoch_text(), "restored": self.region_state(region), "display": {"title": title}, "undo": undo}),
+            );
+        }
+        let input = &params["input"];
+        if input.get("toRef").is_some_and(|to| !to.is_null()) {
+            return Err(bad("Logic Pro's Event List moves a region in time, not to another track: leave toRef out"));
+        }
+        let at = self.region_for(method, input)?;
+        let to = Self::position_of_input(input, "regions")?;
+        let region = self.regions[at].clone();
+        let now = self.region_state(&region);
+        let length = region.end - region.start;
+        let after = json!({"startBeats": to, "endBeats": to + length, "name": now["name"], "track": now["track"], "looped": now["looped"]});
+        let title = format!("Moved {} to {}", region.label(), bar_text(to));
+        let unchanged = close_beats(region.start, to);
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": after});
+            if unchanged {
+                display["unchanged"] = true.into();
+            }
+            return Ok(
+                json!({"epoch": self.epoch_text(), "target": self.region_target(at), "prior": now, "fence": now, "display": display}),
+            );
+        }
+        if params["fence"] != now {
+            return Err(changed(format!("{} changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        if unchanged {
+            return Ok(
+                json!({"epoch": self.epoch_text(), "applied": now, "target": self.region_target(at), "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+            );
+        }
+        let at = self.place_region(at, to, to + length);
+        self.bump_epoch();
+        let undo = self.applied(Some("Value Change"), &desc)?;
+        let after = self.region_state(&self.regions[at]);
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": after, "target": self.region_target(at), "display": {"title": title, "before": now, "after": after}, "undo": undo}),
+        )
+    }
+
+    /// The edges a resize asks for (the one not given stays), in the bridge's words for what is off.
+    fn region_edges(input: &Value, start: f64, end: f64) -> Result<(Option<f64>, Option<f64>), Fault> {
+        let given = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+        if (given("start") || given("end")) && !given("startBeats") && !given("endBeats") {
+            return Err(bad(
+                "Logic Pro's bridge moves a region's edges by startBeats and endBeats (beats from the project's start), not seconds",
+            ));
+        }
+        let edge = |key: &str| -> Result<Option<f64>, Fault> {
+            match input.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) => value
+                    .as_f64()
+                    .filter(|n| n.is_finite() && (0.0..=1.0e6).contains(n))
+                    .map(Some)
+                    .ok_or_else(|| bad(format!("{key} must be a number from 0: beats from the project's start"))),
+            }
+        };
+        let (new_start, new_end) = (edge("startBeats")?, edge("endBeats")?);
+        if new_start.is_none() && new_end.is_none() {
+            return Err(bad("pass the new start (startBeats), the new end (endBeats), or both"));
+        }
+        if new_end.unwrap_or(end) <= new_start.unwrap_or(start) + 1.0 / TICKS_PER_BEAT {
+            return Err(bad("the region must end after it starts"));
+        }
+        Ok((new_start, new_end))
+    }
+
+    /// A region's edges set with Logic's own Set Region/Event/Marquee Start and End to Playhead Position (the start
+    /// first), the playhead placed by the LCD's bar and beat: whole beats only, both checked before either is set. Each
+    /// edge that moves is a step of Logic's undo, named as its Edit menu names it; the notes stay where they are in
+    /// time; the region is left selected (the bridge clicks it), and the epoch moves. Its place now (from 0), and the
+    /// steps.
+    fn set_edges(&mut self, at: usize, start: Option<f64>, end: Option<f64>) -> Result<(usize, Vec<&'static str>), Fault> {
+        if [start, end].into_iter().flatten().any(|edge| !on_a_beat(edge)) {
+            return Err(bad("Logic Pro's playhead display places an edge on a beat: give whole beats"));
+        }
+        let id = self.regions[at].id;
+        let mut steps = vec![];
+        if let Some(start) = start {
+            let region = &mut self.regions[at];
+            let moved = region.start - start;
+            for note in &mut region.notes {
+                note["beat"] = (note["beat"].as_f64().unwrap_or(0.0) + moved).into();
+            }
+            region.start = start;
+            steps.push("Set Start to Playhead Position");
+        }
+        if let Some(end) = end {
+            self.regions[at].end = end;
+            steps.push("Set End to Playhead Position");
+        }
+        self.select_region(id);
+        self.sort_regions();
+        self.bump_epoch();
+        Ok((self.region_index(id).unwrap_or(at), steps))
+    }
+
+    /// `region-resize {ref, startBeats?, endBeats?}`: the region's edges at the playhead (`set_edges`); the epoch moves,
+    /// and the apply answers the region's ref in it. Its restore sets the edges back, by value.
+    fn region_resize(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            if let Some(back) = self.region_by_state(&params["prior"]) {
+                let title = format!("{} is as it was", self.regions[back].label());
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": self.region_state(&self.regions[back]), "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+                );
+            }
+            let at = match self.region_by_state(&params["applied"]) {
+                Some(at) => at,
+                None if params["discard"] == true => self.region_for_restore(params)?,
+                None => return Err(changed("the region has been changed in Logic Pro since Kumi trimmed it")),
+            };
+            let start = params["prior"]["startBeats"].as_f64().ok_or_else(|| bad("prior.startBeats"))?;
+            let end = params["prior"]["endBeats"].as_f64().ok_or_else(|| bad("prior.endBeats"))?;
+            let region = &self.regions[at];
+            let (start, end) = ((!close_beats(start, region.start)).then_some(start), (!close_beats(end, region.end)).then_some(end));
+            let (at, steps) = self.set_edges(at, start, end)?;
+            let undo = self.restored_steps(&steps, &desc)?;
+            let region = &self.regions[at];
+            let title = format!("{} back to its length", region.label());
+            return Ok(
+                json!({"epoch": self.epoch_text(), "restored": self.region_state(region), "display": {"title": title}, "undo": undo}),
+            );
+        }
+        let input = &params["input"];
+        let at = self.region_for(method, input)?;
+        let region = self.regions[at].clone();
+        let now = self.region_state(&region);
+        let (start, end) = Self::region_edges(input, region.start, region.end)?;
+        let (new_start, new_end) = (start.unwrap_or(region.start), end.unwrap_or(region.end));
+        let wanted =
+            json!({"startBeats": new_start, "endBeats": new_end, "name": now["name"], "track": now["track"], "looped": now["looped"]});
+        let title = format!("Trimmed {} to {}–{}", region.label(), bar_text(new_start), bar_text(new_end));
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": wanted});
+            if close_beats(new_start, region.start) && close_beats(new_end, region.end) {
+                display["unchanged"] = true.into();
+            }
+            return Ok(
+                json!({"epoch": self.epoch_text(), "target": self.region_target(at), "prior": now, "fence": now, "display": display}),
+            );
+        }
+        if params["fence"] != now {
+            return Err(changed(format!("{} changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        if wanted == now {
+            return Ok(
+                json!({"epoch": self.epoch_text(), "applied": now, "target": self.region_target(at), "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+            );
+        }
+        let start = start.filter(|start| !close_beats(*start, region.start));
+        let end = end.filter(|end| !close_beats(*end, region.end));
+        let (at, steps) = self.set_edges(at, start, end)?;
+        let undo = self.applied_steps(&steps, &desc)?;
+        let after = self.region_state(&self.regions[at]);
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": after, "target": self.region_target(at), "display": {"title": title, "before": now, "after": after}, "undo": undo}),
+        )
+    }
+
+    /// The region at `at` split at `beats` (inside it): the left part keeps the region's id, the right part is a new
+    /// region after it with the notes from the split on, and Logic leaves it selected. The right part's id.
+    fn split_region(&mut self, at: usize, beats: f64) -> u64 {
+        let id = self.next_region;
+        self.next_region += 1;
+        let left = &mut self.regions[at];
+        let cut = beats - left.start;
+        let (kept, moved): (Vec<Value>, Vec<Value>) = left.notes.drain(..).partition(|note| note["beat"].as_f64().unwrap_or(0.0) < cut);
+        left.notes = kept;
+        left.selected = false;
+        let right = Region {
+            id,
+            track: left.track,
+            name: left.name.clone(),
+            kind: left.kind.clone(),
+            start: beats,
+            end: left.end,
+            looping: left.looping,
+            selected: true,
+            notes: moved
+                .into_iter()
+                .map(|mut note| {
+                    note["beat"] = (note["beat"].as_f64().unwrap_or(0.0) - cut).into();
+                    note
+                })
+                .collect(),
+        };
+        left.end = beats;
+        self.regions.push(right);
+        self.sort_regions();
+        id
+    }
+
+    /// The parts of a split joined again: the right part's notes back in the left, the right part gone, the left's end
+    /// back at `end`, the region selected; the epoch moves. The left's place now (from 0).
+    fn join_split(&mut self, left_at: usize, right_at: Option<usize>, end: f64) -> usize {
+        let left_id = self.regions[left_at].id;
+        if let Some(right_at) = right_at {
+            let right = self.regions.remove(right_at);
+            if let Some(left_at) = self.region_index(left_id) {
+                let cut = right.start - self.regions[left_at].start;
+                for mut note in right.notes {
+                    note["beat"] = (note["beat"].as_f64().unwrap_or(0.0) + cut).into();
+                    self.regions[left_at].notes.push(note);
+                }
+            }
+        }
+        if let Some(left) = self.regions.iter_mut().find(|region| region.id == left_id) {
+            left.end = end;
+        }
+        self.select_region(left_id);
+        self.sort_regions();
+        self.bump_epoch();
+        self.region_index(left_id).unwrap_or(0)
+    }
+
+    /// `region-split {ref, positionBeats}`: the region clicked, the playhead there (the LCD's bar and beat: whole beats
+    /// only), Split Regions/Events at Playhead Position: the left part keeps its place (its ref in the new epoch is the
+    /// apply's `target`), the right part is new (its ref in `created`), and the epoch moves. Its restore is Logic's own
+    /// undo while that step is on top: a split region isn't made whole by value.
+    fn region_split(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            return self.region_split_restore(params);
+        }
+        let input = &params["input"];
+        let at = self.region_for(method, input)?;
+        let beats = Self::position_of_input(input, "regions")?;
+        let region = self.regions[at].clone();
+        let now = self.region_state(&region);
+        if beats <= region.start || beats >= region.end {
+            return Err(bad(format!("that's not inside the region: it runs from {} to {}", bar_text(region.start), bar_text(region.end))));
+        }
+        if !on_a_beat(beats) {
+            return Err(bad("Logic Pro's playhead display splits on a beat: give whole beats"));
+        }
+        let fence = json!({"region": now, "regions": self.regions.len()});
+        let title = format!("Split {} at {}", region.label(), bar_text(beats));
+        if method == "change_preview" {
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": self.region_target(at),
+                "prior": now,
+                "fence": fence,
+                "display": {"title": title, "note": "Logic Pro's own undo puts the region back whole while the split is its latest step."},
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed(format!("{} or the regions changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        // (the region clicked alone first)
+        self.select_region(region.id);
+        let right = self.split_region(at, beats);
+        self.bump_epoch();
+        let undo = self.applied(Some("Split Regions"), &desc)?;
+        let (left_at, right_at) = (self.region_index(region.id).unwrap_or(at), self.region_index(right).unwrap_or(at + 1));
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "applied": {"left": self.region_state(&self.regions[left_at]), "right": self.region_state(&self.regions[right_at])},
+            "target": self.region_target(left_at),
+            "created": {"ref": self.region_ref(right_at + 1), "kind": "region"},
+            "display": {"title": title},
+            "undo": undo,
+        }))
+    }
+
+    fn region_split_restore(&mut self, params: &Value) -> Answer {
+        let desc = Self::desc(params)?;
+        if self.region_by_state(&params["prior"]).is_some() {
+            return Ok(
+                json!({"epoch": self.epoch_text(), "restored": {"ref": params["target"]["ref"]}, "display": {"title": "The region is whole again"}, "undo": {"desc": desc, "entry": false}}),
+            );
+        }
+        let (left, right) = (self.region_by_state(&params["applied"]["left"]), self.region_by_state(&params["applied"]["right"]));
+        if params["discard"] != true && (left.is_none() || right.is_none()) {
+            return Err(changed("one of the split's parts has been changed in Logic Pro since Kumi split it"));
+        }
+        let key = Self::key_of(params);
+        let pressed = self.undo_in_logic("Split Regions", |top| top.key.as_deref() == Some(key.as_str()))?.title;
+        let unanswered = || uncertain(format!("Logic Pro's {pressed:?} was pressed, but the region isn't whole again"));
+        if self.restore_unanswered() {
+            return Err(unanswered());
+        }
+        // (Logic's own undo takes the split back whatever the parts are now)
+        let left = left.or_else(|| self.region_at(params["target"]["ref"].as_str(), true).ok());
+        let right = right.or_else(|| self.region_at(params["created"]["ref"].as_str(), true).ok());
+        let Some(left) = left else { return Err(unanswered()) };
+        let place = self.join_split(left, right.filter(|right| *right != left), number(&params["prior"], "endBeats"));
+        let label = self.regions[place].label();
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "restored": {"ref": self.region_ref(place + 1), "was": params["target"]["ref"], "pressed": pressed},
+            "display": {"title": format!("{label} whole again"), "note": "Put back with Logic Pro's own undo."},
+            "undo": {"desc": desc, "entry": false, "how": "undo"},
+        }))
+    }
+
+    /// `region-loop {ref, loop}`: the Region inspector's Loop checkbox, pressed with the region selected through its
+    /// item (the Tracks area's rows never show the loop). A step of Logic's undo ("Loop Parameter Change"); its
+    /// restore presses it back, by value.
+    fn region_loop(&mut self, method: &str, params: &Value) -> Answer {
+        let title_of = |region: &Region, on: bool| format!("{} {}", region.label(), if on { "looped" } else { "not looped" });
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let at = self.region_for_restore(params)?;
+            let (prior, applied) = (params["prior"]["loop"] == true, params["applied"]["loop"] == true);
+            let region = self.regions[at].clone();
+            let mut step = None;
+            if region.looping != prior {
+                if params["discard"] != true && region.looping != applied {
+                    return Err(changed(format!("{}'s loop has been changed in Logic Pro since Kumi set it", region.label())));
+                }
+                self.regions[at].looping = prior;
+                self.select_region(region.id);
+                step = Some("Loop Parameter Change");
+            }
+            let undo = self.restored(step, &desc)?;
+            let title = format!("{} (put back)", title_of(&region, prior));
+            return Ok(json!({"epoch": self.epoch_text(), "restored": {"loop": prior}, "display": {"title": title}, "undo": undo}));
+        }
+        let input = &params["input"];
+        let at = self.region_for(method, input)?;
+        let wanted = input.get("loop").and_then(Value::as_bool).ok_or_else(|| bad("loop must be true or false"))?;
+        let region = self.regions[at].clone();
+        let now = json!({"loop": region.looping});
+        let title = title_of(&region, wanted);
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": {"loop": wanted}});
+            if region.looping == wanted {
+                display["unchanged"] = true.into();
+            }
+            return Ok(
+                json!({"epoch": self.epoch_text(), "target": self.region_target(at), "prior": now, "fence": now, "display": display}),
+            );
+        }
+        if params["fence"] != now {
+            return Err(changed(format!("{}'s loop changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        let step = (region.looping != wanted).then_some("Loop Parameter Change");
+        self.regions[at].looping = wanted;
+        self.select_region(region.id);
+        let undo = self.applied(step, &desc)?;
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": {"loop": wanted}, "display": {"title": title, "before": now, "after": {"loop": wanted}}, "undo": undo}),
+        )
+    }
+
+    /// A region's name as an input gives it, in the bridge's words for what is off.
+    fn region_name_input(input: &Value) -> Result<String, Fault> {
+        let name = input.get("name").and_then(Value::as_str).ok_or_else(|| bad("name must be text"))?;
+        if name.trim().is_empty() {
+            return Err(bad("name must not be empty"));
+        }
+        if name.chars().count() > 256 || name.chars().any(char::is_control) {
+            return Err(bad("name must be one line of at most 256 characters"));
+        }
+        Ok(name.to_string())
+    }
+
+    /// `region-rename {ref, name}`: the Region inspector's name field, confirmed (the region selected through its item):
+    /// a step of Logic's undo ("Renaming"); the epoch moves, and the apply answers the region's ref in it. Its restore
+    /// renames it back, by value.
+    fn region_rename(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let at = self.region_for_restore(params)?;
+            let prior = params["prior"]["name"].as_str().unwrap_or_default().to_string();
+            let region = self.regions[at].clone();
+            let mut step = None;
+            if region.name != prior {
+                if params["discard"] != true && json!({"name": region.name}) != params["applied"] {
+                    return Err(changed(format!("{}'s name has been changed in Logic Pro since Kumi set it", region.label())));
+                }
+                self.regions[at].name = prior.clone();
+                self.select_region(region.id);
+                self.bump_epoch();
+                step = Some("Renaming");
+            }
+            let undo = self.restored(step, &desc)?;
+            return Ok(
+                json!({"epoch": self.epoch_text(), "restored": {"name": prior}, "display": {"title": format!("Region named {} again", quoted(&prior))}, "undo": undo}),
+            );
+        }
+        let input = &params["input"];
+        let at = self.region_for(method, input)?;
+        let name = Self::region_name_input(input)?;
+        let region = self.regions[at].clone();
+        let now = json!({"name": region.name});
+        let title = format!("Renamed region {} → {}", quoted(&region.name), quoted(&name));
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": {"name": name}});
+            if region.name == name {
+                display["unchanged"] = true.into();
+            }
+            return Ok(
+                json!({"epoch": self.epoch_text(), "target": self.region_target(at), "prior": now, "fence": now, "display": display}),
+            );
+        }
+        if params["fence"] != now {
+            return Err(changed(format!("{}'s name changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        let mut step = None;
+        if region.name != name {
+            self.regions[at].name = name.clone();
+            self.select_region(region.id);
+            self.bump_epoch();
+            step = Some("Renaming");
+        }
+        let undo = self.applied(step, &desc)?;
+        let at = self.region_index(region.id).unwrap_or(at);
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": {"name": name}, "target": self.region_target(at), "display": {"title": title, "before": now, "after": {"name": name}}, "undo": undo}),
+        )
+    }
+
+    /// `region-delete {ref}`: the region clicked, the Delete key; the epoch moves, and what it was is kept in
+    /// `material` (with the apply's `desc` as its `step`). Its restore is Logic's own undo while that step is on top
+    /// (the region comes back with its notes): Logic can't make it again by value.
+    fn region_delete(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let material =
+                params.get("material").filter(|material| !material.is_null()).ok_or_else(|| bad("material: what the delete removed"))?;
+            if let Some(back) = self.region_by_state(material) {
+                return Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "restored": {"ref": self.region_ref(back + 1)},
+                    "display": {"title": format!("{} is back already", self.regions[back].label())},
+                    "undo": {"desc": desc, "entry": false},
+                }));
+            }
+            let (key, step) = (Self::key_of(params), material["step"].as_str().unwrap_or_default().to_string());
+            let pressed = self
+                .undo_in_logic("Delete", |top| top.key.as_deref() == Some(key.as_str()) && top.desc.as_deref() == Some(step.as_str()))?
+                .title;
+            let unanswered = || uncertain(format!("Logic Pro's {pressed:?} was pressed, but the region isn't back"));
+            if self.restore_unanswered() {
+                return Err(unanswered());
+            }
+            let Some(region) = self.deleted_regions.remove(&step) else { return Err(unanswered()) };
+            let id = region.id;
+            self.regions.push(region);
+            self.select_region(id);
+            self.sort_regions();
+            self.bump_epoch();
+            let place = self.region_index(id).unwrap_or(0);
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "restored": {"ref": self.region_ref(place + 1), "was": params["target"]["ref"], "pressed": pressed},
+                "display": {"title": format!("{} put back", self.regions[place].label()), "note": "Put back with Logic Pro's own undo."},
+                "undo": {"desc": desc, "entry": false, "how": "undo"},
+            }));
+        }
+        let input = &params["input"];
+        let at = self.region_for(method, input)?;
+        let region = self.regions[at].clone();
+        let now = self.region_state(&region);
+        let fence = json!({"region": now, "regions": self.regions.len()});
+        let title = format!("Deleted {}", region.label());
+        if method == "change_preview" {
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": self.region_target(at),
+                "prior": now,
+                "fence": fence,
+                "display": {"title": title, "note": "Only Logic Pro's own undo brings a deleted region back, while the deletion is its latest step."},
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed(format!("{} or the regions changed since the preview", region.label())));
+        }
+        let desc = Self::desc(params)?;
+        let mut material = now;
+        material["kind"] = region.kind.clone().into();
+        material["step"] = desc.clone().into();
+        // (the region clicked alone, then gone: nothing is left selected)
+        self.select_region(region.id);
+        let mut gone = self.regions.remove(at);
+        gone.selected = false;
+        self.deleted_regions.insert(desc.clone(), gone);
+        self.bump_epoch();
+        let undo = self.applied(Some("Delete"), &desc)?;
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": {"deleted": true}, "material": material, "display": {"title": title}, "undo": undo}),
+        )
+    }
+
+    // ----- (M4) the cycle, the Tempo and Signature Lists -----
+
+    /// The cycle as the bridge reads it: the control bar's Cycle button and the LCD's locators.
+    fn cycle_state(&self) -> Value {
+        let (on, start, end) = self.cycle;
+        json!({"on": on, "startBeats": start, "endBeats": end})
+    }
+
+    /// `loop-range {startBeats, endBeats}`: the locators through the LCD on its Custom display (they sit on Logic's
+    /// ticks) and the Cycle button; 0 and 0 turn the cycle off and leave the locators. No step of Logic's undo; its
+    /// restore puts the cycle back with its locators, by value.
+    fn loop_range(&mut self, method: &str, params: &Value) -> Answer {
+        let same = |a: &Value, b: &Value| {
+            a["on"] == b["on"]
+                && close_beats(number(a, "startBeats"), number(b, "startBeats"))
+                && close_beats(number(a, "endBeats"), number(b, "endBeats"))
+        };
+        let title_of = |state: &Value| {
+            if state["on"] == true {
+                format!("Cycle {} to {}", bar_text(number(state, "startBeats")), bar_text(number(state, "endBeats")))
+            } else {
+                "Cycle off".to_string()
+            }
+        };
+        let now = self.cycle_state();
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let prior = &params["prior"];
+            if !same(&now, prior) {
+                if params["discard"] != true && !same(&now, &params["applied"]) {
+                    return Err(changed("the cycle has been changed in Logic Pro since Kumi set it"));
+                }
+                // (an off cycle keeps its locators, and a restore puts them back too)
+                let (start, end) = (number(prior, "startBeats"), number(prior, "endBeats"));
+                let (start, end) = if end > start { (on_ticks(start), on_ticks(end)) } else { (self.cycle.1, self.cycle.2) };
+                self.cycle = (prior["on"] == true, start, end);
+            }
+            let undo = self.restored(None, &desc)?;
+            let back = self.cycle_state();
+            let title = format!("{} (put back)", title_of(&back));
+            return Ok(
+                json!({"epoch": self.epoch_text(), "restored": back, "display": {"title": title, "before": now, "after": back}, "undo": undo}),
+            );
+        }
+        let input = &params["input"];
+        let given = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+        if (given("start") || given("end")) && !given("startBeats") {
+            return Err(bad(
+                "Logic Pro's bridge places the cycle by startBeats and endBeats (beats from the project's start), not seconds",
+            ));
+        }
+        let beat = |key: &str| -> Result<Option<f64>, Fault> {
+            match input.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) => value
+                    .as_f64()
+                    .filter(|n| n.is_finite() && (0.0..=1.0e6).contains(n))
+                    .map(Some)
+                    .ok_or_else(|| bad(format!("{key} must be a number from 0: beats from the project's start"))),
+            }
+        };
+        let start = beat("startBeats")?
+            .ok_or_else(|| bad("pass startBeats (beats from the project's start) and endBeats; 0 and 0 turn the cycle off"))?;
+        let end = beat("endBeats")?.ok_or_else(|| bad("pass endBeats"))?;
+        let on = !(start == 0.0 && end == 0.0);
+        if on && end <= start {
+            return Err(bad("the cycle must end after it starts (0 and 0 turn it off)"));
+        }
+        let after = if on {
+            json!({"on": true, "startBeats": start, "endBeats": end})
+        } else {
+            json!({"on": false, "startBeats": now["startBeats"], "endBeats": now["endBeats"]})
+        };
+        if method == "change_preview" {
+            let mut display = json!({"title": title_of(&after), "before": now, "after": after});
+            if same(&now, &after) {
+                display["unchanged"] = true.into();
+            }
+            if on && (on_ticks(start) != start || on_ticks(end) != end) {
+                display["note"] = "The locators sit on Logic Pro's ticks (960 to a beat): the range is rounded to them.".into();
+            }
+            return Ok(
+                json!({"epoch": self.epoch_text(), "target": {"ref": null, "kind": "project"}, "prior": now, "fence": now, "display": display}),
+            );
+        }
+        if !same(&now, &params["fence"]) {
+            return Err(changed("the cycle changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        if !same(&now, &after) {
+            self.cycle = if on { (true, on_ticks(start), on_ticks(end)) } else { (false, self.cycle.1, self.cycle.2) };
+        }
+        let undo = self.applied(None, &desc)?;
+        let applied = self.cycle_state();
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": applied, "display": {"title": title_of(&applied), "before": now, "after": applied}, "undo": undo}),
+        )
+    }
+
+    /// The Tempo List's row at a beat, if one is (0 is the project's first tempo event, always there).
+    fn tempo_at(&self, beats: f64) -> Value {
+        if beats == 0.0 {
+            return json!({"exists": true, "bpm": self.tempo});
+        }
+        match self.tempo_changes.iter().find(|(at, _)| *at == beats) {
+            Some((_, bpm)) => json!({"exists": true, "bpm": bpm}),
+            None => json!({"exists": false}),
+        }
+    }
+
+    /// The tempo in force at a beat: what a tempo event made there comes with.
+    fn tempo_in_force(&self, beats: f64) -> f64 {
+        self.tempo_changes.iter().rev().find(|(at, _)| *at <= beats).map_or(self.tempo, |(_, bpm)| *bpm)
+    }
+
+    /// The Tempo List's rows: the project's first tempo event and each one after it.
+    fn tempo_events(&self) -> usize {
+        1 + self.tempo_changes.len()
+    }
+
+    fn put_tempo(&mut self, beats: f64, bpm: f64) {
+        if beats == 0.0 {
+            self.tempo = bpm;
+            return;
+        }
+        match self.tempo_changes.iter_mut().find(|(at, _)| *at == beats) {
+            Some(change) => change.1 = bpm,
+            None => {
+                self.tempo_changes.push((beats, bpm));
+                self.tempo_changes.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+        }
+    }
+
+    /// The steps of Logic's undo a tempo of `bpm` at `beats` takes: a row made first ("Insert Tempo", with the tempo in
+    /// force) when none is there, and its Tempo cell stepped ("Value Change") when its BPM isn't `bpm` already.
+    fn tempo_steps(&self, beats: f64, bpm: f64) -> Vec<&'static str> {
+        let now = self.tempo_at(beats);
+        let mut steps = vec![];
+        let from = if now["exists"] == true {
+            number(&now, "bpm")
+        } else {
+            steps.push("Insert Tempo");
+            self.tempo_in_force(beats)
+        };
+        if (from - bpm).abs() >= 0.0001 {
+            steps.push("Value Change");
+        }
+        steps
+    }
+
+    /// Two Tempo List rows the same: both there with the same BPM, or neither there.
+    fn same_tempo(a: &Value, b: &Value) -> bool {
+        a["exists"] == b["exists"] && (a["exists"] == false || (number(a, "bpm") - number(b, "bpm")).abs() < 0.0001)
+    }
+
+    /// A BPM as the Tempo List's Tempo cell takes it: 5 to 990, to four decimals.
+    fn bpm_input(input: &Value) -> Result<f64, Fault> {
+        let bpm = input.get("bpm").and_then(Value::as_f64).filter(|bpm| bpm.is_finite()).ok_or_else(|| bad("bpm must be a number"))?;
+        if !(TEMPO_MIN..=TEMPO_MAX).contains(&bpm) {
+            return Err(bad(format!("bpm must be from {TEMPO_MIN} to {TEMPO_MAX}")));
+        }
+        Ok((bpm * 10000.0).round() / 10000.0)
+    }
+
+    /// A BPM as the bridge's titles say it: `128`, `120.25`.
+    fn bpm_text(bpm: f64) -> String {
+        let text = format!("{bpm:.4}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+
+    /// `tempo-marker-set {positionBeats, bpm}`: the Tempo List's row at the beat, its Tempo cell stepped; or a row made
+    /// first at the playhead, Create new Tempo Event (two steps of Logic's undo: "Insert Tempo", then the cell's "Value
+    /// Change"). At 0 it is the project's first tempo. Its restore is by value: the row stepped back, or (one Kumi made)
+    /// deleted again.
+    fn tempo_marker_set(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let beats = on_the_beat(params["target"]["positionBeats"].as_f64().ok_or_else(|| bad("target.positionBeats"))?);
+            let (now, prior) = (self.tempo_at(beats), &params["prior"]);
+            let title = format!("Tempo at {} put back", bar_text(beats));
+            if Self::same_tempo(&now, prior) {
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": now, "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+                );
+            }
+            if params["discard"] != true && !Self::same_tempo(&now, &params["applied"]) {
+                return Err(changed(format!("the tempo at {} has been changed in Logic Pro since Kumi set it", bar_text(beats))));
+            }
+            if prior["exists"] == true {
+                let bpm = prior["bpm"].as_f64().unwrap_or(120.0);
+                let steps = self.tempo_steps(beats, bpm);
+                self.put_tempo(beats, bpm);
+                let undo = self.restored_steps(&steps, &desc)?;
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": self.tempo_at(beats), "display": {"title": title}, "undo": undo}),
+                );
+            }
+            // Kumi made the row: taken away again.
+            if now["exists"] != true {
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": {"exists": false}, "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+                );
+            }
+            self.tempo_changes.retain(|(at, _)| *at != beats);
+            let undo = self.restored(Some("Delete"), &desc)?;
+            let title = format!("Tempo event at {} taken away again", bar_text(beats));
+            return Ok(json!({"epoch": self.epoch_text(), "restored": {"exists": false}, "display": {"title": title}, "undo": undo}));
+        }
+        let input = &params["input"];
+        let bpm = Self::bpm_input(input)?;
+        let beats = on_the_beat(Self::position_of_input(input, "tempo and signature changes")?);
+        let now = self.tempo_at(beats);
+        let wanted = json!({"exists": true, "bpm": bpm});
+        let title = format!("Tempo {} BPM at {}", Self::bpm_text(bpm), bar_text(beats));
+        let fence = json!({"tempo": now, "events": self.tempo_events()});
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": wanted});
+            if Self::same_tempo(&now, &wanted) {
+                display["unchanged"] = true.into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": null, "kind": "tempo-marker", "positionBeats": beats},
+                "prior": now,
+                "fence": fence,
+                "display": display,
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the tempo events changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        if Self::same_tempo(&now, &wanted) {
+            return Ok(
+                json!({"epoch": self.epoch_text(), "applied": now, "display": {"title": title, "unchanged": true}, "undo": {"desc": desc, "entry": false}}),
+            );
+        }
+        let made = now["exists"] != true;
+        let steps = self.tempo_steps(beats, bpm);
+        self.put_tempo(beats, bpm);
+        let undo = self.applied_steps(&steps, &desc)?;
+        let after = self.tempo_at(beats);
+        let mut applied = after.clone();
+        applied["made"] = made.into();
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": applied, "display": {"title": title, "before": now, "after": after}, "undo": undo}),
+        )
+    }
+
+    /// `tempo-marker-delete {positionBeats}`: the Tempo List row's Delete action (never the project's first tempo
+    /// event); what it was is kept in `material`. Its restore is Logic's own undo while that step is on top, else the
+    /// row made again by value.
+    fn tempo_marker_delete(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let material =
+                params.get("material").filter(|material| !material.is_null()).ok_or_else(|| bad("material: what the delete removed"))?;
+            let bpm = material["bpm"].as_f64().ok_or_else(|| bad("material.bpm"))?;
+            let beats = on_the_beat(material["positionBeats"].as_f64().unwrap_or(0.0));
+            let title = format!("Tempo event at {} put back", bar_text(beats));
+            let now = self.tempo_at(beats);
+            if now["exists"] == true {
+                if params["discard"] == true || (number(&now, "bpm") - bpm).abs() < 0.0001 {
+                    return Ok(
+                        json!({"epoch": self.epoch_text(), "restored": now, "display": {"title": format!("{title} already")}, "undo": {"desc": desc, "entry": false}}),
+                    );
+                }
+                return Err(changed(format!("another tempo event is at {} now", bar_text(beats))));
+            }
+            let key = Self::key_of(params);
+            if let Ok(step) = self.undo_in_logic("Delete", |top| top.key.as_deref() == Some(key.as_str())) {
+                if self.restore_unanswered() {
+                    return Err(uncertain(format!(
+                        "Logic Pro's {:?} was pressed, but no tempo event is back at {}",
+                        step.title,
+                        bar_text(beats)
+                    )));
+                }
+                self.put_tempo(beats, bpm);
+                return Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "restored": self.tempo_at(beats),
+                    "display": {"title": title, "note": "Put back with Logic Pro's own undo."},
+                    "undo": {"desc": desc, "entry": false, "how": "undo"},
+                }));
+            }
+            let steps = self.tempo_steps(beats, bpm);
+            self.put_tempo(beats, bpm);
+            let undo = self.restored_steps(&steps, &desc)?;
+            return Ok(json!({"epoch": self.epoch_text(), "restored": self.tempo_at(beats), "display": {"title": title}, "undo": undo}));
+        }
+        let input = &params["input"];
+        let beats = on_the_beat(Self::position_of_input(input, "tempo and signature changes")?);
+        let now = self.tempo_at(beats);
+        if now["exists"] != true {
+            return Err(match method {
+                "change_preview" => failed(format!("there is no tempo event at {}", bar_text(beats))),
+                _ => changed("the tempo event went since the preview"),
+            });
+        }
+        if beats == 0.0 {
+            return Err(bad("the project's first tempo event stays: change it with tempo_marker_set"));
+        }
+        let fence = json!({"tempo": now, "events": self.tempo_events()});
+        let title = format!("Deleted tempo event at {}", bar_text(beats));
+        if method == "change_preview" {
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": null, "kind": "tempo-marker", "positionBeats": beats},
+                "prior": now,
+                "fence": fence,
+                "display": {"title": title},
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the tempo events changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        self.tempo_changes.retain(|(at, _)| *at != beats);
+        let undo = self.applied(Some("Delete"), &desc)?;
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "applied": {"deleted": true},
+            "material": {"positionBeats": beats, "bpm": now["bpm"]},
+            "display": {"title": title},
+            "undo": undo,
+        }))
+    }
+
+    /// The Signature List's Time row at a beat, if one is (0 is the project's, always there).
+    fn signature_at(&self, beats: f64) -> Value {
+        if beats == 0.0 {
+            return json!({"exists": true, "timeSignature": [self.signature.0, self.signature.1]});
+        }
+        match self.signature_changes.iter().find(|(at, _)| *at == beats) {
+            Some((_, (num, den))) => json!({"exists": true, "timeSignature": [num, den]}),
+            None => json!({"exists": false}),
+        }
+    }
+
+    fn put_signature(&mut self, beats: f64, signature: (i64, i64)) {
+        if beats == 0.0 {
+            self.signature = signature;
+            return;
+        }
+        match self.signature_changes.iter_mut().find(|(at, _)| *at == beats) {
+            Some(change) => change.1 = signature,
+            None => {
+                self.signature_changes.push((beats, signature));
+                self.signature_changes.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+        }
+    }
+
+    /// A time signature as the Signature List takes it: [numerator, denominator] (or {num, den}), 1 to 99 over one of
+    /// its denominators.
+    fn signature_input(input: &Value) -> Result<(i64, i64), Fault> {
+        let pair = input.get("timeSignature").ok_or_else(|| bad("timeSignature must be [numerator, denominator]"))?;
+        let (num, den) = match pair {
+            Value::Array(pair) if pair.len() == 2 => (pair[0].as_u64(), pair[1].as_u64()),
+            Value::Object(_) => (pair["num"].as_u64(), pair["den"].as_u64()),
+            _ => (None, None),
+        };
+        match (num, den) {
+            (Some(num), Some(den)) if (1..=99).contains(&num) && [1, 2, 4, 8, 16, 32].contains(&den) => Ok((num as i64, den as i64)),
+            _ => Err(bad("timeSignature must be [numerator, denominator]: 1 to 99 over 1, 2, 4, 8, 16 or 32")),
+        }
+    }
+
+    /// `signature-set {positionBeats, timeSignature}`: the Signature List's Time row at the bar, its numerator stepped
+    /// and its denominator chosen; or a row made first (Create new Time/Key Signature Change): a step of Logic's undo
+    /// its Edit menu names "Value Change" either way. At 0 it is the project's. Its restore is by value: the row set
+    /// back, or (one Kumi made) deleted through the list's Edit > Delete. (The simulator counts bars by four beats
+    /// whatever the signature: its positions don't follow a change at the start.)
+    fn signature_set(&mut self, method: &str, params: &Value) -> Answer {
+        let text = |state: &Value| format!("{}/{}", state["timeSignature"][0], state["timeSignature"][1]);
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let beats = on_the_beat(params["target"]["positionBeats"].as_f64().ok_or_else(|| bad("target.positionBeats"))?);
+            let (now, prior) = (self.signature_at(beats), &params["prior"]);
+            let title = format!("Time signature at {} put back", bar_text(beats));
+            if now == *prior {
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": now, "display": {"title": title}, "undo": {"desc": desc, "entry": false}}),
+                );
+            }
+            let mut applied = params["applied"].clone();
+            if let Some(fields) = applied.as_object_mut() {
+                fields.remove("made");
+            }
+            if params["discard"] != true && now != applied {
+                return Err(changed(format!("the time signature at {} has been changed in Logic Pro since Kumi set it", bar_text(beats))));
+            }
+            if prior["exists"] == true {
+                let signature = Self::signature_input(&json!({"timeSignature": prior["timeSignature"]}))?;
+                self.put_signature(beats, signature);
+                let undo = self.restored(Some("Value Change"), &desc)?;
+                return Ok(
+                    json!({"epoch": self.epoch_text(), "restored": self.signature_at(beats), "display": {"title": title}, "undo": undo}),
+                );
+            }
+            // Kumi made the row, and a signature row has no Delete action of its own: the list's Edit > Delete.
+            self.signature_changes.retain(|(at, _)| *at != beats);
+            let undo = self.restored(Some("Delete"), &desc)?;
+            let title = format!("Time signature at {} taken away again", bar_text(beats));
+            return Ok(json!({"epoch": self.epoch_text(), "restored": {"exists": false}, "display": {"title": title}, "undo": undo}));
+        }
+        let input = &params["input"];
+        let signature = Self::signature_input(input)?;
+        let beats = on_the_beat(Self::position_of_input(input, "tempo and signature changes")?);
+        if position_of(beats)["beat"] != 1 {
+            return Err(bad("a time signature changes at a bar: give the bar's first beat"));
+        }
+        let now = self.signature_at(beats);
+        let wanted = json!({"exists": true, "timeSignature": [signature.0, signature.1]});
+        let title = format!("Time signature {} at {}", text(&wanted), bar_text(beats));
+        let fence = json!({"signature": now, "events": 1 + self.signature_changes.len()});
+        if method == "change_preview" {
+            let mut display = json!({"title": title, "before": now, "after": wanted});
+            if now == wanted {
+                display["unchanged"] = true.into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": null, "kind": "signature", "positionBeats": beats},
+                "prior": now,
+                "fence": fence,
+                "display": display,
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the time signatures changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        if now == wanted {
+            return Ok(
+                json!({"epoch": self.epoch_text(), "applied": now, "display": {"title": title, "unchanged": true}, "undo": {"desc": desc, "entry": false}}),
+            );
+        }
+        let made = now["exists"] != true;
+        self.put_signature(beats, signature);
+        let undo = self.applied(Some("Value Change"), &desc)?;
+        let after = self.signature_at(beats);
+        let mut applied = after.clone();
+        applied["made"] = made.into();
+        Ok(
+            json!({"epoch": self.epoch_text(), "applied": applied, "display": {"title": title, "before": now, "after": after}, "undo": undo}),
+        )
+    }
+
+    // ----- (M4) a MIDI file imported, Track Stacks -----
+
+    /// The notes of an import as the bridge's file takes them, in its words for what is off.
+    fn import_notes(input: &Value) -> Result<Vec<ImportNote>, Fault> {
+        let list = input.get("notes").and_then(Value::as_array).ok_or_else(|| bad("notes must be a list"))?;
+        if list.is_empty() || list.len() > MOST_IMPORTED {
+            return Err(bad(format!("notes must hold from 1 to {MOST_IMPORTED} notes")));
+        }
+        let whole = |spec: &Value, key: &str, low: u64, high: u64, fallback: Option<u64>| -> Result<u8, Fault> {
+            match spec.get(key) {
+                None | Some(Value::Null) => {
+                    fallback.map(|n| n as u8).ok_or_else(|| bad(format!("every note needs a {key} ({low} to {high})")))
+                }
+                Some(value) => value
+                    .as_u64()
+                    .filter(|n| (low..=high).contains(n))
+                    .map(|n| n as u8)
+                    .ok_or_else(|| bad(format!("{key} must be a whole number from {low} to {high}"))),
+            }
+        };
+        let beats = |spec: &Value, key: &str| -> Result<f64, Fault> {
+            spec.get(key)
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && (0.0..=1.0e6).contains(n))
+                .ok_or_else(|| bad(format!("every note needs a {key} (beats from the region's start)")))
+        };
+        list.iter()
+            .map(|spec| {
+                let length = beats(spec, "length")?;
+                if length <= 0.0 {
+                    return Err(bad("every note needs a length above 0 (beats)"));
+                }
+                Ok(ImportNote {
+                    pitch: whole(spec, "pitch", 0, 127, None)?,
+                    start: beats(spec, "start")?,
+                    length,
+                    velocity: whole(spec, "velocity", 1, 127, Some(100))?,
+                    channel: whole(spec, "channel", 1, 16, Some(1))?,
+                })
+            })
+            .collect()
+    }
+
+    /// `midi-import {ref, positionBeats, notes}`: the bridge writes the notes as a Standard MIDI File (named by its
+    /// bytes, under /tmp/kumi-logic), selects the track, puts the playhead at the beat (the LCD's bar and beat) and
+    /// imports the file (File > Import > MIDI File…, through the panel service): Logic lands it on a new software
+    /// instrument track below the one named, which it names after its default patch, as a region it names itself (the
+    /// file carries no track name), as long as the file's span rounded up to the bar. The epoch moves. Its restore is
+    /// Logic's own undo ("Import") while that step is on top, which takes the track away with the region.
+    fn midi_import(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let created =
+                params.get("created").filter(|created| !created.is_null()).ok_or_else(|| bad("created: the region the import made"))?;
+            let Ok(at) = self.region_at(created["ref"].as_str(), true) else {
+                return Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "restored": {"deleted": created["ref"]},
+                    "display": {"title": "The imported region is gone already"},
+                    "undo": {"desc": desc, "entry": false},
+                }));
+            };
+            let (region_id, track_id) = (self.regions[at].id, self.regions[at].track);
+            let there = self.region_state(&self.regions[at]);
+            let applied = &params["applied"];
+            if params["discard"] != true
+                && (there["startBeats"] != applied["startBeats"]
+                    || there["endBeats"] != applied["endBeats"]
+                    || there["track"] != applied["track"])
+            {
+                return Err(changed("the imported region has been moved in Logic Pro since Kumi imported it"));
+            }
+            let key = Self::key_of(params);
+            let pressed = self.undo_in_logic("Import", |top| top.key.as_deref() == Some(key.as_str()))?.title;
+            if self.restore_unanswered() {
+                return Err(uncertain(format!("Logic Pro's {pressed:?} was pressed, but the imported region is still there")));
+            }
+            self.regions.retain(|region| region.id != region_id);
+            // (the track Logic made for the file goes with it)
+            if created["trackAdded"] == true {
+                if let Some(track) = self.track_index(track_id) {
+                    self.tracks.remove(track);
+                }
+            }
+            self.bump_epoch();
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "restored": {"deleted": created["ref"], "pressed": pressed},
+                "display": {"title": "Import taken back", "note": "Put back with Logic Pro's own undo."},
+                "undo": {"desc": desc, "entry": false, "how": "undo"},
+            }));
+        }
+        let input = &params["input"];
+        let at = self.track_at(input["ref"].as_str(), false).map_err(|fault| {
+            if method == "change_apply" && fault.0 == "failed" {
+                changed(fault.1)
+            } else {
+                fault
+            }
+        })?;
+        let position = input
+            .get("positionBeats")
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && (0.0..=1.0e6).contains(n))
+            .ok_or_else(|| bad("positionBeats must be a number from 0: beats from the project's start, where the region goes"))?;
+        let notes = Self::import_notes(input)?;
+        let count = notes.len();
+        let title = |track: &str, beats: f64| {
+            format!("Imported {count} note{} on {} at {}", if count == 1 { "" } else { "s" }, quoted(track), bar_text(beats))
+        };
+        let names: Vec<String> = self.tracks.iter().map(|track| track.name.clone()).collect();
+        let fence = json!({"tracks": self.tracks.len(), "names": names, "regions": self.regions.len()});
+        if method == "change_preview" {
+            let named = if self.tracks[at].name.is_empty() { format!("Track {}", at + 1) } else { self.tracks[at].name.clone() };
+            let mut display = json!({"title": title(&named, position), "notes": count, "note": "Logic Pro's own undo takes an import back (\"Import\"), while it is its latest step."});
+            if !on_a_beat(position) {
+                display["note"] = "Logic Pro's playhead display places the region on a beat: the division and tick are dropped.".into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": format!("{}:track:{}", self.epoch, at + 1), "kind": "track"},
+                "prior": {"tracks": fence["tracks"], "regions": fence["regions"]},
+                "fence": fence,
+                "display": display,
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the tracks or regions changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        let file = format!("{IMPORT_FOLDER}/kumi-{}.mid", &daw_bridge::auth::sha256_hex(&midi_file(&notes))[..12]);
+        // The region Logic makes: at the playhead's bar and beat, the file's span rounded up to the bar.
+        let start = on_the_beat(position);
+        let span = notes.iter().map(|note| note.start + note.length).fold(0.0, f64::max);
+        let end = start + (span / BEATS_PER_BAR).ceil().max(1.0) * BEATS_PER_BAR;
+        let track = Track::made(self.next_track, IMPORT_TRACK, "instrument");
+        let track_id = track.id;
+        self.next_track += 1;
+        self.tracks.insert(at + 1, track);
+        let region = Region {
+            id: self.next_region,
+            track: track_id,
+            name: IMPORT_REGION.into(),
+            kind: "midi".into(),
+            start,
+            end,
+            looping: false,
+            selected: false,
+            notes: notes.iter().map(ImportNote::row).collect(),
+        };
+        let id = region.id;
+        self.next_region += 1;
+        self.regions.push(region);
+        self.select_region(id);
+        self.sort_regions();
+        self.bump_epoch();
+        let undo = self.applied(Some("Import"), &desc)?;
+        let (place, track_place) = (self.region_index(id).map_or(0, |at| at + 1), at + 2);
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "applied": {"notes": count, "startBeats": start, "endBeats": end, "track": track_place, "trackName": IMPORT_TRACK, "file": file, "answered": []},
+            "created": {"ref": self.region_ref(place), "kind": "region", "track": format!("{}:track:{track_place}", self.epoch), "trackAdded": true},
+            "display": {"title": title(IMPORT_TRACK, start), "notes": count},
+            "undo": undo,
+        }))
+    }
+
+    /// The stack whose own track is at `at` flattened: its track gone, its tracks on their own where they are (a
+    /// summing stack's keep their output on its bus: Logic's own doing); the epoch moves. The stack's own track.
+    fn flatten(&mut self, at: usize) -> Track {
+        let header = self.tracks.remove(at);
+        for track in &mut self.tracks {
+            if track.in_stack == Some(header.id) {
+                track.in_stack = None;
+            }
+        }
+        self.sort_regions();
+        self.bump_epoch();
+        header
+    }
+
+    /// `track-stack {refs, kind, name?}`: the tracks' headers clicked (Shift for the others), then Logic's own Create
+    /// Summing Stack or Create Folder Stack: the stack's own track where the first of them was, the tracks after it in
+    /// their order (Logic gathers them); Logic names it (Sum 1, Folder 1), and a `name` renames it after through the
+    /// Inspector, which puts "Renaming" on top of "Create Track Stack". The epoch moves once. Its restore is Logic's own
+    /// undo while the creation is on top (the tracks back where they were), else Flatten Stack, by value.
+    fn track_stack(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let at =
+                self.track_at(params["created"]["ref"].as_str(), true)
+                    .map_err(|fault| if fault.0 == "failed" { gone(fault.1) } else { fault })?;
+            let name = params["applied"]["name"].as_str().unwrap_or_default().to_string();
+            let stack = self.tracks[at].clone();
+            if !stack.is_stack() || stack.name != name {
+                if params["discard"] == true {
+                    return Ok(json!({
+                        "epoch": self.epoch_text(),
+                        "restored": {"tracks": self.tracks.len()},
+                        "display": {"title": format!("Stack {} is gone already", quoted(&name))},
+                        "undo": {"desc": desc, "entry": false},
+                    }));
+                }
+                return Err(changed(format!("track {} isn't the stack {} Kumi made any more", at + 1, quoted(&name))));
+            }
+            let key = Self::key_of(params);
+            if let Ok(step) = self.undo_in_logic("Create Track Stack", |top| top.key.as_deref() == Some(key.as_str())) {
+                if self.restore_unanswered() {
+                    return Err(uncertain(format!(
+                        "Logic Pro's {:?} was pressed, but the stack {} is still there",
+                        step.title,
+                        quoted(&name)
+                    )));
+                }
+                // The tracks where they were before, exactly: the stack's own track gone.
+                self.tracks.remove(at);
+                for track in &mut self.tracks {
+                    if track.in_stack == Some(stack.id) {
+                        track.in_stack = None;
+                    }
+                }
+                if let Some(order) = step.desc.and_then(|desc| self.stacked.remove(&desc)) {
+                    self.tracks.sort_by_key(|track| order.iter().position(|id| *id == track.id).unwrap_or(usize::MAX));
+                }
+                self.sort_regions();
+                self.bump_epoch();
+                return Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "restored": {"tracks": self.tracks.len(), "pressed": step.title},
+                    "display": {"title": format!("Stack {} taken apart again", quoted(&name)), "note": "Put back with Logic Pro's own undo."},
+                    "undo": {"desc": desc, "entry": false, "how": "undo"},
+                }));
+            }
+            self.flatten(at);
+            let undo = self.restored(Some("Flatten Stack"), &desc)?;
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "restored": {"tracks": self.tracks.len()},
+                "display": {"title": format!("Stack {} flattened again", quoted(&name))},
+                "undo": undo,
+            }));
+        }
+        let input = &params["input"];
+        let refs = input.get("refs").and_then(Value::as_array).ok_or_else(|| bad("refs must be a list of track refs"))?;
+        if refs.is_empty() || refs.len() > 64 {
+            return Err(bad("refs must name from 1 to 64 tracks"));
+        }
+        let mut places: Vec<usize> = vec![];
+        for reference in refs {
+            let place = self.track_at(reference.as_str(), false).map_err(|fault| {
+                if method == "change_apply" && fault.0 == "failed" {
+                    changed(fault.1)
+                } else {
+                    fault
+                }
+            })?;
+            if !places.contains(&place) {
+                places.push(place);
+            }
+        }
+        places.sort_unstable();
+        let kind = match input.get("kind").and_then(Value::as_str) {
+            Some("summing") => "summing",
+            Some("folder") => "folder",
+            _ => return Err(bad("kind must be \"summing\" or \"folder\"")),
+        };
+        let name = match input.get("name") {
+            None | Some(Value::Null) => None,
+            Some(name) => Some(name.as_str().filter(|name| !name.trim().is_empty()).ok_or_else(|| bad("name must be text"))?.to_string()),
+        };
+        let names: Vec<String> = self.tracks.iter().map(|track| track.name.clone()).collect();
+        let fence = json!({"tracks": self.tracks.len(), "names": names});
+        let members = and_list(places.iter().map(|&place| self.tracks[place].name.as_str()));
+        let noun = if kind == "summing" { "Summing" } else { "Folder" };
+        if method == "change_preview" {
+            if let Some(stacked) = places.iter().find(|&&place| self.tracks[place].is_stack()) {
+                return Err(bad(format!("track {} is a Track Stack already; Logic Pro doesn't stack stacks from outside", stacked + 1)));
+            }
+            let mut display = json!({"title": format!("{noun} stack of {members}"), "kind": kind});
+            if let Some(name) = &name {
+                display["name"] = name.clone().into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": null, "kind": "track"},
+                "prior": {"tracks": self.tracks.len()},
+                "fence": fence,
+                "display": display,
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the tracks changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        let before: Vec<u64> = self.tracks.iter().map(|track| track.id).collect();
+        // Logic's own name for it, and (a summing stack's) the bus it mixes through.
+        let made = if kind == "summing" { &mut self.summing_stacks } else { &mut self.folder_stacks };
+        *made += 1;
+        let number = *made;
+        let named = format!("{} {number}", if kind == "summing" { "Sum" } else { "Folder" });
+        let stack = Track::stack(self.next_track, &named, kind, number);
+        let stack_id = stack.id;
+        self.next_track += 1;
+        let first = places[0];
+        let mut gathered: Vec<Track> = places.iter().rev().map(|&place| self.tracks.remove(place)).collect();
+        gathered.reverse();
+        self.tracks.insert(first, stack);
+        for (n, mut track) in gathered.into_iter().enumerate() {
+            track.in_stack = Some(stack_id);
+            if kind == "summing" {
+                track.row["output"] = format!("Bus {number}").into();
+            }
+            self.tracks.insert(first + 1 + n, track);
+        }
+        let mut steps = vec!["Create Track Stack"];
+        let shown = match name {
+            Some(name) => {
+                self.tracks[first].name = name.clone();
+                steps.push("Renaming");
+                name
+            }
+            None => named,
+        };
+        self.sort_regions();
+        self.bump_epoch();
+        self.stacked.insert(desc.clone(), before);
+        let undo = self.applied_steps(&steps, &desc)?;
+        let subtracks: Vec<String> = (first + 2..=first + 1 + places.len()).map(|place| format!("{}:track:{place}", self.epoch)).collect();
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "applied": {"index": first + 1, "name": shown, "kind": kind, "tracks": subtracks},
+            "created": {"ref": format!("{}:track:{}", self.epoch, first + 1), "kind": "track", "stack": kind},
+            "display": {"title": format!("{noun} stack {} of {members}", quoted(&shown))},
+            "undo": undo,
+        }))
+    }
+
+    /// `track-stack-flatten {ref}`: the stack's header clicked, then Logic's own Flatten Stack: its own track gone, its
+    /// tracks on their own where they are; the epoch moves, and the stack as it was is kept in `material` (its name,
+    /// its place, and how many tracks showed with it open). Its restore is Logic's own undo while that step is on top:
+    /// which tracks were under a stack isn't readable once it is flat.
+    fn track_stack_flatten(&mut self, method: &str, params: &Value) -> Answer {
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let material =
+                params.get("material").filter(|material| !material.is_null()).ok_or_else(|| bad("material: the stack as it was"))?;
+            let name = material["name"].as_str().unwrap_or_default().to_string();
+            let place = material["index"].as_u64().unwrap_or(0) as usize;
+            if self.tracks.get(place.wrapping_sub(1)).is_some_and(|track| track.is_stack() && track.name == name) {
+                return Ok(json!({
+                    "epoch": self.epoch_text(),
+                    "restored": {"tracks": self.tracks.len()},
+                    "display": {"title": format!("Stack {} is back already", quoted(&name))},
+                    "undo": {"desc": desc, "entry": false},
+                }));
+            }
+            let key = Self::key_of(params);
+            let step = self.undo_in_logic("Flatten Stack", |top| top.key.as_deref() == Some(key.as_str()))?;
+            let unanswered =
+                || uncertain(format!("Logic Pro's {:?} was pressed, but no stack {} is back at track {place}", step.title, quoted(&name)));
+            if self.restore_unanswered() {
+                return Err(unanswered());
+            }
+            let Some((stack, members)) = step.desc.as_ref().and_then(|desc| self.flattened.remove(desc)) else { return Err(unanswered()) };
+            let id = stack.id;
+            let at = place.saturating_sub(1).min(self.tracks.len());
+            self.tracks.insert(at, stack);
+            for track in &mut self.tracks {
+                if members.contains(&track.id) {
+                    track.in_stack = Some(id);
+                }
+            }
+            self.sort_regions();
+            self.bump_epoch();
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "restored": {"tracks": self.tracks.len(), "pressed": step.title, "ref": format!("{}:track:{}", self.epoch, at + 1)},
+                "display": {"title": format!("Stack {} back", quoted(&name)), "note": "Put back with Logic Pro's own undo."},
+                "undo": {"desc": desc, "entry": false, "how": "undo"},
+            }));
+        }
+        let input = &params["input"];
+        let at = self.track_at(input["ref"].as_str(), false).map_err(|fault| {
+            if method == "change_apply" && fault.0 == "failed" {
+                changed(fault.1)
+            } else {
+                fault
+            }
+        })?;
+        let stack = self.tracks[at].clone();
+        if !stack.is_stack() {
+            return Err(bad(format!("track {} {} isn't a Track Stack", at + 1, quoted(&stack.name))));
+        }
+        let names: Vec<String> = self.tracks.iter().map(|track| track.name.clone()).collect();
+        let fence = json!({"tracks": self.tracks.len(), "names": names});
+        let title = format!("Stack {} flattened", quoted(&stack.name));
+        if method == "change_preview" {
+            return Ok(json!({
+                "epoch": self.epoch_text(),
+                "target": {"ref": format!("{}:track:{}", self.epoch, at + 1), "kind": "track"},
+                "prior": {"name": stack.name, "index": at + 1, "tracks": self.tracks.len()},
+                "fence": fence,
+                "display": {"title": title},
+            }));
+        }
+        if params["fence"] != fence {
+            return Err(changed("the tracks changed since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        // (the stack open, every track of it shows)
+        let shown = self.tracks.len();
+        let members: Vec<u64> = self.tracks.iter().filter(|track| track.in_stack == Some(stack.id)).map(|track| track.id).collect();
+        let header = self.flatten(at);
+        self.flattened.insert(desc.clone(), (header, members));
+        let undo = self.applied(Some("Flatten Stack"), &desc)?;
+        Ok(json!({
+            "epoch": self.epoch_text(),
+            "applied": {"name": stack.name, "tracks": self.tracks.len()},
+            "material": {"name": stack.name, "index": at + 1, "tracks": shown},
+            "display": {"title": title},
+            "undo": undo,
+        }))
+    }
+
     // ----- the transport and the plan's steps -----
 
     fn transport(&mut self, method: &str, params: &Value) -> Answer {
@@ -1403,43 +3658,104 @@ impl State {
         let kind = asked.get("kind").and_then(Value::as_str);
         let track_rows = || -> Vec<Value> { self.tracks.iter().enumerate().map(|(at, track)| track.row(at + 1)).collect() };
         let marker_rows = || -> Vec<Value> { self.markers.iter().enumerate().map(|(at, marker)| marker.row(at + 1)).collect() };
+        let signature_text = format!("{}/{}", self.signature.0, self.signature.1);
         let patch_transport = |transport: &mut Value| {
             transport["playing"] = self.playing.into();
             transport["tempo"] = self.tempo.into();
+            transport["cycle"] = self.cycle.0.into();
+            if transport.get("timeSignature").is_some() {
+                transport["timeSignature"] = signature_text.clone().into();
+            }
+            if transport.get("beatsPerBar").is_some() {
+                transport["beatsPerBar"] = self.signature.0.into();
+            }
+        };
+        let patch_project = |project: &mut Value| {
+            project["tempo"] = self.tempo.into();
+            project["trackCount"] = self.tracks.len().into();
+            project["timeSignature"] = signature_text.clone().into();
         };
         let playhead = || {
             let position = position_of(self.playhead);
             json!({"bar": position["bar"], "beat": position["beat"]})
         };
+        // The place a region ref of the recorded epoch names (from 0), if the region is there.
+        let region_of = |reference: &str| -> Option<usize> {
+            let rest = reference.strip_prefix(&format!("{RECORDED_EPOCH}:region:"))?;
+            rest.parse::<usize>().ok().filter(|place| *place >= 1 && *place <= self.regions.len()).map(|place| place - 1)
+        };
+        let gone = |reference: &str| ("failed".to_string(), format!("{reference} isn't in the project (deleted, or another project)"));
+        // A region's notes as a FOCUS body (the recorded shape).
+        let notes_body = |at: usize| {
+            let region = &self.regions[at];
+            let rows = region.note_rows(at + 1);
+            alphabetical(json!({
+                "endBeats": region.end, "epoch": RECORDED_EPOCH.to_string(), "kind": "notes", "name": region.name,
+                "notes": rows, "regionRef": format!("{RECORDED_EPOCH}:region:{}", at + 1), "startBeats": region.start,
+                "timeSignature": signature_text, "total": region.notes.len(),
+            }))
+        };
         Some(match method {
             "read" if asked.get("ref").is_some() => {
                 let reference = asked["ref"].as_str().unwrap_or_default();
                 let (_, rest) = reference.split_once(':')?;
-                if !rest.starts_with("track:") || epoch_of(reference) != Some(RECORDED_EPOCH) {
+                if epoch_of(reference) != Some(RECORDED_EPOCH) {
+                    return None;
+                }
+                let asked_for = params["ref"].as_str().unwrap_or_default();
+                if rest.starts_with("region:") {
+                    return Some(match region_of(reference) {
+                        Some(at) => Ok(json!({"epoch": RECORDED_EPOCH.to_string(), "items": [self.region_rows()[at].clone()]})),
+                        None => Err(gone(asked_for)),
+                    });
+                }
+                if !rest.starts_with("track:") {
                     return None;
                 }
                 match rest["track:".len()..].parse::<usize>().ok().filter(|place| *place >= 1 && *place <= self.tracks.len()) {
                     Some(place) => Ok(json!({"epoch": RECORDED_EPOCH.to_string(), "items": [self.tracks[place - 1].row(place)]})),
-                    None => Err((
-                        "failed".to_string(),
-                        format!("{} isn't in the project (deleted, or another project)", params["ref"].as_str().unwrap_or_default()),
-                    )),
+                    None => Err(gone(asked_for)),
                 }
             }
             "read" if kind == Some("track") && asked.get("parent").is_none() => page_of(track_rows(), asked),
             "read" if kind == Some("marker") && asked.get("parent").is_none() => page_of(marker_rows(), asked),
+            // (M4) The regions, through the project or under a track; a region's notes as the Event List lists them.
+            "read" if kind == Some("region") => match asked.get("parent").and_then(Value::as_str) {
+                None => page_of(self.region_rows(), asked),
+                // (the request is in the recorded epoch here; a parent from another epoch is left to the recorded
+                // refusals and the stale check)
+                Some(parent) => {
+                    let place = parent.strip_prefix(&format!("{RECORDED_EPOCH}:track:")).and_then(|n| n.parse::<usize>().ok())?;
+                    match place >= 1 && place <= self.tracks.len() {
+                        true => page_of(self.region_rows().into_iter().filter(|row| row["trackRef"] == parent).collect(), asked),
+                        false => Err(gone(params["parent"].as_str().unwrap_or_default())),
+                    }
+                }
+            },
+            "read" if kind == Some("note") && asked.get("parent").is_some() => match region_of(asked["parent"].as_str().unwrap_or_default()) {
+                Some(at) => page_of(self.regions[at].note_rows(at + 1), asked),
+                None => Err(gone(params["parent"].as_str().unwrap_or_default())),
+            },
             "read" if kind == Some("project") => recorded("read", asked.clone()).map(|mut page| {
-                page["items"][0]["tempo"] = self.tempo.into();
-                page["items"][0]["trackCount"] = self.tracks.len().into();
+                patch_project(&mut page["items"][0]);
                 page
             }),
             "read" if kind == Some("tempo") => recorded("read", asked.clone()).map(|mut page| {
-                page["items"][0]["bpm"] = self.tempo.into();
+                let row = &mut page["items"][0];
+                row["bpm"] = self.tempo.into();
+                // (M4) The Signature List as changed (the tempo row lists no tempo events, as the bridge's doesn't).
+                if self.signature != (4, 4) || !self.signature_changes.is_empty() {
+                    let key = row["signatures"][0]["key"].clone();
+                    let mut signatures = vec![json!({"key": key, "position": position_of(0.0), "time": signature_text})];
+                    signatures.extend(self.signature_changes.iter().map(|(at, (num, den))| {
+                        json!({"key": key, "position": position_of(*at), "time": format!("{num}/{den}")})
+                    }));
+                    row["signatures"] = Value::Array(signatures);
+                }
                 page
             }),
             "snapshot" => recorded("snapshot", asked.clone()).map(|mut snapshot| {
-                snapshot["project"]["tempo"] = self.tempo.into();
-                snapshot["project"]["trackCount"] = self.tracks.len().into();
+                patch_project(&mut snapshot["project"]);
                 snapshot["tracks"] = Value::Array(track_rows());
                 snapshot["markers"] = Value::Array(marker_rows());
                 patch_transport(&mut snapshot["transport"]);
@@ -1453,30 +3769,41 @@ impl State {
                 focus
             }),
             "focus_body" if kind == Some("timeline") => recorded("focus_body", json!({"kind": "timeline"})).and_then(|mut whole| {
-                let recorded_lanes = whole["lanes"].as_array().cloned().unwrap_or_default();
                 let lanes: Vec<Value> = self
                     .tracks
                     .iter()
                     .enumerate()
                     .map(|(at, track)| {
-                        // A recorded track keeps its lane (its regions); a track Kumi added has none.
-                        let mut lane = recorded_lanes
-                            .get(track.id as usize - 1)
-                            .filter(|_| track.id >= 1)
-                            .cloned()
-                            .unwrap_or_else(|| json!({"kind": track.kind, "regions": []}));
-                        lane["name"] = track.name.clone().into();
-                        lane["trackRef"] = format!("{RECORDED_EPOCH}:track:{}", at + 1).into();
-                        lane
+                        // Each track's regions, as the Tracks area shows them now (a track Kumi added holds none).
+                        let regions: Vec<Value> = self
+                            .regions
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, region)| region.track == track.id)
+                            .map(|(place, region)| region.lane_row(place + 1))
+                            .collect();
+                        json!({"kind": track.kind, "name": track.name, "regions": regions, "trackRef": format!("{RECORDED_EPOCH}:track:{}", at + 1)})
                     })
                     .collect();
                 whole["lanes"] = Value::Array(lanes);
                 whole["trackCount"] = self.tracks.len().into();
                 whole["playing"] = self.playing.into();
                 whole["playheadBeats"] = self.playhead.into();
+                whole["beatsPerBar"] = self.signature.0.into();
                 whole["markers"] = self.markers.iter().map(|m| json!({"name": m.name, "positionBeats": m.position_beats})).collect();
                 timeline_page(&whole, asked)
             }),
+            "focus_body" if kind == Some("notes") => match asked.get("ref").and_then(Value::as_str) {
+                Some(reference) => match region_of(reference) {
+                    Some(at) => Ok(notes_body(at)),
+                    None => Err(gone(params["ref"].as_str().unwrap_or_default())),
+                },
+                // (the selected region, else the first)
+                None => match self.regions.iter().position(|region| region.selected).or((!self.regions.is_empty()).then_some(0)) {
+                    Some(at) => Ok(notes_body(at)),
+                    None => Err(("failed".to_string(), "no region is selected to show the notes of".to_string())),
+                },
+            },
             "focus_body" if kind == Some("tree") => {
                 let mut body = recorded("focus_body", asked.clone()).ok()?;
                 let reference = body["trackRef"].as_str().unwrap_or_default();
@@ -1516,12 +3843,62 @@ impl LogicScript {
         state.epoch += 1;
         state.project = n;
         state.places.clear();
+        state.region_places.clear();
+        state.keep_places();
     }
 
-    /// The project open now, as the bridge's `status` would name it: the recorded one, or the copy `open_project` opened.
+    /// The project open now, as the bridge's `status` would name it: the recorded one, the copy `open_project` opened,
+    /// or (M4) the package Kumi saved it as.
     pub fn project(&self) -> Project {
-        let n = self.state.lock().unwrap().project;
-        serde_json::from_value(another_project(&serde_json::to_value(project()).unwrap(), n)).unwrap()
+        let state = self.state.lock().unwrap();
+        let project = another_project(&serde_json::to_value(project()).unwrap(), state.project);
+        let project = match &state.saved_as {
+            Some(path) => saved_project(&project, path),
+            None => project,
+        };
+        serde_json::from_value(project).unwrap()
+    }
+
+    /// (M4) The package the project was last saved to by Kumi (a save as), if it was.
+    pub fn saved_as(&self) -> Option<String> {
+        self.state.lock().unwrap().saved_as.clone()
+    }
+
+    /// (M4) The regions in the Tracks area's order: each name, its track's place (from 1), its start and its end.
+    pub fn regions(&self) -> Vec<(String, usize, f64, f64)> {
+        let state = self.state.lock().unwrap();
+        state
+            .regions
+            .iter()
+            .map(|region| (region.name.clone(), state.track_index(region.track).map_or(0, |at| at + 1), region.start, region.end))
+            .collect()
+    }
+
+    /// (M4) How many notes the region at `place` (from 1) holds.
+    pub fn notes_of(&self, place: usize) -> usize {
+        self.state.lock().unwrap().regions.get(place - 1).map_or(0, |region| region.notes.len())
+    }
+
+    /// (M4) The cycle: whether it is on, and the locators in beats (off, bar 1 to bar 5, as recorded).
+    pub fn cycle(&self) -> (bool, f64, f64) {
+        self.state.lock().unwrap().cycle
+    }
+
+    /// (M4) The Tempo List: each change's beat and BPM, the project's at 0 first.
+    pub fn tempos(&self) -> Vec<(f64, f64)> {
+        let state = self.state.lock().unwrap();
+        std::iter::once((0.0, state.tempo)).chain(state.tempo_changes.iter().copied()).collect()
+    }
+
+    /// (M4) The Signature List: each change's beat and signature, the project's at 0 first.
+    pub fn signatures(&self) -> Vec<(f64, (i64, i64))> {
+        let state = self.state.lock().unwrap();
+        std::iter::once((0.0, state.signature)).chain(state.signature_changes.iter().copied()).collect()
+    }
+
+    /// (M4) The next restore alone is made, and Logic doesn't answer after it (REAPER's simulator's switch).
+    pub fn uncertain_restore_once(&self) {
+        self.state.lock().unwrap().uncertain_restore_once = true;
     }
 
     /// Every request the simulator answered, in order.
@@ -1592,12 +3969,12 @@ impl LogicScript {
     /// Logic's undo history as the host named its steps (`desc`), oldest first; a step the bridge couldn't name (a
     /// restore's, or a write Logic didn't answer after) is empty.
     pub fn undo_history(&self) -> Vec<String> {
-        self.state.lock().unwrap().undo.iter().map(|(_, desc)| desc.clone().unwrap_or_default()).collect()
+        self.state.lock().unwrap().undo.iter().map(|step| step.desc.clone().unwrap_or_default()).collect()
     }
 
     /// The same, as Logic's Edit menu titles them.
     pub fn undo_titles(&self) -> Vec<String> {
-        self.state.lock().unwrap().undo.iter().map(|(title, _)| title.clone()).collect()
+        self.state.lock().unwrap().undo.iter().map(|step| step.title.clone()).collect()
     }
 
     /// A dialog shows for the next change's preview, and closes right after.
@@ -1615,7 +3992,7 @@ impl LogicScript {
     /// test's business), and the bridge names it to the host by the `desc` it kept (`undone_in_daw`): Logic's title
     /// for the step, and that desc, if the bridge had one.
     pub fn undo_last(&self) -> Option<(String, Option<String>)> {
-        self.state.lock().unwrap().undo.pop()
+        self.state.lock().unwrap().undo.pop().map(|step| (step.title, step.desc))
     }
 
     pub fn respond(&self) -> Respond {
@@ -1646,9 +4023,11 @@ impl LogicScript {
             }
             "transport_stop" | "transport_play" | "cursor_set" => return Some(state.transport(method, params)),
             "undo_step_begin" | "undo_step_end" => return Some(state.plan_step(method, params)),
+            // (M4) Saving: the package written, nothing in the project changed.
+            "project_save" => return Some(state.project_save(params)),
             _ => {}
         }
-        let (epoch, project) = (state.epoch, state.project);
+        let (epoch, project, saved_as) = (state.epoch, state.project, state.saved_as.clone());
         // Past the recorded epoch, a ref or cursor from an earlier one is refused before anything is looked up, as the
         // bridge refuses it whatever it was for; in the recorded epoch the refusals recorded answer.
         if epoch != RECORDED_EPOCH {
@@ -1656,7 +4035,13 @@ impl LogicScript {
                 return Some(Err(stale));
             }
         }
-        let answered = |result: &Value| another_project(&retag(result, RECORDED_EPOCH, epoch), project);
+        let answered = |result: &Value| {
+            let answer = another_project(&retag(result, RECORDED_EPOCH, epoch), project);
+            match &saved_as {
+                Some(path) => saved_project(&answer, path),
+                None => answer,
+            }
+        };
         // (whole numbers as integers, so a page asked with limit 1.0 is the page of limit 1)
         let asked = normal(&retag(params, epoch, RECORDED_EPOCH));
         // The rows Kumi's changes reach are made from the project as changed, over the recorded ones.
@@ -1692,7 +4077,13 @@ mod tests {
         assert_eq!(answer("read", json!({"kind": "note"})).unwrap_err().0, "bad-params", "the recorded refusal");
         assert_eq!(answer("read", json!({"kind": "region", "parent": "0:track:2"})).unwrap_err().0, "stale");
         assert_eq!(answer("read", json!({"kind": "track", "limit": 1.0})).unwrap()["nextCursor"], "1.1", "whole numbers alike");
-        assert!(answer("read", json!({"kind": "note", "parent": "1:region:1", "limit": 3})).unwrap_err().1.contains("no answer scripted"));
+        // (M4) The notes are the region's, paged as a read pages them, as recorded when the request was.
+        let notes = answer("read", json!({"kind": "note", "parent": "1:region:1", "limit": 3})).unwrap();
+        assert_eq!(
+            (notes["items"].as_array().map(Vec::len), notes["nextCursor"].as_str(), notes["total"].as_u64()),
+            (Some(3), Some("1.3"), Some(4))
+        );
+        assert!(answer("read", json!({"kind": "note", "parent": "1:region:9"})).unwrap_err().1.contains("isn't in the project"));
         // The epoch moves: refs from before are stale, and the same questions answer in the new epoch.
         script.change_tracks();
         assert_eq!(answer("read", json!({"ref": "1:track:2"})).unwrap_err().0, "stale");

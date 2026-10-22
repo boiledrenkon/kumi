@@ -191,6 +191,8 @@ pub struct Header {
     pub volume_db: Option<f64>,
     pub pan: i64,
     pub selected: bool,
+    /// A Track Stack's header: it carries the disclosure triangle that shows or hides the subtracks.
+    pub stack: bool,
 }
 
 impl Header {
@@ -211,6 +213,7 @@ impl Header {
             volume_db: volume.and_then(|v| db_of(&v.value_desc)),
             pan: pan.map_or(0, pan_of),
             selected: item.is_selected(),
+            stack: item.children.iter().any(|c| c.role == "AXDisclosureTriangle"),
         }
     }
 }
@@ -481,7 +484,7 @@ fn send_level(slot: &Node, strings: &Strings) -> Option<f64> {
 
 /// A track's row: the header's live state, the strip's kind and routing when known.
 pub fn track_row(reference: &str, header: &Header, strip: Option<&StripState>) -> Value {
-    json!({
+    let mut row = json!({
         "ref": reference,
         "index": header.index,
         "name": header.name,
@@ -496,7 +499,12 @@ pub fn track_row(reference: &str, header: &Header, strip: Option<&StripState>) -
         "output": strip.map(|s| s.output.clone()).unwrap_or_default(),
         "inputs": strip.map(|s| s.inputs.clone()).unwrap_or_default(),
         "selected": header.selected,
-    })
+    });
+    // Only a stack's header says so: the rows of plain tracks are as they were.
+    if header.stack {
+        row["stack"] = true.into();
+    }
+    row
 }
 
 pub fn region_row(reference: &str, track_ref: &str, region: &Region, beats_per_bar: u32) -> Value {
@@ -688,7 +696,8 @@ mod tests {
                 monitoring: true,
                 volume_db: Some(-3.0),
                 pan: -12,
-                selected: false
+                selected: false,
+                stack: false,
             }
         );
         let row = track_row("1:track:2", &header, None);

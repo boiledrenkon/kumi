@@ -1451,6 +1451,214 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
         .await;
 }
 
+/// (M4) Logic's first M4 slice through Kumi's host into HISTORY and back out: a save (no row, the package answered)
+/// and a save as; a key command Logic kept no step of (no row, released at the host) and one it did (a row only
+/// Logic's own undo takes back: Kept, in Logic's words); a region split and its undo (the right part's ref named,
+/// whole again through Logic's own undo); a MIDI import of 64 notes read back and undone; the cycle set and undone
+/// (no step of Logic's undo, the row says so); a tempo change in the Tempo List and its undo; and an undo Logic
+/// answered uncertain (REAPER's simulator's switch): Unsure with Logic's words leading, never sent again.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_notes_the_cycle_and_the_tempo_list() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(Recorded {
+                inner: InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) },
+                calls: RefCell::default(),
+            });
+            let recorded = endpoint.clone();
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let settle = || async {
+                for _ in 0..200 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let row = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).cloned();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            for words in ["midi_import", "key_command runs one of Logic Pro's key commands", "never one that opens a dialog"] {
+                assert!(observed.instructions.contains(words), "{words}: {}", observed.instructions);
+            }
+            let keys = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"][1]["ref"].as_str().unwrap().to_owned();
+
+            // A save, and a save as: no row, the package answered, nothing journaled.
+            let plan = tool(&observed, "make_changes");
+            let saved = plan.execute(input(json!({"steps": [{"tool": "save_project", "input": {}}]})), Signal::new()).await.unwrap();
+            assert!(!saved.is_error && saved.text.contains("Saved the project"), "{}", saved.text);
+            let copy = "/Users/me/Music/Logic/Scratch Kumi.logicx";
+            let saved_as =
+                plan.execute(input(json!({"steps": [{"tool": "save_project", "input": {"path": copy}}]})), Signal::new()).await.unwrap();
+            assert!(!saved_as.is_error && saved_as.text.contains("Saved the project"), "{}", saved_as.text);
+            assert_eq!(script.saved_as().as_deref(), Some(copy));
+            assert!(told.borrow().is_empty(), "a save makes no row");
+            // (the package each save answered, as the host handed it on; a plan's text keeps a step's title alone)
+            let answered: Vec<String> = recorded
+                .calls
+                .borrow()
+                .iter()
+                .filter(|(name, _, _)| name == "project_save")
+                .filter_map(|(_, args, answer)| {
+                    assert!(args.get("epoch").is_some(), "a save names the epoch it was read in: {args}");
+                    answer["structuredContent"]["saved"].as_str().map(str::to_owned)
+                })
+                .collect();
+            assert_eq!(answered, ["/Users/me/Music/Logic/Scratch.logicx", copy]);
+
+            // A key command Logic keeps no step of: no row, and the host forgets it; one it does: a row only Logic's own
+            // undo takes back, which Kumi's undo says, leaving the row Kept. (A key command is a make_changes step, as
+            // REAPER's run_action is, not a tool of its own.)
+            let key_command = |command: &str| {
+                let steps = json!({"steps": [{"tool": "key_command", "input": {"command": command}}]});
+                plan.execute(input(steps), Signal::new())
+            };
+            let selected = key_command("Select All").await.unwrap();
+            assert!(!selected.is_error && selected.text.contains("no row in HISTORY"), "{}", selected.text);
+            settle().await;
+            assert!(told.borrow().is_empty(), "no row for it");
+            let action = recorded
+                .last_transaction("change_apply", |answer| answer["display"]["unchanged"] == true)
+                .expect("an apply Logic kept no step of");
+            assert!(recorded.released().contains(&action), "the host forgets it");
+            let marked = key_command("Create Marker").await.unwrap();
+            assert!(!marked.is_error && marked.text.contains("Ran key command “Create Marker”"), "{}", marked.text);
+            let made = row("Ran key command “Create Marker” (⌥')").expect("a row");
+            assert_eq!(made.state, ChangeState::Applied);
+            assert!(
+                made.note.as_deref().is_some_and(|note| note.starts_with("Only Logic Pro's own undo can take this back")),
+                "{:?}",
+                made.note
+            );
+            assert_eq!(script.markers().len(), 2);
+            let undo = tool(&observed, "undo_change");
+            let kept = undo.execute(input(json!({"change": made.id})), Signal::new()).await.unwrap();
+            assert!(
+                kept.is_error
+                    && kept.text.contains("Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)"),
+                "{}",
+                kept.text
+            );
+            let made = row("Ran key command “Create Marker” (⌥')").unwrap();
+            assert_eq!(
+                (made.state, made.note.as_deref()),
+                (ChangeState::Kept, Some("Kumi can't take back what a key command did: Logic Pro's own undo can (Cmd-Z in Logic Pro)"))
+            );
+
+            // A region split: the right part's ref comes back, short; whole again through Logic's own undo.
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let regions = tool(&look, "logic_read").execute(input(json!({"kind": "region"})), Signal::new()).await.unwrap();
+            let region = serde_json::from_str::<Value>(&regions.text).unwrap()["items"][0]["ref"].as_str().unwrap().to_owned();
+            assert!(region.starts_with("region:"), "{region}");
+            let split =
+                tool(&look, "region_split").execute(input(json!({"ref": region, "positionBeats": 8})), Signal::new()).await.unwrap();
+            assert!(!split.is_error && split.text.contains("\"ref\":\"region:") && !split.text.contains(":region:"), "{}", split.text);
+            assert_eq!(script.regions().len(), 2);
+            let split_row = row("Split region “Keys” at bar 3").expect("a row");
+            let whole = tool(&look, "undo_change").execute(input(json!({"change": split_row.id})), Signal::new()).await.unwrap();
+            assert!(!whole.is_error, "{}", whole.text);
+            let split_row = row("Split region “Keys” at bar 3").unwrap();
+            assert_eq!(
+                (split_row.state, split_row.note.as_deref(), script.regions().len()),
+                (ChangeState::Undone, Some("Put back with Logic Pro's own undo."), 1)
+            );
+
+            // A MIDI import of 64 notes: a new region on a new track Logic adds below Keys, its notes read back; taken away
+            // again, track and all, through Logic's own undo.
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let keys =
+                serde_json::from_str::<Value>(&look.context).unwrap()["tracks"][1]["ref"].as_str().map(str::to_owned).unwrap_or(keys);
+            let notes: Vec<Value> = (0..64).map(|n| json!({"pitch": 48 + n % 12, "start": n as f64 * 0.25, "length": 0.25})).collect();
+            let imported = tool(&look, "midi_import")
+                .execute(input(json!({"ref": keys, "positionBeats": 32, "notes": notes})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!imported.is_error, "{}", imported.text);
+            let created = serde_json::from_str::<Value>(&imported.text).unwrap()["ref"].as_str().unwrap().to_owned();
+            assert!(created.starts_with("region:"), "{}", imported.text);
+            assert_eq!((script.regions().len(), script.notes_of(2), script.track_count()), (2, 64, 3));
+            let read = tool(&look, "logic_read")
+                .execute(input(json!({"kind": "note", "parent": created, "limit": 100})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!read.is_error, "{}", read.text);
+            assert_eq!(serde_json::from_str::<Value>(&read.text).unwrap()["total"], 64);
+            let import_row = row("Imported 64 notes on “Studio Grand” at bar 9").expect("a row");
+            let gone = tool(&look, "undo_change").execute(input(json!({"change": import_row.id})), Signal::new()).await.unwrap();
+            assert!(!gone.is_error, "{}", gone.text);
+            assert_eq!(
+                (row("Imported 64 notes on “Studio Grand” at bar 9").unwrap().state, script.regions().len(), script.track_count()),
+                (ChangeState::Undone, 1, 2)
+            );
+
+            // The cycle (a make_changes step, as REAPER's loop_range is): no step of Logic's undo, which the row says;
+            // undone by value. A tempo change in the Tempo List.
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let cycle = tool(&look, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "loop_range", "input": {"startBeats": 16, "endBeats": 32}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!cycle.is_error, "{}", cycle.text);
+            let cycle_row = row("Cycle bar 5 to bar 9").expect("a row");
+            assert_eq!(cycle_row.note.as_deref(), Some("Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can."));
+            assert_eq!(script.cycle(), (true, 16.0, 32.0));
+            let undone = tool(&look, "undo_change").execute(input(json!({"change": cycle_row.id})), Signal::new()).await.unwrap();
+            assert!(!undone.is_error, "{}", undone.text);
+            assert_eq!((row("Cycle bar 5 to bar 9").unwrap().state, script.cycle()), (ChangeState::Undone, (false, 0.0, 16.0)));
+            let tempo = tool(&look, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "tempo_marker_set", "input": {"positionBeats": 32, "bpm": 128}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!tempo.is_error, "{}", tempo.text);
+            assert_eq!(script.tempos(), [(0.0, 160.0), (32.0, 128.0)]);
+            let tempo_row = row("Tempo 128 BPM at bar 9").expect("a row");
+            tool(&look, "undo_change").execute(input(json!({"change": tempo_row.id})), Signal::new()).await.unwrap();
+            assert_eq!((row("Tempo 128 BPM at bar 9").unwrap().state, script.tempos()), (ChangeState::Undone, vec![(0.0, 160.0)]));
+
+            // An undo Logic answered uncertain: Unsure, Logic's words leading, and never sent again.
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let vocal = serde_json::from_str::<Value>(&look.context).unwrap()["tracks"][0]["ref"].as_str().unwrap().to_owned();
+            let muted = tool(&look, "track_mute").execute(input(json!({"ref": vocal, "mute": true})), Signal::new()).await.unwrap();
+            assert!(!muted.is_error, "{}", muted.text);
+            let mute_row = row("Vocal muted").expect("a row");
+            script.uncertain_restore_once();
+            let unsure = tool(&look, "undo_change").execute(input(json!({"change": mute_row.id})), Signal::new()).await.unwrap();
+            assert!(
+                unsure.is_error
+                    && unsure.text.contains("Logic Pro couldn't finish Kumi's undo: Logic Pro didn't answer after the change was sent"),
+                "{}",
+                unsure.text
+            );
+            let mute_row = row("Vocal muted").unwrap();
+            assert_eq!(mute_row.state, ChangeState::Unsure);
+            assert!(
+                mute_row.note.as_deref().is_some_and(|note| note.starts_with("Kumi's undo didn't finish: Logic Pro didn't answer")),
+                "{:?}",
+                mute_row.note
+            );
+            let restores = script.asked().iter().filter(|(method, _)| method == "change_restore").count();
+            let again = tool(&look, "undo_change").execute(input(json!({"change": mute_row.id})), Signal::new()).await.unwrap();
+            assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
+            assert_eq!(script.asked().iter().filter(|(method, _)| method == "change_restore").count(), restores, "nothing sent twice");
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (M7) Renoise with Kumi's host in front of the simulator's song, and the changes Kumi makes told to `told`.
 async fn renoise_with_changes(
     home: &std::path::Path,

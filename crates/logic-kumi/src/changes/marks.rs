@@ -264,6 +264,7 @@ pub fn add_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         Ok(Applied {
             applied: state(&marker),
             created: Some(target(ctx, place)),
+            target: None,
             material: None,
             display: json!({"title": format!("Marker {} at {}", quoted(&marker.name), timeline::bar_text(&marker.position))}),
             step: Some("Create Marker"),
@@ -332,6 +333,7 @@ pub fn move_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> 
         Ok(Applied {
             applied: json!({"position": after.position.to_json()}),
             created: None,
+            target: None,
             material: None,
             display: json!({"title": format!("Moved {name} to {}", timeline::bar_text(&to)), "before": now, "after": {"position": to.to_json()}}),
             step: Some("Value Change"),
@@ -419,6 +421,7 @@ pub fn delete_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied
         Ok(Applied {
             applied: json!({"deleted": true}),
             created: None,
+            target: None,
             material: Some(material),
             display: json!({"title": format!("Deleted {name}")}),
             step: Some("Delete"),

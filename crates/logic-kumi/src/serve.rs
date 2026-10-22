@@ -17,7 +17,7 @@ use crate::read::{self, Want};
 use crate::refs::Ref;
 
 /// The methods the change side answers.
-pub const CHANGE_METHODS: [&str; 8] = [
+pub const CHANGE_METHODS: [&str; 9] = [
     "change_preview",
     "change_apply",
     "change_restore",
@@ -26,6 +26,7 @@ pub const CHANGE_METHODS: [&str; 8] = [
     "cursor_set",
     "undo_step_begin",
     "undo_step_end",
+    "project_save",
 ];
 
 /// Answers one change request over Logic, through the change side: the run loop's for a queued one, the recorder's
@@ -51,6 +52,7 @@ pub fn answer_change(
             "cursor_set" => changes.cursor_set(&mut ctx, params),
             "undo_step_begin" => changes.step_begin(params),
             "undo_step_end" => changes.step_end(params),
+            "project_save" => changes.project_save(&mut ctx, params),
             other => Err((daw_bridge::wire::code::UNKNOWN_METHOD.into(), format!("the Logic Pro bridge has no method {other:?}"))),
         }
     };

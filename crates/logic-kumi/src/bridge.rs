@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 use crate::ax::strings::{self, Strings};
 use crate::ax::{Ax, AxError};
 use crate::changes::Changes;
+
+/// The methods that write to Logic: the focus is refreshed before their answer leaves.
+const WRITES: [&str; 6] = ["change_apply", "change_restore", "transport_stop", "transport_play", "cursor_set", "project_save"];
 use crate::focus::{self, Focus};
 use crate::helper::Helper;
 use crate::log;
@@ -190,10 +193,9 @@ fn on_app_event(event: &Value, attached: Option<&Attached>) -> Option<Signal> {
     }
 }
 
-/// Logic's string tables for the language it runs in, from its bundle (the app's path from the helper, else the
-/// standard place).
-fn strings_for(app: &App, config: &Config) -> Strings {
-    let bundle = config
+/// Logic's app bundle: the one named, else the running app's, else the standard place.
+fn bundle_of(app: &App, config: &Config) -> std::path::PathBuf {
+    config
         .bundle
         .clone()
         .or_else(|| {
@@ -205,7 +207,13 @@ fn strings_for(app: &App, config: &Config) -> Strings {
                 }
             })
         })
-        .unwrap_or_else(|| Path::new("/Applications/Logic Pro.app").to_path_buf());
+        .unwrap_or_else(|| Path::new("/Applications/Logic Pro.app").to_path_buf())
+}
+
+/// Logic's string tables for the language it runs in, from its bundle (the app's path from the helper, else the
+/// standard place).
+fn strings_for(app: &App, config: &Config) -> Strings {
+    let bundle = bundle_of(app, config);
     let language = strings::language_of(&strings::preferred_languages(&app.bundle));
     let strings = Strings::load(&bundle, &language);
     if language != "en" {
@@ -238,6 +246,12 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 app.bundle,
                 server.port()
             ));
+            // The producer's key command set: their preferences over the preset they chose, cached for the run.
+            let mut changes = Changes::default();
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            changes.keys = crate::keys::KeyCommands::load(&bundle_of(app, config), home.as_deref());
+            let (names, bindings) = changes.keys.counts();
+            log::line(&format!("key commands: {names} names, {bindings} bindings from {:?}", changes.keys.source));
             Some(Attached {
                 pid: app.pid,
                 model,
@@ -246,7 +260,7 @@ fn attach(config: &Config, app: &App, notes: &mut Notes) -> Option<Attached> {
                 server,
                 hub,
                 project: Project::new(strings_for(app, config)),
-                changes: Changes::default(),
+                changes,
                 mcu: Mcu::default(),
                 mcu_opened: None,
                 mcu_said: false,
@@ -369,9 +383,14 @@ impl Attached {
         }
     }
 
-    /// Answers one queued request through the project reader.
-    fn serve(&mut self, job: Job, helper: &mut dyn Helper) {
+    /// Answers one queued request through the project reader. A write (a change applied or put back, the transport,
+    /// the playhead, a save) refreshes the focus before its answer leaves, so the host's next `focus` reads what the
+    /// write left and not what the tick before it saw: the M4 gate read the cycle one write behind otherwise.
+    fn serve(&mut self, job: Job, helper: &mut dyn Helper, notes: &mut Notes) {
         let answer = self.answer(&job.method, &job.params, helper);
+        if WRITES.contains(&job.method.as_str()) {
+            self.refresh(helper, notes);
+        }
         job.answer(answer);
     }
 
@@ -514,7 +533,7 @@ pub fn run(config: Config, mut helper: Box<dyn Helper>, stop: Arc<AtomicBool>) -
                     job.answer(Err((wire::code::FAILED.into(), server::UNTRUSTED.into())));
                     continue;
                 }
-                attached.serve(job, helper.as_mut());
+                attached.serve(job, helper.as_mut(), &mut notes);
             }
         }
         if heartbeat_at.elapsed() >= heartbeat {

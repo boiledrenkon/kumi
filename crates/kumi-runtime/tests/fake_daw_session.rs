@@ -767,11 +767,26 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
                 }),
                 step(|_| call("undo_change", json!({"change": "last"}))),
                 step(|_| call("logic_read", json!({"kind": "track"}))),
+                // (M4) The project saved (no row), a region read and split, and the split taken back (Logic's own
+                // undo, while on top).
+                step(|_| call("make_changes", json!({"steps": [{"tool": "save_project", "input": {}}]}))),
+                step(|_| call("logic_read", json!({"kind": "region"}))),
+                // (the region's short ref as the read just named it: a session never names a ref twice)
+                step(|recorded| {
+                    let text = recorded.requests.borrow().last().cloned().unwrap_or_default();
+                    let region = Regex::new(r"region:\d+").unwrap().find_iter(&text).last().map(|m| m.as_str().to_string());
+                    call("region_split", json!({"ref": region.unwrap_or_else(|| "region:1".into()), "positionBeats": 8}))
+                }),
+                step(|_| call("undo_change", json!({"change": "last"}))),
                 step(|_| answer("Done.")),
             ]);
             session.submit("Pull the vocal down and add a pad track.", None).await.unwrap();
             assert_eq!(script.volume(1), -6.0, "the plan ran");
             assert_eq!(script.track(3)["name"], json!("Pad"), "the track below Keys, its rename undone");
+            let asked = script.asked();
+            assert!(asked.iter().any(|(method, _)| method == "project_save"), "the save reached the bridge: {asked:?}");
+            assert!(asked.iter().any(|(method, params)| method == "change_apply" && params["kind"] == "region-split"), "{asked:?}");
+            assert_eq!(script.regions().len(), 1, "the split was taken back");
             assert_eq!(
                 script.undo_titles(),
                 ["Undo Create Track", "Undo Renaming", "Undo Renaming"],
