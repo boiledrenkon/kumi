@@ -49,18 +49,19 @@ jobs:
           # Main, and pull requests that change installing, updating, releasing, Willington's files, the Mac helper the
           # bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings) and
           # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), how Kumi's extension
-          # goes into Live, or how REAPER's and Renoise's bridges are built and go in (the extension's build, shim, SDK and
-          # entry point, the host's binary, the tool's manifest, entry and version, and the shared lifecycle, detection
-          # and files: a REAPER change kind or a host tool is CI's), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
-          # silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install each,
-          # update to it from the release before it and check the update from the JavaScript release (see below). A pull
-          # request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a version
-          # number or how Kumi stores what it keeps (the store, settings and sign-ins, memory, techniques, playbook, gaps,
-          # an older Kumi's files) installs on Linux. Any other builds Linux's bundle only; main installs and checks it once
-          # merged.
+          # goes into Live, or how REAPER's, Renoise's and Logic Pro's bridges are built and go in (the extension's
+          # build, shim, SDK and entry point, the host's binary, the tool's manifest, entry and version, Logic's
+          # bridge's binary and its helper, and the shared lifecycle, detection and files: a REAPER change kind or a
+          # host tool is CI's), build and install on one machine of each system (Linux and Windows on x64, macOS on
+          # Apple silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install
+          # each, update to it from the release before it and check the update from the JavaScript release (see below).
+          # A pull request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a
+          # version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory, techniques,
+          # playbook, gaps, an older Kumi's files) installs on Linux. Any other builds Linux's bundle only; main
+          # installs and checks it once merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/reaper-kumi/(build\.rs|Cargo\.toml|shim/|sdk/|src/lib\.rs)|crates/daw-mcp-server/(Cargo\.toml|src/bin/)|crates/daw-bridge/(Cargo\.toml|src/(lifecycle|install|detect|files|owner|paths)\.rs)|daws/renoise/com\.kumi\.Bridge\.xrnx/(manifest\.xml|main\.lua|payload/version\.lua))'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/reaper-kumi/(build\.rs|Cargo\.toml|shim/|sdk/|src/lib\.rs)|crates/daw-mcp-server/(Cargo\.toml|src/bin/)|crates/daw-bridge/(Cargo\.toml|src/(lifecycle|install|detect|files|owner|paths)\.rs)|crates/logic-kumi/(Cargo\.toml|src/main\.rs|helper/)|daws/renoise/com\.kumi\.Bridge\.xrnx/(manifest\.xml|main\.lua|payload/version\.lua))'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
@@ -73,7 +74,8 @@ jobs:
             crates/kumi/src/daw/own.rs crates/daw-bridge/src/lifecycle.rs crates/daw-bridge/src/install.rs crates/daw-bridge/src/detect.rs \
             crates/reaper-kumi/build.rs crates/reaper-kumi/src/lib.rs crates/daw-mcp-server/src/bin/daw-mcp-server.rs \
             crates/daw-bridge/src/files.rs crates/daw-bridge/src/owner.rs crates/daw-bridge/src/paths.rs crates/reaper-kumi/shim/csurf.cpp \
-            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua; do
+            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua \
+            crates/logic-kumi/src/main.rs crates/logic-kumi/helper/KumiLogicHands.swift scripts/build-logic-hands.py; do
             test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
@@ -85,7 +87,7 @@ jobs:
             base="origin/${GITHUB_BASE_REF}"
             # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
             changed="$(git diff --name-only "$base...HEAD")"
-            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.|^crates/(reaper-kumi|daw-bridge|daw-mcp-server)/(tests|examples)/|^crates/(reaper-kumi|daw-bridge|daw-mcp-server)/src/(.*/)?tests\.rs$' || true)"
+            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.|^crates/(reaper-kumi|daw-bridge|daw-mcp-server|logic-kumi)/(tests|examples)/|^crates/(reaper-kumi|daw-bridge|daw-mcp-server|logic-kumi)/src/(.*/)?tests\.rs$|^crates/logic-kumi/helper/tests/' || true)"
             # Cargo's changed lines less version numbers (a bridge or release bump): what's left is a dependency.
             dependencies="$(git diff -U0 "$base...HEAD" -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' \
               | grep -E '^[-+]' | grep -v -E '^(---|\+\+\+) |^[-+]version = "[^"]*"$' || true)"
@@ -156,11 +158,15 @@ jobs:
         with:
           key: ${{ env.PROFILE }}-${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Only the Mac bundles carry the helper Kumi uses Live's menus with; each Mac job builds it (universal, under
-      # a minute) instead of waiting for a job of its own.
-      - name: Build Kumi's Mac helper
+      # Only the Mac bundles carry the helper Kumi uses Live's menus with, and only the Apple Silicon Mac's the helper Logic
+      # Pro's bridge reads Logic with (Logic Pro 12 runs on Apple Silicon only); each Mac job builds what its bundle
+      # carries (universal, under a minute each) instead of waiting for a job of its own.
+      - name: Build Kumi's Mac helpers
         if: runner.os == 'macOS'
-        run: python3 scripts/build-hands.py
+        shell: bash
+        run: |
+          python3 scripts/build-hands.py
+          if [[ '${{ matrix.target }}' == aarch64-apple-darwin ]]; then python3 scripts/build-logic-hands.py; fi
       - name: Build and bind the release artifacts
         shell: bash
         run: python3 scripts/build-native-release.py --target '${{ matrix.target }}' --profile "$PROFILE" --out release
@@ -170,7 +176,11 @@ jobs:
         run: |
           want=arm64
           if [[ '${{ matrix.target }}' == x86_64-* ]]; then want=x86_64; fi
-          for name in kumi ableton-mcp-server ableton-mcp-analysis-worker daw-mcp-server kumi-harness kumi-library-measure kumi-library-learner; do
+          names="kumi ableton-mcp-server ableton-mcp-analysis-worker daw-mcp-server kumi-harness kumi-library-measure kumi-library-learner"
+          # Logic Pro's bridge, which only the Apple Silicon Mac's bundle carries.
+          logic=false
+          if [[ '${{ matrix.target }}' == aarch64-apple-darwin ]]; then logic=true; names="$names logic-kumi"; fi
+          for name in $names; do
             archs="$(lipo -archs "target/${{ matrix.target }}/$PROFILE/$name")"
             echo "$name: $archs"
             test "$archs" = "$want"
@@ -184,6 +194,21 @@ jobs:
           codesign --verify --strict --verbose "$extension"
           test "$(otool -D "$extension" | tail -n 1)" = "@rpath/reaper_kumi.dylib"
           if dyld_info -segments "$extension" | grep -i mis-aligned; then exit 1; fi
+          # Logic Pro's bridge and its helper, as Apple's own tools see them (the release script read both too): the bridge
+          # signed (Apple Silicon runs no unsigned code), laid out as dyld wants and starting; the helper universal and
+          # signed, as scripts/build-logic-hands.py makes it, and the only build there.
+          if $logic; then
+            bridge="target/${{ matrix.target }}/$PROFILE/logic-kumi"
+            codesign --verify --strict --verbose "$bridge"
+            if dyld_info -segments "$bridge" | grep -i mis-aligned; then exit 1; fi
+            test "$("$bridge" --version)" = "logic-kumi $(sed -n 's/^version = "\(.*\)"$/\1/p' crates/logic-kumi/Cargo.toml)"
+            helpers=(target/logic-hands/kumi-logic-hands-*)
+            test "${#helpers[@]}" = 1
+            archs="$(lipo -archs "${helpers[0]}" | tr ' ' '\n' | sort | xargs)"
+            echo "$(basename "${helpers[0]}"): $archs"
+            test "$archs" = "arm64 x86_64"
+            codesign --verify --strict --verbose "${helpers[0]}"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.target }}
@@ -264,6 +289,8 @@ jobs:
           KUMI_HOME: ${{ runner.temp }}/kumi-home
           KUMI_RELEASES: http://127.0.0.1:8765
           SHELL: /bin/bash
+          # Logic Pro's bridge is in an Apple Silicon Mac's bundle only (Logic Pro 12 runs on Apple Silicon only).
+          LOGIC: ${{ runner.os == 'macOS' && runner.arch == 'ARM64' }}
         run: |
           set -eux
           # A variable name running straight into a non-ASCII character ("$version…") is read as part of
@@ -302,22 +329,39 @@ jobs:
           # Kumi's host for them starts.
           kumi --daw reaper bridge --yes
           kumi --daw renoise bridge --yes
+          # Logic Pro's bridge from the bundle, into Kumi's own folder (Logic loads nothing, so there's no DAW folder), on
+          # an Apple Silicon Mac; it starts, asked its version. Anywhere else Kumi carries none: it says Logic Pro is
+          # supported on Apple Silicon Macs only and sets nothing up, which daw_bridges.py checks too.
+          if [[ "$LOGIC" == true ]]; then
+            kumi --daw logic bridge --yes
+          else
+            if kumi --daw logic bridge --yes > logic.txt; then cat logic.txt; exit 1; fi
+            cat logic.txt
+            grep -q "Logic Pro is supported on Apple Silicon Macs only" logic.txt
+          fi
           daws() { python3 scripts/tests/daw_bridges.py placed "$KUMI_HOME/app" "$KUMI_HOME" "$reaper" "$renoise" "$@"; }
           daws --load
           daws > daws.txt
           "$KUMI_HOME/app/daw-mcp-server" --version
           kumi --daw reaper doctor || true
           kumi update | tee update.txt; grep -q "up to date" update.txt
-          test "$(daws)" = "$(cat daws.txt)"   # up to date: both bridges as they were, the one to roll back to kept
+          test "$(daws)" = "$(cat daws.txt)"   # up to date: each bridge as it was, the one to roll back to kept
           # Two rollbacks, each DAW's bridge going with Kumi: the Kumi the repair kept is made to carry other copies of
-          # both, as an earlier release would (none before this one carries them), and the second rollback puts back
+          # each, as an earlier release would (none before this one carries them), and the second rollback puts back
           # this build's from the generations kept at the first install.
           python3 scripts/tests/daw_bridges.py earlier "$KUMI_HOME/app.previous" 0.0.9
-          kumi update --rollback
+          kumi update --rollback > rollback.txt
+          cat rollback.txt
           kumi --version
           daws | tee earlier.txt
           grep -q -E '^reaper 0\.0\.9 [0-9a-f]+ [^ ]+ rollback$' earlier.txt
           grep -q -E '^renoise 0\.0\.9 [0-9a-f]+ [^ ]+ rollback$' earlier.txt
+          if [[ "$LOGIC" == true ]]; then
+            grep -q -E '^logic 0\.0\.9 [0-9a-f]+ [^ ]+ rollback$' earlier.txt
+            # Said in Logic's words: the bridge is in Kumi's own folder, and nothing of Logic's restarts.
+            grep -q "Kumi's Logic Pro bridge 0.0.9 is back in Kumi's own folder" rollback.txt
+            if grep -q "restart Logic Pro" rollback.txt; then exit 1; fi
+          fi
           kumi update --rollback
           kumi --version
           daws | tee forward.txt
@@ -343,6 +387,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           KUMI_RELEASES: http://127.0.0.1:8765
+          # Logic Pro's bridge is in an Apple Silicon Mac's bundle only (Logic Pro 12 runs on Apple Silicon only).
+          LOGIC: ${{ runner.os == 'macOS' && runner.arch == 'ARM64' }}
         run: |
           set -eux
           version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
@@ -422,11 +468,13 @@ jobs:
           kumi update
           test "$(kumi --version)" = "Kumi $version"
           after="$(bridge)"; after_extension="$(extension)"
-          # REAPER's extension and Renoise's tool from this build, in scratch DAW folders: that release knows neither DAW,
-          # so its rollback leaves both as they are, said, and so does its own rollback back to this build.
+          # REAPER's extension and Renoise's tool from this build, in scratch DAW folders, and on an Apple Silicon Mac Logic
+          # Pro's bridge in Kumi's own folder: that release knows none of these DAWs, so its rollback leaves each as it is,
+          # said, and so does its own rollback back to this build.
           python3 scripts/tests/daw_bridges.py prepare "$reaper" "$renoise"
           kumi --daw reaper bridge --yes
           kumi --daw renoise bridge --yes
+          if [[ "$LOGIC" == true ]]; then kumi --daw logic bridge --yes; fi
           placed() { python3 scripts/tests/daw_bridges.py placed "$home/.kumi/$1" "$home/.kumi" "$reaper" "$renoise"; }
           placed app > daws.txt
           kumi update --rollback | tee rollback.txt
@@ -435,6 +483,7 @@ jobs:
           test "$(extension)" = "$before_extension"
           grep -q "Kumi's extension stays in REAPER" rollback.txt
           grep -q "Kumi's tool stays in Renoise" rollback.txt
+          if [[ "$LOGIC" == true ]]; then grep -q "Kumi's Logic Pro bridge stays in Kumi's own folder" rollback.txt; fi
           test "$(placed app.previous)" = "$(cat daws.txt)"
           kumi update --rollback
           test "$(kumi --version)" = "Kumi $version"
@@ -442,7 +491,7 @@ jobs:
           test "$(extension)" = "$after_extension"
           test "$(placed app)" = "$(cat daws.txt)"
 
-          # Uninstalling takes the PATH line out, and REAPER's and Renoise's bridges.
+          # Uninstalling takes the PATH line out, and REAPER's and Renoise's bridges, and Logic's from Kumi's own folder.
           kumi uninstall --yes
           test ! -e "$home/.kumi/app"
           test ! -e "$home/.kumi/bin"
@@ -531,6 +580,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'kumi --daw reaper bridge failed' }
           & $kumi --daw renoise bridge --yes
           if ($LASTEXITCODE -ne 0) { throw 'kumi --daw renoise bridge failed' }
+          # Logic Pro's bridge is in an Apple Silicon Mac's bundle only (Logic Pro 12 runs on Apple Silicon only): Windows'
+          # Kumi carries none, says so, and sets nothing up, which daw_bridges.py checks too.
+          $logic = & $kumi --daw logic bridge --yes | Out-String; Write-Host $logic
+          if ($LASTEXITCODE -eq 0 -or $logic -notmatch 'Logic Pro is supported on Apple Silicon Macs only') { throw "kumi --daw logic bridge didn't refuse: $logic" }
           function Daws {
             $said = python scripts/tests/daw_bridges.py placed (Join-Path $env:KUMI_HOME 'app') $env:KUMI_HOME $reaper $renoise @args | Out-String
             if ($LASTEXITCODE -ne 0) { throw "REAPER's and Renoise's bridges aren't as Kumi put them" }

@@ -1,5 +1,7 @@
 # Logic Pro bridge contract (M2 to M6)
 
+English · [简体中文](../zh-CN/LOGIC_CONTRACT.md) · [日本語](../ja/LOGIC_CONTRACT.md)
+
 What `logic-kumi` answers over `kumi-daw/1`, and which macOS channel each answer comes from. The
 wire, handshake, discovery files and lifecycle are daw-bridge's; this page is only Logic's shapes.
 Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-2026-10-18.md`)

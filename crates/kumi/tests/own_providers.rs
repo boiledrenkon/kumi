@@ -308,9 +308,9 @@ fn copy_folder(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// A Kumi's app folder carrying REAPER's extension (these bytes, this version) and Renoise's tool (this checkout's,
-/// saying `tool`), laid out as a release lays them out.
-fn app_carrying(root: &std::path::Path, name: &str, extension: &[u8], version: &str, tool: &str) -> std::path::PathBuf {
+/// A Kumi's app folder carrying REAPER's extension (these bytes, this version), Renoise's tool (this checkout's, saying
+/// `tool`) and Logic's bridge (a stand-in bridge and helper, versioned `logic`), laid out as a release lays them out.
+fn app_carrying(root: &std::path::Path, name: &str, extension: &[u8], version: &str, tool: &str, logic: &str) -> std::path::PathBuf {
     let app = root.join(name);
     let reaper = app.join("daws").join("reaper");
     std::fs::create_dir_all(&reaper).unwrap();
@@ -322,6 +322,18 @@ fn app_carrying(root: &std::path::Path, name: &str, extension: &[u8], version: &
     let lua = folder.join("payload").join("version.lua");
     let text = std::fs::read_to_string(&lua).unwrap();
     std::fs::write(&lua, text.replace("\"1.0.0\"", &format!("\"{tool}\""))).unwrap();
+    let bridge = app.join("daws").join("logic").join("logic-kumi");
+    std::fs::create_dir_all(&bridge).unwrap();
+    std::fs::write(bridge.join("logic-kumi"), format!("#!/bin/sh\necho logic-kumi {logic}\n")).unwrap();
+    std::fs::write(bridge.join("kumi-logic-hands-test"), b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(bridge.join("version"), format!("{logic}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["logic-kumi", "kumi-logic-hands-test"] {
+            std::fs::set_permissions(bridge.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
     app
 }
 
@@ -336,8 +348,8 @@ async fn an_update_follows_each_copy_and_never_puts_back_a_bridge_taken_out_or_m
     std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
     std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
     env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
-    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0");
-    let later = app_carrying(dir.path(), "app.new", b"extension 0.1.1", "0.1.1", "1.0.1");
+    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0", "0.1.0");
+    let later = app_carrying(dir.path(), "app.new", b"extension 0.1.1", "0.1.1", "1.0.1", "0.1.1");
     let home = env["KUMI_HOME"].clone();
     let out = Rc::new(Out::default());
     let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
@@ -424,7 +436,7 @@ async fn a_kumi_an_earlier_updater_put_in_place_brings_its_bridge_as_it_starts()
         reference: tools.join(folder).join(daw_bridge::install::RENOISE_REFERENCE),
     };
     // Renoise's tool 0.9.0, as the Kumi before put it in; this checkout carries 1.0.0.
-    let earlier = app_carrying(dir.path(), "app.earlier", b"x", "0.0.9", "0.9.0").join("daws/renoise").join(folder);
+    let earlier = app_carrying(dir.path(), "app.earlier", b"x", "0.0.9", "0.9.0", "0.0.9").join("daws/renoise").join(folder);
     let home = std::path::PathBuf::from(&env["KUMI_HOME"]);
     let put_earlier = || daw_bridge::lifecycle::Lifecycle::new(&home, target.clone()).install(&earlier, "0.9.0").unwrap();
     put_earlier();
@@ -501,8 +513,8 @@ async fn an_update_keeps_the_bridges_in_place_and_a_rollback_takes_each_to_the_c
     std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
     std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
     env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
-    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0");
-    let earlier = app_carrying(dir.path(), "app.previous", b"extension 0.0.9", "0.0.9", "0.9.0");
+    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0", "0.1.0");
+    let earlier = app_carrying(dir.path(), "app.previous", b"extension 0.0.9", "0.0.9", "0.9.0", "0.0.9");
     let unknowing = dir.path().join("app.older");
     std::fs::create_dir_all(&unknowing).unwrap();
     let home = env["KUMI_HOME"].clone();
@@ -599,6 +611,144 @@ async fn an_update_keeps_the_bridges_in_place_and_a_rollback_takes_each_to_the_c
     assert_eq!(receipt_of(&env, Daw::Reaper).target, installed[0].target);
     for default in ["Library/Application Support/REAPER", "AppData/Roaming/REAPER", ".config/REAPER"] {
         assert!(!dir.path().join(default).join("UserPlugins").exists(), "{default}");
+    }
+}
+
+/// Logic's bridge goes the ways REAPER's and Renoise's go, in Kumi's own folder and in its own words (nothing of Logic's
+/// restarts): an update bringing the bridge in place changes nothing; a rollback takes it to the copy the Kumi it goes
+/// back to carries, and the next forward again, to the generation kept; an earlier Kumi that doesn't know Logic leaves
+/// it where it is; an update bringing another puts it where it was. A test apart from REAPER's and Renoise's, so that
+/// neither reaches CI's 30 s on Windows, where each owner-only folder made is a PowerShell run.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_bridge_follows_an_update_and_a_rollback_in_kumis_own_folder() {
+    use daw_bridge::daw::Daw;
+    let (dir, env) = logic_home();
+    let now = app_carrying(dir.path(), "app", b"extension 0.1.0", "0.1.0", "1.0.0", "0.1.0");
+    let earlier = app_carrying(dir.path(), "app.previous", b"extension 0.0.9", "0.0.9", "0.9.0", "0.0.9");
+    let unknowing = dir.path().join("app.older");
+    std::fs::create_dir_all(&unknowing).unwrap();
+    let home = env["KUMI_HOME"].clone();
+    let out = Rc::new(Out::default());
+    let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
+    let logic: &dyn DawProvider = &own::LOGIC;
+    let placed = std::path::Path::new(&home).join("bridges/logic/bridge/logic-kumi");
+
+    // In, as `kumi --daw logic bridge` puts it, from `now`.
+    let mut from_now = env.clone();
+    from_now.insert(own::LOGIC_BRIDGE_SOURCE_VAR.into(), now.join("daws/logic/logic-kumi").to_string_lossy().into_owned());
+    assert_eq!(logic.setup_bridge(out.clone(), &from_now, yes()).await.unwrap(), 0, "{}", out.0.borrow());
+    let installed = receipt_of(&env, Daw::Logic);
+    assert_eq!(installed.version.as_deref(), Some("0.1.0"));
+
+    // `kumi update` to a Kumi bringing the same bridge, twice: nothing changes, nothing is said.
+    out.0.borrow_mut().clear();
+    for _ in 0..2 {
+        assert_eq!(logic.after_update(&io, &home, &now.to_string_lossy(), None).await, 0);
+    }
+    assert_eq!(receipt_of(&env, Daw::Logic), installed);
+    assert_eq!(out.0.borrow().as_str(), "");
+
+    // Rolled back to a Kumi carrying 0.0.9, then forward again.
+    for (app, kumi_version, version) in [(&earlier, "1.19.2", "0.0.9"), (&now, "1.19.3", "0.1.0")] {
+        out.0.borrow_mut().clear();
+        let step = logic.prepare_rollback(&io, &home, &app.to_string_lossy(), kumi_version, false).await.unwrap();
+        assert_eq!(step.after_swap(&io, &home, &app.to_string_lossy(), kumi_version, true).await, 0);
+        let said = out.0.borrow().clone();
+        assert!(
+            said.contains(&format!(
+                "Kumi's Logic Pro bridge {version} is back in Kumi's own folder, as Kumi {kumi_version} had it: Kumi starts it beside Logic Pro when a session begins.\n"
+            )),
+            "{said}"
+        );
+        assert!(!said.contains("restart Logic Pro") && !said.contains("in Logic Pro"), "{said}");
+        let receipt = receipt_of(&env, Daw::Logic);
+        assert_eq!((receipt.version.as_deref(), receipt.history[0].action.as_str()), (Some(version), "rollback"));
+        assert_eq!(std::fs::read_to_string(placed.join("version")).unwrap(), format!("{version}\n"));
+        assert!(placed.join("bridge-reference.json").is_file(), "the reference stays inside the folder");
+    }
+    // Forward again is the generation kept from the first install, not a third copy.
+    assert_eq!(receipt_of(&env, Daw::Logic).generation, installed.generation);
+
+    // An earlier Kumi that doesn't know Logic: the bridge stays, said.
+    out.0.borrow_mut().clear();
+    let step = logic.prepare_rollback(&io, &home, &unknowing.to_string_lossy(), "1.19.1", false).await.unwrap();
+    assert_eq!(step.after_swap(&io, &home, &unknowing.to_string_lossy(), "1.19.1", true).await, 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!(
+            "Kumi's Logic Pro bridge stays in Kumi's own folder ({}): Kumi 1.19.1 doesn't know Logic Pro, so it won't use it or remove it. Delete that folder to take it out.\n",
+            installed.target
+        )),
+        "{said}"
+    );
+    assert_eq!(receipt_of(&env, Daw::Logic).version.as_deref(), Some("0.1.0"));
+
+    // An update bringing another Logic bridge puts it in Kumi's own folder, where it was.
+    out.0.borrow_mut().clear();
+    assert_eq!(logic.after_update(&io, &home, &earlier.to_string_lossy(), None).await, 0);
+    assert_eq!(
+        out.0.borrow().as_str(),
+        "Kumi's Logic Pro bridge 0.0.9 is in Kumi's own folder now: Kumi starts it beside Logic Pro when a session begins.\n"
+    );
+    let receipt = receipt_of(&env, Daw::Logic);
+    assert_eq!((receipt.version.as_deref(), receipt.target.as_str()), (Some("0.0.9"), installed.target.as_str()));
+}
+
+/// A Kumi with no bridge for Logic Pro to set up (Linux's, Windows', the Intel Mac's) says Logic Pro is supported on
+/// Apple Silicon Macs only. A release (installed: its launcher sets KUMI_INSTALLED) sets up only the bridge it carries,
+/// never one staged from the checkout it was built in; and nothing but a Mac runs Logic Pro, so a checkout's build
+/// elsewhere has none either. A session and the doctor say why, rather than the command that would only say it again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_kumi_without_logics_bridge_says_logic_pro_is_supported_on_apple_silicon_macs_only() {
+    let (dir, mut env) = logic_home();
+    env.remove(own::LOGIC_BRIDGE_SOURCE_VAR);
+    env.insert("KUMI_INSTALLED".into(), "1".into());
+    env.insert("KUMI_LOGIC_APP".into(), fake_logic_app(dir.path(), "12.3.1").to_string_lossy().into_owned());
+    let why = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        // The Apple Silicon Mac's release carries it: one that doesn't wants installing again.
+        "this Kumi doesn't carry it: run Kumi's installer again".to_string()
+    } else {
+        let system = if cfg!(target_os = "macos") {
+            "Intel Macs"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        };
+        format!("Logic Pro is supported on Apple Silicon Macs only, and this Kumi is for {system}")
+    };
+    let logic: &dyn DawProvider = &own::LOGIC;
+    let placed = dir.path().join(".kumi/bridges/logic/bridge/logic-kumi");
+    let mut envs = vec![env.clone()];
+    if !cfg!(target_os = "macos") {
+        let mut checkout = env.clone();
+        checkout.remove("KUMI_INSTALLED");
+        envs.push(checkout);
+    }
+    for env in &envs {
+        // With --yes or without (then nothing is asked first): refused in words, nothing set up or staged.
+        for command in [yes(), Default::default()] {
+            let out = Rc::new(Out::default());
+            assert_eq!(logic.setup_bridge(out.clone(), env, command).await.unwrap(), 1, "{}", out.0.borrow());
+            assert_eq!(out.0.borrow().as_str(), format!("Kumi's Logic Pro bridge couldn't be set up: {why}.\n"));
+            assert!(!placed.exists() && !logic.bridge_installed(env));
+        }
+        let state = logic.bridge_state(env, false, true, None, "kumi");
+        assert_eq!(
+            state.notice,
+            Some(format!(
+                "Kumi's Logic Pro bridge isn't set up yet, so Kumi can't see your project; chatting without it. {}{}.",
+                why[..1].to_uppercase(),
+                &why[1..]
+            ))
+        );
+        let doctor = kumi::doctor::DoctorIo::new(Rc::new(Out::default()), env.clone());
+        let checks = logic.doctor_checks(&doctor, &kumi::doctor::Check::ok("Kumi")).await;
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        assert_eq!(
+            (checks[0].status.clone(), checks[0].text.clone(), checks[0].next.clone()),
+            (kumi::doctor::CheckStatus::Note, format!("Kumi's Logic Pro bridge isn't set up: {why}"), None)
+        );
     }
 }
 
