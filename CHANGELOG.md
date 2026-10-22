@@ -3,6 +3,16 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.21.1 — 2026-10-22
+
+Ships with bridge 1.0.93, as 1.21.0 did.
+
+- Brings everything in 1.21.0, which never published: its build stopped on install checks that still
+  expected the REAPER extension and Renoise tool 1.20.0 carried.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.21.0 — 2026-10-22
 
 Ships with bridge 1.0.93, as 1.20.0 did. Ships with REAPER extension 0.1.1 and Renoise tool 1.0.1,
