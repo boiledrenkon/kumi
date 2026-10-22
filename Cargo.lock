@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "daw-mcp-server"
-version = "1.19.3"
+version = "1.20.0"
 dependencies = [
  "daw-bridge",
  "flate2",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "kumi"
-version = "1.19.3"
+version = "1.20.0"
 dependencies = [
  "ableton-mcp-server",
  "async-trait",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "kumi-common"
-version = "1.19.3"
+version = "1.20.0"
 dependencies = [
  "icu_collator",
  "icu_locale_core",
@@ -1291,7 +1291,7 @@ version = "1.19.2"
 
 [[package]]
 name = "kumi-runtime"
-version = "1.19.3"
+version = "1.20.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

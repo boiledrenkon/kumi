@@ -64,8 +64,8 @@ For Logic Pro, run `kumi --daw logic`: Kumi sets its Logic Pro bridge up in its 
 
 ## Status
 
-- Kumi 1.19.3 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
-- 1.19.3 is tested with Live on macOS. On Windows, installing and updating are tested; using it with Live there is still new. Please send a `kumi report` when something breaks.
+- Kumi 1.20.0 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
+- 1.20.0 is tested with Live on macOS. On Windows, installing and updating are tested; using it with Live there is still new. Please send a `kumi report` when something breaks.
 - REAPER 7.82 and Renoise 3.5.4 are tested on macOS. On Windows and Linux, CI tests putting Kumi's extension and tool in place and loading the extension; using them with REAPER and Renoise there is new.
 - Logic Pro 12 is supported on Apple Silicon Macs through Kumi's own Logic Pro bridge, tested with Logic Pro 12.3.1 on macOS 26.6.1. Intel Macs, Linux and Windows have no Logic Pro bridge. Please send a `kumi --daw logic report` when something breaks there.
 
