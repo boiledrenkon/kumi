@@ -5,7 +5,8 @@ an operator at Logic (a selection followed, a dialog counted as busy, refs held 
 a project switched) are still to run: the Mac was in use when the run reached them, and they need
 Logic in front. Scope: `feat/logic` at 245e932a, the bridge reading the real Logic Pro through
 Accessibility and the Mackie channel, Kumi's host starting it from a session, and Kumi's runtime
-reading the rows, the focus and the four bodies through it.
+reading the rows, the focus and the four bodies through it. Paths in this record and in the recordings
+show the Mac's home directory as `/Users/me`; the project ids, hashes of the paths, are over that.
 
 | | |
 | --- | --- |

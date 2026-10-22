@@ -1559,7 +1559,7 @@ impl<S: RefScheme + 'static> KernelTool for UndoTool<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{reaper_changes, renoise_changes};
+    use super::super::{logic_changes, reaper_changes, renoise_changes};
     use super::*;
     use regex::Regex;
     use std::collections::BTreeSet;
@@ -1567,8 +1567,8 @@ mod tests {
     /// Live's words, whole: none may reach the model from another DAW's changes.
     const LIVE_WORDS: &str = r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Remote Script|Control Surface|Main|Drum Rack|Operator|[Rr]acks?|[Cc]lips?|[Cc]lip slots?|[Ss]cenes?)\b";
 
-    fn sets() -> [(&'static str, &'static OwnChangeSet); 2] {
-        [("REAPER", &reaper_changes::CHANGES), ("Renoise", &renoise_changes::CHANGES)]
+    fn sets() -> [(&'static str, &'static OwnChangeSet); 3] {
+        [("REAPER", &reaper_changes::CHANGES), ("Renoise", &renoise_changes::CHANGES), ("Logic Pro", &logic_changes::CHANGES)]
     }
 
     /// The kinds a bridge's code registers, found with `pattern` in the files under `folder` whose names start with
@@ -1579,7 +1579,7 @@ mod tests {
         let mut kinds = BTreeSet::new();
         for entry in std::fs::read_dir(&folder).unwrap() {
             let path = entry.unwrap().path();
-            if path.file_name().unwrap().to_string_lossy().starts_with(prefix) {
+            if path.is_file() && path.file_name().unwrap().to_string_lossy().starts_with(prefix) {
                 let text = std::fs::read_to_string(&path).unwrap();
                 kinds.extend(found.captures_iter(&text).filter_map(|c| c.iter().skip(1).flatten().next().map(|m| m.as_str().to_string())));
             }
@@ -1590,10 +1590,16 @@ mod tests {
 
     #[test]
     fn each_daws_kinds_are_exactly_what_its_bridge_makes() {
-        let reaper =
-            registered("crates/reaper-kumi/src/changes", "", r#"kind: "([a-z]+(?:-[a-z]+)+)"|"([a-z]+(?:-[a-z]+)+)" => Some\(Kind"#);
+        const KIND: &str = r#"kind: "([a-z]+(?:-[a-z]+)+)"|"([a-z]+(?:-[a-z]+)+)" => Some\(Kind"#;
+        let reaper = registered("crates/reaper-kumi/src/changes", "", KIND);
         let renoise = registered("daws/renoise/com.kumi.Bridge.xrnx/payload", "changes", r#"(?:kind = |register\()"([a-z]+(?:-[a-z]+)+)""#);
-        for ((app, set), bridge) in sets().into_iter().zip([reaper, renoise]) {
+        // Logic's bridge names what it makes as `kind: "track-volume"` in its props table and as
+        // `"track-rename" => Some(Kind::…)` in its kind match (crates/logic-kumi/src/changes); the kinds it can't make
+        // yet sit in its NOT_YET pairs (`("loop-range", "why")`) and its KINDS list names them bare, neither of which the
+        // pattern takes, so only the kinds it makes count.
+        let logic = registered("crates/logic-kumi/src/changes", "", KIND);
+        assert!(!logic.is_empty(), "Logic's bridge registers no kinds the pattern finds");
+        for ((app, set), bridge) in sets().into_iter().zip([reaper, renoise, logic]) {
             let ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
             assert_eq!(ours, bridge, "{app}: Kumi's kinds against its bridge's");
         }

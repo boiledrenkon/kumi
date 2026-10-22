@@ -54,6 +54,84 @@ pub struct Shape {
     pub regions: Vec<(usize, String, u32, u32, u32, u32)>,
 }
 
+/// A List Editors tab shown for a run of reads and writes: whether the pane was opened for it, and the tab that was
+/// on before, if another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListOpen {
+    pub opened: bool,
+    pub was_on: Option<&'static str>,
+}
+
+/// Where each track and region of one epoch stands in the next: a restore names a track or region by the place it
+/// had when the change was previewed, and the bridge carries it to where it is now. Found from the shapes before and
+/// after an epoch move: one header more is an insertion at the first place that differs, one less a deletion there,
+/// the same names in another order go by name, another name at the same count is a rename that keeps every place,
+/// anything else matches names where they are unique; a region follows its track by its name and bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carry {
+    /// The epoch the places are from (they lead to the next).
+    pub from: u32,
+    pub tracks: Vec<Option<usize>>,
+    pub regions: Vec<Option<usize>>,
+}
+
+/// The most epoch moves carried: a restore from further back is `gone`.
+pub const CARRIES: usize = 64;
+
+impl Carry {
+    fn between(from: u32, before: &Shape, after: &Shape) -> Carry {
+        let (b, a) = (&before.headers, &after.headers);
+        let mut sorted_a = a.clone();
+        let mut sorted_b = b.clone();
+        sorted_a.sort();
+        sorted_b.sort();
+        let by_name = |name: &String| {
+            let unique = b.iter().filter(|n| *n == name).count() == 1 && a.iter().filter(|n| *n == name).count() == 1;
+            unique.then(|| a.iter().position(|n| n == name).map(|i| i + 1)).flatten()
+        };
+        let tracks: Vec<Option<usize>> = if a.len() == b.len() && sorted_a == sorted_b {
+            // The same names in another order: each by its name (the same name twice stays where it is).
+            b.iter().enumerate().map(|(i, name)| by_name(name).or(Some(i + 1))).collect()
+        } else if a.len() == b.len() {
+            // A rename: every place holds.
+            (1..=b.len()).map(Some).collect()
+        } else if a.len() == b.len() + 1 {
+            let at = (0..b.len()).find(|i| a[*i] != b[*i]).unwrap_or(b.len());
+            (0..b.len()).map(|i| Some(if i < at { i + 1 } else { i + 2 })).collect()
+        } else if a.len() + 1 == b.len() {
+            let at = (0..a.len()).find(|i| a[*i] != b[*i]).unwrap_or(a.len());
+            (0..b.len())
+                .map(|i| {
+                    if i < at {
+                        Some(i + 1)
+                    } else if i == at {
+                        None
+                    } else {
+                        Some(i)
+                    }
+                })
+                .collect()
+        } else {
+            b.iter().map(by_name).collect()
+        };
+        let regions = before
+            .regions
+            .iter()
+            .map(|(track, name, start_bar, start_beat, end_bar, end_beat)| {
+                let track_now = tracks.get(track.wrapping_sub(1)).copied().flatten()?;
+                after
+                    .regions
+                    .iter()
+                    .position(|r| {
+                        r.0 == track_now && r.1 == *name && (r.2, r.3, r.4, r.5) == (*start_bar, *start_beat, *end_bar, *end_beat)
+                    })
+                    .map(|i| i + 1)
+            })
+            .collect();
+        Carry { from, tracks, regions }
+    }
+}
+
 /// What a request needs read beyond the Tracks area and the control bar.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Needs {
@@ -102,6 +180,8 @@ pub struct Project {
     pub layout: Layout,
     pub epoch: u32,
     pub shape: Option<Shape>,
+    /// Where the tracks and regions of each earlier epoch stand now, one carry per epoch move, oldest first.
+    pub carries: Vec<Carry>,
     /// The strips as the Mixer last showed them, by the track's place (from 1), with when.
     strips: Option<(Instant, Vec<StripState>)>,
     /// The list editors' rows read last, by tab, with when.
@@ -129,6 +209,7 @@ impl Project {
             layout: Layout::default(),
             epoch: 1,
             shape: None,
+            carries: Vec::new(),
             strips: None,
             lists: HashMap::new(),
             notes: HashMap::new(),
@@ -257,16 +338,48 @@ impl Project {
         }
     }
 
-    /// Notes a poll's headers and regions: whether the epoch moved.
+    /// Notes a poll's headers and regions: whether the epoch moved (and where the tracks and regions went).
     pub fn observe(&mut self, headers: &[Header], regions: &[(usize, Region)]) -> bool {
         let shape = Self::shape_of(headers, regions);
         let moved = self.shape.as_ref().is_some_and(|before| *before != shape);
         if moved {
+            if let Some(before) = &self.shape {
+                self.carries.push(Carry::between(self.epoch, before, &shape));
+                if self.carries.len() > CARRIES {
+                    self.carries.remove(0);
+                }
+            }
             self.epoch += 1;
             self.forget();
         }
         self.shape = Some(shape);
         moved
+    }
+
+    /// Another project, or the same one loaded again: the places of earlier epochs mean nothing now.
+    pub fn new_project(&mut self) {
+        self.carries.clear();
+        self.shape = None;
+        self.layout = Layout::default();
+    }
+
+    /// Where a track of an earlier epoch stands now (its place from 1): None when the epoch is too far back, or the
+    /// track went.
+    pub fn carry_track(&self, epoch: u32, place: usize) -> Option<usize> {
+        let mut place = place;
+        for carry in self.carries.iter().filter(|carry| carry.from >= epoch) {
+            place = carry.tracks.get(place.checked_sub(1)?).copied().flatten()?;
+        }
+        (self.carries.iter().any(|carry| carry.from == epoch) || epoch == self.epoch).then_some(place)
+    }
+
+    /// Where a region of an earlier epoch stands now.
+    pub fn carry_region(&self, epoch: u32, place: usize) -> Option<usize> {
+        let mut place = place;
+        for carry in self.carries.iter().filter(|carry| carry.from >= epoch) {
+            place = carry.regions.get(place.checked_sub(1)?).copied().flatten()?;
+        }
+        (self.carries.iter().any(|carry| carry.from == epoch) || epoch == self.epoch).then_some(place)
     }
 
     /// A view pane's button in the control bar, by its label: its path and whether the pane is open.
@@ -277,7 +390,7 @@ impl Project {
     }
 
     /// Opens a pane the reader needs if it is closed; whether it was opened (so the reader closes it after).
-    fn open_pane(&mut self, ax: &mut Ax, label: &str) -> Result<bool, AxError> {
+    pub(crate) fn open_pane(&mut self, ax: &mut Ax, label: &str) -> Result<bool, AxError> {
         let (path, open) = self.view_button(ax, label)?;
         if open {
             return Ok(false);
@@ -287,7 +400,7 @@ impl Project {
         Ok(true)
     }
 
-    fn close_pane(&mut self, ax: &mut Ax, label: &str) -> Result<(), AxError> {
+    pub(crate) fn close_pane(&mut self, ax: &mut Ax, label: &str) -> Result<(), AxError> {
         let (path, open) = self.view_button(ax, label)?;
         if open {
             ax.action(&self.root, &path, "AXPress", SETTLE_MS)?;
@@ -315,6 +428,14 @@ impl Project {
             }
         }
         result
+    }
+
+    /// The Mixer pane's strips as nodes, with their controls' paths: the pane must be open (`open_pane("Mixer")`),
+    /// and the layout found after it opened.
+    pub fn mixer_strip_nodes(&mut self, ax: &mut Ax) -> Result<Vec<Node>, AxError> {
+        let path = self.need(&self.layout.mixer, "its Mixer")?;
+        let area = ax.tree(&self.root, &path, 3, 256, Some(CHEAP))?;
+        Ok(area.children.into_iter().filter(|c| c.role == "AXLayoutItem").collect())
     }
 
     /// The strips of the tracks, by place (from 1), from the Mixer unless read a moment ago.
@@ -365,34 +486,58 @@ impl Project {
 
     /// Shows a List Editors tab (opening the pane when closed) and reads its table's rows; puts the pane back after.
     fn read_list(&mut self, ax: &mut Ax, tab: &'static str) -> Result<(Vec<(String, usize)>, Node), AxError> {
+        let open = self.show_list(ax, tab)?;
+        let result = self.list_table(ax, tab);
+        self.hide_list(ax, open)?;
+        result
+    }
+
+    /// Shows a List Editors tab, opening the pane when it is closed, and keeps it shown for a run of reads and
+    /// writes; [`Project::hide_list`] puts the tab and the pane back.
+    pub fn show_list(&mut self, ax: &mut Ax, tab: &'static str) -> Result<ListOpen, AxError> {
         let opened = self.open_pane(ax, "List Editors")?;
-        let result = (|| {
+        let tabs_path = self.need(&self.layout.list_tabs, "its List Editors")?;
+        let tabs = ax.tree(&self.root, &tabs_path, 1, 8, Some(BRIEF))?;
+        let was_on = paths::list_tab_on(&tabs, &self.strings);
+        if was_on != Some(tab) {
+            let button = tabs
+                .children
+                .iter()
+                .find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, tab))
+                .ok_or_else(|| AxError::Missing(format!("the {tab} tab")))?;
+            ax.action(&self.root, &button.path, "AXPress", SETTLE_MS)?;
+        }
+        Ok(ListOpen { opened, was_on: was_on.filter(|was| *was != tab) })
+    }
+
+    /// The shown list's table, with its columns: read again after each write to it.
+    pub fn list_table(&mut self, ax: &mut Ax, tab: &str) -> Result<(Vec<(String, usize)>, Node), AxError> {
+        let list_path = self.need(&self.layout.list, "its list")?;
+        let list = ax.tree(&self.root, &list_path, 7, 256, Some(CHEAP))?;
+        let table = paths::list_table(&list).ok_or_else(|| AxError::Missing(format!("the {tab} list")))?.clone();
+        let columns = paths::columns(&table);
+        Ok((columns, table))
+    }
+
+    /// The list's group itself (its buttons: Create new Marker, Create new Event, the item count).
+    pub fn list_group(&mut self, ax: &mut Ax) -> Result<Node, AxError> {
+        let list_path = self.need(&self.layout.list, "its list")?;
+        ax.tree(&self.root, &list_path, 2, 64, Some(BRIEF))
+    }
+
+    /// Puts the List Editors back as they were before [`Project::show_list`].
+    pub fn hide_list(&mut self, ax: &mut Ax, open: ListOpen) -> Result<(), AxError> {
+        if let Some(was_on) = open.was_on {
             let tabs_path = self.need(&self.layout.list_tabs, "its List Editors")?;
             let tabs = ax.tree(&self.root, &tabs_path, 1, 8, Some(BRIEF))?;
-            let was_on = paths::list_tab_on(&tabs, &self.strings);
-            if was_on != Some(tab) {
-                let button = tabs
-                    .children
-                    .iter()
-                    .find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, tab))
-                    .ok_or_else(|| AxError::Missing(format!("the {tab} tab")))?;
-                ax.action(&self.root, &button.path, "AXPress", SETTLE_MS)?;
+            if let Some(button) = tabs.children.iter().find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, was_on)) {
+                let _ = ax.action(&self.root, &button.path, "AXPress", 50);
             }
-            let list_path = self.need(&self.layout.list, "its list")?;
-            let list = ax.tree(&self.root, &list_path, 7, 256, Some(CHEAP))?;
-            let table = paths::list_table(&list).ok_or_else(|| AxError::Missing(format!("the {tab} list")))?.clone();
-            let columns = paths::columns(&table);
-            if let Some(was_on) = was_on.filter(|was| *was != tab) {
-                if let Some(button) = tabs.children.iter().find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, was_on)) {
-                    let _ = ax.action(&self.root, &button.path, "AXPress", 50);
-                }
-            }
-            Ok((columns, table))
-        })();
-        if opened {
+        }
+        if open.opened {
             self.close_pane(ax, "List Editors")?;
         }
-        result
+        Ok(())
     }
 
     /// The markers from the Marker List.
@@ -753,6 +898,22 @@ mod tests {
         let mut muted = header("Keys");
         muted.mute = true;
         assert!(!project.observe(&[muted, header("Vox")], &[region(2, "Keys", 3)]));
+        // The places of earlier epochs are carried: epoch 2's "Keys" (place 2) is place 1 since the headers moved.
+        assert_eq!(project.carry_track(2, 2), Some(1));
+        assert_eq!(project.carry_track(2, 1), Some(2));
+        assert_eq!(project.carry_track(6, 2), Some(2));
+        assert_eq!(project.carry_track(3, 1), Some(2), "a region appearing moved nothing");
+        assert_eq!(project.carry_region(3, 1), None, "a region that moved itself isn't followed");
+        assert_eq!(project.carry_region(5, 1), Some(1), "a rename keeps the region");
+        assert_eq!(project.carry_track(0, 1), None, "before the first shape");
+        // A track inserted shifts the ones after it; one deleted takes its place with it.
+        assert!(project.observe(&[header("Keys"), header("Bass"), header("Vox")], &[region(3, "Keys", 3)]));
+        assert_eq!((project.carry_track(6, 1), project.carry_track(6, 2)), (Some(1), Some(3)));
+        assert_eq!(project.carry_region(6, 1), Some(1), "the region followed its track");
+        assert!(project.observe(&[header("Keys"), header("Vox")], &[region(2, "Keys", 3)]));
+        assert_eq!((project.carry_track(7, 2), project.carry_track(7, 3), project.carry_track(6, 2)), (None, Some(2), Some(2)));
+        project.new_project();
+        assert_eq!(project.carry_track(7, 1), None);
         assert_eq!(project.region_place(&Ref::parse("6:region:1"), "6:region:1"), Ok(1));
         assert!(project.region_place(&Ref::parse("6:track:1"), "6:track:1").is_err());
         assert_eq!(

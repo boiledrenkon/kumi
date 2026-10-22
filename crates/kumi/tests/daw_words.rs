@@ -100,6 +100,15 @@ async fn tui_states(daw: DawId, label: &str, focuses: Vec<(serde_json::Value, Op
     h.type_text("/status\r").await;
     settle(&h).await;
     found.screen("/status", &h);
+    // A change that stands, and the producer's /undo of it: the notice, and HISTORY's rows, in the DAW's words.
+    h.emit(json!({"type":"change","change":{"id":"c2","family":"tempo","title":"Tempo 120 → 124 BPM","state":"applied","at":2}}));
+    settle(&h).await;
+    found.screen("a change", &h);
+    *c.undo.borrow_mut() =
+        Some(serde_json::from_value(json!({"id":"c2","family":"tempo","title":"Tempo 120 → 124 BPM","state":"undone","at":2})).unwrap());
+    h.type_text("/undo\r").await;
+    settle(&h).await;
+    found.screen("/undo", &h);
     h.emit(json!({"type":"library","status":{"state":"ready","sounds":1020,"presets":40,"sets":3,"learnedAt":1}}));
     settle(&h).await;
     found.screen("library", &h);
@@ -190,6 +199,7 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         "Read your REAPER project again",
         "REAPER connected",
         "REAPER isn't connected",
+        "Undid: Tempo 120 → 124 BPM",
         "Kumi closed. Each project's conversation continues next time.",
     ];
     tui_states(DawId::Reaper, "REAPER — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("REAPER");
@@ -219,13 +229,21 @@ case!(a_logic_session_never_speaks_lives_words, async {
             })),
         ),
     ];
+    // HISTORY over Logic's profile: a change to check, the catch-up, watching, and the producer's /undo, each in
+    // Logic's words.
     let seen = [
         "connecting to Logic Pro",
         "Ask Kumi about your project",
+        "check Logic Pro",
+        "While Logic Pro was away",
+        "Watching your changes in Logic Pro",
+        "Kept once the project is saved",
+        "A project not saved yet",
         "Read your Logic Pro project again",
         "Logic Pro connected",
         "Logic Pro isn't connected",
         "Logic Pro is busy",
+        "Undid: Tempo 120 → 124 BPM",
         "Kumi closed. Each project's conversation continues next time.",
         // (/status: REAPER has no status bar Kumi can write to)
         "no status bar",

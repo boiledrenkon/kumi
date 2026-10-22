@@ -1,0 +1,424 @@
+//! The bridge's changes over recorded scenes of the real Logic Pro, without Logic: each kind's scene (a preview, its
+//! apply, a readback, its restore, as `examples/record_changes.rs` recorded them) replayed through the bridge's own
+//! change side, with every answer compared to what the real Logic gave; a readback that doesn't show the value
+//! answered `uncertain`; a dialog answered `busy` through the whole bridge; a restore whose ref is from an earlier
+//! epoch carried to the track's place now; and the undo watch naming the producer's own Cmd-Z back, over a plan of
+//! four changes undone by hand after the recording. The M2 scenes and `reads.rs` stand as they are.
+
+mod common;
+
+use std::path::PathBuf;
+
+use common::{dialog, hands_showing, tracks_window, Lab, SONG};
+use logic_kumi::ax::strings::Strings;
+use logic_kumi::ax::Ax;
+use logic_kumi::changes::{self, Changes};
+use logic_kumi::fixtures::{Scene, SceneHands};
+use logic_kumi::helper::{Helper, Launch};
+use logic_kumi::project::Project;
+use logic_kumi::serve;
+use serde_json::{json, Value};
+
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Every change scene, by its name.
+const SCENES: [&str; 19] = [
+    "change-track-volume",
+    "change-track-pan",
+    "change-track-mute",
+    "change-track-solo",
+    "change-track-arm",
+    "change-track-rename",
+    "change-track-add",
+    "change-track-delete",
+    "change-marker-add",
+    "change-marker-move",
+    "change-marker-delete",
+    "change-tempo-set",
+    "change-cursor",
+    "change-transport",
+    "change-notes-add",
+    "change-notes-change",
+    "change-notes-delete",
+    "change-fx-bypass",
+    "change-plan",
+];
+
+/// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
+struct Step {
+    step: Value,
+    recorded: Value,
+    replayed: Value,
+}
+
+impl Step {
+    fn method(&self) -> &str {
+        self.step["method"].as_str().unwrap_or("")
+    }
+    fn result(&self) -> &Value {
+        &self.replayed["result"]
+    }
+}
+
+/// A scene replayed: its steps, the requests it couldn't answer, and the undo watch's events.
+struct Replayed {
+    steps: Vec<Step>,
+    unrecorded: Vec<(String, Value)>,
+    events: Vec<Value>,
+}
+
+fn load(name: &str) -> Scene {
+    Scene::load(&fixtures().join(name))
+        .unwrap_or_else(|error| panic!("no scene {name}: {error}; record it with the record_changes example"))
+}
+
+/// Replays a scene's steps through the change side over its recorded helper replies, as the recorder ran them.
+fn replay_scene(scene: &Scene) -> Replayed {
+    changes::set_settling(false);
+    let pid = scene.logic.get("pid").and_then(Value::as_u64).unwrap_or(1) as u32;
+    let project = scene.logic.get("project").cloned().unwrap_or(Value::Null);
+    let hands = SceneHands::new(scene);
+    let mut helper: Box<dyn Helper> = Launch::launch(&mut hands.clone()).unwrap();
+    let mut state = Project::new(Strings::english());
+    state.set_identity(
+        project.get("id").and_then(Value::as_str),
+        project.get("path").and_then(Value::as_str),
+        project.get("name").and_then(Value::as_str).unwrap_or_default(),
+    );
+    // The attach the recorder made before the steps, so the helper's reply queues line up.
+    let _ = helper.call("apps", json!({"bundles": logic_kumi::logic::BUNDLES}));
+    let _ = helper.call("trusted", json!({"prompt": false}));
+    let _ = helper.call("windows", json!({"pid": pid}));
+    {
+        let mut ax = Ax::new(helper.as_mut(), pid);
+        state.look(&mut ax, None).expect("the first look");
+    }
+    let mut changes = Changes::default();
+    let (mut steps, mut events) = (Vec::new(), Vec::new());
+    for record in scene.logic.get("steps").and_then(Value::as_array).into_iter().flatten() {
+        let step = record["step"].clone();
+        let answer = if let Some(method) = step.get("method").and_then(Value::as_str) {
+            let params = step["params"].clone();
+            if serve::CHANGE_METHODS.contains(&method) {
+                serve::answer_change(&mut state, &mut changes, helper.as_mut(), pid, method, &params)
+            } else {
+                serve::answer(&mut state, helper.as_mut(), pid, method, &params)
+            }
+        } else if step.get("poll").is_some() {
+            let mut ax = Ax::new(helper.as_mut(), pid);
+            let (look, headers, _) = state.look(&mut ax, None).expect("a look for the poll");
+            let mut got = Vec::new();
+            let carry = |from: u32, place: usize| state.carry_track(from, place);
+            changes.watch.poll(&mut ax, &state.strings, &look, &headers, &mut |data| got.push(data), &carry);
+            events.extend(got.iter().cloned());
+            Ok(json!({"epoch": look.epoch.to_string(), "events": got}))
+        } else {
+            // The producer's own Cmd-Z, or a wait: nothing of the helper's.
+            continue;
+        };
+        let replayed = match answer {
+            Ok(result) => json!({"ok": true, "result": result}),
+            Err((code, message)) => json!({"ok": false, "error": {"code": code, "message": message}}),
+        };
+        steps.push(Step { step, recorded: record["answer"].clone(), replayed });
+    }
+    Replayed { steps, unrecorded: hands.unrecorded(), events }
+}
+
+fn replay(name: &str) -> Replayed {
+    let replayed = replay_scene(&load(name));
+    assert!(
+        replayed.unrecorded.is_empty(),
+        "{name}: the scene didn't record what the changes ask now; record it again: {:?}",
+        replayed.unrecorded
+    );
+    for step in &replayed.steps {
+        assert_eq!(step.replayed, step.recorded, "{name}: {} answered otherwise than the real Logic did", step.step);
+    }
+    replayed
+}
+
+/// The steps of a method, in order.
+fn of<'a>(replayed: &'a Replayed, method: &str) -> Vec<&'a Step> {
+    replayed.steps.iter().filter(|step| step.method() == method).collect()
+}
+
+#[test]
+fn every_change_scene_replays_as_the_real_logic_answered() {
+    for name in SCENES {
+        let replayed = replay(name);
+        assert!(!replayed.steps.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn a_tracks_volume_pan_mute_solo_and_arm_go_through_its_header_and_come_back_by_value() {
+    for (name, field, wanted, prior, step) in [
+        ("change-track-volume", "volumeDb", json!(-6.0), json!(0.0), "Vocal volume −6 dB"),
+        ("change-track-pan", "pan", json!(-0.5), json!(0.0), "Vocal pan 50% left"),
+        ("change-track-mute", "mute", json!(true), json!(false), "Vocal muted"),
+        ("change-track-solo", "solo", json!(true), json!(false), "Keys soloed"),
+        ("change-track-arm", "armed", json!(true), json!(false), "Vocal armed"),
+    ] {
+        let replayed = replay(name);
+        let preview = of(&replayed, "change_preview")[0].result().clone();
+        assert_eq!(
+            (&preview["prior"][field], &preview["fence"][field], preview["display"]["title"].as_str()),
+            (&prior, &prior, Some(step)),
+            "{name}"
+        );
+        assert_eq!(preview["target"]["kind"], "track");
+        let applied = of(&replayed, "change_apply")[0].result().clone();
+        assert_eq!(applied["applied"][field], wanted, "{name}");
+        // Logic keeps no undo step for a header's control: Kumi's undo is the way back.
+        assert_eq!(applied["undo"], json!({"desc": format!("Kumi: {step} (k0001)"), "entry": false}), "{name}");
+        let restored = of(&replayed, "change_restore")[0].result().clone();
+        assert_eq!(restored["restored"][field], prior, "{name}");
+        assert!(restored["display"]["title"].as_str().unwrap().ends_with("(put back)"), "{name}: {}", restored["display"]["title"]);
+        assert_eq!(restored["undo"]["entry"], false);
+    }
+    // The pan carries Logic's own steps beside the share: −32 of 64 is half left.
+    let pan = replay("change-track-pan");
+    assert_eq!(of(&pan, "change_apply")[0].result()["applied"], json!({"pan": -0.5, "steps": -32}));
+}
+
+#[test]
+fn a_rename_goes_through_the_inspector_moves_the_epoch_and_is_a_step_of_logics_undo() {
+    let replayed = replay("change-track-rename");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"name": "Vox"}));
+    assert_eq!(applied["display"]["title"], "Renamed track “Vocal” → “Vox”");
+    assert_eq!(applied["undo"], json!({"desc": "Kumi: Renamed track “Vocal” → “Vox” (k0001)", "entry": true, "title": "Undo Renaming"}));
+    // A renamed header moves the epoch, as the M2 observers count it: the answer carries the new one.
+    assert_eq!(applied["epoch"], "2");
+    let read = of(&replayed, "read")[0].result().clone();
+    assert_eq!((read["items"][0]["name"].as_str(), read["items"][0]["ref"].as_str()), (Some("Vox"), Some("2:track:1")));
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["name"].as_str(), restored["epoch"].as_str()), (Some("Vocal"), Some("3")));
+}
+
+#[test]
+fn a_track_added_below_a_track_answers_the_new_epoch_and_its_restore_deletes_it() {
+    let replayed = replay("change-track-add");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"tracks": 2, "names": ["Vocal", "Keys"]}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["epoch"], "2");
+    assert_eq!(applied["created"], json!({"ref": "2:track:2", "kind": "track"}));
+    assert_eq!(applied["applied"], json!({"index": 2, "name": "Bass", "kind": "audio"}));
+    assert_eq!(applied["display"]["title"], "Added audio track “Bass”");
+    assert_eq!((applied["undo"]["entry"].as_bool(), applied["undo"]["title"].as_str()), (Some(true), Some("Undo Renaming")));
+    let read = of(&replayed, "read")[0].result().clone();
+    assert_eq!(
+        read["items"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["Vocal", "Bass", "Keys"]
+    );
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["deleted"].as_str(), restored["epoch"].as_str()), (Some("2:track:2"), Some("3")));
+    assert_eq!(restored["display"]["title"], "“Bass” taken away again");
+}
+
+#[test]
+fn a_deleted_track_is_put_back_only_by_logics_own_undo_while_its_step_is_on_top() {
+    let replayed = replay("change-track-delete");
+    let applies = of(&replayed, "change_apply");
+    // The scene adds an instrument track, then deletes it: the delete is the second apply.
+    let deleted = applies[1].result().clone();
+    assert_eq!(deleted["applied"], json!({"deleted": true}));
+    let material = &deleted["material"];
+    for key in ["name", "kind", "index", "volumeDb", "pan", "mute", "solo", "arm", "step"] {
+        assert!(material.get(key).is_some(), "material lacks {key}: {material}");
+    }
+    assert_eq!((material["name"].as_str(), material["index"].as_u64()), (Some("Inst 2"), Some(3)));
+    assert_eq!(material["step"], deleted["undo"]["desc"]);
+    assert_eq!(deleted["undo"]["title"], "Undo Delete Tracks");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    // The restore is Logic's own undo (Cmd-Z): a new step, so entry false, with how "undo"; the epoch moved again.
+    assert_eq!((restored["undo"]["entry"].as_bool(), restored["undo"]["how"].as_str()), (Some(false), Some("undo")));
+    assert!(restored["restored"]["ref"].as_str().unwrap().ends_with(":track:3"), "{}", restored["restored"]["ref"]);
+    assert_eq!(restored["restored"]["was"], "2:track:3");
+    assert_eq!(restored["display"]["note"], "Put back with Logic Pro's own undo.");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"].as_array().unwrap().len(), 2);
+    assert_eq!(reads[1].result()["items"].as_array().unwrap().len(), 3);
+    assert_eq!(reads[2].result()["items"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn markers_are_made_at_the_playhead_moved_by_their_segments_and_deleted_by_their_row() {
+    let added = replay("change-marker-add");
+    let applied = of(&added, "change_apply")[0].result().clone();
+    assert_eq!(applied["created"], json!({"ref": "1:marker:2", "kind": "marker"}));
+    assert_eq!(applied["applied"]["position"], json!({"bar": 17, "beat": 1, "division": 1, "tick": 1}));
+    assert_eq!(applied["applied"]["name"], "Marker 2");
+    assert_eq!(applied["undo"]["title"], "Undo Create Marker");
+    assert_eq!(of(&added, "read")[0].result()["items"].as_array().unwrap().len(), 2);
+    assert_eq!(of(&added, "change_restore")[0].result()["restored"], json!({"deleted": "1:marker:2"}));
+    assert_eq!(of(&added, "read")[1].result()["items"].as_array().unwrap().len(), 1);
+
+    let moved = replay("change-marker-move");
+    let applied = of(&moved, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"]["position"]["bar"], 10);
+    assert_eq!(applied["undo"]["title"], "Undo Value Change");
+    assert_eq!(of(&moved, "change_restore")[0].result()["restored"]["position"]["bar"], 9);
+
+    let deleted = replay("change-marker-delete");
+    let applies = of(&deleted, "change_apply");
+    assert_eq!(applies[1].result()["material"]["position"]["bar"], 17);
+    assert_eq!(applies[1].result()["undo"]["title"], "Undo Delete");
+    let restored = of(&deleted, "change_restore")[0].result().clone();
+    assert_eq!(restored["undo"]["how"], "undo", "{restored}");
+    assert_eq!(of(&deleted, "read")[1].result()["items"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn the_tempo_the_playhead_and_the_transport_go_through_the_control_bar() {
+    let tempo = replay("change-tempo-set");
+    let applied = of(&tempo, "change_apply")[0].result().clone();
+    assert_eq!((applied["applied"]["bpm"].as_f64(), applied["undo"]["entry"].as_bool()), (Some(120.0), Some(false)));
+    assert_eq!(of(&tempo, "change_restore")[0].result()["restored"]["bpm"], 160.0);
+
+    let cursor = replay("change-cursor");
+    let moved = of(&cursor, "cursor_set");
+    assert_eq!(moved[0].result()["playhead"], json!({"bar": 5, "beat": 1}));
+    assert_eq!((moved[0].result()["positionBeats"].as_f64(), moved[0].result()["position"].as_f64()), (Some(16.0), Some(6.0)));
+    assert_eq!(moved[1].result()["positionBeats"], 0.0);
+    assert_eq!(moved[2].result()["playhead"], json!({"bar": 3, "beat": 1}), "seconds at the tempo");
+
+    let transport = replay("change-transport");
+    let (stops, plays) = (of(&transport, "transport_stop"), of(&transport, "transport_play"));
+    assert_eq!(stops[0].result(), &json!({"stopped": false, "wasRecording": false}));
+    assert_eq!(plays[0].result(), &json!({"started": true, "playing": true}));
+    assert_eq!(stops[1].result(), &json!({"stopped": true, "wasRecording": false}));
+}
+
+#[test]
+fn notes_are_written_changed_and_deleted_in_the_event_list_and_put_back_by_their_values() {
+    let added = replay("change-notes-add");
+    let preview = of(&added, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"]["count"], 4);
+    assert!(preview["fence"]["hash"].is_string());
+    let applied = of(&added, "change_apply")[0].result().clone();
+    assert_eq!(
+        applied["applied"]["added"],
+        json!([{"position": {"bar": 1, "beat": 3, "division": 3, "tick": 1}, "pitch": 62, "velocity": 90, "lengthTicks": 480, "channel": 1}])
+    );
+    assert_eq!(applied["applied"]["notes"].as_u64(), Some(5));
+    assert_eq!(applied["undo"]["entry"], true);
+    assert!(applied["undo"]["title"].as_str().unwrap().starts_with("Undo "), "{}", applied["undo"]["title"]);
+    assert_eq!(of(&added, "read")[0].result()["items"].as_array().unwrap().len(), 5);
+    assert_eq!(of(&added, "change_restore")[0].result()["restored"], json!({"notes": 4}));
+
+    let changed = replay("change-notes-change");
+    let applied = of(&changed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"]["added"][0]["pitch"], 61);
+    assert_eq!(applied["applied"]["removed"][0]["pitch"], 60);
+    assert_eq!(applied["undo"]["title"], "Undo Value Change");
+    assert_eq!(of(&changed, "read")[0].result()["items"][0]["pitch"], 60, "put back in place");
+
+    let deleted = replay("change-notes-delete");
+    let applied = of(&deleted, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"]["removed"][0]["pitch"], 72);
+    assert_eq!(applied["undo"]["title"], "Undo Delete");
+    assert_eq!(of(&deleted, "read")[0].result()["items"][3]["pitch"], 72, "written again");
+}
+
+#[test]
+fn a_plug_ins_bypass_is_pressed_on_its_strip_in_the_mixer() {
+    let replayed = replay("change-fx-bypass");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"bypassed": true}));
+    assert_eq!(applied["display"]["title"], "Bypassed “Channel EQ” on “Vocal”");
+    assert_eq!(applied["undo"]["entry"], false);
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["bypassed"], true);
+    assert_eq!(of(&replayed, "change_restore")[0].result()["restored"], json!({"bypassed": false}));
+}
+
+#[test]
+fn a_readback_that_doesnt_show_the_value_is_uncertain_and_names_no_step() {
+    // The mute scene with its header reads frozen at the before-state: the click posts, but Logic never shows mute
+    // on, so the apply answers `uncertain` and names no step. The header read is the tree of the headers' group,
+    // which the reader asks for with 256 children (the window and the Tracks area ask for fewer).
+    let mut scene = load("change-track-mute");
+    let header_calls: Vec<usize> = scene
+        .calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.op == "tree" && call.params.get("children") == Some(&json!(256)))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(header_calls.len() >= 2, "the mute scene reads the headers more than once");
+    let before = scene.calls[header_calls[0]].reply.clone();
+    for &i in &header_calls {
+        scene.calls[i].reply = before.clone();
+    }
+    let replayed = replay_scene(&scene);
+    let apply = &of(&replayed, "change_apply")[0].replayed;
+    assert_eq!(apply["ok"], false, "{apply}");
+    assert_eq!(apply["error"]["code"], "uncertain");
+    assert!(apply["error"]["message"].as_str().unwrap().contains("after Kumi asked"));
+}
+
+#[test]
+fn a_change_while_a_dialog_is_up_is_busy_and_writes_nothing() {
+    let behind = json!({"title": "Song - Tracks", "role": "AXWindow", "subrole": "AXStandardWindow", "main": false, "focused": false, "document": format!("file://{SONG}")});
+    let hands = hands_showing(json!([dialog("Import"), behind]));
+    let lab = Lab::start(&hands);
+    let mut client = lab.client();
+    client.status_when("modal", |status| status["busy"] == "modal");
+    let refused =
+        client.call_with("change_preview", json!({"kind": "track-mute", "input": {"ref": "1:track:1", "mute": true}, "epoch": "1"}));
+    assert_eq!(
+        (refused["error"]["code"].as_str(), refused["error"]["message"].as_str()),
+        (Some("busy"), Some("Logic Pro is showing a dialog; nothing changed"))
+    );
+    assert_eq!(hands.calls_of("set") + hands.calls_of("action") + hands.calls_of("click"), 0);
+    // Without the Accessibility grant: failed, in words, never busy.
+    hands.set_windows(json!([tracks_window("Song - Tracks", Some(&format!("file://{SONG}")))]), &["Song - Tracks"]);
+    hands.set_trusted(false);
+    client.status_when("the permission", |status| status["permission"] == "accessibility");
+    let refused = client.call_with("change_apply", json!({"kind": "track-mute", "input": {}, "fence": {}, "desc": "x", "epoch": "1"}));
+    assert_eq!(refused["error"]["code"], "failed");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("Accessibility"));
+}
+
+#[test]
+fn a_restore_from_an_earlier_epoch_is_carried_to_where_its_track_is_now() {
+    let replayed = replay("change-carry");
+    // A fader set in epoch 1, a track added (epoch 2), deleted (3), put back (4) and deleted again (5): the fader's
+    // restore names epoch 1's place, which is still track 1.
+    let restores = of(&replayed, "change_restore");
+    let fader = restores.last().unwrap().result().clone();
+    assert_eq!((fader["epoch"].as_str(), fader["restored"]["volumeDb"].as_f64()), (Some("5"), Some(0.0)));
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["volumeDb"], 0.0);
+}
+
+#[test]
+fn the_producers_own_undo_of_a_plan_of_four_changes_is_named_back() {
+    let replayed = replay("change-plan");
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies.len(), 4, "volume, rename, add, mute");
+    // Two Cmd-Z presses after the plan: Logic's own undo took back the track add and the rename, named back to Kumi
+    // by the Edit menu's titles. The mute and the fader, which Logic keeps no step for, are then put back by value.
+    let named: Vec<String> = replayed
+        .events
+        .iter()
+        .filter(|event| event["how"] == "undo")
+        .flat_map(|event| event["descs"].as_array().unwrap().iter().map(|d| d.as_str().unwrap().to_string()))
+        .collect();
+    assert!(named.iter().any(|d| d.contains("Added audio track")), "the add wasn't named back: {named:?}");
+    assert!(named.iter().any(|d| d.contains("Renamed track")), "the rename wasn't named back: {named:?}");
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores.len(), 2);
+    assert!(restores.iter().all(|step| step.result()["undo"]["entry"] == false));
+    // The project ends as it began: the fader at 0 dB, no mute, the name Vocal, two tracks.
+    let read = of(&replayed, "read").last().unwrap().result().clone();
+    let items = read["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        (items[0]["name"].as_str(), items[0]["volumeDb"].as_f64(), items[0]["mute"].as_bool()),
+        (Some("Vocal"), Some(0.0), Some(false))
+    );
+}

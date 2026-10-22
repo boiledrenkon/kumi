@@ -2,7 +2,7 @@
 //! and Kumi's host: its refs (positions under the project's epoch, as Renoise's), its read tool, FOCUS's bodies from
 //! Logic's own shapes (a channel strip, a region's notes, the Tracks area, a strip's routing), its words for a Logic
 //! that answers late or lacks Accessibility, and its instructions. The integration itself is the one every bridge of
-//! Kumi's own shares (`own_bridge`).
+//! Kumi's own shares (`own_bridge`); what Kumi changes in Logic, and how, is `logic_changes`.
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
 use super::own_views::{body_args, selected, view};
 use crate::core::{
@@ -18,8 +18,8 @@ use regex::Regex;
 use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
-/// The instructions Logic's turns carry (M7 brings the full instruction pack).
-const INSTRUCTIONS: &str = "You work in Logic Pro through Kumi's bridge beside it, which reads Logic through macOS Accessibility. Read the project with logic_read before you describe it: its tracks (audio, software instrument, external MIDI, aux and output channel strips), their regions, a region's notes as the Event List lists them, each strip's plug-ins and sends, the markers, and the tempo and signatures. A ref such as track:3 is this turn's: pass it back as parent (the track for its regions, plug-ins and sends; a region for its notes) to read what's inside. Kumi reads Logic Pro here; changing it comes later.";
+/// The instructions Logic's turns carry (M7 brings the full instruction pack); the change set's follow them.
+const INSTRUCTIONS: &str = "You work in Logic Pro through Kumi's bridge beside it, which reads and changes Logic through macOS Accessibility. Read the project with logic_read before you describe or change it: its tracks (audio, software instrument, external MIDI, aux and output channel strips), their regions, a region's notes as the Event List lists them, each strip's plug-ins and sends, the markers, and the tempo and signatures. A ref such as track:3 is this turn's: pass it back as parent (the track for its regions, plug-ins and sends; a region for its notes) to read what's inside.";
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::LOGIC,
@@ -423,7 +423,7 @@ impl RefScheme for LogicRefs {
     }
 }
 
-/// Logic's tools as the app shows them (M1 reads; nothing acts).
+/// Logic's tools as the app shows them: the read, and make_changes as the plan (play and stop act as REAPER's do).
 pub const PRESENTATION: ToolPresentation = ToolPresentation {
     label: |tool| match tool {
         "logic_read" => Some("looked at your project"),

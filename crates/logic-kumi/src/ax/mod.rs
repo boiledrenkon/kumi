@@ -324,6 +324,53 @@ impl<'a> Ax<'a> {
             json!({"pid": self.pid, "root": root.to_json(), "path": path, "attr": attr, "value": value, "settleMs": settle_ms}),
         )
     }
+
+    /// Whether Logic is the app in front, from the helper's `apps`.
+    pub fn in_front(&mut self) -> Result<bool, AxError> {
+        let reply = self.call("apps", json!({"bundles": crate::logic::BUNDLES}))?;
+        Ok(reply["apps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|app| app["pid"].as_u64() == Some(u64::from(self.pid)) && app["active"] == Value::Bool(true)))
+    }
+
+    /// Asks macOS to bring Logic in front (the helper waits up to a second): whether it is.
+    pub fn activate(&mut self) -> Result<bool, AxError> {
+        let reply = self.call("activate", json!({"pid": self.pid}))?;
+        Ok(reply["active"] == Value::Bool(true))
+    }
+
+    /// Brings another app in front, by its pid: what was there before Logic was brought forward.
+    pub fn activate_pid(&mut self, pid: u32) -> Result<bool, AxError> {
+        let reply = self.call("activate", json!({"pid": pid}))?;
+        Ok(reply["active"] == Value::Bool(true))
+    }
+
+    /// Posts a key with modifiers to Logic: whether Logic was in front to take it.
+    pub fn keys(&mut self, key: &str, mods: &[&str]) -> Result<bool, AxError> {
+        let reply = self.call("keys", json!({"pid": self.pid, "key": key, "mods": mods}))?;
+        Ok(reply["active"] == Value::Bool(true))
+    }
+
+    /// Presses a menu item by its titles from the menu bar down: the title as shown.
+    pub fn menu(&mut self, titles: &[&str]) -> Result<String, AxError> {
+        let reply = self.call("menu", json!({"pid": self.pid, "titles": titles}))?;
+        Ok(reply["title"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// Clicks a point on the screen (the helper brings Logic in front first).
+    pub fn click(&mut self, x: f64, y: f64) -> Result<(), AxError> {
+        self.call("click", json!({"pid": self.pid, "x": x, "y": y}))?;
+        Ok(())
+    }
+
+    /// An element's frame on the screen: its position and size.
+    pub fn frame(&mut self, root: &Root, path: &str) -> Result<(f64, f64, f64, f64), AxError> {
+        let attrs = self.get(root, path, &["AXPosition", "AXSize"])?;
+        let number = |key: &str, field: &str| attrs.get(key).and_then(|v| v.get(field)).and_then(Value::as_f64).unwrap_or(0.0);
+        Ok((number("AXPosition", "x"), number("AXPosition", "y"), number("AXSize", "w"), number("AXSize", "h")))
+    }
 }
 
 #[cfg(test)]
