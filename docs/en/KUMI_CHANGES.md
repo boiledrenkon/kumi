@@ -380,7 +380,7 @@ Logic Pro's bridge has versions of its own. Only the Kumi for Apple Silicon
 Macs carries it: `kumi --daw logic bridge` sets it up in Kumi's own folder, and
 `kumi update` brings it up to date there. Kumi starts it beside Logic Pro,
 which loads nothing, so Logic Pro never restarts for it.
-Each Kumi release for Apple Silicon Macs ships with one: Kumi 1.20.0 with Logic Pro bridge 0.1.0.
+Each Kumi release for Apple Silicon Macs ships with one: Kumi 1.21.0 with Logic Pro bridge 0.1.0.
 
 ## REAPER and Renoise
 

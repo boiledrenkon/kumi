@@ -50,5 +50,5 @@ the bridge clearing whatever dialog Logic shows when a panel it asked for doesn'
 Kumi's docs say how to use Kumi with Logic Pro in English, Japanese and Chinese (the guide, the support and capability
 matrices, delivery, the developer guide, testing, the TUI's page), the Japanese and Chinese docs gain the Logic
 contract and the status doc's Logic entries, the READMEs carry Logic Pro 12 and Apple's trademark, and the status doc's
-evidence table lists every Logic record. Logic's ships-with line names Kumi 1.20.0: the release that takes this is cut
-with `scripts/release.py --minor`.
+evidence table lists every Logic record. Logic's ships-with line names Kumi 1.21.0 (it named 1.20.0 until 1.20.0 went
+out with REAPER and Renoise alone): the release that takes this is cut with `scripts/release.py --minor`.
