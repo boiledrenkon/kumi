@@ -1,9 +1,11 @@
-# Runs `cargo test` in a home of its own (the Windows side of scripts/test-isolated.sh): HOME, USERPROFILE,
+# Runs the tests in a home of their own (the Windows side of scripts/test-isolated.sh): HOME, USERPROFILE,
 # APPDATA, LOCALAPPDATA, XDG_CONFIG_HOME and KUMI_HOME point into a fresh temporary folder, so no test can
 # reach this machine's Live folders, Remote Scripts or ~/.kumi through a default it forgot to override.
-# Cargo and rustup keep their own folders, named before the profile moves. The arguments are `cargo test`'s,
-# or `cargo nextest run`'s with KUMI_NEXTEST=1; then KUMI_NEXTEST_LIST names a file for the tests the run selects
-# (`cargo nextest list`'s JSON), written first, to compare one run's tests with another's.
+# Cargo and rustup keep their own folders, named before the profile moves. The tests run on cargo-nextest, each in a
+# process of its own: a crate's tests are one binary, and some set the environment. The arguments are `cargo nextest
+# run`'s; KUMI_NEXTEST_LIST names a file for the tests the run selects (`cargo nextest list`'s JSON), written first, to
+# compare one run's tests with another's. KUMI_NEXTEST=0 runs `cargo test` instead, with its arguments: a crate's tests
+# then share one process.
 $ErrorActionPreference = 'Stop'
 if (-not $env:CARGO_HOME) { $env:CARGO_HOME = Join-Path $env:USERPROFILE '.cargo' }
 if (-not $env:RUSTUP_HOME) { $env:RUSTUP_HOME = Join-Path $env:USERPROFILE '.rustup' }
@@ -15,15 +17,24 @@ try {
   $env:XDG_CONFIG_HOME = Join-Path $home_ '.config'; $env:KUMI_HOME = Join-Path $home_ '.kumi'
   Remove-Item Env:KUMI_REMOTE_SCRIPTS_DIR -ErrorAction SilentlyContinue
   Remove-Item Env:KUMI_LIVE_EXTENSIONS_DIR -ErrorAction SilentlyContinue
-  # A profile that names its test binaries (`binary(…)` in its default-filter, .config/nextest.toml) builds only those:
-  # nextest builds every binary it could run, whatever the filter, and runs the ones the filter leaves.
+  # A profile that names its test binaries (`binary(…)`, or a crate's `binary_id(<crate>::it)`, in its default-filter,
+  # .config/nextest.toml) builds only those: nextest builds every binary it could run, whatever the filter, and runs the
+  # ones the filter leaves.
   [string[]]$only = @()
   if ($env:KUMI_NEXTEST_BUILD_PROFILE) {
     $config = Get-Content -Raw (Join-Path $PSScriptRoot '..\.config\nextest.toml')
     $section = [regex]::Match($config, '(?ms)^\[profile\.' + [regex]::Escape($env:KUMI_NEXTEST_BUILD_PROFILE) + '\]\s*$(.*?)(?=^\[|\z)').Groups[1].Value
-    $only = [regex]::Matches($section, 'binary\(([a-z0-9_]+)\)') | ForEach-Object { '--test'; $_.Groups[1].Value }
+    $names = [regex]::Matches($section, 'binary\(([a-z0-9_]+)\)|binary_id\([a-z0-9_-]+::(it)\)') |
+      ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } } | Sort-Object -Unique
+    $only = $names | ForEach-Object { '--test'; $_ }
   }
-  if ($env:KUMI_NEXTEST -eq '1') {
+  if ($env:KUMI_NEXTEST -ne '0') {
+    # (Windows PowerShell 5.1 can throw on a native command's stderr under 'Stop')
+    $nextest = try { & cargo nextest --version 2>$null | Out-Null; $LASTEXITCODE -eq 0 } catch { $false }
+    if (-not $nextest) {
+      [Console]::Error.WriteLine('test-isolated.ps1: the tests run on cargo-nextest: cargo install cargo-nextest --locked (KUMI_NEXTEST=0: cargo test)')
+      exit 1
+    }
     # The whole workspace, or the crates named (-p).
     [string[]]$scope = @('--workspace')
     foreach ($arg in $args) { if ($arg -ceq '-p' -or $arg -clike '-p?*' -or $arg -ceq '--package' -or $arg -clike '--package=*') { $scope = @() } }

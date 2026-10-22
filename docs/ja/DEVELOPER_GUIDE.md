@@ -65,13 +65,13 @@ cargo run --release -p kumi -- bridge --allow-dirty   # Live を閉じた状態�
 
 ## ビルド、テスト、計測
 
-ネイティブのチェックはリポジトリのルートから実行します。分離ランナーは、一時的なホームで `cargo test --workspace --locked` を実行します：
+ネイティブのチェックはリポジトリのルートから実行します。分離ランナーは、一時的なホームで、すべてのテストを cargo-nextest で一つずつ別のプロセスで実行します：
 
 ```sh
 npm ci --prefix crates/kumi-runtime/tests/support   # 初回のみ：一部のテストが使う公式 SDK
 cargo build --locked --workspace --all-targets
 sh scripts/test-isolated.sh                 # PowerShell: ./scripts/test-isolated.ps1
-sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport
+sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'
 python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 ```
 

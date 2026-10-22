@@ -25,9 +25,10 @@ It's one Cargo workspace. Each DAW is reached through a bridge that runs inside 
 
 ## Commands
 - Tests, in a home of their own (never your real ~/.kumi or Live folders):
-  `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci -p <crate>` (Windows: `scripts/test-isolated.ps1`)
-  - Needs cargo-nextest. Without `KUMI_NEXTEST=1` the runner uses `cargo test`.
-- One test file: `sh scripts/test-isolated.sh -p kumi-runtime --test <name>`
+  `sh scripts/test-isolated.sh --profile ci -p <crate>` (Windows: `scripts/test-isolated.ps1`)
+  - Needs cargo-nextest: each test runs in a process of its own. `KUMI_NEXTEST=0` runs `cargo test` instead.
+- One test file: `sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^<name>::/)'`. A crate's integration tests
+  are one binary, `tests/it/`, with a module for each file (`tests/it/main.rs` lists them).
 - Format and the gating lint:
   `cargo fmt --all --check`
   `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref`

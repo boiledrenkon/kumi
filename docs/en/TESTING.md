@@ -24,6 +24,7 @@ What they need:
 | Needs | For |
 | --- | --- |
 | Rust and Cargo | The crates and the migration tests |
+| cargo-nextest (`cargo install cargo-nextest --locked`) | The Rust tests, each in a process of its own |
 | Node.js on PATH (CI uses 24) | Some Rust tests, the Live extension's tests and the migration tests |
 | Python 3.11 or later on PATH (`python3`, or `python.exe` on Windows) | The Remote Script tests, the release scripts' tests, and Rust tests that run Python |
 | A locally supplied Extensions SDK in `vendor/` | Building or type-checking the Live extension (its tests don't need it) |
@@ -38,12 +39,12 @@ Run from the repository root.
 
 | Command | What it does |
 | --- | --- |
-| `sh scripts/test-isolated.sh` (Windows: `./scripts/test-isolated.ps1`) | `cargo test --workspace --locked` in a home of its own; arguments go to `cargo test` |
-| `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | One test file of one crate |
+| `sh scripts/test-isolated.sh` (Windows: `./scripts/test-isolated.ps1`) | Every test with cargo-nextest, each in a process of its own, in a home of its own; arguments go to `cargo nextest run` (`KUMI_NEXTEST=0`: `cargo test`, a crate's tests in one process) |
+| `sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'` | One test file of one crate: a crate's tests are one binary, `tests/it/`, a module a file |
 | `cargo fmt --all --check` | Formatting, as CI checks it |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lints; advisory in CI for now |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | A `RefCell` borrow held across an await; fails the Lint CI job |
-| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | The tests the `Rust / Linux` parts run, with cargo-nextest (`-p <crate>` or `--exclude <crate>` for one part's; `--profile ci-os`: what macOS and Windows run; `--profile extended`: every test) |
+| `sh scripts/test-isolated.sh --profile ci` | The tests the `Rust / Linux` parts run, with cargo-nextest (`-p <crate>` or `--exclude <crate>` for one part's; `--profile ci-os`: what macOS and Windows run; `--profile extended`: every test) |
 | `python3 scripts/dev.py check` | Required CI's checks for what this branch changes since `origin/main` (`--base` for another): the change's whitespace, every file in a crate or an area, then for the crates it affects `cargo fmt --check`, the `RefCell` lint and their `ci` tests (with cargo-nextest), then the Remote Script's, the Live extension's and the Renoise tool's tests when they changed, and the release scripts' tests. `--dry-run` says what it would run |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | The bridge's performance budgets; see [the developer guide](DEVELOPER_GUIDE.md#build-test-and-measure) |
 

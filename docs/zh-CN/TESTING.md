@@ -23,6 +23,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 | 需要 | 用于 |
 | --- | --- |
 | Rust 和 Cargo | 各个 crate 和迁移测试 |
+| cargo-nextest（`cargo install cargo-nextest --locked`） | Rust 测试，每个测试在单独的进程中运行 |
 | PATH 上的 Node.js（CI 使用 24） | 部分 Rust 测试、Live 扩展的测试和迁移测试 |
 | PATH 上的 Python 3.11 或更高版本（`python3`，在 Windows 上为 `python.exe`） | Remote Script 测试、发布脚本的测试，以及会运行 Python 的 Rust 测试 |
 | 在 `vendor/` 中本地提供的 Extensions SDK | 构建 Live 扩展或对其做类型检查（它的测试不需要） |
@@ -35,12 +36,12 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 
 | 命令 | 作用 |
 | --- | --- |
-| `sh scripts/test-isolated.sh`（Windows：`./scripts/test-isolated.ps1`） | 在独立的主目录中运行 `cargo test --workspace --locked`；参数会传给 `cargo test` |
-| `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 只运行一个 crate 的一个测试文件 |
+| `sh scripts/test-isolated.sh`（Windows：`./scripts/test-isolated.ps1`） | 在独立的主目录中用 cargo-nextest 运行全部测试，每个测试一个进程；参数会传给 `cargo nextest run`（`KUMI_NEXTEST=0`：改用 `cargo test`，一个 crate 的测试共用一个进程） |
+| `sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'` | 只运行一个 crate 的一个测试文件：一个 crate 的测试是一个二进制（`tests/it/`，每个文件一个模块） |
 | `cargo fmt --all --check` | 按 CI 的方式检查格式 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint 检查；目前在 CI 中仅供参考 |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | 跨 await 持有的 `RefCell` 借用；会使 Lint CI 任务失败 |
-| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | 用 cargo-nextest 运行 `Rust / Linux` 各部分运行的测试（单个部分的用 `-p <crate>` 或 `--exclude <crate>`；`--profile ci-os`：macOS 和 Windows 运行的测试；`--profile extended`：全部测试） |
+| `sh scripts/test-isolated.sh --profile ci` | 用 cargo-nextest 运行 `Rust / Linux` 各部分运行的测试（单个部分的用 `-p <crate>` 或 `--exclude <crate>`；`--profile ci-os`：macOS 和 Windows 运行的测试；`--profile extended`：全部测试） |
 | `python3 scripts/dev.py check` | 针对本分支相对 `origin/main` 的改动（用 `--base` 指定其他起点）运行 Required CI 的检查：改动的空白、每个文件都属于某个 crate 或区域，然后对受影响的 crate 运行 `cargo fmt --check`、`RefCell` 的 lint 和它们的 `ci` 测试（用 cargo-nextest），再在有改动时运行 Remote Script、Live 扩展和 Renoise 工具的测试，以及发布脚本的测试。`--dry-run` 只说明会运行什么 |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | 桥接的性能预算；见[开发者指南](DEVELOPER_GUIDE.md#构建测试与测量) |
 
