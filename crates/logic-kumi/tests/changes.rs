@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 54] = [
+const SCENES: [&str; 55] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -80,6 +80,7 @@ const SCENES: [&str; 54] = [
     "read-smart-none",
     "change-fx-param-exact",
     "change-bounce-undo",
+    "change-playhead-exact",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -1120,4 +1121,27 @@ fn bounce_scene_presses(name: &str) -> Vec<(String, i64, i64)> {
             Some((call.params.get("path")?.as_str()?.to_string(), call.reply.get("before")?.as_i64()?, call.reply.get("after")?.as_i64()?))
         })
         .collect()
+}
+
+#[test]
+fn a_split_after_logic_played_lands_exactly_on_the_bar_asked() {
+    // Logic played and stopped, so the playhead's division and tick are wherever the stop left them, and the LCD's
+    // bar and beat sliders keep them: the playhead goes to the project's start first ("Go to Beginning"), then to
+    // bar 3, and the split lands there exactly.
+    let replayed = replay("change-playhead-exact");
+    let presses: Vec<String> = load("change-playhead-exact")
+        .calls
+        .iter()
+        .filter(|call| call.op == "action")
+        .filter_map(|call| call.params.get("path").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    assert_eq!(presses, ["5.5", "5.6", "5.6"], "Play, Stop, then Go to Beginning before the playhead is placed");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(
+        (applied["applied"]["left"]["endBeats"].as_f64(), applied["applied"]["right"]["startBeats"].as_f64()),
+        (Some(8.0), Some(8.0))
+    );
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][1]["startBeats"], 8.0);
+    assert_eq!(reads[1].result()["items"].as_array().unwrap().len(), 1, "the region whole again");
 }

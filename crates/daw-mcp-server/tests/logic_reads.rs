@@ -108,7 +108,10 @@ async fn the_read_methods_on_the_wire() {
             "undo_step_end",
             "project_save",
             "bounce",
-            "export_tracks"
+            "export_tracks",
+            "hear",
+            "audition",
+            "render"
         ]
     );
     assert_eq!(client.welcome().events, ["project", "transport", "tracks", "selection", "undone_in_daw"]);

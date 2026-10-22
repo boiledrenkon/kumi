@@ -10,17 +10,17 @@
 //! so the producer's own undo is named back to Kumi by [`undo::Watch`], which keeps Kumi's steps in order.
 
 mod automation;
-mod bounce;
+pub(crate) mod bounce;
 mod command;
-mod cycle;
-mod front;
+pub(crate) mod cycle;
+pub(crate) mod front;
 mod fx;
 mod import;
 mod lists;
 mod marks;
 mod menus;
 mod notes;
-mod nudge;
+pub(crate) mod nudge;
 pub mod panel;
 mod panes;
 mod params;
@@ -36,8 +36,8 @@ pub mod smf;
 mod stack;
 pub(crate) mod strips;
 mod structure;
-mod timeline;
-mod tracks;
+pub(crate) mod timeline;
+pub(crate) mod tracks;
 pub mod undo;
 mod window;
 

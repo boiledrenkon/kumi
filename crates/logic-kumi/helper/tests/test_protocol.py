@@ -1,14 +1,24 @@
 """The helper's protocol, driven over its stdin and stdout: ids, errors, the ops that need no Accessibility grant,
-the virtual MIDI ports both ways, and a clean exit. Everything that needs the grant is checked for a well-formed
-error only, so the suite passes on a Mac without Logic and without the grant."""
+the virtual MIDI ports both ways, the process tap on afplay, and a clean exit. Everything that needs the grant is
+checked for a well-formed error only, so the suite passes on a Mac without Logic and without the grant.
+
+The tap's tests play a quiet tone (-30 dBFS, after a second of silence) with afplay and tap it muted; they never tap
+a DAW. KUMI_TAP_DIR names the folder their files go in (a temporary one inside it, removed after); without it, the
+system's temporary folder."""
+import array
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import queue
+import shutil
+import signal
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -126,6 +136,31 @@ class Helper:
             self.process.stdout.close()
             self.process.stderr.close()
 
+def write_tone(path: Path, lead: float, seconds: float, frequency=440.0, level_db=-30.0, rate=48_000) -> None:
+    """A 32-bit float stereo WAV: `lead` seconds of silence, then a sine at `level_db` dBFS with 10 ms fades."""
+    amplitude = 10 ** (level_db / 20)
+    fade = int(0.01 * rate)
+    length = int(seconds * rate)
+    samples = array.array("f", bytes(8 * int(lead * rate)))
+    for index in range(length):
+        value = amplitude * min(1.0, index / fade, (length - 1 - index) / fade) * math.sin(2 * math.pi * frequency * index / rate)
+        samples.extend((value, value))
+    data = samples.tobytes()
+    header = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, 2, rate, rate * 8, 8, 32)
+    path.write_bytes(header + b"data" + struct.pack("<I", len(data)) + data)
+
+def read_capture(path: Path):
+    """A WAV the tap wrote, its header checked against the file: (rate, channels, samples)."""
+    data = path.read_bytes()
+    assert data[:4] == b"RIFF" and data[8:16] == b"WAVEfmt " and data[36:40] == b"data", data[:44]
+    code, channels, rate, byte_rate, block, bits = struct.unpack("<HHIIHH", data[20:36])
+    size = struct.unpack("<I", data[40:44])[0]
+    assert (code, bits, block, byte_rate) == (3, 32, 4 * channels, 4 * channels * rate), (code, bits, block, byte_rate)
+    assert struct.unpack("<I", data[4:8])[0] == 36 + size and len(data) == 44 + size, (data[4:8], size, len(data))
+    samples = array.array("f")
+    samples.frombytes(data[44:])
+    return rate, channels, samples
+
 def ok(message: dict) -> dict:
     assert message["ok"] is True, message
     return message
@@ -225,10 +260,6 @@ class Protocol(unittest.TestCase):
         self.assertEqual(error(self.helper.request("click", pid=os.getpid(), x=10, y=10, mods=["hyper"])), "unknown-mod")
         self.assertEqual(error(self.helper.request("type", pid=os.getpid(), text="x" * 201)), "too-long")
 
-    def test_tap_is_reserved(self):
-        self.assertEqual(error(self.helper.request("tap.start")), "reserved")
-        self.assertEqual(error(self.helper.request("tap.stop")), "reserved")
-
     def test_midi_ports_round_trip(self):
         self.assertEqual(error(self.helper.request("midi.send", hex=INERT)), "midi-closed")
         opened = ok(self.helper.request("midi.open", name=PORT, uid=1_234_567))
@@ -245,6 +276,9 @@ class Protocol(unittest.TestCase):
             self.assertEqual([event["hex"] for event in events], [INERT])
             self.assertIsInstance(events[0]["ms"], int)
             self.assertGreater(events[0]["ms"], 1_700_000_000_000)
+            # The host times the tap's anchors are in: when the helper got the packet, and the packet's own stamp.
+            self.assertGreater(events[0]["hostTime"], 0)
+            self.assertIsInstance(events[0]["timeStamp"], int)
             heard = echo.stdout.read().split("\n")
         self.assertIn(INERT, heard)
         self.assertTrue(ok(self.helper.request("midi.close"))["closed"])
@@ -265,6 +299,135 @@ class Protocol(unittest.TestCase):
         ok(self.helper.request("trusted", prompt=False))
         self.assertEqual(self.helper.close(), 0)
         self.assertEqual(self.helper.stderr, "")
+
+class Tap(unittest.TestCase):
+    """The process tap, on afplay playing a quiet tone the tap mutes: never on a DAW."""
+    def setUp(self):
+        self.helper = Helper()
+        self.folder = tempfile.TemporaryDirectory(prefix="kumi-tap-", dir=os.environ.get("KUMI_TAP_DIR"))
+        self.files = Path(self.folder.name)
+        self.players = []
+
+    def tearDown(self):
+        for player in self.players:
+            if player.poll() is None:
+                player.kill()
+            player.wait()
+        if self.helper.process.poll() is None:
+            self.helper.close()
+        self.folder.cleanup()
+
+    def play(self, lead: float, seconds: float) -> subprocess.Popen:
+        if shutil.which("afplay") is None:
+            self.skipTest("afplay isn't on this Mac")
+        tone = self.files / f"tone-{len(self.players)}.wav"
+        write_tone(tone, lead, seconds)
+        player = subprocess.Popen(["afplay", str(tone)])
+        self.players.append(player)
+        return player
+
+    def start(self, player: subprocess.Popen, capture: Path) -> dict:
+        return self.start_with(player, capture, maxSeconds=30)
+
+    def start_with(self, player: subprocess.Popen, capture: Path, maxSeconds: float) -> dict:
+        """tap.start on the player, muted, once Core Audio has a process object for it (a few tens of milliseconds in);
+        a tap macOS denies, or one too old a macOS can't make, skips the test."""
+        until = time.monotonic() + 2.0
+        while True:
+            message = self.helper.request("tap.start", pid=player.pid, path=str(capture), mute=True, maxSeconds=maxSeconds)
+            if message["ok"]:
+                return message
+            if message["error"] in ("denied", "unsupported"):
+                player.kill()
+                self.skipTest(f"the tap is {message['error']}: {message.get('detail')}")
+            if message["error"] != "failed" or message.get("step") != "process" or time.monotonic() > until:
+                self.fail(f"tap.start: {message}")
+            time.sleep(0.01)
+
+    def test_requests_are_checked_and_nothing_is_tapped_without_a_process_object(self):
+        self.assertEqual(error(self.helper.request("tap.stop")), "failed")
+        self.assertEqual(ok(self.helper.request("tap.status"))["running"], False)
+        capture = self.files / "capture.wav"
+        for params in ({"path": str(capture)}, {"pid": os.getpid()}, {"pid": os.getpid(), "path": "capture.wav"},
+                       {"pid": os.getpid(), "path": str(capture), "mute": "yes"}, {"pid": os.getpid(), "path": str(capture), "maxSeconds": 0},
+                       {"pid": os.getpid(), "path": str(capture), "maxSeconds": 3601}):
+            self.assertEqual(error(self.helper.request("tap.start", **params)), "bad-request", params)
+        # This interpreter makes no audio, so Core Audio has no process object for it; a pid nobody has is no process.
+        for pid in (os.getpid(), missing_pid()):
+            message = self.helper.request("tap.start", pid=pid, path=str(capture))
+            if error(message) != "unsupported":
+                self.assertEqual((message["error"], message["step"]), ("failed", "process"), message)
+        self.assertFalse(capture.exists())
+        self.assertEqual(ok(self.helper.request("tap.status"))["running"], False)
+
+    def test_a_capture_of_afplay_is_a_float_wav_with_anchors(self):
+        player = self.play(lead=1.0, seconds=1.0)
+        capture = self.files / "capture.wav"
+        started = self.start(player, capture)
+        self.assertEqual(started["channels"], 2)
+        self.assertGreater(started["sampleRate"], 0)
+        self.assertIsInstance(started["hostTime"], int)
+        self.assertLess(started["ms"], 2000)
+        # One tap at a time, and it says how far it is.
+        self.assertEqual(error(self.helper.request("tap.start", pid=player.pid, path=str(self.files / "other.wav"))), "busy")
+        self.assertFalse((self.files / "other.wav").exists())
+        self.assertEqual(ok(self.helper.request("tap.status"))["running"], True)
+        player.wait(timeout=10)
+        stopped = ok(self.helper.request("tap.stop"))
+        self.assertEqual(error(self.helper.request("tap.stop")), "failed")
+        self.assertEqual(set(stopped) - {"id", "ok", "ms"}, {"file", "frames", "seconds", "sampleRate", "channels", "peak", "rms", "anchors", "timebase", "dropped", "truncated"})
+        self.assertEqual((stopped["file"], stopped["channels"], stopped["sampleRate"]), (str(capture), 2, started["sampleRate"]))
+        self.assertEqual((stopped["dropped"], stopped["truncated"]), (0, False))
+        self.assertGreater(stopped["seconds"], 1.5)
+        rate, channels, samples = read_capture(capture)
+        self.assertEqual((rate, channels, len(samples) // channels), (round(stopped["sampleRate"]), 2, stopped["frames"]))
+        peak = max(abs(sample) for sample in samples)
+        self.assertAlmostEqual(peak, stopped["peak"], places=6)
+        self.assertLess(abs(20 * math.log10(peak) + 30), 1.0, f"the tone's peak is {20 * math.log10(peak):.2f} dBFS, not -30")
+        # The anchors: frames and host times both rising, the first at frame 0, agreeing with the rate within 1 ms.
+        anchors, timebase = stopped["anchors"], stopped["timebase"]
+        self.assertGreaterEqual(len(anchors), 2)
+        self.assertEqual(anchors[0][0], 0)
+        tick = timebase["numer"] / timebase["denom"] / 1e9
+        for before, after in zip(anchors, anchors[1:]):
+            self.assertGreater(after[0], before[0])
+            self.assertGreater(after[1], before[1])
+            self.assertLess(abs((after[1] - anchors[0][1]) * tick - after[0] / stopped["sampleRate"]), 0.001)
+
+    def test_a_capture_stops_writing_at_max_seconds(self):
+        # Reaching maxSeconds stops the tap's IO, which ends the mute: the player goes long before its tone would begin.
+        player = self.play(lead=2.0, seconds=0.5)
+        capture = self.files / "capture.wav"
+        started = self.start_with(player, capture, maxSeconds=0.3)
+        time.sleep(0.7)
+        status = ok(self.helper.request("tap.status"))
+        self.assertEqual((status["running"], status["truncated"]), (True, True))
+        stopped = ok(self.helper.request("tap.stop"))
+        player.kill()
+        self.assertEqual(stopped["truncated"], True)
+        self.assertEqual(stopped["frames"], int(0.3 * started["sampleRate"]))
+        rate, channels, samples = read_capture(capture)
+        self.assertEqual(len(samples) // channels, stopped["frames"])
+
+    def test_eof_or_a_signal_finishes_a_running_tap(self):
+        # Two seconds of silence: the tap ends and the player is stopped before the tone would begin.
+        for ending in ("eof", "sigterm"):
+            if ending == "sigterm":
+                self.helper = Helper()
+            player = self.play(lead=2.0, seconds=0.5)
+            capture = self.files / f"capture-{ending}.wav"
+            self.start(player, capture)
+            time.sleep(0.4)
+            if ending == "eof":
+                self.assertEqual(self.helper.close(), 0)
+            else:
+                self.helper.process.send_signal(signal.SIGTERM)
+                self.assertEqual(self.helper.process.wait(timeout=5), -signal.SIGTERM)
+                self.helper.close()
+            player.kill()
+            rate, channels, samples = read_capture(capture)
+            self.assertEqual(channels, 2)
+            self.assertGreater(len(samples) // channels, rate // 10, ending)
 
 class Build(unittest.TestCase):
     def test_helper_is_named_after_its_source(self):

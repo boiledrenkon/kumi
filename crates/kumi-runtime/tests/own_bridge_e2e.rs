@@ -1803,6 +1803,118 @@ async fn logics_m4b_kinds_go_through_kumis_host_a_plugin_added_and_tuned_a_send_
         .await;
 }
 
+/// (M5) Logic heard through Kumi's host: the listening tools offered in Logic's words (the audition with every request,
+/// the rest behind find_tools), what the integration hears for the listen tool (the whole mix in one pass; two tracks
+/// in one audition, a pass each, each soloed; Logic put back), a pass refused in words while Logic plays for the
+/// producer, a region's audio file not offered until the bridge's rows name one, and the captures gone with the
+/// integration. None of it is a change: no row, no step of Logic's undo.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_listening_hears_a_pass_per_track_through_kumis_host_and_says_why_not_in_its_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(Recorded {
+                inner: InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) },
+                calls: RefCell::default(),
+            });
+            let shared = endpoint.clone();
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = shared.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+
+            // The listening tools, in Live's order: the audition with every request, the rest behind find_tools.
+            let offered: Vec<(&str, bool)> = observed
+                .tools
+                .iter()
+                .filter(|tool| ["audition", "judge", "tune", "groove", "form", "sound", "render"].contains(&tool.name()))
+                .map(|tool| (tool.name(), tool.deferred()))
+                .collect();
+            assert_eq!(
+                offered,
+                [("audition", false), ("judge", true), ("tune", true), ("groove", true), ("form", true), ("sound", true), ("render", true)]
+            );
+            let audition = tool(&observed, "audition");
+            assert!(audition.description().contains("soloed") && !audition.description().contains("clip"), "{}", audition.description());
+            assert!(audition.input_schema()["properties"]["candidates"]["items"]["properties"].get("clip").is_none(), "no clips in Logic");
+            assert!(tool(&observed, "render").description().contains("the Stereo Out's"));
+            assert!(logic.has_hear() && logic.has_audition(), "Logic is heard");
+            assert!(!logic.has_audio_file() && !logic.has_goal(), "no region's file and no goal's rig yet");
+
+            // The whole mix, bars 1 to 5: one pass, the producer hearing it.
+            let mix = HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(16.), ..HearRequest::default() };
+            let takes = logic.hear(&mix, Signal::new()).await.unwrap().unwrap();
+            assert_eq!(
+                takes.iter().map(|take| (take.label.as_str(), take.start, take.seconds, take.live)).collect::<Vec<_>>(),
+                [("The whole mix", 0.0, Some(6.0), false)]
+            );
+            assert!(std::path::Path::new(&takes[0].file).is_file());
+            let pass = script.asked().into_iter().rev().find(|(method, _)| method == "hear").unwrap().1;
+            assert_eq!((pass["mute"].clone(), pass.get("solo"), pass["epoch"].clone()), (json!(false), None, json!("1")), "{pass}");
+
+            // Vocal by this turn's ref and Keys by its name: one audition, a pass each, each soloed.
+            let two = HearRequest {
+                tracks: vec!["track:1".into(), "Keys".into()],
+                from_beat: Some(4.),
+                beats: Some(8.),
+                ..HearRequest::default()
+            };
+            let takes = logic.hear(&two, Signal::new()).await.unwrap().unwrap();
+            assert_eq!(
+                takes.iter().map(|take| (take.label.as_str(), take.seconds)).collect::<Vec<_>>(),
+                [("Vocal", Some(3.0)), ("Keys", Some(3.0))]
+            );
+            assert_ne!(takes[0].file, takes[1].file);
+            let (method, pass) = script.asked().into_iter().rev().find(|(method, _)| method == "hear" || method == "audition").unwrap();
+            assert_eq!(
+                (method.as_str(), pass["candidates"].clone(), pass["fromBeats"].as_f64(), pass["beats"].as_f64()),
+                ("audition", json!([{"ref": "1:track:1"}, {"ref": "1:track:2"}]), Some(4.0), Some(8.0))
+            );
+            assert!(!script.track(1)["solo"].as_bool().unwrap() && !script.track(2)["solo"].as_bool().unwrap(), "the solos put back");
+            let unknown = HearRequest { tracks: vec!["Strings".into()], from_beat: Some(0.), beats: Some(4.), ..HearRequest::default() };
+            let refused = logic.hear(&unknown, Signal::new()).await.unwrap().unwrap_err();
+            assert!(refused.contains("Strings isn't a track in the project now"), "{refused}");
+
+            // Vocal muted by the producer, heard soloed: it stays silent, and its take's note says why.
+            script.set_track(1, "mute", json!(true));
+            let vocal = HearRequest { tracks: vec!["Vocal".into()], from_beat: Some(0.), beats: Some(4.), ..HearRequest::default() };
+            let takes = logic.hear(&vocal, Signal::new()).await.unwrap().unwrap();
+            assert_eq!(takes[0].note.as_deref(), Some("Vocal is muted in Logic Pro, so soloing doesn't make it heard"));
+            script.set_track(1, "mute", json!(false));
+
+            // Logic playing for the producer: the pass is refused before anything plays, in the bridge's words.
+            endpoint.call("transport_play", JsonObject::new(), Signal::new()).await.unwrap();
+            let busy = logic.hear(&mix, Signal::new()).await.unwrap().unwrap_err();
+            assert_eq!(
+                busy,
+                "Logic Pro is busy (Logic Pro is playing: Kumi listens only while it is stopped; nothing changed): try again in a moment"
+            );
+            endpoint.call("transport_stop", JsonObject::new(), Signal::new()).await.unwrap();
+
+            // Nothing of it is a change.
+            assert!(told.borrow().is_empty(), "no row: {:?}", told.borrow());
+            assert!(script.undo_titles().is_empty() && script.plugins("output:1").is_empty());
+            logic.close().await.unwrap();
+            assert!(!std::path::Path::new(&takes[0].file).exists(), "the captures go with the integration");
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (M7) Renoise with Kumi's host in front of the simulator's song, and the changes Kumi makes told to `told`.
 async fn renoise_with_changes(
     home: &std::path::Path,

@@ -19,6 +19,7 @@ use crate::{
         none::no_access,
         own_catchup::{CatchUpWords, Remembered, WatchTool, CLOSE_MS},
         own_changes::{Ending, Link, OwnPlan},
+        own_listen::{HookListening, ListenHook, OwnListenLink},
         own_listening::{Flags, OwnListening},
         own_phrases::{PhraseLook, Phrased},
     },
@@ -90,6 +91,9 @@ pub struct OwnDaw {
     /// `.logicx` package, opened with Logic's own app as a double-click would); None for a DAW Kumi can't open
     /// projects in from here.
     pub open_project: Option<OpenProject>,
+    /// (M5) Hears the DAW: builds the listening tools' `Renderer`, and what answers `hear` and `audio_file`, over Kumi's
+    /// link to its host (Logic's); None for a DAW Kumi can't hear yet, whose integration offers no listening.
+    pub listening: Option<ListenHook>,
     /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe; None for a
     /// DAW without them (Logic's).
     pub catch_up: Option<&'static CatchUpWords>,
@@ -181,6 +185,9 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// A `project` event came since the focus was last read: the next read checks whose project it is, whatever the
     /// epoch says.
     project_changed: Rc<Cell<bool>>,
+    /// (M5) The DAW's listening, when it hears through a hook of its own (Logic's): its listening tools and what
+    /// hears for `hear`, in place of the shared listening's.
+    hook_listening: Option<HookListening>,
     /// M6: when the project's snapshot is kept again, and what catch-up told of it.
     remembered: Rc<Remembered>,
     /// The task that keeps the snapshot again as edits settle is running.
@@ -340,6 +347,10 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     };
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
+    let hook_listening = daw.listening.map(|hook| {
+        let reach = Rc::new(OwnListenLink { link: link.clone(), plan: changes.clone(), on_action: context.on_action.clone() });
+        HookListening::new(hook, reach, context)
+    });
     let variations: Option<Rc<dyn KernelTool>> = (daw.profile.caps.variations && daw.profile.id == Some(crate::core::daw::DawId::Renoise))
         .then(|| {
             let backend = super::renoise_variations::RenoiseBackend::new(changes.clone(), listening.renderer.clone());
@@ -377,6 +388,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         project_wanted: Rc::default(),
         projects: Rc::new(tokio::sync::watch::channel(None).0),
         project_changed: Rc::default(),
+        hook_listening,
         remembered,
         keeping: Cell::new(false),
         listening,
@@ -966,7 +978,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
     }
 
-    /// The model's tools: the read, the DAW's changes with their plan and undo, and the listening tools it can run now.
+    /// The model's tools: the read, the DAW's changes with their plan and undo, and the listening tools it can run now
+    /// ((M5) through its own hook, for a DAW that hears through one).
     fn tools(&self) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = vec![self.read_tool()];
         tools.extend(self.changes.tools());
@@ -979,7 +992,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 on_watch: self.options.context.on_watch.clone(),
             }));
         }
-        tools.extend(self.listening.tools());
+        match &self.hook_listening {
+            Some(listening) => tools.extend(listening.tools()),
+            None => tools.extend(self.listening.tools()),
+        }
         // M7: the variations loop, where the DAW offers it.
         if let Some(variations) = &self.variations {
             tools.push(variations.clone());
@@ -1245,6 +1261,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             .iter()
             .find_map(|at| snapshot.pointer(at).and_then(Value::as_f64));
         self.tempo.set(tempo);
+        // What the listening keeps between looks (the meter with the tempo).
+        if let Some(listening) = &self.hook_listening {
+            listening.hearing.seen(snapshot);
+        }
         if let Some(beats) = snapshot.pointer("/transport/beatsPerBar").and_then(Value::as_f64) {
             self.listening.renderer.set_beats_per_bar(beats);
         }
@@ -1386,33 +1406,67 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         Ok(Ok(()))
     }
+    /// (M5) The producer's words came into the answer under way: a judged run's changes from here may be theirs.
     fn steered(&self) {
-        self.listening.steered();
+        match &self.hook_listening {
+            Some(listening) => listening.steered(),
+            None => self.listening.steered(),
+        }
     }
     async fn settled(&self) {
-        self.listening.settled().await;
+        // (a DAW's own hook answers each call when it's done: nothing of it runs between calls)
+        if self.hook_listening.is_none() {
+            self.listening.settled().await;
+        }
     }
+    /// (M5) Hearing the project, auditioning and an audio file: through the DAW's own hook (Logic's), as its profile
+    /// says it can; else the shared listening over the host's renders and captures, as the bridge says it can now.
     fn has_hear(&self) -> bool {
-        let flags = self.listening.renderer.flags();
-        self.connected.get() && flags.known && flags.render
+        match &self.hook_listening {
+            Some(_) => self.daw.profile.caps.hear,
+            None => {
+                let flags = self.listening.renderer.flags();
+                self.connected.get() && flags.known && flags.render
+            }
+        }
     }
     fn has_audition(&self) -> bool {
-        self.has_hear()
+        match &self.hook_listening {
+            Some(_) => self.daw.profile.caps.audition,
+            None => self.has_hear(),
+        }
     }
     fn has_audio_file(&self) -> bool {
-        self.connected.get() && self.listening.renderer.flags().known
+        match &self.hook_listening {
+            Some(_) => self.daw.profile.caps.audio_file,
+            None => self.connected.get() && self.listening.renderer.flags().known,
+        }
     }
     async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
-        self.listening.hear(request, signal).await
+        match &self.hook_listening {
+            Some(listening) if self.has_hear() => listening.hearing.hear(request, signal).await,
+            Some(_) => Err(RuntimeError::plain("Not available")),
+            None => self.listening.hear(request, signal).await,
+        }
     }
     async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
-        self.listening.audition(request, signal).await
+        match &self.hook_listening {
+            Some(listening) if self.has_audition() => listening.engine.audition(request, signal).await,
+            Some(_) => Err(RuntimeError::plain("Not available")),
+            None => self.listening.audition(request, signal).await,
+        }
     }
     async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
-        self.listening.audio_file(named, signal).await
+        match &self.hook_listening {
+            Some(listening) if self.has_audio_file() => listening.hearing.audio_file(named, signal).await,
+            Some(_) => Ok(None),
+            None => self.listening.audio_file(named, signal).await,
+        }
     }
+    /// A goal's rig is the shared listening's (renders and scratch copies through the host): none for a DAW that hears
+    /// through its own hook.
     fn has_goal(&self) -> bool {
-        self.connected.get() && self.listening.goal_ready()
+        self.hook_listening.is_none() && self.connected.get() && self.listening.goal_ready()
     }
     async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
         self.listening.goal(request, signal).await
@@ -1572,8 +1626,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         let pinned = hints.as_ref().and_then(|hints| hints.pinned.as_ref());
         signal.check()?;
         self.changes.new_turn();
-        // A match run's next round goes on with its answer's rounds; a new answer starts a judged run's changes afresh.
-        self.listening.new_turn(hints.as_ref().and_then(|hints| hints.continuing) == Some(true));
+        // A match run's next round goes on with its answer's rounds; a new answer starts a judged run's changes afresh
+        // (through the DAW's own hook, Logic's, or the shared listening).
+        let continuing = hints.as_ref().and_then(|hints| hints.continuing) == Some(true);
+        match &self.hook_listening {
+            Some(listening) => listening.new_turn(continuing),
+            None => self.listening.new_turn(continuing),
+        }
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
         }
@@ -1650,6 +1709,9 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         self.changes.retire_all(Ending::Restart);
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {
             unlisten();
+        }
+        if let Some(listening) = &self.hook_listening {
+            listening.hearing.close().await;
         }
         let endpoint = self.endpoint.borrow_mut().take();
         if let Some(endpoint) = endpoint {

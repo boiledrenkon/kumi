@@ -11,6 +11,7 @@ use crate::bodies;
 use crate::changes::{Changes, Ctx};
 use crate::helper::Helper;
 use crate::log;
+use crate::mcu::Mcu;
 use crate::project::{Needs, Project};
 use crate::queue::Answer;
 use crate::read::{self, Want};
@@ -70,6 +71,37 @@ pub fn answer_change(
         started.elapsed().as_millis(),
         ax.calls
     ));
+    result
+}
+
+/// The listening methods: `hear`, `audition`, `render`.
+pub const LISTEN_METHODS: [&str; 3] = crate::listen::METHODS;
+
+/// Answers one listening request over Logic, with the bridge's Mackie Control when there is one (its timecode is how
+/// the playhead is followed while Logic plays, its solo buttons how a track is soloed for a pass): the run loop's for a
+/// queued one, the recorder's and the listening test's over a helper of their own. `keepalive` is called about once a
+/// second while Logic plays.
+#[allow(clippy::too_many_arguments)]
+pub fn answer_listen(
+    project: &mut Project,
+    mcu: Option<&mut Mcu>,
+    helper: &mut dyn Helper,
+    pid: u32,
+    method: &str,
+    params: &Value,
+    keepalive: &mut dyn FnMut(),
+) -> Answer {
+    let mut ax = Ax::new(helper, pid);
+    let started = Instant::now();
+    let result = {
+        let mut ctx = Ctx { project, ax: &mut ax };
+        crate::listen::answer(&mut ctx, mcu, method, params, keepalive)
+    };
+    let said = match &result {
+        Ok(_) => "ok".to_string(),
+        Err((code, _)) => code.clone(),
+    };
+    log::line(&format!("{method} -> {said} in {} ms ({} helper calls)", started.elapsed().as_millis(), ax.calls));
     result
 }
 

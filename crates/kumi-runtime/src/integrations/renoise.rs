@@ -51,6 +51,7 @@ pub const DAW: OwnDaw = OwnDaw {
     permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::RENOISE),
     changes: &super::renoise_changes::CHANGES,
     open_project: None,
+    listening: None,
     catch_up: Some(&CATCH_UP),
     phrases: Some(&PHRASES),
 };

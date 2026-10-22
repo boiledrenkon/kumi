@@ -1,11 +1,12 @@
 # kumi-logic-hands
 
 The macOS helper behind Kumi's Logic Pro bridge, `logic-kumi`. It is one Swift file with no dependencies
-beyond Cocoa, ApplicationServices and CoreMIDI. The bridge runs it as a child and speaks JSON lines with
-it: one request a line on stdin, one reply a line on stdout, events in between. It knows macOS, not Logic:
-it reads and writes Accessibility elements, presses menu items, posts key events to a process and opens
-virtual MIDI ports, each exactly as asked. The protocol is the "Helper protocol" section of
-`docs/en/LOGIC_CONTRACT.md`; this page is how the helper implements it.
+beyond Cocoa, ApplicationServices, CoreMIDI and CoreAudio. The bridge runs it as a child and speaks JSON
+lines with it: one request a line on stdin, one reply a line on stdout, events in between. It knows macOS,
+not Logic: it reads and writes Accessibility elements, presses menu items, posts key events to a process,
+opens virtual MIDI ports and records a process's output through a Core Audio process tap, each exactly as
+asked. The protocol is the "Helper protocol" section of `docs/en/LOGIC_CONTRACT.md`; this page is how the
+helper implements it.
 
 The helper stays dumb on purpose: no element paths, no key command tables, nothing that changes with a
 Logic version. macOS ties the Accessibility grant to the helper's content, so a helper that rarely changes
@@ -53,7 +54,8 @@ id as given (`null` when the request had none) and `ms`, how long the helper too
 The rules: one request at a time; a reply within 2 s, else an error (`timeout` when the work did not
 finish in time, `busy` when the request before it still held the helper); logging goes to stderr only; no
 app is activated unless `activate` asks; a pop-up button's children are never read unless `popups` is
-true, since reading them opens its menu; EOF on stdin or `quit` ends the helper, and its MIDI ports with it.
+true, since reading them opens its menu; EOF on stdin or `quit` ends the helper, and its MIDI ports with it, after
+finishing a running tap (SIGTERM, SIGINT and SIGHUP finish the tap too, then end the helper as the signal says).
 
 ## Ops
 
@@ -75,7 +77,9 @@ true, since reading them opens its menu; EOF on stdin or `quit` ends the helper,
 | `midi.open` | `name`, `uid` | `opened`, `source`, `destination`: a virtual source and destination of that name with the unique ids `uid` and `uid + 1`; `uid` is a number, or a text hashed to one |
 | `midi.send` | `hex` | `sent`: the bytes out of the source |
 | `midi.close` | | `closed`; closing closed ports is fine |
-| `tap.start`, `tap.stop` | | the error `reserved` until M5 |
+| `tap.start` | `pid`, `path` (the whole path of a WAV file to make; never one that is there), `mute` (default false), `maxSeconds` (default 600, above 0 and up to 3600) | `sampleRate`, `channels`, `hostTime`: a tap on the process's output mixed down to stereo, written to `path` as 32-bit float at `sampleRate` (see "The process tap"); `mute` keeps the process's own output from the speakers while the tap is read; `hostTime` is the host time (`mach_absolute_time`) just after the tap's device started. One tap at a time |
+| `tap.status` | | `running`, `frames` and `seconds` written so far, `truncated` |
+| `tap.stop` | | `file`, `frames`, `seconds`, `sampleRate`, `channels`, `peak` and `rms` (linear, 1.0 is full scale), `anchors` (`[frame, hostTime]` pairs), `timebase` (`{numer, denom}`: a host tick is `numer / denom` ns), `dropped` (frames lost), `truncated` (the capture reached `maxSeconds`): the tap stopped, its file finished, its aggregate device and tap destroyed |
 | `quit` | | `{"id": n, "ok": true}`, then the helper exits |
 
 `root` is `"app"` (the default), `"main"` (`AXMainWindow`), `"focused"` (`AXFocusedWindow`),
@@ -106,15 +110,56 @@ Accessibility, key and menu op checks first), `no-process`, `no-app` (no running
 pid), `no-root`, `no-element` (the path runs out; `path` names where), `popup`, `unknown-attr`,
 `no-attributes`, `no-menubar`, `no-menu-item` (`title` names the first title not found), `disabled` (the
 menu item is greyed out), `unknown-key`, `unknown-mod`, `event-failed`, `too-long`, `bad-hex`,
-`midi-open` (ports are open already), `midi-closed`, `midi-failed` (`status` carries CoreMIDI's), `reserved`,
-`timeout`, `busy`, and for a `set`, `action` or `menu` press that the app refused, the AXError's name
+`midi-open` (ports are open already), `midi-closed`, `midi-failed` (`status` carries CoreMIDI's), `denied`
+(macOS refused the process tap for want of the System Audio Recording permission; `status` is Core Audio's),
+`unsupported` (a process tap before macOS 14.2), `failed` (a tap that couldn't start, or `tap.stop` with no tap
+running; `step` names where: `process`, `tap`, `format`, `aggregate`, `streams`, `file`, `ioproc` or `start`, with
+`detail` and, from Core Audio, `status`), `timeout`, `busy` (also `tap.start` while a tap runs), and for a `set`,
+`action` or `menu` press that the app refused, the AXError's name
 (`cannotComplete`, `attributeUnsupported`, `actionUnsupported`, …) with `result`, `before` and `after`
 still in the reply.
 
+## The process tap
+
+`tap.start` finds the process's Core Audio process object (`kAudioHardwarePropertyTranslatePIDToProcessObject`;
+a process has none until it makes audio, which is `failed` with `step: "process"`: ask again a little later),
+makes a private tap mixing that process down to stereo (`CATapDescription`, `muteBehavior` `.mutedWhenTapped`
+when `mute`, else `.unmuted`) and a private aggregate device holding it, with drift compensation, clocked by the
+default output device. A default output device with inputs of its own would put them in the aggregate's input too,
+so then the tap is the aggregate's only member and its clock: the IOProc hears the tap and nothing else, or the
+start fails at `step: "streams"`. The IOProc copies each buffer into a ring (nothing allocated, locked or written
+to a file on Core Audio's real-time thread; a semaphore signal per buffer), and a writer thread drains the ring into
+the file: a 44-byte WAV header, format 3 (IEEE float), 32-bit, the aggregate's rate and the tap's channels
+interleaved, the header's sizes patched every second and at the end. The file is made new (`O_EXCL`).
+
+The frames come at the aggregate device's rate, the clock device's, which `sampleRate` says: a process playing at
+another rate is resampled to it by the drift compensation. The tap's own format can say otherwise (afplay playing
+a 48 kHz file on 44.1 kHz speakers: the tap's format said 48 kHz, the frames came at 44.1 kHz), so the file and
+the replies carry the aggregate's rate, never the tap's.
+
+`anchors` place the file in time: each pair is the frame where a buffer starts in the file and the host time Core
+Audio stamped that buffer's first frame with (the `mHostTime` of the IOProc's input time stamp). There is one for
+the first buffer, one at least every quarter second, one right after any frames were lost, and one for the last
+buffer, frames and host times both rising. A host time `t` falls on frame `f + (t - h) × numer / denom / 10⁹ ×
+sampleRate` from the anchor `(f, h)` at or before it; between two anchors with no loss between them their own
+pace is a little closer still (`TapCapture::frame_at` in `src/helper.rs` does both). `dropped` counts frames lost:
+a jump in the device's sample time, or a writer more than four seconds behind. A capture that reaches `maxSeconds`
+stops writing and stops its IO (which ends the mute), and `tap.stop` says `truncated: true`; the file stays under
+4 GB whatever `maxSeconds` says.
+
+The tap and the aggregate device are private to the helper: Audio MIDI Setup never lists them, and a helper that
+dies takes them with it (its file then reads up to the last patch of its header). macOS may ask for the System
+Audio Recording permission (System Settings > Privacy & Security > Screen & System Audio Recording) for the app
+the helper runs under; a refusal that Core Audio reports (`kAudioDevicePermissionsError`, `'!hog'`) is `denied`.
+A Mac whose permission is off may instead record silence: a capture of a process that played with `peak` 0 says so.
+The tap needs macOS 14.2; the helper still runs on macOS 13 and answers `unsupported` there.
+
 ## Events
 
-- `{"event": "midi", "hex": "90 5E 7F", "ms": n}`: one for each packet the MIDI destination receives,
-  `ms` the Unix time in milliseconds. A long SysEx can arrive as several packets.
+- `{"event": "midi", "hex": "90 5E 7F", "ms": n, "hostTime": n, "timeStamp": n}`: one for each packet the MIDI
+  destination receives, `ms` the Unix time in milliseconds, `hostTime` the host time (`mach_absolute_time`, the
+  clock of a tap's anchors) the helper received it at, `timeStamp` the packet's own host time stamp (0 when its
+  sender gave none). A long SysEx can arrive as several packets.
 - `{"event": "app", "state": "launched" | "terminated" | "activated" | "deactivated", "pid": n, "bundle": "…"}`
   for the bundle ids of the last `apps` request.
 
@@ -126,8 +171,12 @@ python3 -m unittest discover -s crates/logic-kumi/helper/tests -p 'test_*.py'
 
 builds the helper if needed, and `tests/midi_echo.swift`, a small CoreMIDI counterpart that sends to
 the helper's destination and listens on its source, then drives the helper over its pipes: ids, errors,
-the ops that need no grant, the MIDI ports both ways, EOF and `quit`. It passes on a Mac without Logic and
-without the Accessibility grant; the ops that need the grant are checked for a well-formed error there.
+the ops that need no grant, the MIDI ports both ways, the process tap, EOF and `quit`. It passes on a Mac without
+Logic and without the Accessibility grant; the ops that need the grant are checked for a well-formed error there.
+The tap's tests play a tone at -30 dBFS (after a second of silence, so the mute is on before it starts) with
+`afplay` and tap it muted, never a DAW; they skip when `afplay` is missing or macOS denies the tap.
+`KUMI_TAP_DIR` names the folder for their files (a temporary folder inside it, removed after). The whole tap,
+measured, is `cargo run -p logic-kumi --example tap_probe -- --dir <folder>`.
 The only MIDI byte it sends is Active Sensing, which a DAW listening on every input ignores; a DAW that scans every new
 port for a control surface (Logic sends its Mackie device queries) is heard on the test port and left out of the check.
 
@@ -143,3 +192,7 @@ port for a control surface (Logic sends its Mackie device queries) is heard on t
 - Reading a pop-up button's children opens its menu, so nothing reads them unless `popups` is true.
 - An app that stops answering makes each Accessibility call wait 1.5 s at most; the 2 s rule then
   answers `timeout` and the next request `busy` until the helper is free again.
+- A process tap needed no permission prompt on the lab's Mac (macOS 26). Core Audio made afplay's process
+  object within about 50 ms of its launch; a tap of an object that isn't a process is refused with `'!obj'`.
+- An aggregate device holding only the tap runs at the tap's own rate with host times exactly on that rate,
+  which look computed rather than measured; one clocked by an output device stamps the device's own times.

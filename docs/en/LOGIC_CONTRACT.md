@@ -1,4 +1,4 @@
-# Logic Pro bridge contract (M2, M3, M4)
+# Logic Pro bridge contract (M2, M3, M4, M5)
 
 What `logic-kumi` answers over `kumi-daw/1`, and which macOS channel each answer comes from. The
 wire, handshake, discovery files and lifecycle are daw-bridge's; this page is only Logic's shapes.
@@ -18,9 +18,9 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | Accessibility writes | values with a text field or slider, buttons, rows | set, then `AXConfirm`; read back before answering |
 | Key commands | actions with a binding | activate Logic first; post modifiers as their own events |
 | Menu items | actions without a binding | activate Logic first; press by index after matching the title |
-| Mackie Control | selection, transport and level events; the LCD names; selecting a track | answer only as a Mackie Control (device 0x14), and the version request; select from the Pan view, where the LCD names the strips |
+| Mackie Control | selection, transport and level events; the LCD names; selecting a track; the timecode display followed while Logic plays (listening); the strips' solo buttons (a listening pass's solos) | answer only as a Mackie Control (device 0x14), and the version request; select from the Pan view, where the LCD names the strips; the timecode's digits are ASCII (0x31 is "1"), the first two controllers the assignment display ("PN") |
 | Panel service | open and save panels | post keys to `com.apple.appkit.xpc.openAndSavePanelService`; set the go-to-folder field by AX |
-| Process tap | listening | M5 |
+| Process tap | hearing Logic (`hear`, `audition`) | the helper's `tap.*` on Logic's pid, into a 32-bit float WAV file under the request's folder; started and stopped around a run of passes, never left running; `mute` keeps Logic from the speakers meanwhile |
 
 ## Identity
 
@@ -116,13 +116,15 @@ stderr only and never activates an app unless asked. The helper's README
 | `midi.open` | `name`, `uid` (int, or a string hashed to one) | `opened`, `source`, `destination`; `midi-open` while open |
 | `midi.send` | `hex` | `sent` |
 | `midi.close` | | `closed` (idempotent) |
-| `tap.start`, `tap.stop` | reserved for M5 | `reserved` |
+| `tap.start` | `pid`, `path` (a new WAV file's whole path), `mute` (false), `maxSeconds` (600, up to 3600) | `sampleRate`, `channels`, `hostTime`; `busy` while a tap runs, `denied` (no System Audio Recording permission), `unsupported` (before macOS 14.2), `failed` with `step` and `detail` (`step: "process"` while the process makes no audio yet) |
+| `tap.status` | | `running`, `frames`, `seconds`, `truncated` |
+| `tap.stop` | | `file`, `frames`, `seconds`, `sampleRate`, `channels`, `peak`, `rms` (linear), `anchors` (`[frame, hostTime]`), `timebase` (`{numer, denom}`), `dropped`, `truncated`; `failed` when no tap runs |
 | `quit` | | `ok` then exit |
 
 Error codes: `malformed`, `unknown-op`, `bad-request`, `untrusted`, `no-process`, `no-app`,
 `timeout`, `busy`, `popup`, `unknown-attr`, `no-menubar`, `no-menu-item`, `disabled`,
-`unknown-key`, `unknown-mod`, `too-long`, `bad-hex`, `midi-closed`, `midi-open`, `reserved`, and
-an AXError's name for a failed read, write or action.
+`unknown-key`, `unknown-mod`, `too-long`, `bad-hex`, `midi-closed`, `midi-open`, `denied`,
+`unsupported`, `failed`, and an AXError's name for a failed read, write or action.
 
 `root` is `"app"`, `"main"` (`AXMainWindow`), `"focused"` (`AXFocusedWindow`), `"menubar"` or
 `{"title": "substring"}`; `path` is child indexes joined by dots from that root. `depth` and
@@ -136,9 +138,22 @@ empty are left out; `more` counts children beyond `children`, or all of them at 
 Values are JSON (numbers, strings, booleans), points, sizes, rectangles and ranges are objects,
 other elements are `{"ref": "role title"}`.
 
-Events: `{"event": "midi", "hex": "…", "ms": n}` for bytes from the MIDI destination (a long
-SysEx may come in several); `{"event": "app", "state": "launched" | "terminated" | "activated" |
+Events: `{"event": "midi", "hex": "…", "ms": n, "hostTime": n, "timeStamp": n}` for bytes from the
+MIDI destination (a long SysEx may come in several; `hostTime` is when the helper received them,
+`timeStamp` the packet's own host time stamp, 0 when the sender gave none); `{"event": "app", "state": "launched" | "terminated" | "activated" |
 "deactivated", "pid": n, "bundle": "…"}` for the apps named in the last `apps` request.
+
+The process tap (`tap.*`) records a process's output mixed down to stereo into a WAV file the helper
+writes itself: format 3 (IEEE float), 32-bit, at the rate of the tap's private aggregate device
+(clocked by the default output device; a process playing at another rate is resampled to it), the
+header's sizes patched every second and at the end. `mute` keeps the process's own output from the
+speakers while the tap is read. `anchors` pair a frame of the file with the host time
+(`mach_absolute_time`, the clock CoreMIDI stamps packets with) Core Audio gave the buffer starting
+there: the first buffer, one at least every quarter second, one after any loss, and the last. A host
+time `t` falls on frame `f + (t - h) × numer / denom / 10⁹ × sampleRate` from the anchor `(f, h)` at
+or before it. `dropped` counts frames lost; a capture that reaches `maxSeconds` stops writing and says
+`truncated`. EOF, `quit` and SIGTERM finish a running tap's file; the tap and its aggregate device
+are private to the helper and go with it.
 
 ## Changes (`change_preview`, `change_apply`, `change_restore`)
 
@@ -213,7 +228,14 @@ pane and tab and puts them back; a marker is made at the playhead, which is move
 `transport_play`, `transport_stop` and `cursor_set` (the tools `play`, `stop`, `set_cursor`) go
 through the control bar's Play and Stop buttons and the LCD's bar and beat sliders; none is a step
 of Logic's undo, and `cursor_set` takes `positionBeats` or `position` (seconds at the project's
-constant tempo). `undo_step_begin`/`undo_step_end` are counted (Logic has no undo block):
+constant tempo). The playhead is placed exactly on the beat asked, wherever it is placed (`cursor_set`,
+and where a marker, a split, a resize edge, a tempo or signature event, an import or an automation event
+is made): the LCD's bar and beat sliders keep the division and tick the playhead had, and a stop leaves
+those anywhere (after one, Logic played from 2.1.3.162 and a split asked at bar 3 landed past it), so
+when Logic has played or stopped since the bridge last placed it, or the Mackie Control's timecode shows
+a division or tick past 1, the playhead goes to the project's start first with the Stop button, which
+reads "Go to Beginning" while Logic is stopped away from it (at the start it reads "Stop", and the
+playhead is on the beat already), then the bar and beat are stepped. `undo_step_begin`/`undo_step_end` are counted (Logic has no undo block):
 `undo_step_begin` answers `{stepId: "sN"}`, `undo_step_end` `{desc, entry: false, changes: n}`, and
 each change in the plan stays its own step of Logic's undo.
 
@@ -232,7 +254,8 @@ Project". With it unchecked a bounce changes nothing in the project and leaves L
 bounce, then the split undone through Logic's undo: recorded). The dialog keeps these choices for the next bounce, as
 it keeps the format. A bounce holds whatever Logic plays, the metronome's click included while the control bar's
 Metronome Click is on (bars 6 and 7 of Scratch, where no region plays, bounced at a peak of 0.42 with the click on):
-`bounce` leaves the click as the producer set it. `export_tracks` goes through File > Export > All Tracks as Audio Files…, an open panel that takes a
+`bounce` leaves the click as the producer set it, and `render` (M5, "Listening" below) turns it off for its bounce.
+`export_tracks` goes through File > Export > All Tracks as Audio Files…, an open panel that takes a
 folder (its options are left as the producer set them): the folder (which must be there) is reached by the go-to
 sheet, Export pressed, and the answer lists the files Logic wrote there (`{epoch, folder, files: [{name, bytes,
 seconds}]}`). What the bridge looks at on disk goes through one seam (`src/disk.rs`), so a recorded scene keeps
@@ -456,3 +479,117 @@ titles.
 - `track-add` places a track **below the selected one** (Logic's New Tracks behaviour), so `index`
   counts from 1 (0, above every track, is unreachable); a kind (`audio`, `instrument`, `external`)
   may be given.
+
+## Listening (`hear`, `audition`, `render`)
+
+M5 lets Kumi hear Logic. The three are methods of the bridge, queued on the run loop as the changes are. None is a
+change, a row or a step of Logic's undo, and each leaves Logic as it found it: stopped, its playhead on the bar and
+beat it was on (on the beat), every track's solo, the metronome and the cycle as they were. They are put back whatever
+happens, a pass that fails included, and what couldn't be is listed under `notPutBack`. Logic playing or recording is
+`busy` ("Kumi listens only while it is stopped"), a dialog up `busy`, a missing Accessibility grant `failed` in words,
+as for every method. Audio never travels on the wire: each answer names a file in the request's `folder`, a whole path
+to a folder that is there (Kumi makes no folders and never writes over a file: `kumi-hear-<n>.wav`,
+`kumi-audition-<n>-<k>.wav`, `kumi-render-<n>.wav`, numbered past those there). Kumi never hears the metronome: the
+control bar's Metronome Click is turned off for the pass when it is on, read back, and turned on again after
+(`metronome: "off for the pass"`; `"off"` when it was off). The metronome's state is a setting Logic saves with the
+project, so turning it off and on again, which every run of passes does (its clicks turn it on), marks the project
+edited though nothing in it changed: the producer's next close of it asks to save (moving the playhead leaves it as it
+was; measured on a copy of Scratch).
+
+| Method | Params | Answer |
+| --- | --- | --- |
+| `hear` | `fromBeats`, `beats` (at least 0.25, at most 600 s at the project's tempo), `folder`, `mute?` (false), `solo?` (track refs soloed alone for the pass; none: the whole mix, no track soloed), `epoch?` | `{file, seconds, sampleRate, channels, lead: 0, peak, rms, aligned: {by, latencyMs, errorMs}, fromBeats, beats, mute, solo, metronome, epoch, note?, notPutBack?}` |
+| `audition` | `candidates` (1 to 16 of `{ref}`, a track soloed alone, or `{mix: true}`, the whole mix), `fromBeats`, `beats`, `folder`, `mute?`, `epoch?` | `{candidates: [{ref` or `mix: true, name, file, seconds, sampleRate, channels, lead: 0, peak, rms, note?}], aligned, fromBeats, beats, mute, metronome, epoch, notPutBack?}`: the candidates in their order, heard one pass each in one capture |
+| `render` | `ref?` (a track soloed alone for the bounce; none: the whole mix), `fromBeats`, `beats`, `folder`, `epoch?` | `{file, seconds, sampleRate, channels, bits: 32, lead: 0, fromBeats, beats, metronome, epoch, ref?, note?, notPutBack?}` |
+
+`peak` and `rms` are linear over every sample of the file (1.0 is full scale); `seconds`, `sampleRate` and `channels`
+are the file's. A pass is captured as 32-bit float at the default output device's rate and in stereo (44.1 kHz on the
+lab's Mac), and a render is Logic's bounce at the project's rate, 32-bit float. `lead` is 0: the file starts on the
+part's first beat. A track soloed that the producer muted stays silent, and its take's `note` says so; a play that
+stopped short of the part's end (the producer pressed Stop) keeps what was played, and `note` says where Logic
+stopped. Refs are this epoch's (`stale` otherwise), and a request's `epoch`, when it gives one, must be the project's.
+
+### A run of passes
+
+1. Logic read as it stands: the transport (`busy` while it plays), every header's solo and mute, the Metronome Click,
+   the cycle, the playhead, the regions (where the song ends).
+2. The cycle off, the metronome off, the helper's tap started on Logic's pid into `kumi-tap-<n>.wav` under `folder`
+   (muted for the producer when `mute`), for at most the passes' length and a margin.
+3. For each pass: exactly the tracks it asks for soloed, through the Mackie Control's solo buttons when its strips
+   line up with the tracks (the LCD naming the first eight in order, as Logic last wrote the names), else each
+   header's Solo checkbox (a click with Logic in front), read back from the headers; the playhead placed exactly on the
+   part's first whole beat (a part from a fraction of a beat plays from the beat before and is cut where it starts);
+   Play; the playhead followed until it is 150 ms past the part's end, eight or more of the display's updates seen;
+   Stop.
+4. The clicks: the playhead a bar past the song's end, where nothing plays, the metronome on, Play for a beat and a
+   little more (two clicks), Stop.
+5. The tap stopped, Logic put back (stopped, the solos, the metronome, the playhead on its bar and beat, then the
+   cycle, whose left locator the Stop button would go to), each pass's part cut out of the capture into a file of its
+   own, and the capture deleted.
+
+### Following the playhead, and how a part is cut
+
+The playhead is followed by the Mackie Control's timecode display. While Logic plays, it sends the digits that
+changed, about every 33 ms, a CoreMIDI packet each, the most significant first; the helper stamps each packet with the
+host time it came (Logic's own packets carry a time stamp of 0). A run of descending digits is one update, dated by its
+first packet, and while the surface's PLAY and BEATS LEDs are lit, each update is a position (bar, beat, division,
+tick). A play's positions lie on a line of host time against ticks (960 a quarter note; the division's ticks found as
+the divisor that makes them a line) to within 0.4 ms, with an update now and then a few milliseconds late, which the
+fit leaves out. When the surface sends nothing within 1.5 s of Play (no surface, or its display on SMPTE time), the
+control bar's bar and beat are polled instead (`by: "transport"`), each change of beat dated at the middle of the two
+polls around it, good to half their spacing.
+
+The tap stamps its frames with the same clock (its anchors), so a beat's host time is a frame of the capture. What the
+timecode can't say is how late the tap hears what Logic's display shows: on the lab's Mac that latency changed from one
+tap to the next, between 9 and 21.5 ms over 40 taps (within one tap, about a millisecond from one play to the next),
+which no fixed number covers within 10 ms. So each run measures it with step 4's clicks, which land the latency after
+their beats where nothing else plays, and every part of the capture is cut by it (`by: "timecode+click"`,
+`latencyMs`). When the clicks can't be heard (a metronome set silent), 15 ms is taken and `errorMs` is 10 (`by:
+"timecode"`). `errorMs` is the cut's uncertainty: the two clicks' agreement, the lines' spread, and what a play varies
+by within a tap (1.5 ms).
+
+Measured on Scratch at 160 BPM, each file read by the recorder before it was deleted: over the six hears of bar 1 in
+`listen-align` and the two of `listen-hear`, the Piano region's four notes began 0.4 to 1.8 ms after where the beats
+say in the file (32 notes; the latency the clicks measured was 20.1 to 21.2 ms, `errorMs` 1.7 to 1.8). In Logic's own
+offline bounce of the part (`listen-render`, Keys alone) the same notes begin 0.2 to 0.9 ms after their beats (the
+piano's attack), so a heard part is cut within about a millisecond of where the bounce puts its beats; in the
+audition's takes the notes began 0.5 ms before to 0.7 ms after their beats. Before the clicks, the lab cut by the
+timecode with a fixed latency: the tap's latency moved between 9 and 21.5 ms from tap to tap, so a fixed one missed by
+up to 11 ms; measured by clicks in another play of the same tap, the notes landed within 2 ms.
+
+### Render
+
+`render` is M4b's `bounce` (above) over the part: 32-bit float WAV, Normalize off, Add to Project off, the metronome
+off (a bounce holds the click otherwise) and the solos the request asks for. A track's own audio is that track soloed
+alone, which then passes the Stereo Out's plug-ins (its `note` says so). The solos and the metronome are put back.
+
+### Permission
+
+The tap needed no prompt on the lab's Mac (macOS 26.6.1): the helper runs under the terminal the bridge runs in, whose
+Accessibility grant it uses, and System Audio Recording was never asked for. Where macOS refuses the tap, the helper's
+`tap.start` answers `denied`, and `hear` and `audition` answer `failed`, saying to allow System Audio Recording for the
+app Kumi runs in (System Settings > Privacy & Security > Screen & System Audio Recording); before macOS 14.2, `failed`
+says listening needs 14.2.
+
+### How long it takes, and what the host's call must allow
+
+Measured on Scratch (160 BPM, the parts 1.5 s long): a `hear` took 4.3 to 4.9 s, so a run's overhead is 2.8 to 3.4 s
+(about a second of it the clicks); an `audition` of three candidates took 9.7 s, each pass after the first adding its
+part and about 1.2 s; a `render` of Keys alone took 8.2 s and one of four bars of the mix (6 s of audio) 6.4 s, most of
+it the Bounce dialog and the save panel.
+
+The bridge waits for a listening request as long as its part plays and a margin, at the project's tempo as the focus
+last read it (60 BPM when it has none): `hear` the part's seconds and 28 s, `audition` each candidate's part and 8 s,
+and 20 s more, `render` the part and 45 s (`listen::bound_seconds`), at most two hours whatever a deadline says; a
+request that gives its own deadline is waited for until then. The host's call must allow the part's length and a
+margin too: a 1.5 s part is answered in about 5 s, so the host's 30 s change timeout covers parts up to about 20 s, and
+a longer part (or an audition of several) needs the bound's length.
+
+### A region's audio file
+
+Logic shows an audio region's file by name only, never its path. Imported into a copy of Scratch (a tone onto Vocal),
+the region's item names the region ("import-tone") and its help text says where it starts and ends and that it is an
+audio region; the Region inspector names the region; the Browsers pane's Project tab lists the file by name
+("import-tone.wav"), its regions under it, in text fields that carry no path, URL or document. So a region row has no
+`file` field, and the runtime's `audio_file` has nothing to read for Logic: Kumi hears a region by `hear` or `render` of
+its track over the region's bars instead.

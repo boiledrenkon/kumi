@@ -47,6 +47,11 @@
 //! kinds in the shared brief's shapes; it refuses `fx-move` and `send-mode` as the bridge does, answers `param`,
 //! `smart` and `automation` reads and a strip's tree and routing bodies, and writes a bounce's and an export's audio
 //! files where it is asked to (`bounce`, `export_tracks`: no change, the bridge's answers).
+//!
+//! (M5, `logic/listen.rs`) Logic is heard as the bridge hears it, with audio the simulation makes: `hear` plays a part
+//! and captures it (each track a sine of its own through its fader, pan and plug-ins, then the Stereo Out's), `audition`
+//! takes such a pass for each candidate, `render` bounces a part offline; each writes a WAV file into the folder Kumi
+//! names and answers what the file holds, and none changes the project.
 use super::replay::{epoch_of, find, load_cases, normal, retag, Case, RECORDED_EPOCH};
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
@@ -55,6 +60,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod listen;
 mod mixer;
 mod render;
 use mixer::{AutoEvent, Aux, Channel, Output, Plugin, Smart};
@@ -83,6 +89,8 @@ const CHANGE_METHODS: [&str; 11] = [
     "bounce",
     "export_tracks",
 ];
+/// (M5) Listening: a part played and captured, a pass per candidate, a part bounced offline. None is a change.
+const LISTEN_METHODS: [&str; 3] = ["hear", "audition", "render"];
 /// The kinds the bridge can't make, and why, as it refuses them.
 const NOT_YET: [(&str, &str); 5] = [
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
@@ -4139,11 +4147,14 @@ impl LogicScript {
 
     /// The simulator's config for Logic with this project behind it: the reads, and Kumi's changes, in the bridge's order.
     pub fn config(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        SimulatorConfig::logic(secret, resource).with_methods(&METHODS, self.respond()).with_methods(&CHANGE_METHODS, self.respond())
+        SimulatorConfig::logic(secret, resource)
+            .with_methods(&METHODS, self.respond())
+            .with_methods(&CHANGE_METHODS, self.respond())
+            .with_methods(&LISTEN_METHODS, self.respond())
     }
 
     fn answer(&self, method: &str, params: &Value) -> Option<Answer> {
-        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) {
+        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) && !LISTEN_METHODS.contains(&method) {
             return None;
         }
         let mut state = self.state.lock().unwrap();
@@ -4164,6 +4175,10 @@ impl LogicScript {
             "project_save" => return Some(state.project_save(params)),
             "bounce" => return Some(state.bounce(params)),
             "export_tracks" => return Some(state.export_tracks(params)),
+            // (M5) A part heard, auditioned or bounced: files written, nothing in the project changed.
+            "hear" => return Some(state.hear(params)),
+            "audition" => return Some(state.audition(params)),
+            "render" => return Some(state.render(params)),
             _ => {}
         }
         let (epoch, project, saved_as) = (state.epoch, state.project, state.saved_as.clone());

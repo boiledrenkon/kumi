@@ -52,6 +52,8 @@ pub const DAW: OwnDaw = OwnDaw {
     permission_words,
     changes: &super::logic_changes::CHANGES,
     open_project: Some(open_project),
+    // (M5) Logic is heard: a part played and what it outputs captured, a part bounced offline (`logic_listening`).
+    listening: Some(super::logic_listening::hook),
     // (Logic's catch-up, watch_me and phrases are its own above: `project` and `instant`, not the host's snapshots.)
     catch_up: None,
     phrases: None,

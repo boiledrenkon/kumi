@@ -201,6 +201,11 @@ pub struct Project {
     pub sample_rate: Option<u32>,
     /// How many helper calls the last full-window walk took and how long: the lab's number.
     pub last_walk_ms: Option<u64>,
+    /// Whether the playhead stands exactly on a beat (its division and tick 1), which the LCD can't show: false once
+    /// Logic has played or stopped since, or the Mackie Control's timecode shows a division or tick past 1. Placing
+    /// the playhead goes to the project's start first when it isn't, since the LCD's bar and beat sliders keep the
+    /// division and tick it had. A project read fresh is taken as exact; the bridge starts it unsure.
+    pub playhead_exact: bool,
 }
 
 impl Project {
@@ -224,6 +229,7 @@ impl Project {
             key_signature: String::new(),
             sample_rate: None,
             last_walk_ms: None,
+            playhead_exact: true,
         }
     }
 

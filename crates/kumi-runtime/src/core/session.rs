@@ -2,6 +2,7 @@
 
 use super::{
     contracts::*,
+    daw::cant_yet,
     errors::{FailureKind, KumiError, RuntimeError},
     file_sync::FileSync,
     gaps::{gap_guidance, gap_tools_for},
@@ -587,10 +588,20 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                     })),
                     hear: Some(Rc::new(move |request, signal| {
                         let profile = options.profile;
-                        let integration = hear.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        let (integration, connected) = hear
+                            .upgrade()
+                            .map(|i| {
+                                let state = i.state.borrow();
+                                (state.integration.clone(), state.connection == ConnectionState::Connected)
+                            })
+                            .unwrap_or((None, false));
                         async move {
                             match integration {
                                 Some(i) if i.has_hear() => i.hear(&request, signal).await,
+                                // (M5) Connected to a DAW Kumi doesn't hear yet: what can't be done, not that it isn't connected.
+                                Some(i) if connected && i.profile().id.is_some() => {
+                                    Ok(Err(cant_yet(i.profile(), &format!("hear the {}", i.profile().words.place))))
+                                }
                                 _ => Ok(Err(format!(
                                     "Kumi isn't connected to {}, so it can't hear the {}.",
                                     profile.words.app, profile.words.place

@@ -185,6 +185,12 @@ fn put_cycle(ctx: &mut Ctx, on: bool) -> Done<bool> {
     Ok(after.cycle)
 }
 
+/// The Cycle button turned on or off (its locators left as they are), for a listening pass that plays through; whether
+/// it is on after.
+pub(crate) fn set_cycle(ctx: &mut Ctx, on: bool) -> Done<bool> {
+    put_cycle(ctx, on)
+}
+
 /// Reads the cycle (on, left, right) with the LCD on Custom, and puts the display back.
 fn read_cycle(ctx: &mut Ctx) -> Done<Value> {
     let (_, shown) = display_mode(ctx)?;

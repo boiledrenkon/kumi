@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 /// The longest bounce Kumi asks for, in beats (an hour at 240 BPM).
-const MOST_BEATS: f64 = 14400.0;
+pub(super) const MOST_BEATS: f64 = 14400.0;
 pub(super) const SAMPLE_RATE: u32 = 44_100;
 pub(super) const CHANNELS: u16 = 2;
 

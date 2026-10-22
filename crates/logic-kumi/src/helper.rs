@@ -605,6 +605,161 @@ impl Helper for MockHelper {
     }
 }
 
+// The process tap: the helper records a process's output (Logic's) into a WAV file it writes itself, 32-bit float at
+// its aggregate device's rate and the tap's channels, and stamps the file with host times (`mach_absolute_time`, the
+// clock CoreMIDI's packets carry) so any host time can be placed in it (`tap.start`, `tap.status`, `tap.stop`: the
+// contract's helper protocol).
+
+/// What `tap.start` answers: the capture's format and when it started.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TapStarted {
+    pub sample_rate: f64,
+    pub channels: u32,
+    /// The host time right after the tap's device started.
+    pub host_time: u64,
+}
+
+/// What `tap.status` answers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TapStatus {
+    pub running: bool,
+    /// Frames in the file so far, and their length in seconds.
+    pub frames: u64,
+    pub seconds: f64,
+    /// Whether the capture reached its `maxSeconds` and stopped writing.
+    pub truncated: bool,
+}
+
+/// Host time's unit: a tick is `numer / denom` nanoseconds (`mach_timebase_info`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timebase {
+    pub numer: u32,
+    pub denom: u32,
+}
+
+impl Timebase {
+    /// A number of ticks as seconds (negative ticks for a time before another).
+    pub fn seconds(&self, ticks: i128) -> f64 {
+        ticks as f64 * f64::from(self.numer) / f64::from(self.denom) / 1e9
+    }
+}
+
+/// What `tap.stop` answers: the finished file, and how to place a host time in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapCapture {
+    /// The WAV file, as `tap.start` named it.
+    pub file: PathBuf,
+    /// Frames in the file, and their length in seconds at `sample_rate`.
+    pub frames: u64,
+    pub seconds: f64,
+    pub sample_rate: f64,
+    pub channels: u32,
+    /// The largest sample and the root mean square of every sample, linear (1.0 is full scale).
+    pub peak: f64,
+    pub rms: f64,
+    /// `(frame, host time)`: where a buffer starts in the file and the host time Core Audio stamped it with. The first
+    /// buffer, at least one every quarter second after it, one after any loss, and the last; in order.
+    pub anchors: Vec<(u64, u64)>,
+    pub timebase: Timebase,
+    /// Frames lost on the way (the device skipped some, or the writer fell behind): 0 for a whole capture.
+    pub dropped: u64,
+    /// Whether the capture reached its `maxSeconds` and stopped writing there.
+    pub truncated: bool,
+}
+
+impl TapCapture {
+    /// The frame of the file a host time falls on, fractional (below 0 or past the end for a host time outside the
+    /// capture): between the two anchors around it at their own pace when no frames were lost between them, else from
+    /// the anchor before it at the sample rate. None without anchors.
+    pub fn frame_at(&self, host_time: u64) -> Option<f64> {
+        let first = *self.anchors.first()?;
+        let after = self.anchors.partition_point(|&(_, host)| host <= host_time);
+        let (frame, host) = if after == 0 { first } else { self.anchors[after - 1] };
+        let offset = self.timebase.seconds(i128::from(host_time) - i128::from(host));
+        if let (true, Some(&(next_frame, next_host))) = (after > 0, self.anchors.get(after)) {
+            let span = self.timebase.seconds(i128::from(next_host) - i128::from(host));
+            let frames = next_frame.saturating_sub(frame) as f64;
+            if span > 0.0 && (frames / self.sample_rate - span).abs() < 0.001 {
+                return Some(frame as f64 + frames * offset / span);
+            }
+        }
+        Some(frame as f64 + offset * self.sample_rate)
+    }
+}
+
+/// A reply that said `ok` but lacks what its op answers: refused as `bad-reply`, with the reply.
+fn bad_reply(op: &str, reply: &Value, field: &str) -> HelperError {
+    let mut reply = reply.clone();
+    reply["detail"] = format!("the helper's {op} reply has no {field}").into();
+    HelperError::Refused { code: "bad-reply".into(), reply }
+}
+
+fn field<T>(op: &str, reply: &Value, name: &str, read: impl Fn(&Value) -> Option<T>) -> Result<T, HelperError> {
+    reply.get(name).and_then(read).ok_or_else(|| bad_reply(op, reply, name))
+}
+
+fn channels(op: &str, reply: &Value) -> Result<u32, HelperError> {
+    field(op, reply, "channels", |v| v.as_u64().and_then(|n| u32::try_from(n).ok()))
+}
+
+/// Starts a tap on the process `pid`, writing a new WAV file at `path` (a whole path; never over a file that is
+/// there), muting the process's own output while it runs when `mute`, for at most `max_seconds` (the helper's 600
+/// when None). The helper's refusals come back as they are: `busy` (a tap runs), `denied` (macOS wants the System
+/// Audio Recording permission), `unsupported` (before macOS 14.2), `failed` (with `step` and `detail`).
+pub fn tap_start(helper: &mut dyn Helper, pid: u32, path: &Path, mute: bool, max_seconds: Option<f64>) -> Result<TapStarted, HelperError> {
+    let Some(path) = path.to_str() else {
+        let reply = json!({"ok": false, "error": "bad-request", "detail": "the tap's path isn't UTF-8"});
+        return Err(HelperError::Refused { code: "bad-request".into(), reply });
+    };
+    let mut params = json!({"pid": pid, "path": path, "mute": mute});
+    if let Some(seconds) = max_seconds {
+        params["maxSeconds"] = seconds.into();
+    }
+    let reply = helper.call("tap.start", params)?;
+    Ok(TapStarted {
+        sample_rate: field("tap.start", &reply, "sampleRate", Value::as_f64)?,
+        channels: channels("tap.start", &reply)?,
+        host_time: field("tap.start", &reply, "hostTime", Value::as_u64)?,
+    })
+}
+
+/// How the running tap is doing (`running` false when none runs).
+pub fn tap_status(helper: &mut dyn Helper) -> Result<TapStatus, HelperError> {
+    let reply = helper.call("tap.status", json!({}))?;
+    Ok(TapStatus {
+        running: field("tap.status", &reply, "running", Value::as_bool)?,
+        frames: field("tap.status", &reply, "frames", Value::as_u64)?,
+        seconds: field("tap.status", &reply, "seconds", Value::as_f64)?,
+        truncated: reply.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// Stops the running tap and finishes its file (`failed` when none runs).
+pub fn tap_stop(helper: &mut dyn Helper) -> Result<TapCapture, HelperError> {
+    const OP: &str = "tap.stop";
+    let reply = helper.call(OP, json!({}))?;
+    let anchors = field(OP, &reply, "anchors", |anchors| {
+        anchors.as_array()?.iter().map(|pair| Some((pair.get(0)?.as_u64()?, pair.get(1)?.as_u64()?))).collect::<Option<Vec<_>>>()
+    })?;
+    let timebase = field(OP, &reply, "timebase", |timebase| {
+        let part = |name: &str| timebase.get(name)?.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0);
+        Some(Timebase { numer: part("numer")?, denom: part("denom")? })
+    })?;
+    Ok(TapCapture {
+        file: PathBuf::from(field(OP, &reply, "file", |v| v.as_str().map(str::to_string))?),
+        frames: field(OP, &reply, "frames", Value::as_u64)?,
+        seconds: field(OP, &reply, "seconds", Value::as_f64)?,
+        sample_rate: field(OP, &reply, "sampleRate", Value::as_f64)?,
+        channels: channels(OP, &reply)?,
+        peak: field(OP, &reply, "peak", Value::as_f64)?,
+        rms: field(OP, &reply, "rms", Value::as_f64)?,
+        anchors,
+        timebase,
+        dropped: field(OP, &reply, "dropped", Value::as_u64)?,
+        truncated: field(OP, &reply, "truncated", Value::as_bool)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +852,65 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         assert!(helper.call("trusted", json!({})).is_ok());
         assert_eq!(hands.launches(), 2);
+    }
+
+    #[test]
+    fn the_tap_is_started_followed_and_stopped_through_typed_answers() {
+        let hands = MockHands::new();
+        hands.reply("tap.start", Ok(json!({"sampleRate": 48000.0, "channels": 2, "hostTime": 1_000_000u64})));
+        hands.reply("tap.status", Ok(json!({"running": true, "frames": 24000, "seconds": 0.5, "truncated": false})));
+        // A 24 MHz host clock (125/3 ns a tick): a quarter second is 6,000,000 ticks and 12,000 frames at 48 kHz.
+        hands.reply(
+            "tap.stop",
+            Ok(json!({
+                "file": "/tmp/kumi-tap.wav", "frames": 36000, "seconds": 0.75, "sampleRate": 48000.0, "channels": 2,
+                "peak": 0.0316, "rms": 0.0224, "timebase": {"numer": 125, "denom": 3}, "dropped": 0, "truncated": false,
+                "anchors": [[0, 1_000_000u64], [12000, 7_000_000u64], [24000, 13_000_000u64], [35488, 18_744_000u64]],
+            })),
+        );
+        let busy = HelperError::Refused { code: "busy".into(), reply: json!({"ok": false, "error": "busy"}) };
+        hands.reply("tap.start", Err(busy.clone()));
+        hands.reply("tap.stop", Ok(json!({"file": "/tmp/kumi-tap.wav", "frames": 10})));
+        let mut helper = MockHands::launch(&mut hands.clone()).unwrap();
+
+        let started = tap_start(helper.as_mut(), 812, Path::new("/tmp/kumi-tap.wav"), true, Some(30.0)).unwrap();
+        assert_eq!(started, TapStarted { sample_rate: 48000.0, channels: 2, host_time: 1_000_000 });
+        assert_eq!(
+            hands.calls()[0],
+            ("tap.start".to_string(), json!({"pid": 812, "path": "/tmp/kumi-tap.wav", "mute": true, "maxSeconds": 30.0}))
+        );
+        let status = tap_status(helper.as_mut()).unwrap();
+        assert_eq!(status, TapStatus { running: true, frames: 24000, seconds: 0.5, truncated: false });
+        let capture = tap_stop(helper.as_mut()).unwrap();
+        assert_eq!(
+            (capture.file.as_path(), capture.frames, capture.channels, capture.dropped),
+            (Path::new("/tmp/kumi-tap.wav"), 36000, 2, 0)
+        );
+        assert_eq!((capture.anchors.len(), capture.timebase), (4, Timebase { numer: 125, denom: 3 }));
+        assert!(!capture.truncated && (capture.peak - 0.0316).abs() < 1e-9);
+
+        // A host time is placed between the anchors around it, before the first and after the last at the sample rate.
+        let at = |host: u64| capture.frame_at(host).unwrap();
+        assert!((at(1_000_000) - 0.0).abs() < 1e-6);
+        assert!((at(4_000_000) - 6000.0).abs() < 1e-6, "{}", at(4_000_000));
+        assert!((at(19_000_000) - 36000.0).abs() < 1e-6, "{}", at(19_000_000));
+        assert!((at(0) + 2000.0).abs() < 1e-6, "{}", at(0));
+        // Frames lost between two anchors: a host time before the next one is placed from the one before it.
+        let gapped = TapCapture { anchors: vec![(0, 0), (11488, 6_000_000)], ..capture.clone() };
+        assert!((gapped.frame_at(3_000_000).unwrap() - 6000.0).abs() < 1e-6);
+        assert!((gapped.frame_at(6_000_000).unwrap() - 11488.0).abs() < 1e-6);
+        assert_eq!(TapCapture { anchors: vec![], ..capture }.frame_at(5), None);
+
+        // The helper's refusals come back as they are; a reply short of its fields is `bad-reply`.
+        assert_eq!(tap_start(helper.as_mut(), 812, Path::new("/tmp/other.wav"), false, None), Err(busy));
+        assert_eq!(hands.calls()[3].1, json!({"pid": 812, "path": "/tmp/other.wav", "mute": false}));
+        match tap_stop(helper.as_mut()) {
+            Err(HelperError::Refused { code, reply }) => {
+                assert_eq!((code.as_str(), reply["detail"].as_str()), ("bad-reply", Some("the helper's tap.stop reply has no anchors")))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(tap_status(helper.as_mut()), Err(HelperError::Refused { code, .. }) if code == "unknown-op"));
     }
 
     /// A helper made of a shell script: the real child, its pipes and threads, the reply timeout and the restart.
