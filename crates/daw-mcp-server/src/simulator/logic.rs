@@ -16,16 +16,19 @@
 //! contract's Changes section): a preview that writes nothing and fences what it saw, an apply that checks the fence
 //! again, writes and answers the value read back, a restore by value fenced by what the apply wrote. Logic keeps no
 //! undo step for a header's control (volume, pan, mute, solo, arm) or the tempo, so those answer `undo.entry: false`
-//! with no title; a rename ("Renaming"), a track made ("Create Track") or deleted ("Delete Tracks") and a marker made
-//! ("Create Marker"), moved ("Value Change") or deleted ("Delete") are steps of Logic's undo, named by the Edit menu's
-//! title and by the `desc` the host sent. A track added goes below the selected one (or the one `index` names) and
-//! moves the epoch, as the M2 replay moves it; a restore's ref from before is carried to where its track is now. A
-//! deleted track comes back only through Logic's own undo (Cmd-Z), while that step is still on top; a deleted marker
-//! the same way first, else made again by value, numbered by Logic. The reads replay the vectors with the changed
+//! with no title; a rename ("Renaming"), a track made ("Create Track", then "Renaming" when it is given a name, which
+//! goes through the Inspector once the track is made) or deleted ("Delete Tracks") and a marker made ("Create Marker"),
+//! moved ("Value Change") or deleted ("Delete") are steps of Logic's undo, named by the Edit menu's title and by the
+//! `desc` the host sent. A track added goes below the selected one (or the one `index` names), named after its channel
+//! strip ("Audio 2", "Inst 2": counted by the tracks of its kind), and moves the epoch, as the M2 replay moves it; a
+//! restore's ref from before is carried to where its track is now. A marker Logic makes is 0 beats long and named by
+//! its place in the Marker List ("Marker 1" is the first, so one made before it renumbers the rest), as the M3 and M4
+//! scenes read. A deleted track comes back only through Logic's own undo (Cmd-Z), while that step is still on top; a
+//! deleted marker the same way first, else made again by value. The reads replay the vectors with the changed
 //! values in them. A dialog (`busy_once`) refuses the next preview before anything is written; a write Logic doesn't
 //! answer after (`uncertain_once`) is made and answered `uncertain`. The kinds the bridge can't make are refused saying
-//! why, as it refuses them; of the kinds it makes, the simulator makes those whose state is a value here (the strip's
-//! controls and its name, tracks added and deleted, markers and the tempo), and says so for the rest (notes, bypass).
+//! why, as it refuses them; of the kinds it makes, the simulator makes those whose state is a value here, and says so
+//! for the rest (notes).
 //!
 //! The M4 kinds answer as the bridge's recorded scenes over the real Logic do (`crates/logic-kumi/tests/fixtures`): a
 //! key command resolved by its name or id from Logic's own table (a few of them, with their factory chords), a row only
@@ -35,6 +38,15 @@
 //! Logic names and gathers. Logic's undo steps carry the titles its Edit menu gave them there ("Split Regions", "Loop
 //! Parameter Change", "Insert Tempo" then "Value Change", "Flatten Stack"), keyed by the change's kind and target as
 //! the bridge's undo watch keys them, so a restore through Logic's own undo finds its step on top or says it can't.
+//!
+//! The second M4 slice (`logic/mixer.rs`, `logic/render.rs`) holds each channel strip's plug-ins (with the rows their
+//! window's Controls View lists and the settings their next and previous buttons step through), sends and patch, the
+//! Stereo Out's plug-ins (`<epoch>:output:1`, which no track has), the auxes Logic makes for a bus, and each track's
+//! Smart Controls and automation; it makes the plug-in, patch, send and Smart Control kinds and the bypass as the
+//! bridge's second slice makes them (`crates/logic-kumi/src/changes`, its `change-fx-*` scenes), and the automation
+//! kinds in the shared brief's shapes; it refuses `fx-move` and `send-mode` as the bridge does, answers `param`,
+//! `smart` and `automation` reads and a strip's tree and routing bodies, and writes a bounce's and an export's audio
+//! files where it is asked to (`bounce`, `export_tracks`: no change, the bridge's answers).
 use super::replay::{epoch_of, find, load_cases, normal, retag, Case, RECORDED_EPOCH};
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
@@ -42,6 +54,10 @@ use daw_bridge::wire::Project;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+mod mixer;
+mod render;
+use mixer::{AutoEvent, Aux, Channel, Output, Plugin, Smart};
 
 const VECTORS: &str = include_str!("../../tests/vectors/logic-reads.json");
 const VECTORS_NAME: &str = "tests/vectors/logic-reads.json";
@@ -52,9 +68,9 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
 /// The reads, in the order the bridge's welcome lists them after ping and status.
 const METHODS: [&str; 4] = ["focus", "read", "snapshot", "focus_body"];
-/// What the project answers besides: Kumi's changes, the transport and the playhead, a plan's steps, and (M4) the
-/// project saved, which is no change.
-const CHANGE_METHODS: [&str; 9] = [
+/// What the project answers besides: Kumi's changes, the transport and the playhead, a plan's steps, (M4) the project
+/// saved, and (M4b) a bounce and the tracks exported, none of which is a change.
+const CHANGE_METHODS: [&str; 11] = [
     "change_preview",
     "change_apply",
     "change_restore",
@@ -64,23 +80,21 @@ const CHANGE_METHODS: [&str; 9] = [
     "undo_step_begin",
     "undo_step_end",
     "project_save",
+    "bounce",
+    "export_tracks",
 ];
-/// The kinds the bridge can't make yet, and why, as it refuses them.
-const NOT_YET: [(&str, &str); 9] = [
+/// The kinds the bridge can't make, and why, as it refuses them.
+const NOT_YET: [(&str, &str); 5] = [
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
-    ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
-    ("fx-delete", "the insert slot's pop-up menu can't be driven from outside"),
-    ("fx-param", "a plug-in's controls aren't reached yet"),
-    ("fx-move", "the insert slots can't be rearranged from outside"),
-    ("send-add", "the send slot's pop-up menu can't be driven from outside"),
-    ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
+    ("send-mode", "a send's mode is a mark in its menu, which Logic Pro draws itself and Accessibility can't read, so it could never be read back"),
+    ("fx-move", "Logic Pro moves a plug-in from one slot to another only by dragging it, and no key command or menu item moves one"),
     ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
     ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
 ];
 /// The kinds the bridge makes whose state the simulator doesn't hold.
-const NOT_SIMULATED: [&str; 5] = ["notes-add", "notes-change", "notes-delete", "notes-quantize", "fx-bypass"];
+const NOT_SIMULATED: [&str; 4] = ["notes-add", "notes-change", "notes-delete", "notes-quantize"];
 /// The kinds the simulator makes, for the refusal that names them.
-const SIMULATED: &str = "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, track-stack, track-stack-flatten, marker-add, marker-move, marker-delete, tempo-set, tempo-marker-set, tempo-marker-delete, signature-set, loop-range, region-move, region-resize, region-split, region-loop, region-rename, region-delete, midi-import and key-command";
+const SIMULATED: &str = "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, track-stack, track-stack-flatten, marker-add, marker-move, marker-delete, tempo-set, tempo-marker-set, tempo-marker-delete, signature-set, loop-range, region-move, region-resize, region-split, region-loop, region-rename, region-delete, midi-import, key-command, fx-add, fx-delete, fx-bypass, fx-param, fx-params, fx-preset, patch-load, send-add, send-remove, send-volume, smart-control-set, automation-add, automation-change and automation-delete";
 /// (M4) What a key command's answers say of taking it back, and what one Logic kept no step of says, as the bridge
 /// says them (`changes/command.rs`).
 const KEY_NOTE: &str = "Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro).";
@@ -147,8 +161,8 @@ const PAN_CENTRE: i64 = 64;
 /// Logic's tempo slider runs 5 to 990 BPM in whole steps.
 const TEMPO_MIN: f64 = 5.0;
 const TEMPO_MAX: f64 = 990.0;
-/// How long a marker Logic makes is (its length to the next one isn't modelled).
-const MARKER_LENGTH: f64 = 16.0;
+/// How long a marker Logic makes is: none (the M3 and M4 scenes read a new marker's length as 0).
+const MARKER_LENGTH: f64 = 0.0;
 /// What the Edit menu says with nothing to undo.
 const CANT_UNDO: &str = "Can't Undo";
 /// What the bridge answers when Logic doesn't answer after a write was sent.
@@ -171,6 +185,10 @@ struct Track {
     armed: bool,
     /// (M4) The Track Stack this track is in: its own track's id.
     in_stack: Option<u64>,
+    /// (M4b) Its channel strip's plug-ins, sends and patch; its patch's Smart Controls; its automation, by parameter.
+    channel: Channel,
+    smart: Vec<Smart>,
+    automation: Vec<AutoEvent>,
 }
 
 impl Track {
@@ -187,6 +205,9 @@ impl Track {
             solo: row["solo"] == true,
             armed: row["armed"] == true,
             in_stack: None,
+            channel: Channel::default(),
+            smart: vec![],
+            automation: vec![],
         }
     }
 
@@ -208,6 +229,9 @@ impl Track {
             solo: false,
             armed: false,
             in_stack: None,
+            channel: Channel::default(),
+            smart: vec![],
+            automation: vec![],
         }
     }
 
@@ -248,6 +272,9 @@ impl Track {
             solo: false,
             armed: false,
             in_stack: None,
+            channel: Channel::default(),
+            smart: vec![],
+            automation: vec![],
         }
     }
 
@@ -318,27 +345,40 @@ fn pan_text(steps: i64) -> String {
 
 #[derive(Clone, PartialEq)]
 struct Marker {
-    name: String,
+    /// The name the marker was given; none for one Logic names itself, which its Marker List shows as "Marker <its
+    /// place>": a marker made before it renumbers it (the M4 key command scene: a marker made at bar 1 is "Marker 1",
+    /// and the one at bar 9 reads "Marker 2" from then on).
+    own_name: Option<String>,
     position_beats: f64,
     length: f64,
 }
 
+/// A marker's name as Logic gives it, or none when it is Logic's own numbering ("Marker 2").
+fn own_marker_name(name: &str) -> Option<String> {
+    let numbered = name.strip_prefix("Marker ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    (!numbered).then(|| name.to_string())
+}
+
 impl Marker {
-    /// What a marker is, as the Marker List shows it (the bridge's state).
-    fn state(&self) -> Value {
-        json!({"position": position_of(self.position_beats), "name": self.name, "length": self.length, "text": ""})
+    /// A marker Logic makes (and names itself), as long as Logic makes it: 0 beats (the M3 and M4 scenes).
+    fn made(position_beats: f64) -> Marker {
+        Marker { own_name: None, position_beats, length: MARKER_LENGTH }
+    }
+    /// Its name as the Marker List shows it at `place` (from 1).
+    fn name_at(&self, place: usize) -> String {
+        self.own_name.clone().unwrap_or_else(|| format!("Marker {place}"))
+    }
+    /// What a marker is, as the Marker List shows it at `place` (the bridge's state).
+    fn state(&self, place: usize) -> Value {
+        json!({"position": position_of(self.position_beats), "name": self.name_at(place), "length": self.length, "text": ""})
     }
     /// The row as the Marker List reads it, at `place` (from 1).
     fn row(&self, place: usize) -> Value {
-        json!({"length": self.length, "name": self.name, "position": position_of(self.position_beats), "ref": format!("{RECORDED_EPOCH}:marker:{place}"), "text": ""})
+        json!({"length": self.length, "name": self.name_at(place), "position": position_of(self.position_beats), "ref": format!("{RECORDED_EPOCH}:marker:{place}"), "text": ""})
     }
-    /// The marker as a title says it: `marker “Marker 1”`.
-    fn label(&self) -> String {
-        if self.name.is_empty() {
-            "marker".into()
-        } else {
-            format!("marker {}", quoted(&self.name))
-        }
+    /// The marker at `place` as a title says it: `marker “Marker 1”`.
+    fn label(&self, place: usize) -> String {
+        format!("marker {}", quoted(&self.name_at(place)))
     }
 }
 
@@ -662,8 +702,6 @@ struct State {
     deleted: HashMap<String, Track>,
     /// The markers, in the Marker List's order (by position).
     markers: Vec<Marker>,
-    /// The number Logic gives the next marker it makes ("Marker 2").
-    next_marker: usize,
     tempo: f64,
     /// (M4) The project's regions, in the Tracks area's order (by track, then by start); which region stood at each
     /// place in every epoch before this one, for a restore's ref; and the regions Kumi deleted, by the apply's `desc`,
@@ -689,6 +727,14 @@ struct State {
     /// (M4) The package the project was saved as, if Kumi saved it as another; every path saved to.
     saved_as: Option<String>,
     saved_paths: Vec<String>,
+    /// (M4b) The Mixer's output strips, which no track has (the Stereo Out), and the auxes Logic made for a bus, which
+    /// have no ref.
+    outputs: Vec<Output>,
+    auxes: Vec<Aux>,
+    /// (M4b) What Logic's own undo brings back whole: a plug-in Kumi removed, and a strip as it was before a patch Kumi
+    /// loaded, by the apply's `desc`.
+    removed_plugins: HashMap<String, Plugin>,
+    loaded_patches: HashMap<String, (Channel, Vec<Smart>)>,
     /// The playhead, in beats from the project's start.
     playhead: f64,
     playing: bool,
@@ -1065,11 +1111,17 @@ impl State {
                 .and_then(|page| page["items"].as_array().cloned())
                 .unwrap_or_default()
         };
-        let tracks: Vec<Track> = rows("track").iter().enumerate().map(|(n, row)| Track::recorded(n as u64 + 1, row)).collect();
+        let mut tracks: Vec<Track> = rows("track").iter().enumerate().map(|(n, row)| Track::recorded(n as u64 + 1, row)).collect();
+        // (M4b) Each strip as the recorded project holds it: Vocal's plug-in as its row reads, Keys playing Studio Grand
+        // (the M2 scene's Mixer), and the Stereo Out with no plug-in.
+        for (at, track) in tracks.iter_mut().enumerate() {
+            track.channel = mixer::recorded_channel(&rows_of(&cases, "plugin", &format!("{RECORDED_EPOCH}:track:{}", at + 1)), &track.name);
+            track.smart = mixer::recorded_smart(&track.channel);
+        }
         let markers: Vec<Marker> = rows("marker")
             .iter()
             .map(|row| Marker {
-                name: row["name"].as_str().unwrap_or_default().to_string(),
+                own_name: own_marker_name(row["name"].as_str().unwrap_or_default()),
                 position_beats: beats_of(&row["position"]),
                 length: row["length"].as_f64().unwrap_or(0.0),
             })
@@ -1088,7 +1140,7 @@ impl State {
             })
             .collect();
         let focus = find(&cases, "focus", &json!({})).and_then(|case| case.response.as_ref().ok()).cloned().unwrap_or(Value::Null);
-        let (next_track, next_marker, next_region) = (tracks.len() as u64 + 1, markers.len() + 1, regions.len() as u64 + 1);
+        let (next_track, next_region) = (tracks.len() as u64 + 2, regions.len() as u64 + 1);
         let mut state = State {
             epoch: RECORDED_EPOCH,
             project: 0,
@@ -1099,7 +1151,6 @@ impl State {
             next_track,
             deleted: HashMap::new(),
             markers,
-            next_marker,
             tempo,
             regions,
             region_places: HashMap::new(),
@@ -1115,6 +1166,10 @@ impl State {
             flattened: HashMap::new(),
             saved_as: None,
             saved_paths: vec![],
+            outputs: vec![Output::stereo_out()],
+            auxes: vec![],
+            removed_plugins: HashMap::new(),
+            loaded_patches: HashMap::new(),
             playhead: focus["transport"]["beat"].as_f64().unwrap_or(0.0),
             playing: focus["transport"]["playing"] == true,
             undo: vec![],
@@ -1388,6 +1443,19 @@ impl State {
             "region-delete" => self.region_delete(method, params),
             "midi-import" => self.midi_import(method, params),
             "key-command" => self.key_command(method, params),
+            // (M4b) plug-ins, a patch, sends, Smart Controls, automation
+            "fx-add" => self.fx_add(method, params),
+            "fx-delete" => self.fx_delete(method, params),
+            "fx-bypass" => self.fx_bypass(method, params),
+            "fx-param" => self.fx_param(method, params),
+            "fx-params" => self.fx_params(method, params),
+            "fx-preset" => self.fx_preset(method, params),
+            "patch-load" => self.patch_load(method, params),
+            "send-add" => self.send_add(method, params),
+            "send-remove" => self.send_remove(method, params),
+            "send-volume" => self.send_volume(method, params),
+            "smart-control-set" => self.smart_control_set(method, params),
+            "automation-add" | "automation-change" | "automation-delete" => self.automation(kind, method, params),
             _ => match TRACK_PROPS.iter().find(|prop| prop.kind == kind) {
                 Some(prop) => self.track_prop(prop, method, params),
                 None if NOT_SIMULATED.contains(&kind) => Err(bad(format!(
@@ -1504,10 +1572,7 @@ impl State {
         // split there; the regions selected, or none.
         let edited = match command.id {
             513 => {
-                let beats = on_the_beat(self.playhead);
-                let marker = Marker { name: format!("Marker {}", self.next_marker), position_beats: beats, length: MARKER_LENGTH };
-                self.next_marker += 1;
-                self.markers.push(marker);
+                self.markers.push(Marker::made(on_the_beat(self.playhead)));
                 self.sort_markers();
                 true
             }
@@ -1705,7 +1770,12 @@ impl State {
                     return Err(changed("the tracks changed since the preview"));
                 }
                 let desc = Self::desc(params)?;
+                // Logic names a new track after its channel strip, counted by the strips of its kind (the M3 scenes: a
+                // new audio track beside Vocal is "Audio 2", a new instrument track beside Keys "Inst 2"); a name given
+                // goes through the Inspector once the track is made, so "Renaming" is on top of "Create Track".
+                let renamed = name.is_some();
                 let named = name.unwrap_or_else(|| {
+                    let same = self.tracks.iter().filter(|track| !track.is_stack() && track.kind == kind).count();
                     format!(
                         "{} {}",
                         match kind.as_str() {
@@ -1713,7 +1783,7 @@ impl State {
                             "instrument" => "Inst",
                             _ => "MIDI",
                         },
-                        count + 1
+                        same + 1
                     )
                 });
                 let made = Track::made(self.next_track, &named, &kind);
@@ -1721,7 +1791,8 @@ impl State {
                 self.tracks.insert(after, made);
                 self.bump_epoch();
                 let place = after + 1;
-                let undo = self.applied(Some("Create Track"), &desc)?;
+                let steps: &[&str] = if renamed { &["Create Track", "Renaming"] } else { &["Create Track"] };
+                let undo = self.applied_steps(steps, &desc)?;
                 Ok(json!({
                     "epoch": self.epoch_text(),
                     "applied": {"index": place, "name": named, "kind": kind},
@@ -1835,8 +1906,8 @@ impl State {
     }
 
     /// `marker-add {positionBeats}`: a marker at the playhead moved there (on the beat), from the Marker List's Create
-    /// new Marker; Logic names it. Its restore deletes the row at its place, if the marker there is still at that
-    /// position.
+    /// new Marker; Logic names it by its place in the list. Its restore deletes the row at its place, if the marker
+    /// there is still at that position.
     fn marker_add(&mut self, method: &str, params: &Value) -> Answer {
         if method == "change_restore" {
             let created = params["created"]["ref"].as_str();
@@ -1845,15 +1916,15 @@ impl State {
             let Some(marker) = self.markers.get(place - 1).cloned() else {
                 return Err(gone("the marker Kumi added isn't in the Marker List any more"));
             };
-            if params["discard"] != true && marker.state()["position"] != params["applied"]["position"] {
-                return Err(changed(format!("{} has been moved in Logic Pro since Kumi added it", marker.label())));
+            if params["discard"] != true && position_of(marker.position_beats) != params["applied"]["position"] {
+                return Err(changed(format!("{} has been moved in Logic Pro since Kumi added it", marker.label(place))));
             }
             self.markers.remove(place - 1);
             let undo = self.restored(Some("Delete"), &desc)?;
             return Ok(json!({
                 "epoch": self.epoch_text(),
                 "restored": {"deleted": created},
-                "display": {"title": format!("{} taken away again", marker.label())},
+                "display": {"title": format!("{} taken away again", marker.label(place))},
                 "undo": undo,
             }));
         }
@@ -1885,17 +1956,16 @@ impl State {
                     return Err(changed("the markers changed since the preview"));
                 }
                 let desc = Self::desc(params)?;
-                let marker = Marker { name: format!("Marker {}", self.next_marker), position_beats: beats, length: MARKER_LENGTH };
-                self.next_marker += 1;
+                let marker = Marker::made(beats);
                 self.markers.push(marker.clone());
                 self.sort_markers();
                 let place = self.marker_at(beats).map_or(0, |at| at + 1);
                 let undo = self.applied(Some("Create Marker"), &desc)?;
                 Ok(json!({
                     "epoch": self.epoch_text(),
-                    "applied": marker.state(),
+                    "applied": marker.state(place),
                     "created": {"ref": self.marker_ref(place), "kind": "marker"},
-                    "display": {"title": format!("Marker {} at {}", quoted(&marker.name), bar_text(beats))},
+                    "display": {"title": format!("Marker {} at {}", quoted(&marker.name_at(place)), bar_text(beats))},
                     "undo": undo,
                 }))
             }
@@ -1923,7 +1993,7 @@ impl State {
                     changed("the marker has been moved in Logic Pro since Kumi moved it")
                 });
             };
-            let label = self.markers[at].label();
+            let label = self.markers[at].label(at + 1);
             self.markers[at].position_beats = prior;
             self.sort_markers();
             let undo = self.restored(Some("Value Change"), &desc)?;
@@ -1946,7 +2016,7 @@ impl State {
             });
         };
         let now = json!({"position": position_of(marker.position_beats)});
-        let title = format!("Moved {} to {}", marker.label(), bar_text(to));
+        let title = format!("Moved {} to {}", marker.label(place), bar_text(to));
         match method {
             "change_preview" => {
                 let mut display = json!({"title": title, "before": now, "after": {"position": position_of(to)}});
@@ -1959,7 +2029,7 @@ impl State {
             }
             _ => {
                 if params["fence"] != now {
-                    return Err(changed(format!("{} moved since the preview", marker.label())));
+                    return Err(changed(format!("{} moved since the preview", marker.label(place))));
                 }
                 let desc = Self::desc(params)?;
                 self.markers[place - 1].position_beats = to;
@@ -1992,19 +2062,21 @@ impl State {
                 if self.restore_unanswered() {
                     return Err(uncertain(format!("Logic Pro's {pressed:?} was pressed, but no marker is back at {}", bar_text(beats))));
                 }
-                self.markers.push(Marker { name: name.clone(), position_beats: beats, length });
+                self.markers.push(Marker { own_name: own_marker_name(&name), position_beats: beats, length });
                 self.sort_markers();
                 let place = self.marker_at(beats).map_or(0, |at| at + 1);
+                let shown = self.markers.get(place.wrapping_sub(1)).map_or(name.clone(), |marker| marker.name_at(place));
                 return Ok(json!({
                     "epoch": self.epoch_text(),
                     "restored": {"ref": self.marker_ref(place), "was": params["target"]["ref"], "pressed": pressed},
-                    "display": {"title": format!("Marker {} put back", quoted(&name)), "note": "Put back with Logic Pro's own undo."},
+                    "display": {"title": format!("Marker {} put back", quoted(&shown)), "note": "Put back with Logic Pro's own undo."},
                     "undo": {"desc": desc, "entry": false, "how": "undo"},
                 }));
             }
-            // Else by value: a marker made again at its place; Logic numbers it itself.
+            // Else by value: a marker made again at its place; Logic names it by its place in the list.
             if let Some(at) = self.marker_at(beats) {
-                if params["discard"] == true || self.markers[at].name == name {
+                let there = self.markers[at].name_at(at + 1);
+                if params["discard"] == true || there == name {
                     return Ok(json!({
                         "epoch": self.epoch_text(),
                         "restored": {"ref": self.marker_ref(at + 1)},
@@ -2012,18 +2084,17 @@ impl State {
                         "undo": {"desc": desc, "entry": false},
                     }));
                 }
-                return Err(changed(format!("another marker ({}) is at {} now", quoted(&self.markers[at].name), bar_text(beats))));
+                return Err(changed(format!("another marker ({}) is at {} now", quoted(&there), bar_text(beats))));
             }
-            let made = Marker { name: format!("Marker {}", self.next_marker), position_beats: beats, length };
-            self.next_marker += 1;
-            self.markers.push(made.clone());
+            self.markers.push(Marker::made(beats));
             self.sort_markers();
             let place = self.marker_at(beats).map_or(0, |at| at + 1);
+            let made = self.markers[place - 1].name_at(place);
             let undo = self.restored(Some("Create Marker"), &desc)?;
             return Ok(json!({
                 "epoch": self.epoch_text(),
-                "restored": {"ref": self.marker_ref(place), "name": made.name},
-                "display": {"title": format!("Marker {} put back as {}", quoted(&name), quoted(&made.name)), "note": "Logic Pro numbers a marker made again itself."},
+                "restored": {"ref": self.marker_ref(place), "name": made},
+                "display": {"title": format!("Marker {} put back as {}", quoted(&name), quoted(&made)), "note": "Logic Pro numbers a marker made again itself."},
                 "undo": undo,
             }));
         }
@@ -2037,18 +2108,18 @@ impl State {
                 _ => changed("the marker went since the preview"),
             });
         };
-        let title = format!("Deleted {}", marker.label());
+        let title = format!("Deleted {}", marker.label(place));
         match method {
             "change_preview" => Ok(json!({
                 "epoch": self.epoch_text(),
                 "target": {"ref": input["ref"], "kind": "marker"},
-                "prior": marker.state(),
-                "fence": marker.state(),
+                "prior": marker.state(place),
+                "fence": marker.state(place),
                 "display": {"title": title},
             })),
             _ => {
-                if params["fence"] != marker.state() {
-                    return Err(changed(format!("{} changed since the preview", marker.label())));
+                if params["fence"] != marker.state(place) {
+                    return Err(changed(format!("{} changed since the preview", marker.label(place))));
                 }
                 let desc = Self::desc(params)?;
                 self.markers.remove(place - 1);
@@ -2056,7 +2127,7 @@ impl State {
                 Ok(json!({
                     "epoch": self.epoch_text(),
                     "applied": {"deleted": true},
-                    "material": marker.state(),
+                    "material": marker.state(place),
                     "display": {"title": title},
                     "undo": undo,
                 }))
@@ -3289,7 +3360,9 @@ impl State {
         let start = on_the_beat(position);
         let span = notes.iter().map(|note| note.start + note.length).fold(0.0, f64::max);
         let end = start + (span / BEATS_PER_BAR).ceil().max(1.0) * BEATS_PER_BAR;
-        let track = Track::made(self.next_track, IMPORT_TRACK, "instrument");
+        let mut track = Track::made(self.next_track, IMPORT_TRACK, "instrument");
+        // (M4b) Logic's default patch on it, which names it
+        (track.channel, track.smart) = mixer::imported_channel();
         let track_id = track.id;
         self.next_track += 1;
         self.tracks.insert(at + 1, track);
@@ -3655,6 +3728,11 @@ impl State {
                 .cloned()
                 .ok_or_else(|| ("bad-params".to_string(), format!("the simulator has no answer scripted for {method} {params}")))
         };
+        // (M4b) A strip's plug-ins and sends, a plug-in's parameters, Smart Controls, automation, the Mixer's strips, and
+        // the strip's bodies.
+        if let Some(made) = self.mixer_rows(method, asked, params) {
+            return Some(made);
+        }
         let kind = asked.get("kind").and_then(Value::as_str);
         let track_rows = || -> Vec<Value> { self.tracks.iter().enumerate().map(|(at, track)| track.row(at + 1)).collect() };
         let marker_rows = || -> Vec<Value> { self.markers.iter().enumerate().map(|(at, marker)| marker.row(at + 1)).collect() };
@@ -3790,7 +3868,12 @@ impl State {
                 whole["playing"] = self.playing.into();
                 whole["playheadBeats"] = self.playhead.into();
                 whole["beatsPerBar"] = self.signature.0.into();
-                whole["markers"] = self.markers.iter().map(|m| json!({"name": m.name, "positionBeats": m.position_beats})).collect();
+                whole["markers"] = self
+                    .markers
+                    .iter()
+                    .enumerate()
+                    .map(|(at, m)| json!({"name": m.name_at(at + 1), "positionBeats": m.position_beats}))
+                    .collect();
                 timeline_page(&whole, asked)
             }),
             "focus_body" if kind == Some("notes") => match asked.get("ref").and_then(Value::as_str) {
@@ -3804,21 +3887,6 @@ impl State {
                     None => Err(("failed".to_string(), "no region is selected to show the notes of".to_string())),
                 },
             },
-            "focus_body" if kind == Some("tree") => {
-                let mut body = recorded("focus_body", asked.clone()).ok()?;
-                let reference = body["trackRef"].as_str().unwrap_or_default();
-                let place =
-                    reference.rsplit(':').next().and_then(|n| n.parse::<usize>().ok()).filter(|p| *p >= 1 && *p <= self.tracks.len())?;
-                let track = &self.tracks[place - 1];
-                let strip = &mut body["strip"];
-                strip["name"] = track.name.clone().into();
-                strip["volumeDb"] = track.volume_db.into();
-                strip["pan"] = track.pan_steps.into();
-                strip["mute"] = track.mute.into();
-                strip["solo"] = track.solo.into();
-                strip["armed"] = track.armed.into();
-                Ok(body)
-            }
             _ => return None,
         })
     }
@@ -3896,6 +3964,75 @@ impl LogicScript {
         std::iter::once((0.0, state.signature)).chain(state.signature_changes.iter().copied()).collect()
     }
 
+    /// (M4b) The plug-ins in the slots of a strip, `track:2` or `output:1` (the Stereo Out), the instrument first: each
+    /// name and whether it is bypassed.
+    pub fn plugins(&self, strip: &str) -> Vec<(String, bool)> {
+        let state = self.state.lock().unwrap();
+        state
+            .strip_named(strip)
+            .map(|owner| state.channel(owner).plugins.iter().map(|plugin| (plugin.name.clone(), plugin.bypassed)).collect())
+            .unwrap_or_default()
+    }
+
+    /// (M4b) A row of the Controls View of the plug-in in `slot` (from 1) of a strip, by its name: its raw value (none
+    /// for a menu) and its text.
+    pub fn param(&self, strip: &str, slot: usize, name: &str) -> Option<(Option<f64>, String)> {
+        let state = self.state.lock().unwrap();
+        let owner = state.strip_named(strip)?;
+        state.channel(owner).plugins.get(slot.checked_sub(1)?)?.row_named(name)
+    }
+
+    /// (M4b) The setting the window of the plug-in in `slot` of a strip names.
+    pub fn preset(&self, strip: &str, slot: usize) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let owner = state.strip_named(strip)?;
+        state.channel(owner).plugins.get(slot.checked_sub(1)?).map(|plugin| plugin.preset.clone())
+    }
+
+    /// (M4b) The sends of the track at `index` (from 1): each destination and level in dB (−∞ as -96).
+    pub fn sends(&self, index: usize) -> Vec<(String, f64)> {
+        let state = self.state.lock().unwrap();
+        state
+            .tracks
+            .get(index.wrapping_sub(1))
+            .map(|track| track.channel.sends.iter().map(|send| (format!("Bus {}", send.bus), send.level)).collect())
+            .unwrap_or_default()
+    }
+
+    /// (M4b) The auxes Logic made for a bus nothing took, by name, in the order it made them.
+    pub fn auxes(&self) -> Vec<String> {
+        self.state.lock().unwrap().auxes.iter().map(|aux| aux.name.clone()).collect()
+    }
+
+    /// (M4b) The patch the track at `index` (from 1) plays, as its strip's setting button names it (none when it names
+    /// none), and its Smart Controls: each name and value (0 to 1).
+    pub fn patch(&self, index: usize) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        Some(state.tracks.get(index.checked_sub(1)?)?.channel.patch.clone()).filter(|patch| !patch.is_empty())
+    }
+
+    pub fn smart(&self, index: usize) -> Vec<(String, f64)> {
+        let state = self.state.lock().unwrap();
+        state
+            .tracks
+            .get(index.wrapping_sub(1))
+            .map(|track| track.smart.iter().map(|smart| (smart.name.clone(), smart.value)).collect())
+            .unwrap_or_default()
+    }
+
+    /// (M4b) The automation of `parameter` on the track at `index` (from 1): each event's position in beats and value
+    /// (0 to 127).
+    pub fn automation(&self, index: usize, parameter: &str) -> Vec<(f64, u32)> {
+        let state = self.state.lock().unwrap();
+        state
+            .tracks
+            .get(index.wrapping_sub(1))
+            .map(|track| {
+                track.automation.iter().filter(|event| event.parameter == parameter).map(|event| (event.beats, event.value)).collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// (M4) The next restore alone is made, and Logic doesn't answer after it (REAPER's simulator's switch).
     pub fn uncertain_restore_once(&self) {
         self.state.lock().unwrap().uncertain_restore_once = true;
@@ -3954,7 +4091,7 @@ impl LogicScript {
 
     /// The markers, in the Marker List's order: each name and its position in beats.
     pub fn markers(&self) -> Vec<(String, f64)> {
-        self.state.lock().unwrap().markers.iter().map(|m| (m.name.clone(), m.position_beats)).collect()
+        self.state.lock().unwrap().markers.iter().enumerate().map(|(at, m)| (m.name_at(at + 1), m.position_beats)).collect()
     }
 
     pub fn playing(&self) -> bool {
@@ -4023,8 +4160,10 @@ impl LogicScript {
             }
             "transport_stop" | "transport_play" | "cursor_set" => return Some(state.transport(method, params)),
             "undo_step_begin" | "undo_step_end" => return Some(state.plan_step(method, params)),
-            // (M4) Saving: the package written, nothing in the project changed.
+            // (M4) Saving: the package written, nothing in the project changed; (M4b) a bounce and an export alike.
             "project_save" => return Some(state.project_save(params)),
+            "bounce" => return Some(state.bounce(params)),
+            "export_tracks" => return Some(state.export_tracks(params)),
             _ => {}
         }
         let (epoch, project, saved_as) = (state.epoch, state.project, state.saved_as.clone());
@@ -4170,7 +4309,8 @@ mod tests {
             (added["epoch"].as_str(), added["created"]["ref"].as_str(), added["applied"]["kind"].as_str()),
             (Some("2"), Some("2:track:2"), Some("audio"))
         );
-        assert_eq!(added["undo"], json!({"desc": "Kumi: Added audio track “Pad” (k0002)", "entry": true, "title": "Undo Create Track"}));
+        // (named, it is renamed through the Inspector once made: "Renaming" is on top of "Create Track", as the M3 scene reads)
+        assert_eq!(added["undo"], json!({"desc": "Kumi: Added audio track “Pad” (k0002)", "entry": true, "title": "Undo Renaming"}));
         let page = answer("read", json!({"kind": "track"})).unwrap();
         assert_eq!(
             (page["total"].as_u64(), page["items"][1]["name"].as_str(), page["items"][2]["ref"].as_str()),
@@ -4205,8 +4345,12 @@ mod tests {
         .unwrap();
         assert_eq!((gone["epoch"].as_str(), script.track_count()), (Some("3"), 2));
         assert_eq!(answer("read", json!({"kind": "track"})).unwrap()["items"][1]["name"], "Keys");
-        assert_eq!(script.undo_titles(), ["Undo Create Track", "Undo Delete Tracks"]);
-        assert_eq!(script.undo_history(), ["Kumi: Added audio track “Pad” (k0002)", ""], "a restore's step the bridge doesn't name");
+        assert_eq!(script.undo_titles(), ["Undo Create Track", "Undo Renaming", "Undo Delete Tracks"]);
+        assert_eq!(
+            script.undo_history(),
+            ["", "Kumi: Added audio track “Pad” (k0002)", ""],
+            "the change is kept under its last step; a restore's step the bridge doesn't name"
+        );
     }
 
     #[test]

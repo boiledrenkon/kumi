@@ -17,7 +17,7 @@ use crate::read::{self, Want};
 use crate::refs::Ref;
 
 /// The methods the change side answers.
-pub const CHANGE_METHODS: [&str; 9] = [
+pub const CHANGE_METHODS: [&str; 11] = [
     "change_preview",
     "change_apply",
     "change_restore",
@@ -27,6 +27,8 @@ pub const CHANGE_METHODS: [&str; 9] = [
     "undo_step_begin",
     "undo_step_end",
     "project_save",
+    "bounce",
+    "export_tracks",
 ];
 
 /// Answers one change request over Logic, through the change side: the run loop's for a queued one, the recorder's
@@ -53,6 +55,8 @@ pub fn answer_change(
             "undo_step_begin" => changes.step_begin(params),
             "undo_step_end" => changes.step_end(params),
             "project_save" => changes.project_save(&mut ctx, params),
+            "bounce" => changes.bounce(&mut ctx, params),
+            "export_tracks" => changes.export_tracks(&mut ctx, params),
             other => Err((daw_bridge::wire::code::UNKNOWN_METHOD.into(), format!("the Logic Pro bridge has no method {other:?}"))),
         }
     };
@@ -69,13 +73,31 @@ pub fn answer_change(
     result
 }
 
-/// Answers one request over Logic: the catalog gathers what the request needs, then the dispatch answers from it.
+/// Answers one request over Logic: the catalog gathers what the request needs, then the dispatch answers from it. The
+/// reads that need a key command of Logic's (the Track Automation Event List) post the factory set's chord: the
+/// bridge's run loop answers through [`answer_keyed`] with the producer's own set.
 pub fn answer(project: &mut Project, helper: &mut dyn Helper, pid: u32, method: &str, params: &Value) -> Answer {
+    static FACTORY: std::sync::OnceLock<crate::keys::KeyCommands> = std::sync::OnceLock::new();
+    answer_keyed(project, helper, pid, method, params, FACTORY.get_or_init(crate::keys::KeyCommands::embedded))
+}
+
+/// [`answer`] with the key command set the reads post their chords with.
+pub fn answer_keyed(
+    project: &mut Project,
+    helper: &mut dyn Helper,
+    pid: u32,
+    method: &str,
+    params: &Value,
+    keys: &crate::keys::KeyCommands,
+) -> Answer {
     let mut ax = Ax::new(helper, pid);
     let started = Instant::now();
     let result = match method {
-        "read" => {
+        "read" => 'read: {
             let want = read::want(params, project.epoch)?;
+            if let Some(answer) = crate::changes::read_wide(project, &mut ax, keys, &want, params) {
+                break 'read answer;
+            }
             let needs = match &want {
                 Want::One(reference) => {
                     let parsed = Ref::parse(reference);

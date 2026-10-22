@@ -19,8 +19,18 @@ fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../daw-mcp-server/tests/vectors/logic-reads.json")
 }
 
+/// The second slice's reads, blessed beside this crate's scenes: the host's replay of them is the wiring side's.
+fn m4b_vectors_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/logic-reads-m4b.json")
+}
+
 /// The fixed request set over a scene: the cases, and the requests the scene couldn't answer.
 fn run(name: &str) -> (Vec<Value>, Vec<(String, Value)>) {
+    run_with(name, &scenes::fixed_requests())
+}
+
+/// A request set over a scene.
+fn run_with(name: &str, requests: &[(&'static str, Value)]) -> (Vec<Value>, Vec<(String, Value)>) {
     let dir = fixtures().join(name);
     let scene = Scene::load(&dir).unwrap_or_else(|error| panic!("no scene {name}: {error}; record it with the record_fixtures example"));
     let pid = scene.logic.get("pid").and_then(Value::as_u64).unwrap_or(1) as u32;
@@ -35,7 +45,8 @@ fn run(name: &str) -> (Vec<Value>, Vec<(String, Value)>) {
     let status = json!({"project": project, "busy": false, "permission": null});
     let hands = SceneHands::new(&scene);
     let mut helper = Launch::launch(&mut hands.clone()).unwrap();
-    let cases = scenes::run(helper.as_mut(), pid, Strings::english(), status, (id.as_deref(), path.as_deref(), &pname));
+    logic_kumi::changes::set_settling(false);
+    let cases = scenes::run_set(helper.as_mut(), pid, Strings::english(), status, (id.as_deref(), path.as_deref(), &pname), requests);
     (cases, hands.unrecorded())
 }
 
@@ -242,4 +253,46 @@ fn the_scenes_name_no_home_of_the_mac_they_were_recorded_on() {
         scenes += 1;
     }
     assert!(scenes >= 4, "{scenes} scenes");
+}
+
+#[test]
+fn the_second_slices_reads_over_scratch_are_a_plug_ins_parameters_its_smart_controls_and_automation() {
+    let (cases, unrecorded) = run_with("scratch-m4b", &scenes::m4b_requests());
+    assert!(unrecorded.is_empty(), "the scene didn't record what the readers ask now; record it again: {unrecorded:?}");
+    let answer = |index: usize| cases[index]["response"].clone();
+    let text = scenes::vectors_text(&cases);
+    let path = m4b_vectors_path();
+    if std::env::var("KUMI_BLESS").is_ok_and(|v| v == "1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+    } else {
+        let current =
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("no vectors at {}: bless them with KUMI_BLESS=1", path.display()));
+        assert_eq!(current, text, "the second slice's vectors differ from what the bridge answers: bless them with KUMI_BLESS=1");
+    }
+    // Keys' Piano, from its window's Controls View: a row per parameter with its range and text.
+    let params = answer(0)["result"]["items"].as_array().unwrap().clone();
+    assert_eq!(params.len(), 6);
+    for key in ["ref", "pluginRef", "index", "name", "value", "text", "min", "max", "normalized"] {
+        assert!(params[1].get(key).is_some(), "param row lacks {key}");
+    }
+    assert_eq!(
+        (params[1]["ref"].as_str(), params[1]["pluginRef"].as_str(), params[1]["name"].as_str()),
+        (Some("1:param:2.1.2"), Some("1:plugin:2.1"), Some("Main Volume"))
+    );
+    assert_eq!(params[0]["value"], Value::Null, "a menu parameter has its text alone");
+    assert_eq!(answer(1)["result"]["nextCursor"], "1.2");
+    assert_eq!(answer(2)["result"]["items"][0]["name"], "Main Volume");
+    // Keys' Smart Controls: shares of their ranges with their texts.
+    let smart = answer(3)["result"]["items"].as_array().unwrap().clone();
+    assert!(!smart.is_empty());
+    for key in ["ref", "trackRef", "index", "name", "value", "text"] {
+        assert!(smart[0].get(key).is_some(), "smart row lacks {key}");
+    }
+    assert_eq!(smart[0]["trackRef"], "1:track:2");
+    // Vocal has no automation; the Stereo Out no plug-ins.
+    assert_eq!(answer(4)["result"]["total"], 0);
+    assert_eq!(answer(5)["result"]["total"], 0);
+    assert_eq!(answer(6)["error"]["message"], "param: pass the parent plug-in");
+    assert_eq!(answer(7)["error"]["message"], "smart: pass the parent track");
 }

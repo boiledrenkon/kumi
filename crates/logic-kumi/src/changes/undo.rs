@@ -70,12 +70,43 @@ pub enum Probe {
     Headers { prior: Vec<String>, applied: Vec<String> },
     /// The tempo the control bar shows.
     Tempo { prior: f64, applied: f64 },
+    /// A track's strip, as the Inspector shows the selected track's: its plug-ins' names, or its sends' busses.
+    Strip { place: usize, part: StripPart, prior: Vec<String>, applied: Vec<String> },
+}
+
+/// What of a strip a probe watches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripPart {
+    Plugins,
+    Sends,
+}
+
+/// The selected track's strip as the Inspector showed it at a tick (read only when a probe watches that track).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Seen {
+    pub place: usize,
+    pub plugins: Vec<String>,
+    pub sends: Vec<String>,
 }
 
 impl Probe {
     /// Whether the change reads as applied (Some(true)), as before it (Some(false)), or as neither.
-    fn state(&self, headers: &[Header], look: &Look) -> Option<bool> {
+    fn state(&self, headers: &[Header], look: &Look, seen: Option<&Seen>) -> Option<bool> {
         match self {
+            Probe::Strip { place, part, prior, applied } => {
+                let seen = seen.filter(|seen| seen.place == *place)?;
+                let now = match part {
+                    StripPart::Plugins => &seen.plugins,
+                    StripPart::Sends => &seen.sends,
+                };
+                if now == applied {
+                    Some(true)
+                } else if now == prior {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
             Probe::Header { place, read, same, prior, applied } => {
                 let header = headers.get(place.checked_sub(1)?)?;
                 let now = read(header);
@@ -116,6 +147,9 @@ impl Probe {
             Probe::Header { place, read, same, prior, applied } => {
                 carry(*place).map(|place| Probe::Header { place, read: *read, same: *same, prior: prior.clone(), applied: applied.clone() })
             }
+            Probe::Strip { place, part, prior, applied } => {
+                carry(*place).map(|place| Probe::Strip { place, part: *part, prior: prior.clone(), applied: applied.clone() })
+            }
             other => Some(other.clone()),
         }
     }
@@ -145,6 +179,8 @@ pub struct Watch {
     unverified_said: bool,
     edit: Option<String>,
     epoch: Option<u32>,
+    /// The selected track's strip as last read for a strip probe.
+    strip_seen: Option<Seen>,
 }
 
 impl Watch {
@@ -268,6 +304,16 @@ impl Watch {
         undo
     }
 
+    /// Whether a strip probe watches the track at `place` (the selected one, whose strip the Inspector shows).
+    pub fn strip_wanted(&self, place: usize) -> bool {
+        self.entries.iter().any(|entry| matches!(&entry.probe, Some(Probe::Strip { place: p, .. }) if *p == place))
+    }
+
+    /// The selected track's strip as the Inspector showed it, for the strip probes of the next poll.
+    pub fn saw_strip(&mut self, seen: Seen) {
+        self.strip_seen = Some(seen);
+    }
+
     /// The `desc` of Kumi's latest step that Logic's history holds, if any.
     pub fn top_desc(&self) -> Option<String> {
         self.entries.iter().rev().find(|entry| entry.step.is_some() && !entry.undone).map(|entry| entry.desc.clone())
@@ -301,8 +347,9 @@ impl Watch {
         let epoch = look.epoch.to_string();
         // The probes: a value back where it was is the change undone by hand; back where Kumi set it, a redo.
         let (mut undone, mut redone) = (Vec::new(), Vec::new());
+        let seen = self.strip_seen.take();
         for entry in self.entries.iter_mut() {
-            let Some(state) = entry.probe.as_ref().and_then(|probe| probe.state(headers, look)) else { continue };
+            let Some(state) = entry.probe.as_ref().and_then(|probe| probe.state(headers, look, seen.as_ref())) else { continue };
             if !state && !entry.undone {
                 entry.undone = true;
                 undone.push(entry.desc.clone());
@@ -342,7 +389,7 @@ impl Watch {
             let found = self.entries.iter().rposition(|entry| !entry.undone && entry.step.as_deref() == Some(action.as_str()));
             if let Some(at) = found {
                 for entry in self.entries[at..].iter_mut().filter(|entry| !entry.undone && entry.step.is_some()) {
-                    if entry.probe.as_ref().and_then(|probe| probe.state(headers, look)) == Some(true) {
+                    if entry.probe.as_ref().and_then(|probe| probe.state(headers, look, None)) == Some(true) {
                         continue;
                     }
                     entry.undone = true;
@@ -354,7 +401,7 @@ impl Watch {
             let found = self.entries.iter().rposition(|entry| entry.undone && entry.step.as_deref() == Some(action.as_str()));
             if let Some(at) = found {
                 for entry in self.entries[..=at].iter_mut().filter(|entry| entry.undone && entry.step.is_some()) {
-                    if entry.probe.as_ref().and_then(|probe| probe.state(headers, look)) == Some(false) {
+                    if entry.probe.as_ref().and_then(|probe| probe.state(headers, look, None)) == Some(false) {
                         continue;
                     }
                     entry.undone = false;
@@ -470,6 +517,41 @@ mod tests {
         watch.entries.clear();
         watch.poll(&mut ax, &strings, &look(2, 160.0), &[], &mut |_| {}, &stays);
         assert_eq!(hands.calls_of("tree"), before);
+    }
+
+    #[test]
+    fn a_strip_probe_names_a_plug_in_taken_off_by_hand_when_the_inspector_shows_its_track() {
+        let hands = MockHands::new();
+        hands.set_apps(vec![json!({"bundle": "com.apple.logic10", "pid": 7, "active": true})]);
+        menus(&hands, "Undo Insert Plug-in in Channel Strip", "Can’t Redo");
+        let mut launcher = hands.clone();
+        let mut helper = Launch::launch(&mut launcher).unwrap();
+        let mut ax = Ax::new(helper.as_mut(), 7);
+        let strings = Strings::english();
+        let mut watch = Watch::default();
+        let probe = Probe::Strip {
+            place: 1,
+            part: StripPart::Plugins,
+            prior: vec!["Channel EQ".into()],
+            applied: vec!["Channel EQ".into(), "Gain".into()],
+        };
+        watch.entries.push(entry("Kumi: Added “Gain” to “Vocal” (k0001)", Some("Insert Plug-in in Channel Strip"), Some(probe)));
+        assert!(watch.strip_wanted(1) && !watch.strip_wanted(2));
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut out = |data: Value| events.borrow_mut().push(data);
+        // No strip seen at this tick (another track selected): the probe says nothing.
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[header("Vocal", 0.0)], &mut out, &stays);
+        assert!(events.borrow().is_empty());
+        watch.saw_strip(Seen { place: 1, plugins: vec!["Channel EQ".into(), "Gain".into()], sends: vec![] });
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[header("Vocal", 0.0)], &mut out, &stays);
+        assert!(events.borrow().is_empty(), "as applied");
+        // The Gain gone from the strip: undone at once, whatever the titles say.
+        watch.saw_strip(Seen { place: 1, plugins: vec!["Channel EQ".into()], sends: vec![] });
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[header("Vocal", 0.0)], &mut out, &stays);
+        assert_eq!(events.borrow().len(), 1);
+        assert_eq!(events.borrow()[0]["descs"], json!(["Kumi: Added “Gain” to “Vocal” (k0001)"]));
+        // The strip read for a tick serves that tick only.
+        assert_eq!(watch.strip_seen, None);
     }
 
     #[test]

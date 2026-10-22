@@ -735,6 +735,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             book.clear_names();
         }
         *self.epoch.borrow_mut() = Some(epoch.to_owned());
+        // What every project has, which no read lists (Logic's Stereo Out), is named in this epoch.
+        self.book.borrow_mut().stand(epoch);
     }
 
     /// Reads the host's focus while the app shows FOCUS, telling the app what changed: what the producer looks at and
@@ -1156,6 +1158,15 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             snapshot.pointer("/selection/trackRef").and_then(Value::as_str).map(|track| book.short_ref(track)).into_iter().collect();
         let selection = book.shorten(snapshot.get("selection").unwrap_or(&Value::Null));
         let markers = book.shorten(snapshot.get("markers").unwrap_or(&Value::Null));
+        // The strips every project has that no read lists (Logic's Stereo Out), with their refs.
+        let outputs: Vec<Value> = snapshot
+            .get("epoch")
+            .and_then(Value::as_str)
+            .map(|epoch| book.stand(epoch))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(reference, name)| json!({"ref": reference, "name": name}))
+            .collect();
         drop(book);
         let note = format!("Some tracks are folded to fit; {} reads them whole.", self.daw.read_tool);
         let read_tool = self.daw.read_tool;
@@ -1173,6 +1184,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         context[profile.words.place] = shown_project(&project, snapshot.get("transport"));
         context["transport"] = snapshot.get("transport").cloned().unwrap_or(Value::Null);
         context["tracks"] = json!(folded.tracks);
+        if !outputs.is_empty() {
+            context["outputs"] = json!(outputs);
+        }
         context["selection"] = selection;
         // (m7) How the producer set the DAW up (REAPER's new-item defaults, extensions and render settings; Renoise's usual
         // pattern length, groups and tools), read each look: the instructions say to respect it.
@@ -1691,6 +1705,7 @@ pub(super) fn follow_epoch<S: RefScheme>(
         }
         book.cursors.clear();
         book.keep_names(survives);
+        book.stand(now);
         drop(book);
         *epoch.borrow_mut() = Some(now.to_owned());
         return;
@@ -1702,6 +1717,8 @@ pub(super) fn follow_epoch<S: RefScheme>(
         book.cursors.clear();
         book.clear_names();
     }
+    // What every project has, which no read lists (Logic's Stereo Out), keeps its name in the new epoch.
+    book.borrow_mut().stand(now);
     *epoch.borrow_mut() = Some(now.to_owned());
     layout.set(answer.get("layout").and_then(Value::as_u64));
 }

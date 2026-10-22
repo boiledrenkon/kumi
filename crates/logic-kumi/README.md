@@ -184,6 +184,53 @@ parameter, an import makes a track, a stack's bus routing stays) are
 cycle, a tempo event, an import of 64 notes and a save as, in one run) are
 recorded from the real Logic and replayed by `tests/changes.rs`.
 
+## What it does (M4, second slice)
+
+The bridge puts plug-ins on a strip and takes them off, tunes them, loads
+patches, makes sends, moves Smart Controls, writes automation, bounces and
+exports, and reads what these need, over the same wire:
+
+- `fx-add`, `fx-delete` (`src/changes/plugins.rs`): the Mixer's insert slots,
+  whose menus Logic draws itself (`menus.rs`: a press held while the menu is
+  up, then keys: the plug-in menu's search typed key by key, Down, Return; No
+  Plug-in from an occupied slot's list). A strip is a track's or an output's
+  (`strips.rs`: the Stereo Out is `<epoch>:output:1`, its plug-ins
+  `<epoch>:plugin:0.1.<slot>`), so M5's level reference on the mix has a home.
+- `fx-param`, `fx-params`, `fx-preset` (`params.rs`, `preset.rs`): the plug-in
+  window opened from its slot (`window.rs`), switched to its Controls View,
+  where every parameter is a slider (or a choice, or a switch) Accessibility
+  reads and sets, then its view put back and the window closed; a preset by
+  the window's next and previous setting buttons in its editor, and back by
+  the window's own Undo. The read kind `param` lists the parameters (name,
+  value, text, range, share).
+- `patch-load` (`patch.rs`): the Library's search, its result's row selected.
+- `send-add`, `send-remove`, `send-volume` (`sends.rs`): the send slot's menu
+  walked by arrows, the send's knob stepped; `send-mode` is refused (the mode is
+  a mark Accessibility can't read).
+- `smart-control-set` and the read kind `smart` (`smart.rs`): the Smart
+  Controls pane's sliders for the selected track.
+- `automation-add`, `automation-change`, `automation-delete` and the read kind
+  `automation` (`automation.rs`): the Track Automation Event List of the
+  selected track, its "Fader" rows grouped by parameter; an event made at the
+  playhead with Create new Event, its parameter and value stepped, a row's
+  Delete.
+- `bounce` and `export_tracks` (`bounce.rs`): methods, as `project_save` is:
+  Logic's Bounce dialog and its save panel, the export's open panel, and the
+  files read back from disk through `src/disk.rs`, the seam a recorded scene
+  replays from.
+
+`fx-move` and `send-mode` are refused, saying why (Logic moves a plug-in only
+by dragging it; a send's mode is a mark Accessibility can't read).
+
+The channels, shapes and where Logic forces a difference are
+`docs/en/LOGIC_CONTRACT.md`. The scenes `change-fx-*`, `change-send-*`,
+`change-smart-control-set`, `change-patch-load`, `change-automation-*`,
+`change-bounce` and `change-export-tracks`, and the read scene `scratch-m4b`
+(`record_fixtures --set m4b`, its answers in
+`tests/vectors/logic-reads-m4b.json`), are recorded from the real Logic and
+replayed by `tests/changes.rs` and `tests/reads.rs`; `record_changes` takes
+`{"restore": {"of": n}}` to put back an earlier change of the run.
+
 ## Arguments
 
 ```sh

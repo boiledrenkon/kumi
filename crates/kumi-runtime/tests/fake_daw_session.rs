@@ -723,6 +723,8 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
             let dir = tempfile::tempdir().unwrap();
             let paths = BridgePaths::new(dir.path(), Daw::Logic);
             let secret = ensure_secret(&paths.secret()).unwrap();
+            let bounced = dir.path().join("Scratch bar 1.wav").to_string_lossy().into_owned();
+            let bounce = bounced.clone();
             let script = LogicScript::new();
             let mut config = script.config(secret, "com.apple.logic10");
             config.discovery_dir = Some(paths.discovery());
@@ -778,6 +780,32 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
                     call("region_split", json!({"ref": region.unwrap_or_else(|| "region:1".into()), "positionBeats": 8}))
                 }),
                 step(|_| call("undo_change", json!({"change": "last"}))),
+                // (M4b) A Gain on the Stereo Out (the observation's outputs name it: no read lists it) and its gain set;
+                // then a patch loaded on Keys, a send from Vocal to a bus nothing takes and a bounce (no row) in one plan.
+                step(|recorded| {
+                    let text = recorded.requests.borrow().last().cloned().unwrap_or_default();
+                    let output = Regex::new(r"output:\d+").unwrap().find_iter(&text).last().map(|m| m.as_str().to_string());
+                    call("fx_add", json!({"ref": output.expect("the observation names the Stereo Out"), "name": "Gain"}))
+                }),
+                step(|recorded| {
+                    let text = recorded.requests.borrow().last().cloned().unwrap_or_default();
+                    let plugin = Regex::new(r"plugin:\d+").unwrap().find_iter(&text).last().map(|m| m.as_str().to_string());
+                    call("fx_param", json!({"ref": plugin.unwrap_or_else(|| "plugin:1".into()), "param": "Gain", "value": -3}))
+                }),
+                step(|_| call("logic_read", json!({"kind": "track", "limit": 2}))),
+                step(move |recorded| {
+                    let text = recorded.requests.borrow().last().cloned().unwrap_or_default();
+                    let tracks: Vec<String> = Regex::new(r"track:\d+").unwrap().find_iter(&text).map(|m| m.as_str().to_string()).collect();
+                    let (vocal, keys) = (tracks[tracks.len() - 2].clone(), tracks[tracks.len() - 1].clone());
+                    call(
+                        "make_changes",
+                        json!({"steps": [
+                            {"tool": "patch_load", "input": {"ref": keys, "patch": "Piano/Steinway Grand Piano"}},
+                            {"tool": "send_add", "input": {"ref": vocal, "bus": 1}},
+                            {"tool": "bounce", "input": {"startBeats": 0, "endBeats": 4, "path": bounce.clone()}},
+                        ]}),
+                    )
+                }),
                 step(|_| answer("Done.")),
             ]);
             session.submit("Pull the vocal down and add a pad track.", None).await.unwrap();
@@ -788,21 +816,44 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
             assert!(asked.iter().any(|(method, params)| method == "change_apply" && params["kind"] == "region-split"), "{asked:?}");
             assert_eq!(script.regions().len(), 1, "the split was taken back");
             assert_eq!(
+                (script.param("output:1", 1, "Gain"), script.patch(2).as_deref()),
+                (Some((Some(930.0), "-3.0 dB".to_string())), Some("Steinway Grand Piano"))
+            );
+            assert!(std::path::Path::new(&bounced).is_file(), "the bounce's file");
+            assert_eq!(
                 script.undo_titles(),
-                ["Undo Create Track", "Undo Renaming", "Undo Renaming"],
-                "the add, the rename and its put-back are Logic's steps; the fader none: {:?}",
+                [
+                    "Undo Create Track",
+                    "Undo Renaming",
+                    "Undo Renaming",
+                    "Undo Renaming",
+                    "Undo Insert Plug-in in Channel Strip",
+                    "Undo Load Patch",
+                    "Undo Change Send in Channel Strip"
+                ],
+                "the add (made, then named), the rename and its put-back, the Gain, the patch and the send are Logic's steps; the fader and the Gain's gain none: {:?}",
                 script.undo_history()
             );
-            // The producer's /undo takes back the latest change still standing: the track Kumi added, by its deletion.
+            // The producer's /undo takes back the latest change still standing: the send, through Logic's own undo, with
+            // the aux Logic made for it.
             let undone = session.undo(None).await.unwrap();
-            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added audio track “Pad”"));
-            assert_eq!(script.track_count(), 2);
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added send from “Vocal” to Bus 1"));
+            assert!(script.auxes().is_empty(), "the aux went with it");
             session.submit("What changed?", None).await.unwrap();
             session.close().await.unwrap();
             simulator.stop();
 
             let titles: Vec<String> = changes.borrow().iter().map(|record| record.title.clone()).collect();
-            assert!(titles.iter().any(|title| title == "Vocal volume −6 dB"), "{titles:?}");
+            for title in [
+                "Vocal volume −6 dB",
+                "Added “Gain” to “Stereo Out”",
+                "“Gain”'s Gain → -3.0 dB on “Stereo Out”",
+                "Loaded the patch “Steinway Grand Piano” on “Keys”",
+                "Added send from “Vocal” to Bus 1",
+            ] {
+                assert!(titles.iter().any(|seen| seen == title), "{title}: {titles:?}");
+            }
+            assert!(!titles.iter().any(|title| title.starts_with("Bounced")), "a bounce makes no row: {titles:?}");
             let mut said: Vec<String> = main.requests.borrow().clone();
             assert!(said.iter().any(|request| request.contains("kumiChanges")), "the model sees its changes");
             assert!(said.iter().any(|request| request.contains("Logic Pro's own undo")), "in Logic's words");

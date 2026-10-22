@@ -46,6 +46,22 @@ pub fn fixed_requests() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// The second slice's reads over Scratch, in their order: a plug-in's parameters (Keys' Piano, from its window's
+/// Controls View), a track's Smart Controls (Keys'), a track's automation (Vocal's, none), the Stereo Out's plug-ins,
+/// and the refusals of a read without its parent.
+pub fn m4b_requests() -> Vec<(&'static str, Value)> {
+    vec![
+        ("read", json!({"kind": "param", "parent": "1:plugin:2.1"})),
+        ("read", json!({"kind": "param", "parent": "1:plugin:2.1", "limit": 2})),
+        ("read", json!({"ref": "1:param:2.1.2"})),
+        ("read", json!({"kind": "smart", "parent": "1:track:2"})),
+        ("read", json!({"kind": "automation", "parent": "1:track:1"})),
+        ("read", json!({"kind": "plugin", "parent": "1:output:1"})),
+        ("read", json!({"kind": "param"})),
+        ("read", json!({"kind": "smart"})),
+    ]
+}
+
 /// A request and the answer the bridge gave, as the vectors file keeps them.
 pub fn case(method: &str, params: &Value, answer: &Result<Value, (String, String)>) -> Value {
     let response = match answer {
@@ -83,11 +99,23 @@ pub fn vectors_text(cases: &[Value]) -> String {
 /// Runs the fixed request set over a helper (the real one, recorded, or a scene replayed) and a status to answer
 /// `status` with; the project reader is the bridge's own.
 pub fn run(helper: &mut dyn Helper, pid: u32, strings: Strings, status: Value, identity: (Option<&str>, Option<&str>, &str)) -> Vec<Value> {
+    run_set(helper, pid, strings, status, identity, &fixed_requests())
+}
+
+/// [`run`] over another request set (the second slice's, [`m4b_requests`]).
+pub fn run_set(
+    helper: &mut dyn Helper,
+    pid: u32,
+    strings: Strings,
+    status: Value,
+    identity: (Option<&str>, Option<&str>, &str),
+    requests: &[(&'static str, Value)],
+) -> Vec<Value> {
     let mut project = Project::new(strings);
     project.set_identity(identity.0, identity.1, identity.2);
     let busy = status.get("busy").filter(|busy| **busy != Value::Bool(false)).and_then(Value::as_str).map(str::to_string);
     let mut cases = vec![];
-    for (method, params) in fixed_requests() {
+    for (method, params) in requests.iter().cloned() {
         let answer = match method {
             "status" => Ok(status.clone()),
             // Logic can't take work: every read says so, as the run loop does.

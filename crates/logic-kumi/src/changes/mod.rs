@@ -9,6 +9,8 @@
 //! markers, events), so those answer `undo.entry: false` and are put back by value; and its titles carry no nonce,
 //! so the producer's own undo is named back to Kumi by [`undo::Watch`], which keeps Kumi's steps in order.
 
+mod automation;
+mod bounce;
 mod command;
 mod cycle;
 mod front;
@@ -16,18 +18,28 @@ mod fx;
 mod import;
 mod lists;
 mod marks;
+mod menus;
 mod notes;
 mod nudge;
 pub mod panel;
+mod panes;
+mod params;
+mod patch;
+mod plugins;
+mod preset;
 mod quantize;
 mod regions;
 mod save;
+mod sends;
+mod smart;
 pub mod smf;
 mod stack;
+pub(crate) mod strips;
 mod structure;
 mod timeline;
 mod tracks;
 pub mod undo;
+mod window;
 
 use std::time::Instant;
 
@@ -153,17 +165,24 @@ pub enum Kind {
     TempoMarkerSet,
     TempoMarkerDelete,
     SignatureSet,
+    FxAdd,
+    FxDelete,
+    FxParam,
+    FxParams,
+    FxPreset,
+    SendAdd,
+    SendRemove,
+    SendVolume,
+    SmartControlSet,
+    PatchLoad,
+    Automation(automation::Mode),
 }
 
 /// The kinds Logic's bridge can't make yet, and why, so the refusal says so.
-const NOT_YET: [(&str, &str); 9] = [
+const NOT_YET: [(&str, &str); 5] = [
     ("marker-rename", "a marker's name cell in the Marker List isn't a text field"),
-    ("fx-add", "the insert slot's pop-up menu can't be driven from outside"),
-    ("fx-delete", "the insert slot's pop-up menu can't be driven from outside"),
-    ("fx-param", "a plug-in's controls aren't reached yet"),
-    ("fx-move", "the insert slots can't be rearranged from outside"),
-    ("send-add", "the send slot's pop-up menu can't be driven from outside"),
-    ("send-volume", "the send slot's pop-up menu can't be driven from outside"),
+    ("send-mode", "a send's mode is a mark in its menu, which Logic Pro draws itself and Accessibility can't read, so it could never be read back"),
+    ("fx-move", "Logic Pro moves a plug-in from one slot to another only by dragging it, and no key command or menu item moves one"),
     ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
     ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
 ];
@@ -196,6 +215,17 @@ impl std::fmt::Debug for Kind {
             Kind::TempoMarkerSet => f.write_str("TempoMarkerSet"),
             Kind::TempoMarkerDelete => f.write_str("TempoMarkerDelete"),
             Kind::SignatureSet => f.write_str("SignatureSet"),
+            Kind::FxAdd => f.write_str("FxAdd"),
+            Kind::FxDelete => f.write_str("FxDelete"),
+            Kind::FxParam => f.write_str("FxParam"),
+            Kind::FxParams => f.write_str("FxParams"),
+            Kind::FxPreset => f.write_str("FxPreset"),
+            Kind::SendAdd => f.write_str("SendAdd"),
+            Kind::SendRemove => f.write_str("SendRemove"),
+            Kind::SendVolume => f.write_str("SendVolume"),
+            Kind::SmartControlSet => f.write_str("SmartControlSet"),
+            Kind::PatchLoad => f.write_str("PatchLoad"),
+            Kind::Automation(mode) => write!(f, "Automation({mode:?})"),
         }
     }
 }
@@ -231,12 +261,25 @@ pub fn kind(name: &str) -> Option<Kind> {
         "tempo-marker-set" => Some(Kind::TempoMarkerSet),
         "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
         "signature-set" => Some(Kind::SignatureSet),
+        "fx-add" => Some(Kind::FxAdd),
+        "fx-delete" => Some(Kind::FxDelete),
+        "fx-param" => Some(Kind::FxParam),
+        "fx-params" => Some(Kind::FxParams),
+        "fx-preset" => Some(Kind::FxPreset),
+        "send-add" => Some(Kind::SendAdd),
+        "send-remove" => Some(Kind::SendRemove),
+        "send-volume" => Some(Kind::SendVolume),
+        "smart-control-set" => Some(Kind::SmartControlSet),
+        "patch-load" => Some(Kind::PatchLoad),
+        "automation-add" => Some(Kind::Automation(automation::Mode::Add)),
+        "automation-change" => Some(Kind::Automation(automation::Mode::Change)),
+        "automation-delete" => Some(Kind::Automation(automation::Mode::Delete)),
         _ => None,
     }
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 31] = [
+pub const KINDS: [&str; 44] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -268,10 +311,23 @@ pub const KINDS: [&str; 31] = [
     "signature-set",
     "track-stack",
     "track-stack-flatten",
+    "fx-add",
+    "fx-delete",
+    "fx-param",
+    "fx-params",
+    "fx-preset",
+    "patch-load",
+    "send-add",
+    "send-remove",
+    "send-volume",
+    "smart-control-set",
+    "automation-add",
+    "automation-change",
+    "automation-delete",
 ];
 
 impl Kind {
-    fn preview(self, ctx: &mut Ctx, input: &Value) -> Done<Preview> {
+    fn preview(self, ctx: &mut Ctx, keys: &KeyCommands, input: &Value) -> Done<Preview> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
             Kind::TrackRename => tracks::rename_preview(ctx, input),
@@ -298,6 +354,17 @@ impl Kind {
             Kind::TempoMarkerSet => lists::tempo_set_preview(ctx, input),
             Kind::TempoMarkerDelete => lists::tempo_delete_preview(ctx, input),
             Kind::SignatureSet => lists::signature_preview(ctx, input),
+            Kind::FxAdd => plugins::add_preview(ctx, input),
+            Kind::FxDelete => plugins::delete_preview(ctx, input),
+            Kind::FxParam => params::preview(ctx, input, false),
+            Kind::FxParams => params::preview(ctx, input, true),
+            Kind::FxPreset => preset::preview(ctx, input),
+            Kind::SendAdd => sends::add_preview(ctx, input),
+            Kind::SendRemove => sends::remove_preview(ctx, input),
+            Kind::SendVolume => sends::volume_preview(ctx, input),
+            Kind::SmartControlSet => smart::preview(ctx, input),
+            Kind::PatchLoad => patch::preview(ctx, input),
+            Kind::Automation(mode) => automation::preview(ctx, keys, input, mode),
         }
     }
 
@@ -328,6 +395,17 @@ impl Kind {
             Kind::TempoMarkerSet => lists::tempo_set_apply(ctx, input, fence),
             Kind::TempoMarkerDelete => lists::tempo_delete_apply(ctx, input, fence),
             Kind::SignatureSet => lists::signature_apply(ctx, input, fence),
+            Kind::FxAdd => plugins::add_apply(ctx, input, fence),
+            Kind::FxDelete => plugins::delete_apply(ctx, input, fence, desc),
+            Kind::FxParam => params::apply(ctx, input, fence, false),
+            Kind::FxParams => params::apply(ctx, input, fence, true),
+            Kind::FxPreset => preset::apply(ctx, input, fence),
+            Kind::SendAdd => sends::add_apply(ctx, input, fence),
+            Kind::SendRemove => sends::remove_apply(ctx, input, fence, desc),
+            Kind::SendVolume => sends::volume_apply(ctx, input, fence),
+            Kind::SmartControlSet => smart::apply(ctx, input, fence),
+            Kind::PatchLoad => patch::apply(ctx, input, fence, desc),
+            Kind::Automation(mode) => automation::apply(ctx, keys, input, fence, mode),
         }
     }
 
@@ -361,6 +439,16 @@ impl Kind {
             Kind::TempoMarkerSet => lists::tempo_set_restore(ctx, restore),
             Kind::TempoMarkerDelete => lists::tempo_delete_restore(ctx, watch, restore),
             Kind::SignatureSet => lists::signature_restore(ctx, watch, restore),
+            Kind::FxAdd => plugins::add_restore(ctx, restore),
+            Kind::FxDelete => plugins::delete_restore(ctx, watch, restore),
+            Kind::FxParam | Kind::FxParams => params::restore(ctx, restore),
+            Kind::FxPreset => preset::restore(ctx, restore),
+            Kind::SendAdd => sends::add_restore(ctx, watch, restore),
+            Kind::SendRemove => sends::remove_restore(ctx, watch, restore),
+            Kind::SendVolume => sends::volume_restore(ctx, restore),
+            Kind::SmartControlSet => smart::restore(ctx, restore),
+            Kind::PatchLoad => patch::restore(ctx, watch, restore),
+            Kind::Automation(_) => automation::restore(ctx, keys, restore),
         }
     }
 }
@@ -510,6 +598,53 @@ pub(crate) fn ref_text(ctx: &Ctx, kind: &str, numbers: &[usize]) -> String {
     Ref::new(ctx.project.epoch, kind, numbers).text()
 }
 
+/// The reads that open a window or a pane of Logic's to answer, through the change side's channels: a plug-in's
+/// parameters (`param`, its window's Controls View), a track's Smart Controls (`smart`) and automation (`automation`).
+/// None for the other kinds, which the catalog answers.
+pub fn read_wide(project: &mut Project, ax: &mut Ax, keys: &KeyCommands, want: &crate::read::Want, params: &Value) -> Option<Answer> {
+    use crate::read::Want;
+    let (kind, one) = match want {
+        Want::One(reference) => (Ref::parse(reference)?.kind, Some(reference.clone())),
+        Want::Kind { kind, .. } => (kind.clone(), None),
+    };
+    let mut ctx = Ctx { project, ax };
+    let rows: Done<Vec<Value>> = match kind.as_str() {
+        "param" => (|| {
+            let (owner, slot) = match &one {
+                Some(reference) => {
+                    let (owner, slot, _) = strips::param(&ctx, &json!({"ref": reference}), "ref", Epoch::Current)?;
+                    (owner, slot)
+                }
+                None => strips::plugin(&ctx, params, "parent", Epoch::Current)?,
+            };
+            params::rows(&mut ctx, owner, slot)
+        })(),
+        "smart" => (|| {
+            let place = match &one {
+                Some(reference) => Ref::parse(reference).map(|r| r.first()).unwrap_or(0),
+                None => track_place(&ctx, params, "parent", Epoch::Current)?,
+            };
+            smart::rows(&mut ctx, place)
+        })(),
+        "automation" => (|| {
+            let place = match &one {
+                Some(reference) => Ref::parse(reference).map(|r| r.first()).unwrap_or(0),
+                None => track_place(&ctx, params, "parent", Epoch::Current)?,
+            };
+            automation::rows(&mut ctx, keys, place)
+        })(),
+        _ => return None,
+    };
+    let epoch = ctx.project.epoch;
+    Some(rows.and_then(|rows| match one {
+        Some(reference) => match rows.into_iter().find(|row| row["ref"] == reference.as_str()) {
+            Some(row) => Ok(json!({"items": [row], "epoch": epoch.to_string()})),
+            None => Err(crate::refs::not_in_project(&reference)),
+        },
+        None => crate::read::page(&rows, params, epoch),
+    }))
+}
+
 impl Changes {
     /// `change_preview {kind, input, epoch}`: what the change would do, writing nothing.
     pub fn preview(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
@@ -517,7 +652,7 @@ impl Changes {
         let kind = kind_of(params)?;
         let preview = match kind {
             Kind::KeyCommand => command::preview(self, ctx, object(params, "input")?)?,
-            other => other.preview(ctx, object(params, "input")?)?,
+            other => other.preview(ctx, &self.keys, object(params, "input")?)?,
         };
         Ok(json!({
             "epoch": ctx.project.epoch.to_string(),
@@ -593,6 +728,19 @@ impl Changes {
         save::project_save(ctx, &self.keys, params)
     }
 
+    /// `bounce {epoch, startBeats, endBeats, path, format?}`: the mix of a range written to an audio file through
+    /// Logic's Bounce dialog; no change, no undo step.
+    pub fn bounce(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
+        check_epoch(ctx, params)?;
+        bounce::bounce(ctx, params)
+    }
+
+    /// `export_tracks {epoch, path}`: every track written as an audio file into a folder; no change, no undo step.
+    pub fn export_tracks(&mut self, ctx: &mut Ctx, params: &Value) -> Answer {
+        check_epoch(ctx, params)?;
+        bounce::export_tracks(ctx, params)
+    }
+
     /// `transport_stop`: Logic stops playing and recording (the emergency stop).
     pub fn transport_stop(&mut self, ctx: &mut Ctx) -> Answer {
         timeline::stop(ctx)
@@ -656,9 +804,10 @@ mod tests {
         }
         assert!(kind("track-color").is_none());
         assert!(kind("key-command").is_some());
-        let refused = kind_of(&json!({"kind": "fx-add"})).unwrap_err();
+        let refused = kind_of(&json!({"kind": "fx-move"})).unwrap_err();
         assert_eq!(refused.0, "bad-params");
-        assert!(refused.1.contains("pop-up menu"), "{}", refused.1);
+        assert!(refused.1.contains("dragging"), "{}", refused.1);
+        assert!(kind_of(&json!({"kind": "fx-add"})).is_ok());
         assert_eq!(kind_of(&json!({"kind": "bogus"})).unwrap_err().1, "Logic Pro has no change kind \"bogus\"");
         assert_eq!(quoted("Vocal"), "“Vocal”");
     }

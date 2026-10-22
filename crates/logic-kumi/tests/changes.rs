@@ -13,6 +13,7 @@ use common::{dialog, hands_showing, tracks_window, Lab, SONG};
 use logic_kumi::ax::strings::Strings;
 use logic_kumi::ax::Ax;
 use logic_kumi::changes::{self, Changes};
+use logic_kumi::disk;
 use logic_kumi::fixtures::{Scene, SceneHands};
 use logic_kumi::helper::{Helper, Launch};
 use logic_kumi::project::Project;
@@ -24,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 36] = [
+const SCENES: [&str; 54] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -61,6 +62,24 @@ const SCENES: [&str; 36] = [
     "change-track-stack-flatten",
     "change-project-save",
     "change-plan-m4",
+    "change-fx-add",
+    "change-fx-delete",
+    "change-fx-params",
+    "change-fx-output",
+    "change-fx-preset",
+    "change-send-add",
+    "change-send-volume",
+    "change-send-remove",
+    "change-smart-control-set",
+    "change-patch-load",
+    "change-automation-add",
+    "change-automation-edit",
+    "change-bounce",
+    "change-export-tracks",
+    "change-undo-m4b",
+    "read-smart-none",
+    "change-fx-param-exact",
+    "change-bounce-undo",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -94,6 +113,9 @@ fn load(name: &str) -> Scene {
 /// Replays a scene's steps through the change side over its recorded helper replies, as the recorder ran them.
 fn replay_scene(scene: &Scene) -> Replayed {
     changes::set_settling(false);
+    // What the recording saw on disk (a bounce's file, an export's folder), answered back in order.
+    let looked: Vec<Value> = scene.logic.get("disk").and_then(Value::as_array).cloned().unwrap_or_default();
+    disk::set_hook(Some(disk::replaying(&looked)));
     let pid = scene.logic.get("pid").and_then(Value::as_u64).unwrap_or(1) as u32;
     let project = scene.logic.get("project").cloned().unwrap_or(Value::Null);
     let hands = SceneHands::new(scene);
@@ -141,6 +163,7 @@ fn replay_scene(scene: &Scene) -> Replayed {
         };
         steps.push(Step { step, recorded: record["answer"].clone(), replayed });
     }
+    disk::set_hook(None);
     Replayed { steps, unrecorded: hands.unrecorded(), events }
 }
 
@@ -755,4 +778,346 @@ fn a_plan_of_a_split_a_cycle_a_tempo_event_an_import_and_a_save_as_runs_as_one_s
     let saved = of(&replayed, "project_save")[0].result().clone();
     assert_eq!(saved["dirty"], false);
     assert_eq!(of(&replayed, "read")[0].result()["total"], 3);
+}
+
+#[test]
+fn a_plug_in_is_added_through_its_slots_menu_search_and_taken_off_again_by_value() {
+    let replayed = replay("change-fx-add");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"plugins": ["Channel EQ"], "instrument": null}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    // The empty slot under Channel EQ: the plug-in menu's search took "gain", Down and Return its first result.
+    assert_eq!(applied["applied"], json!({"index": 1, "name": "Gain", "slot": 2, "plugins": ["Channel EQ", "Gain"]}));
+    assert_eq!(applied["created"], json!({"ref": "1:plugin:1.2", "kind": "plugin"}));
+    assert_eq!(applied["undo"]["title"], "Undo Insert Plug-in in Channel Strip");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][1]["name"], "Gain");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"deleted": "1:plugin:1.2", "plugins": ["Channel EQ"]}));
+    assert_eq!(reads[1].result()["total"], 1);
+}
+
+#[test]
+fn a_gain_on_the_stereo_out_is_added_set_in_its_controls_view_read_back_and_taken_off() {
+    // What M5's listening needs: a Gain on the mix's output, its gain set and read, all of it taken back.
+    let replayed = replay("change-fx-output");
+    let applies = of(&replayed, "change_apply");
+    assert_eq!(applies[0].result()["created"], json!({"ref": "1:plugin:0.1.1", "kind": "plugin"}));
+    assert_eq!(applies[0].result()["undo"]["title"], "Undo Insert Plug-in in Channel Strip");
+    let reads = of(&replayed, "read");
+    assert_eq!(
+        reads[0].result()["items"][0],
+        json!({"ref": "1:plugin:0.1.1", "trackRef": "1:output:1", "slot": 1, "name": "Gain", "bypassed": false, "kind": "effect"})
+    );
+    let params = reads[1].result()["items"].as_array().unwrap().clone();
+    let gain = params.iter().find(|p| p["name"] == "Gain").unwrap();
+    assert_eq!(
+        gain,
+        &json!({"ref": "1:param:0.1.1.2", "pluginRef": "1:plugin:0.1.1", "index": 2, "name": "Gain", "value": 960.0, "text": "0.0 dB", "min": 0.0, "max": 1200.0, "normalized": 0.8})
+    );
+    // −6 found by reading the slider's text: Logic's Gain runs −96 to +24 dB a tenth a step.
+    assert_eq!(
+        applies[1].result()["applied"],
+        json!({"plugin": "Gain", "params": [{"index": 2, "name": "Gain", "value": 900.0, "text": "-6.0 dB"}]})
+    );
+    assert_eq!(applies[1].result()["undo"]["entry"], false, "a parameter is no step of the project's undo");
+    assert_eq!(reads[2].result()["items"][0]["text"], "-6.0 dB");
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"]["params"][0]["text"], "0.0 dB");
+    assert_eq!(reads[3].result()["items"][0]["value"], 960.0);
+    assert_eq!(restores[1].result()["restored"], json!({"deleted": "1:plugin:0.1.1", "plugins": []}));
+    assert_eq!(reads[4].result()["total"], 0);
+}
+
+#[test]
+fn a_deleted_plug_in_comes_back_through_logics_own_undo_and_an_instrument_isnt_taken_off() {
+    let replayed = replay("change-fx-delete");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"deleted": true, "plugins": ["Channel EQ", "Compressor"]}));
+    assert_eq!(applied["material"]["name"], "ChromaVerb");
+    assert_eq!(applied["undo"]["title"], "Undo Remove Plug-in in Channel Strip");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"ref": "1:plugin:2.4", "pressed": "Undo Remove Plug-in in Channel Strip"}));
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(of(&replayed, "read")[1].result()["items"][3]["name"], "ChromaVerb");
+    let refused = &of(&replayed, "change_preview")[1].replayed;
+    assert_eq!(refused["error"]["code"], "bad-params");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("instrument"));
+}
+
+#[test]
+fn a_plug_ins_parameters_are_set_together_in_its_controls_view_and_put_back_by_value() {
+    let replayed = replay("change-fx-params");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(
+        applied["applied"]["params"],
+        json!([{"index": 7, "name": "Low Shelf Gain", "value": 270.0, "text": "+3.0 dB"}, {"index": 9, "name": "Peak 1 On/Off", "value": 0.0, "text": "off"}])
+    );
+    assert_eq!(applied["display"]["lines"], json!(["Low Shelf Gain → +3.0 dB", "Peak 1 On/Off → off"]));
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["text"], "+3.0 dB");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"]["params"][1]["text"], "on");
+    assert_eq!(reads[1].result()["items"][0]["text"], "0.0 dB");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[1].replayed["error"]["message"], "normalized must be a number from 0 to 1");
+    assert!(previews[2].replayed["error"]["message"].as_str().unwrap().contains("no parameter named \"Drive\""));
+}
+
+#[test]
+fn a_preset_is_stepped_with_the_plug_in_windows_setting_buttons_and_put_back_with_its_own_undo() {
+    let replayed = replay("change-fx-preset");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"plugin": "Channel EQ", "preset": "Default Preset"}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"plugin": "Channel EQ", "preset": "Brighten Hi Hat", "steps": 1}));
+    assert_eq!(applied["material"], json!({"steps": 1}));
+    assert_eq!(applied["undo"]["entry"], false, "a setting is a step of the plug-in window's own undo, not the project's");
+    // "Default Preset" is on no setting button's way: the window's Undo (in its editor) brings it back.
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"preset": "Default Preset"}));
+    assert_eq!(restored["display"]["note"], "Put back with the plug-in window's own undo.");
+    assert_eq!(of(&replayed, "change_preview")[1].replayed["error"]["code"], "bad-params");
+}
+
+#[test]
+fn a_send_is_made_by_walking_its_slots_menu_its_level_stepped_and_taken_back_with_its_aux_by_logics_own_undo() {
+    let replayed = replay("change-send-add");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"destination": "Bus 1", "slot": 1, "level": -6.0}));
+    // Logic made an aux for the bus nothing used yet: the answer names it.
+    assert_eq!(applied["created"], json!({"ref": "1:send:1.1", "kind": "send", "bus": 1, "aux": "Aux 1"}));
+    assert_eq!(applied["undo"]["title"], "Undo Change Send in Channel Strip");
+    let reads = of(&replayed, "read");
+    assert_eq!(
+        reads[0].result()["items"][0],
+        json!({"ref": "1:send:1.1", "trackRef": "1:track:1", "slot": 1, "destination": "Bus 1", "level": -6.0})
+    );
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"removed": "1:send:1.1", "pressed": "Undo Change Send in Channel Strip"}));
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(reads[1].result()["total"], 0);
+    let refused = &of(&replayed, "change_preview")[1].replayed;
+    assert_eq!(refused["error"]["code"], "bad-params");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("mode"));
+}
+
+#[test]
+fn a_sends_level_is_stepped_on_its_knob_and_put_back_by_value() {
+    let replayed = replay("change-send-volume");
+    let applies = of(&replayed, "change_apply");
+    // A new send starts at −∞, which the rows give as −96 dB.
+    assert_eq!(applies[0].result()["applied"]["level"], -96.0);
+    let preview = of(&replayed, "change_preview")[1].result().clone();
+    assert_eq!(preview["fence"], json!({"send": "Bus 2", "level": -96.0}));
+    assert_eq!(applies[1].result()["applied"], json!({"level": -12.0}));
+    assert_eq!(applies[1].result()["undo"]["entry"], false, "a send's level is no step of Logic's undo");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["level"], -12.0);
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"], json!({"level": -96.0}));
+    assert_eq!(reads[1].result()["items"][0]["level"], -96.0);
+    assert_eq!(restores[1].result()["undo"]["how"], "undo");
+    assert_eq!(reads[2].result()["total"], 0);
+}
+
+#[test]
+fn a_removed_send_comes_back_through_logics_own_undo_while_its_step_is_on_top() {
+    let replayed = replay("change-send-remove");
+    let applies = of(&replayed, "change_apply");
+    let removed = applies[1].result().clone();
+    assert_eq!(removed["applied"], json!({"removed": true, "sends": []}));
+    assert_eq!(removed["material"]["destination"], "Bus 2");
+    assert_eq!(removed["material"]["step"], removed["undo"]["desc"]);
+    assert_eq!(removed["undo"]["title"], "Undo Change Send in Channel Strip");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["total"], 0);
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"], json!({"destination": "Bus 2", "pressed": "Undo Change Send in Channel Strip"}));
+    assert_eq!(reads[1].result()["items"][0]["destination"], "Bus 2");
+    // Then the send Kumi added goes the same way, its aux with it.
+    assert_eq!(restores[1].result()["restored"]["removed"], "1:send:1.1");
+    assert_eq!(reads[2].result()["total"], 0);
+}
+
+#[test]
+fn a_smart_control_is_stepped_in_the_smart_controls_pane_of_its_selected_track_and_put_back_by_value() {
+    let replayed = replay("change-smart-control-set");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["target"], json!({"ref": "1:smart:2.1", "kind": "smart", "track": "1:track:2"}));
+    assert_eq!(preview["fence"], json!({"name": "Tone", "value": 0.0, "text": "0%"}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"name": "Tone", "value": 0.6, "text": "60%"}));
+    assert_eq!(applied["undo"]["entry"], false);
+    let reads = of(&replayed, "read");
+    let names: Vec<&str> = reads[0].result()["items"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Tone", "Low Cut", "Comp", "Ratio"], "the pane's order, by rows then from the left");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"name": "Tone", "value": 0.0, "text": "0%"}));
+    assert_eq!(reads[1].result()["items"][0]["value"], 0.0);
+    let refused = &of(&replayed, "change_preview")[1].replayed;
+    assert!(refused["error"]["message"].as_str().unwrap().contains("“Tone”, “Low Cut”, “Comp”, “Ratio”"));
+}
+
+#[test]
+fn a_patch_is_loaded_from_the_librarys_search_and_taken_back_only_by_logics_own_undo() {
+    let replayed = replay("change-patch-load");
+    let preview = of(&replayed, "change_preview")[0].result().clone();
+    assert_eq!(preview["fence"], json!({"patch": "", "plugins": ["Channel EQ"]}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(
+        applied["applied"],
+        json!({"patch": "Classic Vocal", "plugins": ["Channel EQ", "Compressor", "Channel EQ", "Tape Delay", "Spring Box"]})
+    );
+    assert_eq!(applied["undo"]["title"], "Undo Load Patch");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["total"], 5);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"patch": "", "plugins": ["Channel EQ"], "pressed": "Undo Load Patch"}));
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(reads[1].result()["total"], 1, "the strip read again after Logic's undo, not from what the bridge kept");
+    let missing = &of(&replayed, "change_apply")[1].replayed;
+    assert_eq!(missing["error"]["code"], "failed");
+    assert!(missing["error"]["message"].as_str().unwrap().contains("finds no patch named “No Such Patch Here”"));
+}
+
+#[test]
+fn automation_is_written_in_the_track_automation_event_list_read_back_as_rows_per_parameter_and_taken_out_by_value() {
+    let replayed = replay("change-automation-add");
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    let made = json!([
+        {"positionBeats": 0.0, "value": 90, "number": 7, "parameter": "Volume"},
+        {"positionBeats": 4.0, "value": 60, "number": 7, "parameter": "Volume"}
+    ]);
+    assert_eq!(applied["applied"]["made"], made);
+    assert_eq!(applied["applied"]["events"], made);
+    assert_eq!(applied["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    assert_eq!(
+        reads[0].result()["items"][0],
+        json!({"ref": "1:automation:1.1", "trackRef": "1:track:1", "index": 1, "parameter": "Volume", "number": 7, "events": [{"positionBeats": 0.0, "value": 90}, {"positionBeats": 4.0, "value": 60}]})
+    );
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["restored"], json!({"events": []}));
+    assert_eq!(reads[1].result()["total"], 0);
+    let refused = &of(&replayed, "change_preview")[1].replayed;
+    assert_eq!(refused["error"]["message"], "Logic Pro's playhead display places an automation event on a beat: give whole beats");
+}
+
+#[test]
+fn an_automation_event_is_changed_and_deleted_by_its_place_and_each_is_put_back_by_value() {
+    let replayed = replay("change-automation-edit");
+    let applies = of(&replayed, "change_apply");
+    // The second event moved to beat 8 at 100: taken out and made again there.
+    assert_eq!(applies[1].result()["applied"]["removed"], json!([{"positionBeats": 4.0, "value": 60, "number": 7, "parameter": "Volume"}]));
+    assert_eq!(applies[1].result()["applied"]["made"], json!([{"positionBeats": 8.0, "value": 100, "number": 7, "parameter": "Volume"}]));
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["items"][0]["events"], json!([{"positionBeats": 0.0, "value": 90}, {"positionBeats": 8.0, "value": 100}]));
+    let restores = of(&replayed, "change_restore");
+    let both = json!([{"positionBeats": 0.0, "value": 90}, {"positionBeats": 4.0, "value": 60}]);
+    assert_eq!(reads[1].result()["items"][0]["events"], both);
+    assert_eq!(applies[2].result()["applied"]["removed"], json!([{"positionBeats": 0.0, "value": 90, "number": 7, "parameter": "Volume"}]));
+    assert_eq!(reads[2].result()["items"][0]["events"], json!([{"positionBeats": 4.0, "value": 60}]));
+    assert_eq!(reads[3].result()["items"][0]["events"], both);
+    assert_eq!(restores[2].result()["restored"], json!({"events": []}));
+    assert_eq!(reads[4].result()["total"], 0);
+}
+
+#[test]
+fn the_mix_is_bounced_through_logics_bounce_dialog_and_found_on_disk_and_never_over_a_file() {
+    let replayed = replay("change-bounce");
+    let bounces = of(&replayed, "bounce");
+    let bounced = bounces[0].result().clone();
+    assert_eq!(bounced["bounced"], "/Users/me/programs/kumi-lanes/m5-files/m4b/Scratch bounce.wav");
+    assert_eq!(
+        (bounced["format"].as_str(), bounced["rate"].as_u64(), bounced["channels"].as_u64(), bounced["bits"].as_u64()),
+        (Some("wav24"), Some(44100), Some(2), Some(24))
+    );
+    // Eight beats at Scratch's 160 BPM.
+    assert_eq!(bounced["seconds"], 3.0);
+    assert!(bounces[1].replayed["error"]["message"].as_str().unwrap().contains("is there already"));
+    assert_eq!(bounces[2].replayed["error"]["message"], "path must end in .wav for wav24");
+    assert!(bounces[3].replayed["error"]["message"].as_str().unwrap().contains("Kumi makes no folders"));
+}
+
+#[test]
+fn every_track_is_exported_through_the_export_panel_and_the_new_files_are_answered() {
+    let replayed = replay("change-export-tracks");
+    let exports = of(&replayed, "export_tracks");
+    assert_eq!(
+        exports[0].result()["files"],
+        json!([{"name": "01.wav", "bytes": 985522, "seconds": 3.715}]),
+        "the producer's naming (Increment) and Scratch's one track with sound"
+    );
+    assert_eq!(exports[1].replayed["error"]["code"], "bad-params");
+}
+
+#[test]
+fn the_producers_own_undo_of_a_plug_in_and_a_send_kumi_added_is_named_back() {
+    let replayed = replay("change-undo-m4b");
+    let polls = of(&replayed, "");
+    // Each Cmd-Z takes Kumi's latest step off: the send first, then the plug-in, each named by its desc.
+    let named: Vec<Value> = replayed.events.iter().map(|event| event["descs"].clone()).collect();
+    assert_eq!(named, [json!(["Kumi: Added send from “Vocal” to Bus 2 (k0002)"]), json!(["Kumi: Added “Gain” to “Vocal” (k0001)"])]);
+    assert!(polls.iter().all(|poll| poll.replayed["ok"] == true));
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result()["total"], 1);
+    assert_eq!(reads[1].result()["total"], 0);
+}
+
+#[test]
+fn a_track_whose_strip_has_nothing_smart_controls_map_reads_none_of_them() {
+    // Vocal's strip holds a Channel EQ alone: the pane draws its header (the Controls and EQ views' buttons) over no
+    // controls, which is no rows, not a failure.
+    let replayed = replay("read-smart-none");
+    let reads = of(&replayed, "read");
+    assert_eq!(reads[0].result(), &json!({"items": [], "total": 0, "epoch": "1"}));
+    assert_eq!(reads[1].result()["items"][0]["name"], "Channel EQ");
+}
+
+#[test]
+fn a_parameter_lands_on_the_number_asked_when_its_steps_allow() {
+    // The Stereo Out's Gain asked for -3 dB: its bisection used to stop at the first reading within a quarter of a dB
+    // (-3.1 dB), and goes on now until one reads -3 exactly, which raw 930 does.
+    let replayed = replay("change-fx-param-exact");
+    let applies = of(&replayed, "change_apply");
+    let set = applies[1].result();
+    assert_eq!(set["applied"]["params"][0], json!({"index": 2, "name": "Gain", "value": 930.0, "text": "-3.0 dB"}));
+    assert!(set["display"].get("note").is_none(), "the number was reached: no resolution to say");
+    assert_eq!(of(&replayed, "read")[0].result()["items"][0]["text"], "-3.0 dB");
+    let restores = of(&replayed, "change_restore");
+    assert_eq!(restores[0].result()["restored"]["params"][0]["text"], "0.0 dB");
+    assert_eq!(restores[1].result()["restored"]["deleted"], "1:plugin:0.1.1");
+    assert_eq!(of(&replayed, "read")[1].result()["items"], json!([]));
+}
+
+#[test]
+fn a_bounce_adds_nothing_to_the_project_so_logics_own_undo_still_takes_back_kumis_step_under_it() {
+    // The Bounce dialog's Add to Project put the file in the project's audio, a step of Logic's undo ("Bounce
+    // Project") on top of Kumi's: Kumi unchecks it (and Add to Apple Music Library) before OK.
+    let bounce = replay("change-bounce");
+    let unchecked = bounce_scene_presses("change-bounce");
+    assert!(unchecked.iter().any(|(path, before, after)| path == "3.4" && *before == 1 && *after == 0), "{unchecked:?}");
+    assert_eq!(of(&bounce, "bounce")[0].result()["seconds"], 3.0);
+    // A split, a bounce, then the split taken back through Logic's own undo, which still has the split on top.
+    let replayed = replay("change-bounce-undo");
+    assert_eq!(of(&replayed, "bounce")[0].result()["seconds"], 1.5);
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((restored["restored"]["pressed"].as_str(), restored["undo"]["how"].as_str()), (Some("Undo Split Regions"), Some("undo")));
+    assert_eq!(of(&replayed, "read")[0].result()["items"].as_array().unwrap().len(), 1, "the region whole again");
+}
+
+/// The presses a scene made in the Bounce dialog: each one's path and its value before and after.
+fn bounce_scene_presses(name: &str) -> Vec<(String, i64, i64)> {
+    load(name)
+        .calls
+        .iter()
+        .filter(|call| {
+            call.op == "action"
+                && call.params.get("root").and_then(|r| r.get("title")).and_then(Value::as_str).is_some_and(|t| t.starts_with("Bounce"))
+        })
+        .filter_map(|call| {
+            Some((call.params.get("path")?.as_str()?.to_string(), call.reply.get("before")?.as_i64()?, call.reply.get("after")?.as_i64()?))
+        })
+        .collect()
 }

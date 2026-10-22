@@ -10,7 +10,10 @@ use crate::refs::{self, bad, check_epoch, Fault, Ref};
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
-pub const KINDS: [&str; 8] = ["project", "track", "region", "note", "plugin", "send", "marker", "tempo"];
+pub const KINDS: [&str; 11] = ["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"];
+/// The kinds read only under a parent, and what the parent is: a region's notes, a plug-in's parameters (from its
+/// window's Controls View), a track's Smart Controls and automation (from their panes).
+const NEED_PARENT: [(&str, &str); 4] = [("note", "region"), ("param", "plug-in"), ("smart", "track"), ("automation", "track")];
 
 /// What the readers gathered of the project, in one epoch: the rows of every kind, in the order they are numbered.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -34,8 +37,9 @@ pub struct Catalog {
 /// The key a kind's rows name their parent by.
 pub fn parent_key(kind: &str) -> Option<&'static str> {
     match kind {
-        "region" | "plugin" | "send" => Some("trackRef"),
+        "region" | "plugin" | "send" | "smart" | "automation" => Some("trackRef"),
         "note" => Some("regionRef"),
+        "param" => Some("pluginRef"),
         _ => None,
     }
 }
@@ -123,8 +127,8 @@ pub fn want(params: &Value, epoch: u32) -> Result<Want, Fault> {
         return Err(bad(format!("Logic Pro has no kind {kind:?} to read")));
     }
     let parent = params.get("parent").and_then(Value::as_str);
-    if parent_key(kind) == Some("regionRef") && parent.is_none() {
-        return Err(bad(format!("{kind}: pass the parent region")));
+    if let Some((_, what)) = NEED_PARENT.iter().find(|(needs, _)| *needs == kind).filter(|_| parent.is_none()) {
+        return Err(bad(format!("{kind}: pass the parent {what}")));
     }
     let parent = match (parent_key(kind), parent) {
         (Some(_), Some(parent)) => Ref::parse(parent),

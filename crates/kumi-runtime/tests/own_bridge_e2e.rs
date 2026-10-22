@@ -1259,14 +1259,21 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 "the track it made, in a short ref: {}",
                 done.text
             );
+            // (a track added with a name is made, then renamed through the Inspector: two steps, the change kept under
+            // the last, as the M3 scene reads)
             let undo_steps = script.undo_history();
-            assert_eq!(undo_steps.len(), 2, "no undo block, and none for the fader or the mute: {undo_steps:?}");
+            assert_eq!(undo_steps.len(), 3, "no undo block, and none for the fader or the mute: {undo_steps:?}");
             assert!(
-                undo_steps[0].starts_with("Kumi: Added audio track “Pad” (k")
-                    && undo_steps[1].starts_with("Kumi: Renamed track “Pad” → “Pads” (k"),
+                undo_steps[0].is_empty()
+                    && undo_steps[1].starts_with("Kumi: Added audio track “Pad” (k")
+                    && undo_steps[2].starts_with("Kumi: Renamed track “Pad” → “Pads” (k"),
                 "{undo_steps:?}"
             );
-            assert_eq!(script.undo_titles(), ["Undo Create Track", "Undo Renaming"], "the Edit menu's titles, as the bridge keeps them");
+            assert_eq!(
+                script.undo_titles(),
+                ["Undo Create Track", "Undo Renaming", "Undo Renaming"],
+                "the Edit menu's titles, as the bridge keeps them"
+            );
 
             // The next look lists them for the model, each applied; the add moved the epoch, so the refs are new ones.
             let again = logic.observe(Signal::new(), None).await.unwrap();
@@ -1304,7 +1311,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             assert_eq!(undone.reply.as_deref(), Some("Undone: Added audio track “Pad”."));
             assert_eq!(
                 (script.track_count(), script.undo_titles()),
-                (2, vec!["Undo Create Track".to_string(), "Undo Delete Tracks".to_string()])
+                (2, vec!["Undo Create Track".to_string(), "Undo Renaming".to_string(), "Undo Delete Tracks".to_string()])
             );
 
             // The producer moved the fader since: Kumi leaves it, says why, and HISTORY keeps the change.
@@ -1563,8 +1570,11 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             let regions = tool(&look, "logic_read").execute(input(json!({"kind": "region"})), Signal::new()).await.unwrap();
             let region = serde_json::from_str::<Value>(&regions.text).unwrap()["items"][0]["ref"].as_str().unwrap().to_owned();
             assert!(region.starts_with("region:"), "{region}");
-            let split =
-                tool(&look, "region_split").execute(input(json!({"ref": region, "positionBeats": 8})), Signal::new()).await.unwrap();
+            // (a split is a make_changes step, as the key command is: Logic's tools on every request are REAPER's eight)
+            let split = tool(&look, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "region_split", "input": {"ref": region, "positionBeats": 8}}]})), Signal::new())
+                .await
+                .unwrap();
             assert!(!split.is_error && split.text.contains("\"ref\":\"region:") && !split.text.contains(":region:"), "{}", split.text);
             assert_eq!(script.regions().len(), 2);
             let split_row = row("Split region “Keys” at bar 3").expect("a row");
@@ -1582,12 +1592,10 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             let keys =
                 serde_json::from_str::<Value>(&look.context).unwrap()["tracks"][1]["ref"].as_str().map(str::to_owned).unwrap_or(keys);
             let notes: Vec<Value> = (0..64).map(|n| json!({"pitch": 48 + n % 12, "start": n as f64 * 0.25, "length": 0.25})).collect();
-            let imported = tool(&look, "midi_import")
-                .execute(input(json!({"ref": keys, "positionBeats": 32, "notes": notes})), Signal::new())
-                .await
-                .unwrap();
+            let steps = json!({"steps": [{"tool": "midi_import", "input": {"ref": keys, "positionBeats": 32, "notes": notes}}]});
+            let imported = tool(&look, "make_changes").execute(input(steps), Signal::new()).await.unwrap();
             assert!(!imported.is_error, "{}", imported.text);
-            let created = serde_json::from_str::<Value>(&imported.text).unwrap()["ref"].as_str().unwrap().to_owned();
+            let created = serde_json::from_str::<Value>(&imported.text).unwrap()["done"][0]["ref"].as_str().unwrap().to_owned();
             assert!(created.starts_with("region:"), "{}", imported.text);
             assert_eq!((script.regions().len(), script.notes_of(2), script.track_count()), (2, 64, 3));
             let read = tool(&look, "logic_read")
@@ -1653,6 +1661,142 @@ async fn logics_m4_kinds_go_through_kumis_host_a_save_a_key_command_regions_note
             let again = tool(&look, "undo_change").execute(input(json!({"change": mute_row.id})), Signal::new()).await.unwrap();
             assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
             assert_eq!(script.asked().iter().filter(|(method, _)| method == "change_restore").count(), restores, "nothing sent twice");
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (M4b) Logic's second slice through Kumi's host into HISTORY and back out, in the bridge's shapes: the tools on every
+/// request are REAPER's eight (a plug-in inserted and its parameter among them; a split and an import are make_changes
+/// steps now); a Gain inserted on the Stereo Out (the observation's outputs name it: no read lists it) and its gain set
+/// through the Controls View (no step of Logic's undo, which the row says), read back as a parameter; a patch loaded, a
+/// send to a bus nothing takes (Logic makes an aux, which has no ref and moves nothing) and a bounce in one plan, the
+/// bounce no row; each undone through Kumi: the send and then the patch through Logic's own undo (the aux going with
+/// the send), the gain and the Gain by value.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_m4b_kinds_go_through_kumis_host_a_plugin_added_and_tuned_a_send_a_patch_and_a_bounce() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(Recorded {
+                inner: InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) },
+                calls: RefCell::default(),
+            });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let row = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).cloned();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            // (a step's tool is deferred: make_changes lists it, and it is loaded when asked for)
+            let names: Vec<&str> = observed.tools.iter().filter(|tool| !tool.deferred()).map(|tool| tool.name()).collect();
+            for core in ["track_volume", "track_pan", "track_mute", "track_add", "tempo_set", "fx_add", "fx_param", "notes_add"] {
+                assert!(names.contains(&core), "{core} is a tool on every request: {names:?}");
+            }
+            for step in ["region_split", "midi_import", "send_add", "patch_load", "fx_params", "bounce"] {
+                assert!(!names.contains(&step), "{step} is a make_changes step: {names:?}");
+            }
+            let plan = tool(&observed, "make_changes");
+            for words in ["bounce:", "export_tracks:", "patch_load:", "automation_add:"] {
+                assert!(plan.description().contains(words), "{words}: {}", plan.description());
+            }
+            for refused in ["fx_move:", "send_mode:"] {
+                assert!(!plan.description().contains(refused), "{refused} is the bridge's to refuse: {}", plan.description());
+            }
+
+            // The Stereo Out, which no read lists: the observation names it.
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            assert_eq!(context["outputs"][0]["name"], "Stereo Out", "{context}");
+            let stereo_out = context["outputs"][0]["ref"].as_str().unwrap().to_owned();
+            assert!(stereo_out.starts_with("output:"), "{context}");
+            let read = tool(&observed, "logic_read");
+            let none = read.execute(input(json!({"kind": "plugin", "parent": stereo_out})), Signal::new()).await.unwrap();
+            assert!(!none.is_error && serde_json::from_str::<Value>(&none.text).unwrap()["total"] == 0, "{}", none.text);
+            let added = tool(&observed, "fx_add").execute(input(json!({"ref": stereo_out, "name": "Gain"})), Signal::new()).await.unwrap();
+            assert!(!added.is_error && added.text.contains("\"ref\":\"plugin:"), "{}", added.text);
+            let gain = serde_json::from_str::<Value>(&added.text).unwrap()["ref"].as_str().unwrap().to_owned();
+            let inserted = row("Added “Gain” to “Stereo Out”").expect("a row");
+            assert_eq!((inserted.state, inserted.note.as_deref()), (ChangeState::Applied, None));
+            let set = tool(&observed, "fx_param")
+                .execute(input(json!({"ref": gain, "param": "Gain", "value": -3})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!set.is_error, "{}", set.text);
+            let set_row = row("“Gain”'s Gain → -3.0 dB on “Stereo Out”").expect("a row");
+            assert_eq!(set_row.note.as_deref(), Some("Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can."));
+            assert_eq!(script.param("output:1", 1, "Gain"), Some((Some(930.0), "-3.0 dB".to_string())));
+            let params = read.execute(input(json!({"kind": "param", "parent": gain})), Signal::new()).await.unwrap();
+            let second = serde_json::from_str::<Value>(&params.text).unwrap()["items"][1].clone();
+            assert!(
+                second["ref"].as_str().is_some_and(|reference| reference.starts_with("param:")) && second["text"] == "-3.0 dB",
+                "{}",
+                params.text
+            );
+
+            // A patch on Keys, then a send from Vocal to a bus nothing takes (Logic makes Aux 1, which moves nothing) and a
+            // bounce: one plan; the bounce is no row, and its file is written.
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&look.context).unwrap();
+            let (vocal, keys) =
+                (context["tracks"][0]["ref"].as_str().unwrap().to_owned(), context["tracks"][1]["ref"].as_str().unwrap().to_owned());
+            assert_eq!(context["outputs"][0]["ref"], stereo_out.as_str(), "its name stays");
+            let bounced = home.path().join("Scratch bars 1 to 5.wav").to_string_lossy().into_owned();
+            let steps = json!({"steps": [
+                {"tool": "patch_load", "input": {"ref": keys, "patch": "Piano/Steinway Grand Piano"}},
+                {"tool": "send_add", "as": "send", "input": {"ref": vocal, "bus": 1}},
+                {"tool": "bounce", "input": {"startBeats": 0, "endBeats": 16, "path": bounced}},
+            ]});
+            within_schema(&tool(&look, "make_changes").input_schema(), &input(steps.clone()));
+            let rows = told.borrow().len();
+            let epoch = script.epoch();
+            let done = tool(&look, "make_changes").execute(input(steps), Signal::new()).await.unwrap();
+            assert!(
+                !done.is_error && done.text.contains("Bounced “Scratch bars 1 to 5.wav” (6.0 s)"),
+                "the bounce says what it wrote, as the host titles it: {}",
+                done.text
+            );
+            assert!(done.text.contains("\"ref\":\"send:"), "the send it made, short: {}", done.text);
+            assert!(std::path::Path::new(&bounced).is_file(), "the bounce's file");
+            assert_eq!(told.borrow().len(), rows + 2, "the patch and the send are rows; the bounce none");
+            assert_eq!((script.auxes(), script.epoch()), (vec!["Aux 1".to_string()], epoch), "an aux moves nothing");
+            assert_eq!(script.patch(2).as_deref(), Some("Steinway Grand Piano"));
+
+            // Each undone through Kumi: the send through Logic's own undo (the aux goes with it), then the patch the same way
+            // (its step on top again); the gain and the Gain by value.
+            let undo = tool(&look, "undo_change");
+            let send_row = row("Added send from “Vocal” to Bus 1").expect("a row");
+            let undone = undo.execute(input(json!({"change": send_row.id})), Signal::new()).await.unwrap();
+            assert!(!undone.is_error, "{}", undone.text);
+            assert!(script.auxes().is_empty(), "the aux went with the send");
+            let patch_row = row("Loaded the patch “Steinway Grand Piano” on “Keys”").expect("a row");
+            let back = undo.execute(input(json!({"change": patch_row.id})), Signal::new()).await.unwrap();
+            assert!(!back.is_error, "{}", back.text);
+            assert_eq!(script.patch(2).as_deref(), Some("Studio Grand"));
+            for (title, then) in [("“Gain”'s Gain → -3.0 dB on “Stereo Out”", Some("0.0 dB")), ("Added “Gain” to “Stereo Out”", None)]
+            {
+                let change = row(title).expect("a row");
+                let undone = undo.execute(input(json!({"change": change.id})), Signal::new()).await.unwrap();
+                assert!(!undone.is_error, "{title}: {}", undone.text);
+                assert_eq!(
+                    (row(title).unwrap().state, script.param("output:1", 1, "Gain").map(|(_, text)| text)),
+                    (ChangeState::Undone, then.map(str::to_string))
+                );
+            }
+            assert!(script.plugins("output:1").is_empty());
             logic.close().await.unwrap();
             simulator.stop();
         })

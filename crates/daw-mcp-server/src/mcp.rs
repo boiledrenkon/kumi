@@ -413,7 +413,7 @@ fn tool_list(daw: Daw) -> Value {
             "parent",
             json!({
                 "type": "string",
-                "description": "The ref of what the rows are in: a track for its regions, plug-ins or sends; a region for its notes (required for notes).",
+                "description": "The ref of what the rows are in: a track for its regions, plug-ins, sends, Smart Controls or automation; an output strip (the Stereo Out is <epoch>:output:1) for its plug-ins; a plug-in for its parameters; a region for its notes. Notes, parameters, Smart Controls and automation need theirs.",
             }),
         );
         property(
@@ -434,6 +434,31 @@ fn tool_list(daw: Daw) -> Value {
                 "description": "The ref of a track to centre the first page of the timeline's lanes on: the page starts half a page above it, and says where in `from`.",
             }),
         );
+        // (M4b) A bounce and the tracks exported: files written, nothing in the project changed, so no change and no undo.
+        let epoch = json!({"type": "string", "description": "The epoch of the answer the project was read in: if the project open now is another, it is refused as stale."});
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "bounce",
+            "title": "Bounce the Logic Pro project",
+            "description": "Bounces the open Logic Pro project from startBeats to endBeats (beats from the project's start) to an audio file at path, a whole path to a file that isn't there yet (.wav, or .aif for aiff24), in a folder that is (File > Bounce > Project or Section: Uncompressed in format, wav24 by default, Normalize off): what Logic Pro plays, through the Stereo Out. The file is found on disk and its header read: the answer gives bounced (its path), format, bytes, seconds, rate, channels and bits. A file written, not the project: no change and no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "startBeats": {"type": "number", "minimum": 0},
+                "endBeats": {"type": "number", "minimum": 0},
+                "path": {"type": "string"},
+                "format": {"type": "string", "enum": ["wav24", "wav16", "wav32f", "aiff24"]},
+                "epoch": epoch,
+            })), "required": ["startBeats", "endBeats", "path", "epoch"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "export_tracks",
+            "title": "Export Logic Pro's tracks as audio files",
+            "description": "Exports every track of the open Logic Pro project as an audio file of its own into the folder path, whole and there already (File > Export > All Tracks as Audio Files, with the options the producer set in Logic Pro): the answer lists the files Logic Pro wrote there (name, bytes, seconds). Files written, not the project: no change and no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "path": {"type": "string"},
+                "epoch": epoch,
+            })), "required": ["path", "epoch"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
         property(
             &mut list,
             "focus_body",
@@ -629,6 +654,30 @@ fn valid_id(id: &Value) -> bool {
     }
 }
 
+/// (M4b) What Logic's bounce or export wrote, as Kumi's HISTORY and the model are told it: the bridge answers the files
+/// and what their headers say, and no title of its own.
+fn written_title(name: &str, answer: &mut Value) {
+    if answer.pointer("/display/title").is_some() {
+        return;
+    }
+    let file_name = |path: &str| path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_string();
+    let title = match name {
+        "bounce" => {
+            let Some(path) = answer.get("bounced").and_then(Value::as_str) else { return };
+            match answer.get("seconds").and_then(Value::as_f64) {
+                Some(seconds) => format!("Bounced \u{201c}{}\u{201d} ({seconds:.1} s)", file_name(path)),
+                None => format!("Bounced \u{201c}{}\u{201d}", file_name(path)),
+            }
+        }
+        _ => {
+            let Some(folder) = answer.get("folder").and_then(Value::as_str) else { return };
+            let count = answer.get("files").and_then(Value::as_array).map_or(0, Vec::len);
+            format!("Exported {count} audio file{} into \u{201c}{}\u{201d}", if count == 1 { "" } else { "s" }, file_name(folder))
+        }
+    };
+    answer["display"] = json!({"title": title});
+}
+
 fn tool_result(value: Value, is_error: bool) -> Value {
     json!({
         "content": [{"type": "text", "text": serde_json::to_string(&value).expect("JSON serializes")}],
@@ -745,9 +794,16 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     let (answer, is_error) = host.fx_chain_save(&arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
-                // (r-tracks) Saving: the project in either DAW, tracks as a template in REAPER.
+                // (r-tracks) Saving: the project in either DAW, tracks as a template in REAPER; (M4b) Logic's bounce and export.
                 "project_save" | "track_template_save" if name == "project_save" || host.daw() == Daw::Reaper => {
                     let (answer, is_error) = host.passthrough(name, &arguments).await;
+                    result(id, tool_result(answer, is_error))
+                }
+                "bounce" | "export_tracks" if host.daw() == Daw::Logic => {
+                    let (mut answer, is_error) = host.passthrough(name, &arguments).await;
+                    if !is_error {
+                        written_title(name, &mut answer);
+                    }
                     result(id, tool_result(answer, is_error))
                 }
                 _ => error(id, -32602, &format!("Unknown tool: {name}")),

@@ -6,11 +6,13 @@
 //! cargo run -p logic-kumi --example record_changes -- --out crates/logic-kumi/tests/fixtures/<scene> --steps '<json>' [--helper <path>]
 //!
 //! `--steps` is a list: `{"preview": {"kind", "input"}}`, `{"apply": {"desc"}}` (the last preview's), `{"restore":
-//! {"desc", "discard"?}}` (the last preview's and apply's), `{"call": {"method", "params"}}` for any other method,
+//! {"desc", "discard"?, "of"?}}` (the last preview's and apply's, or with `of` the apply of that place in the run, from
+//! 0, as a host's journal undoes an earlier change), `{"call": {"method", "params"}}` for any other method,
 //! `{"poll": true}` (one focus refresh and the undo watch's poll, its events kept), `{"wait": ms}`, and `{"undo":
 //! true}` or `{"redo": true}`, which press Cmd-Z or Shift-Cmd-Z in Logic through a helper of their own, unrecorded, as
 //! the producer would. `{epoch}` in a step's text stands for the epoch at that step. Each step's answer is kept in
-//! the scene under `logic.steps`, and printed with its time.
+//! the scene under `logic.steps`, and printed with its time; what the bridge looked at on disk (a bounce's file, an
+//! export's folder) under `logic.disk`, which a replay answers from.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -19,6 +21,7 @@ use std::time::{Duration, Instant};
 use logic_kumi::ax::strings::{self, Strings};
 use logic_kumi::ax::Ax;
 use logic_kumi::changes::Changes;
+use logic_kumi::disk;
 use logic_kumi::fixtures::{Recorder, Scene, SCENE_FILE};
 use logic_kumi::helper::{ChildLauncher, Helper, Launch};
 use logic_kumi::logic::{self, Model, BUNDLES};
@@ -88,6 +91,8 @@ fn main() {
     let mut project = Project::new(strings);
     project.set_identity(id.as_deref(), path.as_deref(), &pname);
     let mut changes = Changes::default();
+    let looked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    disk::set_hook(Some(disk::recording(looked.clone())));
     // The first look, as the run loop's first refresh: the shape the epoch moves from.
     {
         let mut ax = Ax::new(helper.as_mut(), app.pid);
@@ -95,6 +100,8 @@ fn main() {
     }
 
     let (mut preview, mut applied): (Option<(Value, Value)>, Option<Value>) = (None, None);
+    // Every apply of the run with its preview, for a restore that names an earlier one.
+    let mut journal: Vec<((Value, Value), Value)> = Vec::new();
     let mut recorded: Vec<Value> = Vec::new();
     let mut events: Vec<Value> = Vec::new();
     for step in steps {
@@ -117,11 +124,14 @@ fn main() {
             let answer = serve::answer_change(&mut project, &mut changes, helper.as_mut(), app.pid, "change_apply", &params);
             if let Ok(answer) = &answer {
                 applied = Some(answer.clone());
+                journal.push((preview.clone().expect("the preview"), answer.clone()));
             }
             (json!({"method": "change_apply", "params": params}), Some(answer))
         } else if let Some(asked) = step.get("restore") {
-            let (params, answer) = preview.clone().expect("a preview before the restore");
-            let done = applied.clone().expect("an apply before the restore");
+            let ((params, answer), done) = match asked.get("of").and_then(Value::as_u64) {
+                Some(of) => journal.get(of as usize).cloned().expect("the apply a restore names"),
+                None => (preview.clone().expect("a preview before the restore"), applied.clone().expect("an apply before the restore")),
+            };
             // The target where the apply left it when the apply said (a region moved or renamed), as the host's journal keeps it.
             let target = done.get("target").filter(|t| !t.is_null()).cloned().unwrap_or_else(|| answer["target"].clone());
             let mut params = json!({"kind": params["kind"], "target": target, "prior": answer["prior"], "applied": done["applied"], "desc": asked["desc"], "epoch": project.epoch.to_string()});
@@ -184,12 +194,15 @@ fn main() {
     }
     while helper.event(Duration::from_millis(50)).is_some() {}
     helper.quit();
+    disk::set_hook(None);
     {
         let mut scene = scene.lock().unwrap();
-        scene.logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project_json, "steps": recorded, "undoneInDaw": events})
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project_json, "steps": recorded, "undoneInDaw": events});
+        let looked = looked.borrow().clone();
+        if !looked.is_empty() {
+            logic["disk"] = Value::Array(looked);
+        }
+        scene.logic = logic.as_object().cloned().unwrap_or_default();
     }
     let scene = scene.lock().unwrap().clone();
     scene.save(&out).expect("write the scene");

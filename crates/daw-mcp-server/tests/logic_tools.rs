@@ -154,6 +154,15 @@ async fn every_answer_the_host_hands_over_names_refs_the_way_the_contract_says()
         ("focus_body", json!({"kind": "notes"})),
         ("focus_body", json!({"kind": "timeline"})),
         ("focus_body", json!({"kind": "routing", "ref": "1:track:1"})),
+        // (M4b) the Stereo Out's plug-ins (none), a strip's plug-ins, a plug-in's parameters and one of them, Smart
+        // Controls, automation
+        ("read", json!({"kind": "plugin", "parent": "1:output:1"})),
+        ("read", json!({"kind": "plugin", "parent": "1:track:2"})),
+        ("read", json!({"kind": "param", "parent": "1:plugin:2.3"})),
+        ("read", json!({"ref": "1:param:2.3.1"})),
+        ("read", json!({"kind": "smart", "parent": "1:track:2"})),
+        ("read", json!({"kind": "automation", "parent": "1:track:1"})),
+        ("focus_body", json!({"kind": "tree", "ref": "1:track:2"})),
     ] {
         let (answer, is_error) = lab.tool(tool, arguments.clone()).await;
         assert!(!is_error, "{tool} {arguments}: {answer}");

@@ -106,7 +106,9 @@ async fn the_read_methods_on_the_wire() {
             "cursor_set",
             "undo_step_begin",
             "undo_step_end",
-            "project_save"
+            "project_save",
+            "bounce",
+            "export_tracks"
         ]
     );
     assert_eq!(client.welcome().events, ["project", "transport", "tracks", "selection", "undone_in_daw"]);
@@ -156,6 +158,46 @@ async fn the_read_methods_on_the_wire() {
     assert_eq!(timeline["lanes"][1]["regions"][0]["ref"], "1:region:1");
     let routing = client.request("focus_body", json!({"kind": "routing", "ref": "1:track:1"}), WAIT).await.unwrap();
     assert_eq!((routing["trackRef"].clone(), routing["sends"].is_array()), (json!("1:track:1"), true));
+    // (M4b) As the bridge's second slice reads them (its `m4b_requests`): Keys' Piano's parameters from its window's
+    // Controls View (the first a menu, with its text alone), a page of them and one by its ref; Keys' Smart Controls (it
+    // plays Studio Grand); Vocal's automation (none); the Stereo Out's plug-ins (none: `1:output:1`, which no track
+    // has); a parameter or Smart Control read without its parent refused; the Compressor's ratio by its ref; Keys'
+    // strip as a body.
+    let piano = client.request("read", json!({"kind": "param", "parent": "1:plugin:2.1"}), WAIT).await.unwrap();
+    assert_eq!((piano["total"].clone(), piano["items"][0]["value"].clone()), (json!(6), Value::Null), "a menu has its text alone");
+    assert_eq!(
+        piano["items"][1],
+        json!({"index": 2, "max": 66.0, "min": 0.0, "name": "Main Volume", "normalized": 0.909091, "pluginRef": "1:plugin:2.1", "ref": "1:param:2.1.2", "text": "0 dB", "value": 60.0}),
+        "as the bridge's scratch-m4b scene reads it"
+    );
+    let page = client.request("read", json!({"kind": "param", "parent": "1:plugin:2.1", "limit": 2}), WAIT).await.unwrap();
+    assert_eq!(page["nextCursor"], "1.2");
+    let main = client.request("read", json!({"ref": "1:param:2.1.2"}), WAIT).await.unwrap();
+    assert_eq!(main["items"][0]["name"], "Main Volume");
+    let smart = client.request("read", json!({"kind": "smart", "parent": "1:track:2"}), WAIT).await.unwrap();
+    assert_eq!(
+        (smart["total"].clone(), smart["items"][0].clone()),
+        (json!(4), json!({"index": 1, "name": "Tone", "ref": "1:smart:2.1", "text": "0%", "trackRef": "1:track:2", "value": 0.0}))
+    );
+    let automation = client.request("read", json!({"kind": "automation", "parent": "1:track:1"}), WAIT).await.unwrap();
+    assert_eq!(automation["total"], 0, "Scratch has no automation");
+    let stereo_out = client.request("read", json!({"kind": "plugin", "parent": "1:output:1"}), WAIT).await.unwrap();
+    assert_eq!(stereo_out["total"], 0, "the Stereo Out holds no plug-in");
+    assert!(refused_as(client.request("read", json!({"kind": "param"}), WAIT).await, "bad-params"));
+    assert!(refused_as(client.request("read", json!({"kind": "smart"}), WAIT).await, "bad-params"));
+    let keys = client.request("read", json!({"kind": "plugin", "parent": "1:track:2"}), WAIT).await.unwrap();
+    let names: Vec<&str> = keys["items"].as_array().unwrap().iter().map(|row| row["name"].as_str().unwrap()).collect();
+    assert_eq!((names, keys["items"][0]["kind"].clone()), (vec!["Piano", "Channel EQ", "Compressor", "ChromaVerb"], json!("instrument")));
+    let ratio = client.request("read", json!({"ref": "1:param:2.3.2"}), WAIT).await.unwrap();
+    assert_eq!((ratio["items"][0]["name"].clone(), ratio["items"][0]["text"].clone()), (json!("Ratio"), json!("2.0:1")));
+    let strip = client.request("focus_body", json!({"kind": "tree", "ref": "1:track:2"}), WAIT).await.unwrap();
+    assert_eq!(
+        (strip["strip"]["inserts"].as_array().map(Vec::len), strip["strip"]["inserts"][3]["pluginRef"].clone()),
+        (Some(4), json!("1:plugin:2.4"))
+    );
+    assert!(refused_as(client.request("read", json!({"kind": "param", "parent": "1:track:1"}), WAIT).await, "bad-params"));
+    assert!(refused_as(client.request("read", json!({"ref": "1:plugin:1.9"}), WAIT).await, "failed"));
+    assert!(refused_as(client.request("read", json!({"kind": "strip"}), WAIT).await, "bad-params"));
 
     // What the bridge refuses: a kind it doesn't have, notes without their region, a ref that isn't in the project, a
     // ref from before the epoch.
@@ -186,7 +228,7 @@ async fn the_read_methods_on_the_wire() {
         "{refused:?}"
     );
     simulator.set_permission(None);
-    assert_eq!(script.asked().len(), 26, "{:?}", script.asked());
+    assert_eq!(script.asked().len(), 40, "{:?}", script.asked());
 
     golden("logic-reads-bridge.ndjson", &normalized(&simulator.transcript()));
     simulator.stop();

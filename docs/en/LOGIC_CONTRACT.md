@@ -1,4 +1,4 @@
-# Logic Pro bridge contract (M2, M3)
+# Logic Pro bridge contract (M2, M3, M4)
 
 What `logic-kumi` answers over `kumi-daw/1`, and which macOS channel each answer comes from. The
 wire, handshake, discovery files and lifecycle are daw-bridge's; this page is only Logic's shapes.
@@ -37,8 +37,11 @@ hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redac
 | `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected, stack (only on a Track Stack's header: `true`) | track headers (name, mute, solo, armed, monitoring, volume, pan, selected; a stack's disclosure triangle); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
 | `region` | ref, trackRef, name, startBeats, endBeats, kind (audio, midi), selected, looped | the Tracks area's layout items and their help text ("Region starts at 1 bar  and ends at 5 bars , MIDI region…") |
 | `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel, selected? | the Event List of the region, which shows the selected region's events: a region not selected is selected first, through its item |
-| `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top |
-| `send` | ref, trackRef, slot, destination, level | the strip's send slots |
+| `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top; an output's plug-ins (the Stereo Out's) under `trackRef` `<epoch>:output:<n>` |
+| `send` | ref, trackRef, slot, destination, level | the strip's send slots: a send's group names its bus, the knob listed right after it says its level ("-6.0", "-∞" as −96) |
+| `param` | ref, pluginRef, index, name, value, text, min, max, normalized | the plug-in window's Controls View (opened from the slot's open button for the read and closed after, its view put back): a row per parameter, its name without the colon, the slider's value and range (`normalized` is the value's share of it), the text beside it; a choice's value is its option's place and a menu's value `null`; needs `parent` (the plug-in) |
+| `smart` | ref, trackRef, index, name, value (0 to 1), text | the Smart Controls pane (opened for the read and closed after) for the track, selected for the read and the selection put back; needs `parent` (the track); a track whose strip has nothing the pane maps (an audio track with only a Channel EQ on it) shows the pane's header over no controls and reads no rows, while a pane that hasn't drawn its header is `failed` |
+| `automation` | ref, trackRef, index, parameter, number, events (positionBeats, value) | the Track Automation Event List of the track (its key command, command 1032, Control-Command-E in the factory set, opens it as a window of its own for the selected track; closed after): its "Fader" rows grouped by parameter, the parameter's name from the Length/Info cell, its number from Num, each event's value (0 to 127) from Val; needs `parent` (the track) |
 | `marker` | ref, position, name, length (beats), text | the Marker List |
 | `tempo` | bpm, signatures (position, time, key) | the Tempo List and the Signature List |
 
@@ -46,7 +49,11 @@ Logic's own words are kept: the key signature as the LCD shows it ("C Major"), a
 slot names it ("Stereo Output"), a plug-in as its slot names it. Refs are positional with an epoch
 (`<epoch>:<kind>:<n>`), as Renoise's: tracks by their place in the Tracks area, regions by their
 place through the project (track by track), markers by their place in the list, notes under their
-region (`1:note:1.3`), plug-ins and sends under their track (`1:plugin:1.1`). The epoch moves on
+region (`1:note:1.3`), plug-ins and sends under their track (`1:plugin:1.1`), a parameter under its plug-in
+(`1:param:1.1.7`), a Smart Control and a parameter's automation under their track (`1:smart:2.1`,
+`1:automation:1.1`). The Mixer's output strips, which no track has, are `<epoch>:output:<n>` in the Mixer's
+order (the Stereo Out is `1:output:1`), their plug-ins `<epoch>:plugin:0.<n>.<slot>` and those plug-ins'
+parameters `<epoch>:param:0.<n>.<slot>.<i>`. The epoch moves on
 every track or region change the bridge observes between polls (a header appeared, vanished, was
 renamed or moved; a region added, removed or moved); notes, plug-ins, sends, markers and tempo
 don't move it. A ref, parent, around or cursor from an earlier epoch is refused as `stale`,
@@ -73,8 +80,9 @@ removed or moved), `selection` (the focus's selection with its `epoch`, when it 
   the Tracks area doesn't take keyboard focus from Accessibility. The surface must be in its Pan
   view for select to mean the track; Logic opens its Control Surface Setup window when it first
   adds the surface, and the bridge reads the project's window by title while that window is main.
-- A pop-up menu Logic opens from a button (a send slot, an output slot) holds the Accessibility
-  call until the menu closes and shows no menu element: sends can't be set from outside yet.
+- A pop-up menu Logic opens from a button (a send slot, an insert slot, an output slot) holds the
+  Accessibility call while it is up and shows no menu element. M4's second slice found that the
+  menu takes keys posted to Logic all the same (see "Where Logic forces a difference").
 - A list's text cells (a marker's name) aren't text fields: a marker can't be renamed from outside;
   a region's name in the Event List at the region level is one.
 - Scrubbers and sliders move by one on a set and by ten on an increment (the tempo, the playhead's
@@ -181,6 +189,19 @@ Logic Pro 12.3.1; the host's simulated Logic (`simulator/logic.rs`) answers the 
 | `signature-set` | `signature_set` | the Signature List: Create new Time/Key Signature Change, the numerator slider, the denominator pop-up | the list | "Value Change" |
 | `track-stack` | `track_stack` | the headers clicked (Shift for the others), Create Summing/Folder Stack (Cmd-Shift-G/H) | the headers: the stack's disclosure triangle | "Create Track Stack" |
 | `track-stack-flatten` | `track_stack_flatten` | the stack's header clicked, Flatten Stack (Cmd-Shift-U) | the headers | "Flatten Stack" |
+| `fx-add` | `fx_add` | the Mixer: the empty slot under the strip's last effect (or the insert bar along the top of the effect it goes before) pressed, its menu's search typed key by key, Down, Return; the plug-in window Logic opens closed | the strip's slots: the name asked at its place | "Insert Plug-in in Channel Strip" (an empty slot), "Change Plug-in in Channel Strip" (an insert bar) |
+| `fx-delete` | `fx_delete` | the Mixer: the plug-in's list button pressed, No Plug-in (Down, Down, Return) | the strip's slots | "Remove Plug-in in Channel Strip" |
+| `fx-param` | `fx_param` | the plug-in window (its slot's open button), View > Controls, the parameter's slider set (exact), its choice pressed or its switch toggled; the view put back and the window closed | the Controls View's value and text | none (the plug-in window's own undo has it) |
+| `fx-params` | `fx_params` | as `fx-param`, several in one window | the Controls View | none |
+| `fx-preset` | `fx_preset` | the plug-in window in its editor (made larger until its header shows the buttons): the next or previous setting button, `step` times, or next until the setting menu names `preset` | the setting pop-up's name | none (the plug-in window's own undo, which the restore presses) |
+| `patch-load` | `patch_load` | the track selected, the Library (Y): its search field set to the patch's name, the result's row selected; the search cleared, the Library closed | the Inspector strip's setting button (the patch's name) and its plug-ins | "Load Patch" |
+| `send-add` | `send_add` | the Mixer: the strip's empty send slot pressed, Down, Down (Bus), Right, Down to the bus, Return; the level then stepped as `send-volume` | the strip's sends: a group named "Bus n" (and the aux Logic made, under `created.aux`) | "Change Send in Channel Strip" |
+| `send-remove` | `send_remove` | the Mixer: the send's list button pressed, No Send (the sixth item) | the strip's sends | "Change Send in Channel Strip" |
+| `send-volume` | `send_volume` | the Mixer: the send's knob, coarse by increments, fine by sets (0.1 dB near 0 dB) | the knob's text | none |
+| `smart-control-set` | `smart_control_set` | the track selected, the Smart Controls pane (B): the control's slider, tenths by increments, hundredths by sets | the slider's value and text | none |
+| `automation-add` | `automation_add` | the track selected, its Track Automation Event List (command 1032, Control-Command-E): the event type set to Fader, the playhead at each event's beat, Create new Event, the new row's Num stepped until its Length/Info cell names the parameter (or to the number asked), its Val stepped; the type, the playhead and the selection put back, the list closed | the list's rows | "Create Event"/"Value Change" |
+| `automation-change` | `automation_change` | the list: the event's row deleted and made again where and as asked | the list | "Delete", then as `automation-add` |
+| `automation-delete` | `automation_delete` | the list: the row's Delete action | the list | "Delete" |
 
 A header's control (volume, pan, mute, solo, arm) and the Mixer slot's bypass take a write without
 the track selected or Logic in front; the mute, solo and arm checkboxes take no `AXPress` or set,
@@ -195,6 +216,27 @@ of Logic's undo, and `cursor_set` takes `positionBeats` or `position` (seconds a
 constant tempo). `undo_step_begin`/`undo_step_end` are counted (Logic has no undo block):
 `undo_step_begin` answers `{stepId: "sN"}`, `undo_step_end` `{desc, entry: false, changes: n}`, and
 each change in the plan stays its own step of Logic's undo.
+
+`bounce {epoch, startBeats, endBeats, path, format?}` and `export_tracks {epoch, path}` are actions, methods of the
+bridge as `project_save` is (no change, no row, no undo step). `bounce` goes through File > Bounce > Project or
+Section…: Logic's Bounce dialog with Uncompressed alone checked (its row selected, so the File Type and Bit Depth
+pop-ups are its own), the format's file type and bit depth (`wav24` by default, `wav16`, `wav32f`, `aiff24`),
+Normalize Off, Add to Project and Add to Apple Music Library unchecked, the Start and End positions' segments
+stepped, OK; then the save panel through its service (the folder by the go-to sheet, the name), and the file is
+waited for on disk and its header read (`{epoch, bounced, format, bytes, seconds, rate, channels, bits, startBeats,
+endBeats}`; `uncertain` when its length isn't the range's at the project's tempo). `path` is a whole path to a `.wav`
+(or `.aif`) that isn't there yet, in a folder that is. Add to Project, which the dialog had checked, puts the file in
+the project's audio, and that is a step of Logic's undo ("Bounce Project") on top of whatever Kumi did before: a
+Kumi step taken back through Logic's own undo (a split, a patch) was then refused, its Edit menu saying "Undo Bounce
+Project". With it unchecked a bounce changes nothing in the project and leaves Logic's undo as it was (a split, a
+bounce, then the split undone through Logic's undo: recorded). The dialog keeps these choices for the next bounce, as
+it keeps the format. A bounce holds whatever Logic plays, the metronome's click included while the control bar's
+Metronome Click is on (bars 6 and 7 of Scratch, where no region plays, bounced at a peak of 0.42 with the click on):
+`bounce` leaves the click as the producer set it. `export_tracks` goes through File > Export > All Tracks as Audio Files…, an open panel that takes a
+folder (its options are left as the producer set them): the folder (which must be there) is reached by the go-to
+sheet, Export pressed, and the answer lists the files Logic wrote there (`{epoch, folder, files: [{name, bytes,
+seconds}]}`). What the bridge looks at on disk goes through one seam (`src/disk.rs`), so a recorded scene keeps
+it and a replay answers from it.
 
 `project_save {epoch, path?, version?}` (the tool `save_project`) is REAPER's shape: no `path`
 saves in place with Logic's Save key command (Cmd-S), answered at once with `dirty: false` when the
@@ -228,6 +270,19 @@ step of Logic's undo. `{saved, dirty}` answers.
   file's notes (it lists the rows on its screen; the region's length says the rest came in);
   `track-stack` answers `applied: {index, name, kind, tracks}` (the subtracks' refs) and `created:
   {ref, stack}`; `tempo-marker-set` and `signature-set` answer `made: true` when they made the row.
+- `fx-add` answers `applied: {index, name, slot, plugins}` (the strip's effects after, from the top) and
+  `created: {ref, kind: "plugin"}`; its fence is the strip's `{plugins, instrument}`. `fx-delete` answers
+  `applied: {deleted, plugins}` and `material: {name, index, strip, step}`; it refuses an instrument. `fx-param`
+  and `fx-params` fence and answer `{plugin, params: [{index, name, value, text}]}`; `fx-preset` answers
+  `{plugin, preset, steps}` with `material: {steps}`. `send-add` answers `applied: {destination, slot, level}`
+  and `created: {ref, kind: "send", bus, aux?}`; `send-remove` `material: {destination, level, slot, step}`;
+  `send-volume` `applied: {level}`. `patch-load` fences and answers `{patch, plugins}` (the strip's setting
+  name and plug-ins). `smart-control-set` fences and answers `{name, value, text}`. The automation kinds take
+  `{ref: track, parameter: <name as the list's Length/Info cell writes it, "Volume"> | <its number>}` with
+  `events: [{positionBeats, value}]` (`automation_add`; whole beats, values 0 to 127), `changes: [{index,
+  positionBeats?, value?}]` (`automation_change`) or `indexes: [...]` (`automation_delete`), an event named by its
+  place among that parameter's events from 0 as the read lists them; they fence the track's whole automation
+  `{events: [{positionBeats, value, number, parameter}]}` and answer `applied: {made, removed, events}`.
 - `applied` carries the value Logic shows after the write. A write Logic doesn't show back is
   `uncertain` ("Logic Pro shows … after Kumi asked for …"), and leaves the step unnamed. The apply's
   `undo` is `{desc, entry}`, with `title` (the Edit menu's Undo title at apply time) and `entry: true`
@@ -245,7 +300,14 @@ step of Logic's undo. `{saved, dirty}` answers.
   numbers it itself). Of the M4 kinds, a move, resize, loop, rename, cycle, quantize, tempo event
   and signature go back by value; a split, a region delete, an import, a flattened stack and a
   deleted tempo event only through Logic's own undo while on top (`undo: {how: "undo"}`); a stack
-  Kumi made is flattened again by value when its step isn't on top.
+  Kumi made is flattened again by value when its step isn't on top. Of the second slice's, a plug-in
+  added is taken off again by value, a deleted one comes back through Logic's own undo while on top
+  (with its settings) and else by name (with Logic's defaults; an instrument isn't deleted); a send
+  added is taken back through Logic's own undo while on top (the aux Logic made goes with it) and
+  else by value (No Send, the aux left in the Mixer), a removed one likewise; a patch only through
+  Logic's own undo while on top; parameters, a send's level and Smart Controls by value; a preset
+  through the plug-in window's own Undo, pressed as many times as Kumi stepped; automation events by value (the
+  events Kumi made deleted, the ones it deleted made again).
 - A restore's refs are from the change's own epoch, carried to where the track or region stands now:
   the bridge watches each epoch move (a header added, deleted, renamed or moved; the M2 observers'
   rule) and keeps, per move, where each place went, so undoing a fader or a rename after a track was
@@ -296,12 +358,71 @@ titles.
 - The tempo takes **whole BPM** from the slider; a fractional `bpm` is rounded, with a note.
 - A **marker can't be named** from outside (its name cell isn't a text field): `marker-add` refuses a
   `name`, and Logic numbers markers itself. `marker-rename` is not made.
-- `fx-add`, `fx-delete`, `fx-param`, `fx-move`, `send-add`, `send-volume`, `track-move` and
-  `track-color` are **not made**: the slot pop-up menus can't be driven from outside, the plug-in
-  window isn't reached, the headers can't be dragged (no key command reorders tracks and a header
-  offers no action but its menu), and the Color palette's swatches are bare positions to
-  Accessibility while a header shows no colour, so a colour could never be read back. Each is
-  refused `bad-params` saying why.
+- `fx-move`, `send-mode`, `track-move`, `track-color` and `marker-rename` are **not made**: Logic
+  moves a plug-in only by dragging it; a send's mode is a mark in the send's menu, which Accessibility
+  can't read, so it could never be read back; the headers can't be dragged (no key command reorders
+  tracks and a header offers no action but its menu); the Color palette's swatches are bare positions
+  to Accessibility while a header shows no colour. Each is refused `bad-params` saying why.
+- The **Mixer's slot menus are Logic's own** (an insert slot's, an insert bar's, a send slot's, a
+  slot's list button's): Accessibility shows no element for them and a press is held while the menu is
+  up, so the helper answers it `cannotComplete` after its 1.5 s messaging timeout (`timeout` on a
+  slower Mac) with the menu still up (the window server shows it at the pop-up menu level). Keys posted
+  to Logic then go to the menu: the plug-in menu's search takes a name typed key by key (key codes;
+  text posted as characters reaches it too, but the bridge types keys), Down highlights its first
+  result and Return takes it, in the format Logic picks for the strip; an occupied slot's menu has No
+  Plug-in second; the send menu is walked by arrows (Down twice to Bus, Right into it, Down to the
+  bus), and an occupied send's menu has No Send sixth, after its routing modes, whose mark Accessibility
+  can't read. Escape closes any of them. A plug-in or a send Logic took is read back by name, and the
+  wrong one (another search result) is taken off again.
+- Logic **opens a plug-in's window when it inserts one** (a dialog titled after the strip); the bridge
+  closes it again and waits for it to go, since while it is up the Edit menu speaks for the window
+  ("Undo", "Redo") and not for the project.
+- A **plug-in's parameters are reached in its window's Controls View** (the view menu, a standard menu
+  read through the pop-up), whose sliders take an exact value; Logic's own plug-ins expose their
+  sliders in the editor view too, but the Controls View lists every plug-in's. A number asked as `value`
+  (what the view shows: -3 for "-3.0 dB") is found by a bisection over the slider's raw values, each set
+  and its text read: it goes on until a value reads the number exactly (the Stereo Out's Gain reads
+  -3.0 dB at raw 930, where the first reading within a quarter dB, -3.1 dB, used to end it), and when no
+  value does, the nearest within the number's own precision is set and `display.note` says the slider's
+  step there. A parameter moved there
+  and a preset loaded are steps of the plug-in window's own undo (its Undo and Redo buttons), never of
+  the project's, so `outside_undo` holds them and the restore is by value (a preset's by the window's
+  Undo). The setting (preset) menu is Logic's own too: a preset is reached through the next and
+  previous buttons. A **narrow header hides what doesn't fit**: the Controls View's header has no Undo
+  and Redo, and a small editor (a Gain at 75%) not even the setting buttons, so `fx-preset` works in the
+  editor, made a size larger at a time (the view menu's sizes) until the header shows the button, the
+  size put back after. "Default Preset" is on no setting button's way (next from it is the first
+  preset, previous from there stays put): only the window's Undo brings it back.
+- A **send Logic makes starts at −∞** on this Mac: `send-add` sets `volumeDb` when it is given, and
+  says so when it isn't. A new bus's aux is Logic's own doing, named under `created.aux`.
+- A **patch replaces the whole strip** (instrument, effects, sends): it is loaded through the Library's
+  search, whose result rows take a selection by Accessibility (its browser's items take only a click),
+  and only Logic's own undo takes it back.
+- **Smart Controls and a send's level move by steps**: a set moves a Smart Control a hundredth and a
+  send's knob one fine step toward the value asked, an increment a tenth or a coarse step. A send's
+  fine step is 0.1 dB above -6 dB and a whole dB below, its increments 1 dB near 0 dB and 10 dB lower
+  down (so they pass the level and come back), so a level is reached within half a fine step (−6.5
+  asked is −6.1, −20 is −20.1) and answered as Logic shows it. Several sends' knobs are listed after all
+  the send groups, in their order (a lone send's right after its group), and are paired by order.
+- **Smart Controls are listed by where the pane shows them** (by rows, then from the left, from their
+  frames): Accessibility lists the pane's sliders in an order of its own, which changes from one showing
+  of the pane to the next.
+- **Automation is read and written through the Track Automation Event List**, a window of its own
+  (each press of its key command opens another one, so the bridge closes the one it opened), whose rows
+  are Logic's "Fader" events numbered by Logic's own parameter numbers (Num: Volume is 7), with the
+  parameter's name in the Length/Info cell and the value from 0 to 127 (no dB text). An event is made
+  at the playhead, which the LCD places on a beat, so events take whole beats; a parameter asked by
+  name is found by stepping the new row's Num up from 0 until the cell names it (at most 127). A
+  change of an event's place or value is the event taken out and made again. None of it moves the
+  epoch; each event is a step of Logic's undo ("Create Event", "Value Change", "Delete").
+- A **bounce** goes through Logic's own Bounce dialog: its pop-up menus are standard ones read through
+  the pop-up, but a menu opened just after another closed may not be up yet, so it is looked for again
+  and pressed once more. An **export holds Logic's main thread** while it writes: the helper's reads
+  time out, which the bridge takes as busy while it waits for the files. The export's options (file
+  names, format) are the producer's: on this Mac the pattern names the files by number ("01.wav"), and
+  a track with no sound writes none.
+- The **Library's search results** sit six levels down its pane and their names three more, deeper
+  than one read of the helper goes (eight): the table is found first, then read.
 - The **cycle** (`loop-range`) is written through the LCD's Custom display mode, whose locator
   sliders sit on Logic's ticks; it is no step of Logic's undo, and an off cycle keeps its locators,
   which a restore puts back too.

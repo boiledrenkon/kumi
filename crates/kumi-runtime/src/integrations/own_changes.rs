@@ -1109,10 +1109,28 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 let title = answer.pointer("/display/title").and_then(Value::as_str).unwrap_or(action.title).to_owned();
                 let mut text = json!({"done": title});
                 // (r-tracks) `saved`: the file a save wrote; (m4-r-fxenv) `file`, `count`: an FX chain saved; (n-devices)
-                // `visible`, `listed`: a device's editor, a preset saved.
-                for field in
-                    ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved", "file", "count", "visible", "listed"]
-                {
+                // `visible`, `listed`: a device's editor, a preset saved; (M4b) Logic's bounce, `bounced` and what its
+                // header says (`format`, `seconds`, `rate`, `channels`, `bits`), and its export, `folder` and `files`.
+                for field in [
+                    "playing",
+                    "positionBeats",
+                    "position",
+                    "wasRecording",
+                    "stopped",
+                    "saved",
+                    "file",
+                    "count",
+                    "visible",
+                    "listed",
+                    "bounced",
+                    "format",
+                    "seconds",
+                    "rate",
+                    "channels",
+                    "bits",
+                    "folder",
+                    "files",
+                ] {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }

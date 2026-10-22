@@ -18,8 +18,21 @@ use regex::Regex;
 use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
-/// The instructions Logic's turns carry (M7 brings the full instruction pack); the change set's follow them.
-const INSTRUCTIONS: &str = "You work in Logic Pro through Kumi's bridge beside it, which reads and changes Logic through macOS Accessibility. Read the project with logic_read before you describe or change it: its tracks (audio, software instrument, external MIDI, aux and output channel strips), their regions, a region's notes as the Event List lists them, each strip's plug-ins and sends, the markers, and the tempo and signatures. A ref such as track:3 is this turn's: pass it back as parent (the track for its regions, plug-ins and sends; a region for its notes) to read what's inside.";
+/// (M4b) Logic's terms and ways, as its instructions carry them (a macro, so `concat!` takes it as the literal it is).
+macro_rules! addendum {
+    () => {
+        "Logic Pro's words and ways: what sits on a track in the Tracks area is a region (audio or MIDI), and what a region holds are its notes or its audio. The Stereo Out is the project's output, a strip of the Mixer that no track has (its ref is in the observation's outputs; read its plug-ins with it as parent): its plug-ins act on the whole mix, so a Gain or a limiter on everything goes there. A send feeds a bus, and Logic Pro makes an aux strip for a bus nothing takes yet. A Track Stack gathers tracks under a track of its own: a summing stack mixes them through a bus, a folder stack only groups them. A fader, pan, mute, solo, arm, bypass, the tempo, the cycle, a plug-in's parameter or setting, a Smart Control and a send's level make no step of Logic Pro's own undo (Kumi's undo puts them back). Quantize is a parameter of a region's events in Logic Pro: they play on the grid and keep their positions underneath. A MIDI file imported lands on a new track of its own. Markers, tempo changes and signatures live in Logic Pro's Marker, Tempo and Signature Lists. A key command acts on what is selected in Logic Pro now. A plug-in's parameters are reached only in its window's Controls View, which Kumi opens and closes itself."
+    };
+}
+
+/// The instructions Logic's turns carry (M7 brings the full instruction pack); the change set's follow them. Then (M4b)
+/// Logic's own words and ways, the addendum: what sits on a track, the Stereo Out and the auxes Logic makes for a bus,
+/// Track Stacks, what Logic's own undo keeps no step of, quantize as a parameter, an import's own track, the lists, key
+/// commands on the selection, and the Controls View.
+const INSTRUCTIONS: &str = concat!(
+    "You work in Logic Pro through Kumi's bridge beside it, which reads and changes Logic through macOS Accessibility. Read the project with logic_read before you describe or change it: its tracks (audio, software instrument, external MIDI, aux and output channel strips), their regions, a region's notes as the Event List lists them, each track's plug-ins and sends, the Stereo Out's plug-ins, a plug-in's parameters, a track's Smart Controls and automation, the markers, and the tempo and signatures. A ref such as track:3 is this turn's: pass it back as parent (the track for its regions, plug-ins, sends, Smart Controls and automation; the Stereo Out for its plug-ins; a plug-in for its parameters; a region for its notes) to read what's inside. ",
+    addendum!(),
+);
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::LOGIC,
@@ -28,8 +41,8 @@ pub const DAW: OwnDaw = OwnDaw {
     instructions: INSTRUCTIONS,
     mechanical: "two equal routes to the Stereo Out, a duplicated send, a send to a bus no aux takes, a muted track or a bypassed plug-in",
     read_tool: "logic_read",
-    read_description: "Read Logic Pro: the project, its tracks, and what's on them (regions, a region's notes, a channel strip's plug-ins and sends, markers, the tempo and signatures), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in the Tracks area's order: kind is audio, instrument, external, aux or output; volumeDb is the fader, pan runs -64 to 63, output names the bus or Stereo Out. A region's startBeats and endBeats count from the project's start. A note's position is Logic's bar, beat, division (a sixteenth) and tick (240 to a division), its lengthTicks in ticks of 1/960 of a beat, its channel 1-16. A plug-in's slot counts the strip's inserts from 1 (kind instrument or effect, bypassed when off); a send names its destination bus and its level in dB.",
-    read_kinds: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo"],
+    read_description: "Read Logic Pro: the project, its tracks, and what's on them (regions, a region's notes, a channel strip's plug-ins and sends, a plug-in's parameters, a track's Smart Controls and automation, markers, the tempo and signatures), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in the Tracks area's order: kind is audio, instrument, external, aux or output; volumeDb is the fader, pan runs -64 to 63, output names the bus or Stereo Out. A region's startBeats and endBeats count from the project's start. A note's position is Logic's bar, beat, division (a sixteenth) and tick (240 to a division), its lengthTicks in ticks of 1/960 of a beat, its channel 1-16. A plug-in's slot counts its strip's plug-ins from 1, the instrument first (kind instrument or effect, bypassed when off); the Stereo Out's are read with its ref (the observation's outputs) as parent. A parameter, as the plug-in window's Controls View lists it, has value (its slider's position between min and max; null for a pop-up menu), normalized (that position's share of its range, 0 to 1) and text as Logic Pro shows it; a send names its destination bus and its level in dB (-96 is −∞); a Smart Control's value runs 0 to 1, with its text; automation comes a parameter at a time (its name and number), each event at positionBeats with its value as the Track Automation Event List's Val shows it, 0 to 127.",
+    read_kinds: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"],
     project_kind: "project",
     fill_focus,
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
@@ -356,12 +369,14 @@ fn parts(reference: &str) -> Option<(&str, &str, Vec<usize>)> {
     Some((epoch, kind, numbers?))
 }
 
-/// Whether a ref's first number is its track's position: a track's own, a plug-in's or a send's always; a region's
-/// or a note's only when the bridge nests it under its track (`region:2.1`, `note:2.1.3`), not when it counts regions
-/// through the project (`region:1`).
+/// Whether a ref's first number is its track's position: a track's own, a send's, a Smart Control's and automation's
+/// always; a plug-in's and a parameter's unless it is 0 (an output's: `plugin:0.1.2` is on the Stereo Out, which moves
+/// with no track); a region's or a note's only when the bridge nests it under its track (`region:2.1`, `note:2.1.3`),
+/// not when it counts regions through the project (`region:1`). An output's own ref is on no track.
 fn on_track(kind: &str, numbers: &[usize]) -> bool {
     match kind {
-        "track" | "plugin" | "send" => !numbers.is_empty(),
+        "track" | "send" | "smart" | "automation" => !numbers.is_empty(),
+        "plugin" | "param" => numbers.first().is_some_and(|first| *first > 0),
         "region" => numbers.len() >= 2,
         "note" => numbers.len() >= 3,
         _ => false,
@@ -402,7 +417,9 @@ impl RefScheme for LogicRefs {
     }
     fn parents(&self, kind: &str) -> Option<Vec<String>> {
         let parents: &[&str] = match kind {
-            "region" | "plugin" | "send" => &["track"],
+            "region" | "send" | "smart" | "automation" => &["track"],
+            "plugin" => &["track", "output"],
+            "param" => &["plugin"],
             "note" => &["region"],
             _ => return None,
         };
@@ -420,6 +437,11 @@ impl RefScheme for LogicRefs {
     fn track_of(&self, reference: &str) -> Option<String> {
         let (epoch, kind, numbers) = parts(reference)?;
         on_track(kind, &numbers).then(|| format!("{epoch}:track:{}", numbers[0]))
+    }
+    /// The Stereo Out, the Mixer's first output strip: every project has it, no track has it and no read lists it (the
+    /// bridge's `<epoch>:output:1`, the parent its plug-ins are read under).
+    fn standing(&self, epoch: &str) -> Vec<(String, &'static str, &'static str)> {
+        vec![(format!("{epoch}:output:1"), "output", "Stereo Out")]
     }
 }
 
@@ -491,6 +513,62 @@ mod tests {
         assert_eq!(refs.parents("note"), Some(vec!["region".to_string()]));
         assert_eq!(refs.parents("region"), Some(vec!["track".to_string()]));
         assert_eq!(refs.parents("marker"), None);
+        // (M4b) A plug-in's parameters and a track's Smart Controls move with their track; the Stereo Out (`output:1`)
+        // and what sits on it (`plugin:0.1.2`) with none.
+        assert_eq!(refs.moved(&shift, "7:param:4.2.3"), Moved::To("7:param:5.2.3".into()));
+        assert_eq!(refs.moved(&shift, "7:smart:4.1"), Moved::To("7:smart:5.1".into()));
+        assert_eq!((refs.moved(&shift, "7:output:1"), refs.moved(&shift, "7:plugin:0.1.2")), (Moved::Same, Moved::Same));
+        assert_eq!(
+            (refs.track_of("7:param:2.1.3"), refs.track_of("7:plugin:0.1.2"), refs.track_of("7:output:1")),
+            (Some("7:track:2".into()), None, None)
+        );
+        assert_eq!(refs.parents("param"), Some(vec!["plugin".to_string()]));
+        assert_eq!(refs.parents("plugin"), Some(vec!["track".to_string(), "output".to_string()]));
+        assert_eq!(refs.parents("automation"), Some(vec!["track".to_string()]));
+        assert_eq!(refs.standing("7"), [("7:output:1".to_string(), "output", "Stereo Out")]);
+    }
+
+    /// (M4b) The Stereo Out stands in every epoch, though no read lists it: named once, its name kept when the epoch
+    /// moves and the names go, and taken as a plug-in read's parent.
+    #[test]
+    fn the_stereo_out_keeps_its_name_from_one_epoch_to_the_next() {
+        let mut book: crate::core::refs::Book<LogicRefs> = Default::default();
+        assert_eq!(book.stand("1"), [("output:1".to_string(), "Stereo Out")]);
+        assert_eq!(book.lengthen(&json!({"ref": "output:1"})), json!({"ref": "1:output:1"}));
+        assert_eq!(book.short_ref("1:track:1"), "track:1");
+        book.refs.clear();
+        book.clear_names();
+        assert_eq!(book.lengthen(&json!({"ref": "output:1"})), json!({"ref": "1:output:1"}), "it outlives the names");
+        assert_eq!(book.stand("2"), [("output:1".to_string(), "Stereo Out")]);
+        assert_eq!(book.lengthen(&json!({"parent": "output:1", "ref": "track:1"})), json!({"parent": "2:output:1", "ref": "track:1"}));
+        let read = json!({"kind": "plugin", "parent": "2:output:1"});
+        assert!(book.validate_parent_and_cursor(read.as_object().unwrap()).is_ok());
+        let wrong = json!({"kind": "param", "parent": "2:output:1"});
+        assert!(book.validate_parent_and_cursor(wrong.as_object().unwrap()).is_err());
+        assert_eq!(book.short_ref("2:plugin:0.1.1"), "plugin:1");
+    }
+
+    /// (M4b) The instructions carry Logic's terms and ways, each in Logic's words and none in Live's.
+    #[test]
+    fn the_instructions_carry_logics_terms_and_ways_in_its_own_words() {
+        for words in [
+            "what sits on a track in the Tracks area is a region",
+            "The Stereo Out is the project's output, a strip of the Mixer that no track has (its ref is in the observation's outputs",
+            "a Gain or a limiter on everything goes there",
+            "A Track Stack gathers tracks under a track of its own",
+            "the tempo, the cycle, a plug-in's parameter or setting, a Smart Control and a send's level make no step of Logic Pro's own undo",
+            "Logic Pro makes an aux strip for a bus nothing takes yet",
+            "Quantize is a parameter of a region's events",
+            "A MIDI file imported lands on a new track of its own",
+            "Marker, Tempo and Signature Lists",
+            "A key command acts on what is selected in Logic Pro now",
+            "only in its window's Controls View, which Kumi opens and closes itself",
+        ] {
+            assert!(INSTRUCTIONS.contains(words), "{words}");
+        }
+        let live = Regex::new(r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Remote Script|Control Surface|Main|Drum Rack|Operator|[Rr]acks?|[Cc]lips?|[Cc]lip slots?|[Ss]cenes?)\b").unwrap();
+        assert!(!live.is_match(INSTRUCTIONS), "{INSTRUCTIONS}");
+        assert!(!live.is_match(DAW.read_description), "{}", DAW.read_description);
     }
 
     #[test]
