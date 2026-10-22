@@ -92,8 +92,13 @@ impl TuiApp {
                 FocusBody::Tracker(_) => BodyKind::Tracker,
                 FocusBody::Matrix(_) => BodyKind::Matrix,
                 FocusBody::Keyzones(_) => BodyKind::Keyzones,
+                FocusBody::Mixer(_) => BodyKind::Mixer,
                 _ => BodyKind::Routing,
             })
+        } else if let Some(asked) = (rows.is_none() && clip.is_none()).then(|| self.own_request()).flatten() {
+            // A body of the DAW's own asked for and not read yet (or refused, as Renoise refuses while Kumi renders): it's
+            // still read again, so it comes back.
+            Some(asked.kind())
         } else if grid.is_some() {
             Some(BodyKind::Grid)
         } else if timeline.is_some() {
@@ -121,9 +126,13 @@ impl TuiApp {
                 FocusBody::Matrix(matrix) => (BodyKind::Matrix, self.draw_matrix(screen, x, area.y + 2, width, matrix, most)),
                 FocusBody::Keyzones(map) => (BodyKind::Keyzones, self.draw_keyzones(screen, x, area.y + 2, width, map, most)),
                 FocusBody::Routing(routing) => (BodyKind::Routing, self.draw_routing(screen, x, area.y + 2, width, routing, most)),
+                FocusBody::Mixer(mixer) => (BodyKind::Mixer, self.draw_mixer(screen, x, area.y + 2, width, mixer, most)),
                 _ => (BodyKind::Routing, 0),
             };
-            screen.put(x + 5, area.y + 1, &heading(kind), &st::FAINT);
+            // (a tracker grid that isn't a pattern, Renoise's phrase, says its own word)
+            let named =
+                if let FocusBody::Tracker(TrackerGrid { heading: Some(word), .. }) = &own { Some(format!(" · {word}")) } else { None };
+            screen.put(x + 5, area.y + 1, &named.unwrap_or_else(|| heading(kind)), &st::FAINT);
             now_at = 4 + drawn;
         } else if let Some(timeline) = timeline {
             screen.put(x + 5, area.y + 1, &heading(BodyKind::Timeline), &st::FAINT);
@@ -185,13 +194,16 @@ impl TuiApp {
     fn bottom_height(pane: i32) -> i32 {
         ((pane as f64 / 2.).floor() as i32).max(7).min((pane - 8).max(1))
     }
-    fn track_header(&self, screen: &mut Screen, x: i32, y: i32, width: i32) -> FocusTrack {
-        let track = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone()).unwrap();
+    /// The focused track's chip and name over a body; where the focus names no track (REAPER's routing window for a track
+    /// that isn't the selected one), the name the body gives, with a plain chip; none when neither says.
+    fn track_header(&self, screen: &mut Screen, x: i32, y: i32, width: i32, named: Option<&str>) -> Option<FocusTrack> {
+        let focused = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone());
+        let track = focused.or_else(|| named.map(|name| FocusTrack { name: name.to_owned(), color: None, kind: None }))?;
         let kind = track.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string());
         let mark = icon(track_kind(kind.as_deref()), self.0.icons, Some(chip_color(track.color.as_deref())));
         screen.put(x, y, &mark.text, &mark.style);
         screen.put(x + 3, y, &truncate(&track.name, (width - 3).max(1)), &st::TEXT);
-        track
+        Some(track)
     }
     fn draw_notes(&self, screen: &mut Screen, x: i32, y: i32, width: i32, clip: &NoteView) -> i32 {
         let track = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone()).unwrap();
@@ -202,10 +214,15 @@ impl TuiApp {
         let mut column = screen.put(x + 3, y, &truncate(&track.name, (((width - 6) as f64 / 2.).floor() as i32).max(1)), &st::TEXT);
         column = screen.put(column, y, " › ", &st::FAINT);
         column = screen.put(column, y, &clip_mark.text, &clip_mark.style) + 1;
+        // An unnamed one in the DAW's word: Live's clip, REAPER's take.
+        let untitled = match self.0.state.borrow().focus.as_ref().and_then(|focus| focus.item.as_ref()).map(|item| item.kind) {
+            Some(kind) if crate::daw::current().id() != kumi_runtime::core::daw::DawId::Ableton => format!("Untitled {}", kind.word()),
+            _ => "Untitled clip".to_string(),
+        };
         screen.put(
             column,
             y,
-            &truncate(if clip.name.is_empty() { "Untitled clip" } else { &clip.name }, (x + width - column).max(1)),
+            &truncate(if clip.name.is_empty() { &untitled } else { &clip.name }, (x + width - column).max(1)),
             &st::BRIGHT,
         );
         // Braille may not show on a basic console: the bars and notes are said below.
@@ -215,7 +232,7 @@ impl TuiApp {
                 spans(screen, x, y + 1 + row as i32, line, None);
             }
         }
-        let bars = clip.length / 4.;
+        let bars = clip.length / clip.beats_per_bar.filter(|beats| *beats > 0.).unwrap_or(4.);
         let selected = clip.notes.iter().filter(|n| n.selected == Some(true)).count();
         let mut facts = vec![
             if bars.fract() == 0. {
@@ -223,7 +240,11 @@ impl TuiApp {
             } else {
                 format!("{} beats", number::to_string(number::round(clip.length * 100.) / 100.))
             },
-            format!("{} {}", clip.notes.len(), if clip.notes.len() == 1 { "note" } else { "notes" }),
+            // (every note the clip has: the view holds the first of a big one's)
+            match clip.note_count.unwrap_or(0).max(clip.notes.len()) {
+                1 => "1 note".to_owned(),
+                count => format!("{count} notes"),
+            },
         ];
         if selected > 0 {
             facts.push(format!("{selected} selected"));
@@ -236,10 +257,38 @@ impl TuiApp {
             &truncate(&if clip.notes.is_empty() { format!("{facts} · empty") } else { facts }, width),
             &st::FAINT,
         );
-        2 + picture_rows
+        // Its controller lanes (REAPER's CC lanes), a row each: the lane's values across the take, or in words.
+        let mut row = y + 2 + picture_rows;
+        const LANES_SHOWN: usize = 3;
+        for lane in clip.lanes.iter().take(LANES_SHOWN) {
+            let name = format!("{:<9}", truncate(&lane.name, 9));
+            let column = screen.put(x, row, &name, &st::DIM);
+            if self.0.graphics == Graphics::Words || clip.length <= 0. {
+                let (low, high) = lane.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])));
+                let points = lane.points.len();
+                let range =
+                    if points > 0 { format!(" · {}–{}", number::to_string(low), number::to_string(high)) } else { String::new() };
+                let said = format!("{points} {}{range}", if points == 1 { "point" } else { "points" });
+                screen.put(column + 1, row, &truncate(&said, (x + width - column - 1).max(1)), &st::FAINT);
+            } else {
+                screen.put(
+                    column + 1,
+                    row,
+                    &controller_line(lane, clip.length, (x + width - column - 1).clamp(4, 32) as usize),
+                    &st::ACCENT,
+                );
+            }
+            row += 1;
+        }
+        if clip.lanes.len() > LANES_SHOWN {
+            let more = clip.lanes.len() - LANES_SHOWN;
+            screen.put(x, row, &truncate(&format!("and {more} more {}", if more == 1 { "lane" } else { "lanes" }), width), &st::FAINT);
+            row += 1;
+        }
+        row - y
     }
     fn draw_grid(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &LauncherStrip) -> i32 {
-        self.track_header(screen, x, y, width);
+        self.track_header(screen, x, y, width, None);
         for (index, slot) in strip.slots.iter().enumerate() {
             let row = y + 1 + index as i32;
             if slot.index == strip.scene {
@@ -281,7 +330,7 @@ impl TuiApp {
         1 + strip.slots.len() as i32
     }
     fn draw_timeline(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &TimelineStrip) -> i32 {
-        self.track_header(screen, x, y, width);
+        self.track_header(screen, x, y, width, None);
         let cells = width.max(8);
         let span = strip.locators.iter().map(|l| l.position + 4.).fold(strip.length.max(strip.position + 4.), f64::max);
         let at = |beats: f64| (beats / span * cells as f64).floor().clamp(0., (cells - 1) as f64) as usize;
@@ -295,8 +344,14 @@ impl TuiApp {
             line[at(locator.position)] = sp("┼", st::DIM);
         }
         line[at(strip.position)] = sp("┃", st::ACCENT);
+        // The time selection, as REAPER shades it.
+        if let Some([start, end]) = strip.time_selection {
+            for cell in &mut line[at(start)..=at(end)] {
+                *cell = sp(cell.text.clone(), Style { bg: st::SELECTED.bg, ..*cell.style });
+            }
+        }
         spans(screen, x, y + 1, &line, None);
-        let bar = |beats: f64| (beats / 4.).floor() + 1.;
+        let bar = |beats: f64| strip.bar_at(beats);
         let past = strip.locators.iter().filter(|l| l.position <= strip.position).max_by(|a, b| a.position.total_cmp(&b.position));
         let mut where_ = vec![format!("bar {}", number::to_string(bar(strip.position)))];
         if strip.playing {
@@ -308,6 +363,9 @@ impl TuiApp {
         let mut whole = vec![];
         if let Some(loop_) = strip.r#loop.as_ref().filter(|l| l.enabled) {
             whole.push(format!("loop {}–{}", number::to_string(bar(loop_.start)), number::to_string(bar(loop_.start + loop_.length))));
+        }
+        if let Some([start, end]) = strip.time_selection {
+            whole.push(format!("selection {}–{}", number::to_string(bar(start)), number::to_string(bar(end))));
         }
         whole.push(format!("{} bars", number::to_string(bar(strip.length) - 1.)));
         screen.put(x, y + 2, &truncate(&where_.join(" · "), width), &st::DIM);
@@ -387,12 +445,15 @@ impl TuiApp {
     /// A tracker's pattern or phrase around its cursor: line numbers (beats brighter), then each track's cells, the
     /// focused track first, as many tracks as fit.
     fn draw_tracker(&self, screen: &mut Screen, x: i32, y: i32, width: i32, grid: &TrackerGrid, most: i32) -> i32 {
-        screen.put(
-            x,
-            y,
-            &truncate(&format!("{} · {} lines", if grid.name.is_empty() { "Pattern" } else { &grid.name }, grid.lines), width),
-            &st::TEXT,
+        let mut title = format!(
+            "{} · {} lines",
+            if grid.name.is_empty() { grid.heading.as_deref().unwrap_or("Pattern") } else { &grid.name },
+            grid.lines
         );
+        for fact in &grid.facts {
+            title.push_str(&format!(" · {fact}"));
+        }
+        screen.put(x, y, &truncate(&title, width), &st::TEXT);
         let focused = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.as_ref().map(|t| t.name.clone()));
         let mut order: Vec<&TrackerTrack> = grid.tracks.iter().collect();
         if let Some(at) = focused.and_then(|name| order.iter().position(|track| track.name == name)) {
@@ -411,7 +472,7 @@ impl TuiApp {
             column += cell + 1;
         }
         for (track, at, cell) in &shown {
-            screen.put(*at, y + 1, &truncate(&track.name, *cell), &st::DIM);
+            screen.put(*at, y + 1, &truncate(&track.name, *cell), &Style::fg(chip_color(track.color.as_deref())));
         }
         let lines = shown.iter().map(|(track, _, _)| track.cells.len()).max().unwrap_or(0);
         let rows = lines.min(most.max(1) as usize);
@@ -432,7 +493,8 @@ impl TuiApp {
             } else {
                 st::FAINT
             };
-            screen.put(x, y, &format!("{:>3}", line + 1), &style);
+            // (as the tracker numbers it: 00 the first line)
+            screen.put(x, y, &format!("{:>3}", format!("{:02}", line)), &style);
             for (track, at, cell) in &shown {
                 let text = track.cells.get(index).map(String::as_str).unwrap_or("");
                 screen.put(
@@ -445,12 +507,15 @@ impl TuiApp {
         }
         2 + rows as i32
     }
-    /// A tracker's sequence: each slot's pattern under each track (muted ones dimmed), sections between, the current
-    /// slot raised.
+    /// A tracker's sequence as its matrix draws it: each slot's number and pattern, then each track's part of it (a
+    /// block in the slot's colour, dim where muted; a dot where empty; an alias as the pattern it plays), sections
+    /// between, the current slot raised with its pattern's name.
     fn draw_matrix(&self, screen: &mut Screen, x: i32, y: i32, width: i32, matrix: &SequenceMatrix, most: i32) -> i32 {
+        // (the slot's number, then its pattern's: "  3 02  ")
+        let lead = 8;
         let column = 4;
-        let fit = ((width - 5) / column).max(1) as usize;
-        let mut head = String::from("     ");
+        let fit = ((width - lead) / column).max(1) as usize;
+        let mut head = " ".repeat(lead as usize);
         for track in matrix.tracks.iter().take(fit) {
             // Padded by width, not characters: a wide name (CJK) takes two cells a character.
             let name = truncate_with(track, column - 1, "");
@@ -460,6 +525,7 @@ impl TuiApp {
         let rows = (most.max(2) - 1) as usize;
         let current = matrix.current.unwrap_or(0);
         let first = current.saturating_sub(rows / 2).min(matrix.slots.len().saturating_sub(rows));
+        let shown = matrix.tracks.len().min(fit);
         let mut row = 1;
         for (index, slot) in matrix.slots.iter().enumerate().skip(first) {
             if row as usize > rows {
@@ -472,18 +538,30 @@ impl TuiApp {
                 screen.put(x, y + row, &truncate(&format!("— {section}"), width), &st::FAINT);
                 row += 1;
             }
-            if Some(index) == matrix.current {
+            let here = Some(index) == matrix.current;
+            if here {
                 screen.fill(Rect::new(x - 1, y + row, width + 2, 1), &st::RAISED);
             }
             screen.put(x, y + row, &format!("{:>3} ", matrix.first + index + 1), &st::FAINT);
-            for track in 0..matrix.tracks.len().min(fit) {
+            screen.put(x + 4, y + row, &format!("{:02}", slot.pattern), &if here { st::TEXT } else { st::DIM });
+            for track in 0..shown {
                 let muted = slot.muted.contains(&track);
-                screen.put(
-                    x + 5 + track as i32 * column,
-                    y + row,
-                    &format!("{:>2}", slot.pattern),
-                    &if muted { st::FAINT } else { st::TEXT },
-                );
+                let color = slot.colors.iter().find(|(at, _)| *at == track).map(|(_, color)| color.as_str());
+                let (text, style) = if let Some((_, source)) = slot.aliases.iter().find(|(at, _)| *at == track) {
+                    (format!("→{source:02}"), if muted { st::FAINT } else { st::DIM })
+                } else if slot.empty.contains(&track) {
+                    ("·".to_owned(), st::FAINT)
+                } else if muted {
+                    ("░░░".to_owned(), st::FAINT)
+                } else {
+                    ("███".to_owned(), color.map_or(st::TEXT, |color| Style::fg(chip_color(Some(color)))))
+                };
+                screen.put(x + lead + track as i32 * column, y + row, &text, &style);
+            }
+            // The current slot's pattern by its name, where there's room.
+            let after = x + lead + shown as i32 * column;
+            if let Some(name) = slot.name.as_deref().filter(|_| here && x + width - after > 4) {
+                screen.put(after, y + row, &truncate(name, x + width - after), &st::DIM);
             }
             row += 1;
         }
@@ -511,14 +589,18 @@ impl TuiApp {
             26..=51 => char::from(b'a' + (k - 26) as u8),
             _ => '+',
         };
-        // The keyzone map: keys across (the zones' keys, an octave at least), velocities up in two bands (four with room); each
-        // cell is the zone that plays there, ▒ where zones overlap, · where none does.
-        let bands: i32 = if map.zones.is_empty() || most < 6 || width < 12 {
+        let phrase_line = !map.phrases.is_empty();
+        let macro_line = !map.macros.is_empty();
+        // The keyzone map: keys across (the zones' keys, an octave at least), velocities up in four bands, two or one, with
+        // the keys under them; each cell is the zone that plays there, ▒ where zones overlap, · where none does. The zones'
+        // names come first, so each letter in it is named below: the map takes the rows they leave (under the title, less
+        // the facts line), beside the macros and phrases lines, else one band in their place.
+        let left = most - 2 - map.zones.len() as i32;
+        let fits = |room: i32| [4, 2, 1].into_iter().find(|bands| (*bands < 4 || most >= 12) && room > *bands);
+        let bands: i32 = if map.zones.is_empty() || width < 12 {
             0
-        } else if most >= 12 {
-            4
         } else {
-            2
+            fits(left - phrase_line as i32 - macro_line as i32).or(fits(left).map(|_| 1)).unwrap_or(0)
         };
         if bands > 0 {
             let lo = map.zones.iter().map(|zone| zone.notes.0).min().unwrap_or(0) as i32;
@@ -555,8 +637,7 @@ impl TuiApp {
             screen.put(x, row, &truncate(&format!("{from}{}{to}", " ".repeat(gap)), width), &st::FAINT);
             row += 1;
         }
-        let phrase_line = !map.phrases.is_empty();
-        let rows = map.zones.len().min((y + most - row - 1 - phrase_line as i32).max(0) as usize);
+        let rows = map.zones.len().min((y + most - row - 1).max(0) as usize);
         for (k, zone) in map.zones.iter().take(rows).enumerate() {
             let notes = if zone.notes.0 == zone.notes.1 {
                 profile.note_name(zone.notes.0)
@@ -566,19 +647,41 @@ impl TuiApp {
             let velocities =
                 if zone.velocities == (0, 127) { String::new() } else { format!(" · vel {}–{}", zone.velocities.0, zone.velocities.1) };
             let off = if zone.note_off { " · note-off" } else { "" };
-            let line = format!("{} {notes:<9} {}{velocities}{off}", letter(k), zone.sample);
+            let group = zone.mute_group.map(|group| format!(" · mute group {group}")).unwrap_or_default();
+            let slice = if zone.slice { " · slice" } else { "" };
+            let line = format!("{} {notes:<9} {}{velocities}{off}{group}{slice}", letter(k), zone.sample);
             screen.put(x, row, &truncate(&line, width), &st::DIM);
             row += 1;
         }
-        let mut facts = vec![format!("{} {}", map.zones.len(), if map.zones.len() == 1 { "zone" } else { "zones" })];
+        let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut facts = vec![count(map.zones.len(), "zone", "zones")];
+        if rows < map.zones.len() {
+            facts[0].push_str(&format!(" ({} not shown)", map.zones.len() - rows));
+        }
         if !map.macros.is_empty() {
-            facts.push(format!("{} macros", map.macros.len()));
+            facts.push(count(map.macros.len(), "macro", "macros"));
         }
         if !map.phrases.is_empty() {
-            facts.push(format!("{} {}", map.phrases.len(), if map.phrases.len() == 1 { "phrase" } else { "phrases" }));
+            facts.push(count(map.phrases.len(), "phrase", "phrases"));
+        }
+        if let Some(n) = map.modsets.filter(|n| *n > 0) {
+            facts.push(count(n, "modulation set", "modulation sets"));
+        }
+        if let Some(n) = map.chains.filter(|n| *n > 0) {
+            facts.push(count(n, "FX chain", "FX chains"));
         }
         screen.put(x, row, &truncate(&facts.join(" · "), width), &st::FAINT);
         row += 1;
+        // Its macros by name, with where each stands (Renoise's 0–100 %).
+        if !map.macros.is_empty() && row < y + most {
+            let shown: Vec<String> = map
+                .macros
+                .iter()
+                .map(|(name, value)| format!("{name} {}%", number::to_string(number::round((value * 100.).clamp(0., 100.)))))
+                .collect();
+            screen.put(x, row, &truncate(&format!("macros: {}", shown.join(" · ")), width), &st::FAINT);
+            row += 1;
+        }
         // The phrases, with their keys in the keymap (and the one program mode plays).
         if phrase_line && row < y + most {
             let shown: Vec<String> = map
@@ -606,8 +709,8 @@ impl TuiApp {
     }
     /// A track's sends and receives, with their levels and where they tap the track.
     fn draw_routing(&self, screen: &mut Screen, x: i32, y: i32, width: i32, routing: &RoutingView, most: i32) -> i32 {
-        self.track_header(screen, x, y, width);
-        let rows = routing.routes.len().min((most.max(2) - 2) as usize);
+        self.track_header(screen, x, y, width, routing.name.as_deref());
+        let rows = routing.routes.len().min((most.max(3) - 2 - routing.midi_out.is_some() as i32).max(1) as usize);
         for (row, route) in routing.routes.iter().take(rows).enumerate() {
             let arrow = match route.kind {
                 RouteKind::Send => "→",
@@ -616,12 +719,19 @@ impl TuiApp {
             };
             let mut line = format!("{arrow} {}", route.other);
             if let Some(db) = route.volume_db {
-                line.push_str(&format!(" · {} dB", number::to_string(number::round(db * 10.) / 10.)));
+                // (dB with a true minus, as the DAW's titles write it)
+                line.push_str(&format!(" · {} dB", number::to_string(number::round(db * 10.) / 10.).replace('-', "−")));
             }
             if let Some(tap) = &route.tap {
                 line.push_str(&format!(" · {tap}"));
             }
             screen.put(x, y + 1 + row as i32, &truncate(&line, width), &if route.muted { st::FAINT } else { st::DIM });
+        }
+        let mut row = y + 1 + rows as i32;
+        // Its MIDI out of the DAW (REAPER's hardware MIDI output), with the routes.
+        if let Some(out) = &routing.midi_out {
+            screen.put(x, row, &truncate(&format!("⇥ MIDI to {out}"), width), &st::DIM);
+            row += 1;
         }
         let parent = match routing.parent_send {
             Some(true) => "feeds its parent",
@@ -629,10 +739,79 @@ impl TuiApp {
             None => "",
         };
         if !parent.is_empty() {
-            screen.put(x, y + 1 + rows as i32, &truncate(parent, width), &st::FAINT);
-            return 2 + rows as i32;
+            screen.put(x, row, &truncate(parent, width), &st::FAINT);
+            row += 1;
         }
-        1 + rows as i32
+        row - y
+    }
+    /// The mixer: a row per track's strip around the selected one (raised): its chip and name, its peak level now where
+    /// the DAW meters it, its fader in dB, its pan, and whether it's muted, soloed or armed. A DAW without meters says so.
+    fn draw_mixer(&self, screen: &mut Screen, x: i32, y: i32, width: i32, mixer: &MixerView, most: i32) -> i32 {
+        const LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+        let note = !mixer.levels;
+        let rows = (most - note as i32).max(1) as usize;
+        let selected = mixer.strips.iter().position(|strip| strip.selected).unwrap_or(0);
+        let first = selected.saturating_sub(rows / 2).min(mixer.strips.len().saturating_sub(rows));
+        let db_text = |db: f64| {
+            if db <= -100. {
+                "−∞".to_string()
+            } else {
+                let text = number::to_fixed(db, 1);
+                text.strip_prefix('-').map_or(text.clone(), |rest| format!("−{rest}"))
+            }
+        };
+        let pan_text = |pan: f64| {
+            let percent = (pan.abs() * 100.).round() as i64;
+            match percent {
+                0 => "C".to_string(),
+                n if pan < 0. => format!("{n}L"),
+                n => format!("{n}R"),
+            }
+        };
+        let mut row = y;
+        for strip in mixer.strips.iter().skip(first).take(rows) {
+            if strip.selected {
+                screen.fill(Rect::new(x - 1, row, width + 2, 1), &st::RAISED);
+            }
+            let kind = strip.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string());
+            let mark = icon(track_kind(kind.as_deref()), self.0.icons, Some(chip_color(strip.color.as_deref())));
+            screen.put(x, row, &mark.text, &mark.style);
+            // What's on the right: the level, the fader, the pan and the flags, in fixed columns.
+            let flags = [strip.mute.as_ref().map(|_| "M"), strip.solo.then_some("S"), strip.armed.then_some("●")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("");
+            let right = format!(
+                "{:>6} {:>4} {:<3}",
+                strip.volume_db.map(db_text).unwrap_or_default(),
+                strip.pan.map(pan_text).unwrap_or_default(),
+                flags
+            );
+            let meter = if mixer.levels { 2 } else { 0 };
+            let at = x + width - text_width(&right);
+            let name_room = (at - meter - (x + 3) - 1).max(1);
+            screen.put(x + 3, row, &truncate(&strip.name, name_room), &if strip.mute.is_some() { st::FAINT } else { st::TEXT });
+            if let Some([left, right_db]) = strip.peak_db.filter(|_| mixer.levels) {
+                let loudest = left.max(right_db);
+                let level = (((loudest + 60.) / 60.).clamp(0., 1.) * 7.).round() as usize;
+                let style = if loudest > -1. {
+                    st::WARN
+                } else if loudest > -60. {
+                    st::ACCENT
+                } else {
+                    st::FAINT
+                };
+                screen.put(at - 2, row, if loudest <= -60. { "·" } else { LEVELS[level] }, &style);
+            }
+            screen.put(at, row, &right, &st::DIM);
+            row += 1;
+        }
+        if note {
+            screen.put(x, row, &truncate(&format!("{} gives no meters", crate::daw::words().app), width), &st::FAINT);
+            row += 1;
+        }
+        row - y
     }
     pub(super) fn draw_held(&self, screen: &mut Screen, x: i32, mut y: i32, width: i32, rows: i32) {
         let state = self.0.state.borrow();
@@ -703,7 +882,15 @@ impl TuiApp {
         self.hit(at, y, 1, |app| app.unpin());
     }
     fn draw_tree(&self, screen: &mut Screen, x: i32, y: i32, width: i32, rows: &[TreeRow], most: i32) -> i32 {
-        self.track_header(screen, x, y, width);
+        let track = self.track_header(screen, x, y, width, None);
+        // A chain that isn't the track's own (REAPER's take FX) says whose it is beside the track.
+        let owner = self.0.state.borrow().tree.as_ref().and_then(|tree| tree.owner.clone());
+        if let (Some(owner), Some(track)) = (owner, track) {
+            let at = x + 3 + text_width(&truncate(&track.name, (width - 3).max(1)));
+            if at + 4 < x + width {
+                screen.put(at, y, &truncate(&format!(" · {owner}"), x + width - at), &st::DIM);
+            }
+        }
         let focused = rows.iter().any(|r| r.role == TreeRole::Focus);
         let cursor = self.0.state.borrow().tree_cursor;
         let keep = cursor
@@ -727,7 +914,7 @@ impl TuiApp {
             let mut column = screen.put(x, row, &item.prefix, &st::FAINT);
             let mark = icon(item.kind, self.0.icons, None);
             column = screen.put(column, row, &mark.text, &mark.style) + 1;
-            let pinned = self.0.state.borrow().pinned.as_ref().is_some_and(|p| p.pin.r#ref == item.r#ref);
+            let pinned = self.0.state.borrow().pinned.as_ref().is_some_and(|p| p.row == item.r#ref);
             let label = if pinned { "pinned" } else { "" };
             let style = if item.role == TreeRole::Focus {
                 st::ACCENT
@@ -739,13 +926,19 @@ impl TuiApp {
                 st::DIM
             };
             let count = item.count.filter(|n| *n > 0).map(|n| format!(" ({n})")).unwrap_or_default();
-            let name = truncate(
-                &item.name,
-                (x + width - column - text_width(&count) - if label.is_empty() { 0 } else { text_width(label) + 1 }).max(1),
-            );
+            let note = item.note.as_ref().map(|note| format!(" · {note}")).unwrap_or_default();
+            let room = (x + width - column - text_width(&count) - if label.is_empty() { 0 } else { text_width(label) + 1 }).max(1);
+            // The name gives way first (a plug-in's format and maker go, then its end), so what the DAW says of it stays.
+            let named = (room - text_width(&note)).max(room.min(8));
+            let name = if text_width(&item.name) <= named { item.name.clone() } else { truncate(short_name(&item.name), named) };
             column = screen.put(column, row, &name, &style);
             if !count.is_empty() {
-                screen.put(column, row, &count, &st::FAINT);
+                column = screen.put(column, row, &count, &st::FAINT);
+            }
+            // What the DAW says of it (bypassed, offline, parallel), where there's room.
+            let left = room - text_width(&name);
+            if !note.is_empty() && left > 4 {
+                screen.put(column, row, &truncate(&note, left), &st::FAINT);
             }
             if !label.is_empty() {
                 let at = x + width - text_width(label);
@@ -1114,5 +1307,15 @@ impl TuiApp {
             line(vec![sp(tokens.strip_prefix(" · ").unwrap_or(&tokens), st::FAINT)]);
         }
         rows
+    }
+}
+
+/// A plug-in's name without what REAPER writes around it: its format ("VST3: ") and its maker ("(Cockos)").
+fn short_name(name: &str) -> &str {
+    const FORMATS: &[&str] = &["VST", "VSTi", "VST3", "VST3i", "AU", "AUi", "CLAP", "CLAPi", "LV2", "LV2i", "DX", "DXi", "JS"];
+    let Some((_, name)) = name.split_once(": ").filter(|(format, _)| FORMATS.contains(format)) else { return name };
+    match name.rfind(" (") {
+        Some(at) if at > 0 && name.ends_with(')') => &name[..at],
+        _ => name,
     }
 }

@@ -88,7 +88,15 @@ for _, file in ipairs({ "test_json.lua", "test_sha256.lua", "test_wire.lua", "te
   -- n-instruments
   "test_instruments.lua", "test_samples.lua", "test_modfx.lua", "test_phrases.lua", "test_instrument_reads.lua", "test_matrix_instruments.lua", "test_fences_instruments.lua", "test_continuity_instruments.lua",
   -- n-devices
-  "test_devices_m4.lua" }) do
+  "test_devices_m4.lua",
+  -- M5 (listening)
+  "test_listening.lua", "test_scratch.lua",
+  -- M6 (m6-library)
+  "test_kit.lua",
+  -- M6 (m6-catchup)
+  "test_digest.lua",
+  -- M7 (variations)
+  "test_variations.lua" }) do
   local chunk = loadfile(tests_dir .. file)
   if chunk then chunk(T) end
 end

@@ -185,7 +185,7 @@ local param_spec = {
     local digits = #(n1:match("%.(%d+)$") or "")
     return math.abs(tonumber(n1) - tonumber(n2)) <= 0.5 * 10 ^ -digits + 1e-9
   end,
-  title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
+  title = function(name, _, to) return name .. " " .. base.minus_text(to.valueString or tostring(to.value)) end,
 }
 
 -- A value that is a place may be given as text, read as Renoise 3.5.4 reads it (lab, 2026-10-19): the number it begins with
@@ -208,30 +208,47 @@ param_spec.wanted_at = function(loc, input)
   return param_spec.wanted(loc.object, input)
 end
 
--- Which parameter of a device a request means: its number from 1, or its name (any case).
-local function parameter_number(device, wanted)
+-- A device's parameter names, read from Renoise once: each by number, lowercased, and the numbers of each exact name. A request
+-- that names many parameters reads them once (a plug-in has thousands), not once a name and pass.
+local function parameter_names(device)
+  local list, lowered, exact = {}, {}, {}
+  for k = 1, #device.parameters do
+    local name = device:parameter(k).name
+    list[k], lowered[k] = name, name:lower()
+    exact[lowered[k]] = exact[lowered[k]] or {}
+    table.insert(exact[lowered[k]], k)
+  end
+  return { list = list, lowered = lowered, exact = exact }
+end
+
+-- Which parameter of a device a request means: its number from 1, or its name (any case). `names`: the device's, read once
+-- (parameter_names) when a request names several.
+local function parameter_number(device, wanted, names)
   local count = #device.parameters
   if type(wanted) == "number" then
     if wanted ~= math.floor(wanted) or wanted < 1 or wanted > count then bad(string.format("param is a number from 1 to %d", count)) end
     return wanted
   end
   if type(wanted) ~= "string" or wanted == "" then bad("param: a parameter's number (from 1) or its name, with a device ref") end
+  names = names or parameter_names(device)
   -- (the name as written, or else the start of one name: EQ 5 names its gains "Gain 1 (100 Hz)", which follow the frequency)
   local lower = wanted:lower()
-  for _, exact in ipairs({ true, false }) do
-    local found
-    for k = 1, count do
-      local name = device:parameter(k).name:lower()
-      if (exact and name == lower) or (not exact and name:sub(1, #lower) == lower) then
-        if found then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
-        found = k
-      end
-    end
-    if found then return found end
+  local hits = names.exact[lower]
+  if hits then
+    if #hits > 1 then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+    return hits[1]
   end
-  local names = {}
-  for k = 1, math.min(count, 24) do names[k] = device:parameter(k).name end
-  bad(string.format("this device has no parameter %q (it has %s%s)", wanted, table.concat(names, ", "), count > 24 and ", ..." or ""))
+  local found
+  for k, name in ipairs(names.lowered) do
+    if name:sub(1, #lower) == lower then
+      if found then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+      found = k
+    end
+  end
+  if found then return found end
+  local shown = {}
+  for k = 1, math.min(count, 24) do shown[k] = names.list[k] end
+  bad(string.format("this device has no parameter %q (it has %s%s)", wanted, table.concat(shown, ", "), count > 24 and ", ..." or ""))
 end
 
 -- A parameter is named by its ref, or by its device's ref and `param`.
@@ -276,10 +293,18 @@ param_spec.reread = function(song, place)
 end
 -- The producer's undo moves a parameter: asked of its observable, once.
 param_spec.watch = function(env, loc) env.watch_param(loc.place.track, loc.place.device, loc.place.param) end
+-- (HISTORY's picture: the parameter's name and range, which the title only says)
+local function parameter_shown(loc)
+  local parameter = loc.object
+  return { parameter = parameter.name, min = parameter.value_min, max = parameter.value_max }
+end
+param_spec.shown = parameter_shown
 base.register(param_spec)
 
 -- (M4 n-devices: device-params, several parameters of one device, asks and checks them as device-param does)
 M.param_spec, M.parameter_number, M.points_at, M.receiver_check = param_spec, parameter_number, points_at, receiver_check
+M.parameter_names = parameter_names
+M.parameter_shown = parameter_shown
 M.track_of_value, M.value_of_track = track_of_value, value_of_track
 
 
@@ -322,13 +347,24 @@ local function sends_check(song, receiver)
   end
 end
 
-local function add_input(song, track, input)
+-- The send a #Send aims at, by its number among the send tracks (from 0: the first send is 0): receiverRef (the send
+-- track) or receiver (that number).
+local function receiver_of(song, env, input)
+  if input.receiverRef == nil then return input.receiver end
+  if input.receiver ~= nil then bad("give receiverRef (the send track) or receiver, not both") end
+  local index, track = base.find(song, env, input.receiverRef, "receiverRef")
+  if rows.track_type(track) ~= "send" then bad(string.format("receiverRef must be a send track; %s isn't one", q(base.named(index, track)))) end
+  return index - song.sequencer_track_count - 2
+end
+
+local function add_input(song, env, track, input)
   local info = resolve_device(track, input.path)
   local is_send = info.path:find("#Send", 1, true) ~= nil
-  if (input.receiver ~= nil or input.amount ~= nil) and not is_send then
-    bad("receiver and amount are for the #Send device")
+  if (input.receiver ~= nil or input.receiverRef ~= nil or input.amount ~= nil) and not is_send then
+    bad("receiverRef, receiver and amount are for the #Send device")
   end
-  if input.receiver ~= nil then sends_check(song, input.receiver) end
+  local receiver = receiver_of(song, env, input)
+  if receiver ~= nil then sends_check(song, receiver) end
   -- (the #Send's Amount is 0 to 1: measured, 3.5.4. Checked before anything is written; apply checks the parameter's own range too)
   if input.amount ~= nil and (type(input.amount) ~= "number" or input.amount ~= input.amount or input.amount < 0 or input.amount > 1) then
     bad("amount must be a number from 0 to 1")
@@ -340,7 +376,7 @@ local function add_input(song, track, input)
   elseif type(at) ~= "number" or at ~= math.floor(at) or at < 2 or at > last then
     bad(string.format("index must be a whole number from 2 (after the mixer device) to %d", last))
   end
-  return info, at
+  return info, at, receiver
 end
 
 local function add_signature(index, track)
@@ -349,10 +385,10 @@ end
 
 local function add_preview(song, env, input)
   local index, track = base.find(song, env, input.ref, "device-add")
-  local info, at = add_input(song, track, input)
+  local info, at, receiver = add_input(song, env, track, input)
   local now = add_signature(index, track)
   -- (the send the receiver names, as a track the layout carries: one made before it by the apply refuses `changed`)
-  if input.receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + input.receiver) end
+  if receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + receiver) end
   local display = {
     title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
     before = { devices = now.devices }, after = { devices = now.devices + 1, path = info.path, index = at },
@@ -373,11 +409,11 @@ local function add_apply(song, env, input, fence, desc)
   local now = add_signature(index, track)
   if type(fence.receiver) == "string" then
     local send = refs.expect(fence.receiver, "track", 1, env.epoch())[1]
-    if input.receiver ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
+    if receiver_of(song, env, input) ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
     now.receiver = fence.receiver
   end
   if not base.same_table(now, fence) then fail("changed", base.named(index, track) .. "'s devices changed since the preview") end
-  local info, at = add_input(song, track, input)
+  local info, at, receiver = add_input(song, env, track, input)
   song:describe_undo(desc)
   local made, device = pcall(function() return track:insert_device_at(info.path, at) end)
   if not made or not device then
@@ -386,10 +422,10 @@ local function add_apply(song, env, input, fence, desc)
   end
   -- The device is set up in this callback; if that can't be done it goes again, so a refused change leaves no device behind.
   local set, err = pcall(function()
-    if input.receiver ~= nil then
+    if receiver ~= nil then
       local parameter = parameter_named(device, "Receiver")
       if not parameter then error({ code = "failed", message = "the #Send device has no Receiver parameter in this Renoise" }, 0) end
-      parameter.value = input.receiver
+      parameter.value = receiver
     end
     if input.amount ~= nil then
       local parameter = parameter_named(device, "Amount")
@@ -407,7 +443,8 @@ local function add_apply(song, env, input, fence, desc)
   end
   local state = material_.device_state(device)
   return {
-    applied = { index = at, path = info.path, state = state },
+    -- (a Doofer's or a Splitter's devices inside, a Notepad's text, a plug-in's state: what its parameters don't show)
+    applied = { index = at, path = info.path, state = state, content = material_.content_fence(device) },
     created = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     target = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     -- (where its undo finds it: its place, followed through the devices made, deleted and moved since)
@@ -440,6 +477,9 @@ local function add_restore(song, env, restore, desc)
   local title = (device.display_name ~= "" and device.display_name or device.name) .. " on " .. base.named(index, track)
   if not restore.discard and (now.path ~= applied.path or now.state ~= (applied.state or {}).state or now.active ~= (applied.state or {}).active) then
     fail("changed", title .. " changed in Renoise since Kumi made it")
+  end
+  if not restore.discard and applied.content ~= nil and material_.content_fence(device) ~= applied.content then
+    fail("changed", title .. " changed in Renoise since Kumi made it (what's inside it, its text or its state)")
   end
   local device_name, track_name = M.label(device), base.named(index, track)
   song:describe_undo(desc)

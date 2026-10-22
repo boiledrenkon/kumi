@@ -75,6 +75,12 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
+/// How many more looks each FX being watched has, in the order they were taken.
+#[cfg(test)]
+pub(super) fn looks_left() -> Vec<u8> {
+    STATE.with(|state| state.borrow().watched.iter().map(|w| w.left).collect())
+}
+
 /// The values a signature hashes: each parameter's normalized value as a 32-bit float.
 pub(super) fn values(reaper: &Reaper, fx: Fx) -> Vec<f32> {
     (0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS)).map(|param| reaper.param_normalized(fx, param) as f32).collect()
@@ -215,9 +221,12 @@ pub(super) fn same_but_for_moving(ctx: &Ctx, fx: Fx, recorded: &Value) -> bool {
 /// Once a tick: the FX Kumi looked at lately are looked at again, at most once every `RELOOK_EVERY` and `RELOOKS` times
 /// in all; at the end of an FX's watch, what moved by itself is learned (see the module's words).
 pub fn tick(reaper: &Reaper, reads: &Reads) {
+    // One FX a tick, the one waiting longest: up to 8 FX of 4,096 parameters each, all at once every 100 ms, held REAPER's
+    // main thread (an FX's looks then come a little further apart, which the watch doesn't mind).
     let due: Vec<(String, Vec<f32>)> = STATE.with(|state| {
         let state = state.borrow();
-        state.watched.iter().filter(|w| w.at.elapsed() >= RELOOK_EVERY).map(|w| (w.guid.clone(), w.values.clone())).collect()
+        let oldest = state.watched.iter().filter(|w| w.at.elapsed() >= RELOOK_EVERY).min_by_key(|w| w.at);
+        oldest.map(|w| (w.guid.clone(), w.values.clone())).into_iter().collect()
     });
     if due.is_empty() {
         return;

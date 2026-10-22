@@ -9,6 +9,8 @@ pub mod changes;
 pub mod csurf;
 pub mod extension;
 pub mod focus;
+// M5 listening (m5-reaper).
+pub mod listening;
 pub mod log;
 pub mod midi;
 pub mod projectconfig;
@@ -18,6 +20,7 @@ pub mod reaper;
 pub mod refs;
 pub mod rows;
 pub mod server;
+pub mod setup;
 pub mod window;
 
 use std::cell::{Cell, RefCell};
@@ -112,6 +115,15 @@ impl Loaded {
         };
         let config = Config::from_reference(&reference);
         log::set_dir(config.log_dir.clone());
+        // (run-lua's scripts go to the bridge's own folder, beside its secret: Kumi keeps it owner-only)
+        reaper::generic::set_scripts_dir(config.secret_file.parent().map(|root| root.join("scripts")));
+        // M5 listening (m5-reaper): renders, captures and scratch notes go into Kumi's folder beside the discovery folder.
+        if let Some(folder) = listening::folder_beside(&config.discovery_dir) {
+            self.extension.set_listening_folder(folder);
+        }
+        if let Some(folder) = changes::kumi_files::kumi_folder_beside(&config.discovery_dir) {
+            self.extension.set_kumi_folder(folder);
+        }
         log::line(&format!("a dialog over the main window is noticed through: {}", window::describe()));
         let started =
             config.bind().and_then(|listener| Server::start(listener, config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()));

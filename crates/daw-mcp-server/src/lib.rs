@@ -2,6 +2,7 @@
 //! (`kumi-daw/1`, see daw-bridge): REAPER's and Renoise's inside the DAW, Logic's a process of Kumi's own that the host
 //! starts. One binary serves any of them: `daw-mcp-server --daw reaper|renoise|logic`.
 
+pub mod catchup;
 pub mod changes;
 pub mod client;
 pub mod flow;
@@ -9,10 +10,12 @@ pub mod host;
 pub mod instruments;
 pub mod library_files;
 pub mod listen;
+pub mod listening;
 pub mod mcp;
 pub mod presets;
 pub mod renoise_devices;
 pub mod renoise_texts;
+pub mod semantic;
 pub mod simulator;
 pub mod stdio;
 pub mod tools;

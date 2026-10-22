@@ -36,9 +36,12 @@ fn a_glue_is_undone_only_while_what_it_made_is_unchanged() {
     state(|s| s.tracks[1].items.iter_mut().find(|i| i.guid == glued).unwrap().mute = true);
     assert_eq!(code(lab.undo("items-glue", &preview, &applied)), "changed");
     assert!(item("{ITEM-K1}").is_none(), "nothing brought back");
-    lab.undo_with("items-glue", &preview, &applied, true).unwrap();
-    assert!(item("{ITEM-K1}").is_some() && item(&glued).is_none());
+    // Discard too: taking the glued item away would take the producer's change with it (review R4).
+    let (code_, why) = lab.undo_with("items-glue", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert!(item("{ITEM-K1}").is_none() && item(&glued).is_some_and(|(_, made)| made.mute), "the producer's glued item stays");
     // An item changed between the preview and the apply.
+    let lab = Lab::new();
     let input = json!({"itemRefs": [K1, K2]});
     let preview = lab.preview("items-glue", input.clone()).unwrap();
     state(|s| s.tracks[1].items[0].length = 1.5);
@@ -79,6 +82,10 @@ fn a_render_gives_each_item_a_new_playing_take_and_its_undo_puts_them_back() {
     assert_eq!(state(|s| *s.actions.last().unwrap()), 41999);
     state(|s| s.tracks[1].items[0].active = 0);
     assert_eq!(code(lab.undo("items-render", &preview, &applied)), "changed");
+    // Discard too: the item from before would write over the take the producer picked (review R4).
+    let (code_, why) = lab.undo_with("items-render", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!((item("{ITEM-K1}").unwrap().1.active, item("{ITEM-K1}").unwrap().1.takes.len()), (0, 2));
     assert_eq!(code(lab.preview("items-render", json!({"itemRefs": [K1], "fx": "all"}))), "bad-params");
 }
 

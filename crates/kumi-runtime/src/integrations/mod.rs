@@ -1,6 +1,8 @@
 //! The DAWs Kumi integrates, and what their integrations share. Outside Live's own integration, only this registry
 //! and the crate root name it: the crate root's constructors for Live come through here.
 pub mod ableton;
+#[cfg(test)]
+mod daws_doc;
 pub mod fallback;
 pub mod logic;
 pub mod logic_changes;
@@ -11,14 +13,24 @@ pub mod logic_manual;
 pub mod logic_project;
 pub mod none;
 pub mod own_bridge;
+pub mod own_catchup;
 pub mod own_changes;
+mod own_goal;
+mod own_groove;
+pub mod own_listen;
 pub mod own_listening;
+pub mod own_phrases;
+pub mod own_pictures;
 pub mod own_project;
 pub mod own_views;
+#[cfg(test)]
+mod pack_tests;
 pub mod reaper;
 pub mod reaper_changes;
 pub mod renoise;
 pub mod renoise_changes;
+mod renoise_lines;
+mod renoise_variations;
 pub mod shared;
 
 use crate::core::daw::{DawId, DawProfile};
@@ -101,5 +113,17 @@ pub fn recent_projects(options: &crate::library::sources::SourceOptions) -> Vec<
     match library(options.daw) {
         Some(library) => (library.recent)(options),
         None => crate::library::sources::recent_sets(options),
+    }
+}
+
+/// REAPER's and Renoise's instructions, packs included, keep within the budget Live's instructions keep. (Here, because
+/// only the registry may name Live's integration outside it.)
+#[cfg(test)]
+#[test]
+fn each_own_daws_instructions_keep_within_lives() {
+    let live = ableton::context::INSTRUCTIONS.len();
+    for daw in [&reaper::DAW, &renoise::DAW] {
+        let text = own_bridge::instructions_of(daw);
+        assert!(text.len() <= live, "{}'s instructions are {} bytes, over Live's {live}", daw.profile.words.app, text.len());
     }
 }

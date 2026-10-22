@@ -141,11 +141,11 @@ settings {
       end,
       write = function(t, v) t.groove_amounts = { v[1], v[2], v[3], v[4] } end,
       check = function(value)
-        if type(value) ~= "table" or #value ~= 4 then bad("amounts: four numbers from 0 to 1, one per line of the groove") end
+        if type(value) ~= "table" or #value ~= 4 then bad("amounts: four numbers from 0 to 1, one per pair of lines of the groove") end
         local out = {}
         for i = 1, 4 do
           local v = value[i]
-          if type(v) ~= "number" or v ~= v or v < 0 or v > 1 then bad("amounts: four numbers from 0 to 1, one per line of the groove") end
+          if type(v) ~= "number" or v ~= v or v < 0 or v > 1 then bad("amounts: four numbers from 0 to 1, one per pair of lines of the groove") end
           out[i] = v
         end
         return out

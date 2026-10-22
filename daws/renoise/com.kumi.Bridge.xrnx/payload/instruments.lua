@@ -18,7 +18,8 @@ M.fail, M.bad = fail, bad
 local function q(text) return "\226\128\156" .. tostring(text) .. "\226\128\157" end
 M.q = q
 
--- What the producer calls each object: its name, or the number Renoise shows (instruments, samples and phrases count from 00).
+-- What the producer calls each object: its name, or the number Renoise shows (instruments and samples count from 00, in hex;
+-- phrases from 01, as Renoise names a new one).
 function M.instrument_label(i, instrument)
   local name = instrument.name
   if name == nil or name == "" then return string.format("Instrument %02X", i - 1) end
@@ -33,7 +34,7 @@ end
 
 function M.phrase_label(ph, phrase)
   local name = phrase.name
-  if name == nil or name == "" then return string.format("Phrase %02X", ph - 1) end
+  if name == nil or name == "" then return string.format("Phrase %02d", ph) end
   return name
 end
 
@@ -230,6 +231,70 @@ function M.instrument_print(instrument)
   }
 end
 
+-- A sample's settings the producer works on (its slices, tuning, level, loop and keys): what the undo of a sample Kumi made
+-- compares, so their later work in it is never taken away unsaid.
+function M.sample_work(sample)
+  local mapping = sample.sample_mapping
+  return {
+    name = sample.name, slices = #sample.slice_markers, transpose = sample.transpose, fine = sample.fine_tune,
+    volume = string.format("%.5f", sample.volume), panning = string.format("%.5f", sample.panning), loop = sample.loop_mode,
+    loopStart = sample.loop_start, loopEnd = sample.loop_end, base = mapping.base_note, notes = mapping.note_range[1] .. "-" .. mapping.note_range[2],
+    velocity = mapping.velocity_range[1] .. "-" .. mapping.velocity_range[2],
+  }
+end
+
+-- A plug-in's state in brief (a sum over every seventh byte, and its length): its state can be megabytes.
+local function state_sum(data)
+  local sum = 0
+  for i = 1, #data, 7 do sum = (sum * 31 + data:byte(i)) % 4294967296 end
+  return string.format("%08x:%d", sum, #data)
+end
+
+-- What the producer works on in an instrument, beyond its print: the devices of each modulation set and FX chain, its macros
+-- and their mappings, its samples' settings and a plug-in's state. What the undo of an instrument Kumi made compares (M3 rule
+-- 3: never take the producer's later work away unsaid).
+function M.instrument_work(instrument)
+  local out = M.instrument_print(instrument)
+  local sets, chains, macros, samples = {}, {}, {}, {}
+  for m = 1, #instrument.sample_modulation_sets do
+    local set, names = instrument:sample_modulation_set(m), {}
+    for d = 1, #set.devices do names[d] = set:device(d).name end
+    sets[m] = table.concat(names, ",")
+  end
+  for c = 1, #instrument.sample_device_chains do
+    local chain, paths = instrument:sample_device_chain(c), {}
+    for d = 1, #chain.devices do paths[d] = chain:device(d).device_path end
+    chains[c] = table.concat(paths, ",")
+  end
+  for k = 1, 8 do
+    local ok, macro = pcall(function() return instrument:macro(k) end)
+    if ok and macro then macros[k] = string.format("%s=%.4f/%d", macro.name, macro.value, #macro.mappings) end
+  end
+  for s = 1, #instrument.samples do samples[s] = M.sample_work(instrument:sample(s)) end
+  out.setDevices, out.chainDevices, out.macros, out.sampleWork = sets, chains, macros, samples
+  local plugin = instrument.plugin_properties
+  if plugin.plugin_loaded then out.pluginState = state_sum(plugin.plugin_device.active_preset_data or "") end
+  return out
+end
+
+-- The copies kept to put back, oldest first: past MAX_KEPT_FILES files or MAX_KEPT_BYTES the oldest go (their undo then says
+-- the kept copy is gone), so a long session's deletes and replaces don't fill the disk before Renoise quits.
+M.MAX_KEPT_FILES, M.MAX_KEPT_BYTES = 256, 2 * 1024 * 1024 * 1024
+local kept_files = {}
+local function prune_kept()
+  local sizes, total = {}, 0
+  for k, path in ipairs(kept_files) do
+    local stat = io.exists(path) and io.stat(path) or nil
+    sizes[k] = stat and stat.size or 0
+    total = total + sizes[k]
+  end
+  while #kept_files > M.MAX_KEPT_FILES or (total > M.MAX_KEPT_BYTES and #kept_files > 1) do
+    local path = table.remove(kept_files, 1)
+    total = total - table.remove(sizes, 1)
+    if io.exists(path) then pcall(os.remove, path) end
+  end
+end
+
 -- Where Kumi keeps what it saves to put back (a deleted instrument's .xrni, a sample's audio): a folder of its own in Renoise's
 -- temporary folder, which Renoise empties as it quits (Kumi's undo can't outlive the song anyway). Renoise's own name when that
 -- folder can't be made.
@@ -241,15 +306,32 @@ function M.temp_file(extension)
   if not io.exists(own) then pcall(os.mkdir, own) end
   if not io.exists(own) then return name end
   if io.exists(name) then pcall(os.remove, name) end
+  kept_files[#kept_files + 1] = own .. sep .. file
+  prune_kept()
   return own .. sep .. file
 end
 
--- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains or plug-in, and at most its one
--- modulation set, with no devices in it.
+-- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains, plug-in or MIDI output device
+-- (a hardware synth's slot is the producer's: clear() would reset its MIDI output), and at most its one modulation set, with
+-- no devices in it.
 function M.is_empty(instrument)
   local print = M.instrument_print(instrument)
   if print.samples > 0 or print.phrases > 0 or print.plugin ~= "" or print.chains > 0 or print.sets > 1 then return false end
+  local midi_ok, device = pcall(function() return instrument.midi_output_properties.device_name end)
+  if midi_ok and type(device) == "string" and device ~= "" then return false end
   return print.sets == 0 or #instrument:sample_modulation_set(1).devices == 0
+end
+
+-- Loads an .xrni into the selected instrument `i`: true when Renoise did. Renoise 3.5.4 (lab, 2026-10-20) first adds an empty
+-- instrument after the last one when that is the one it loads into (told as insert@i+1 before its own insert@i+1 and remove@i)
+-- and leaves it there; in the middle it adds none. Kumi takes that empty one out again, in the same step.
+function M.load_xrni(song, i, path)
+  local count = #song.instruments
+  local loaded = renoise.app():load_instrument(path)
+  if loaded and i == count and #song.instruments == count + 1 and M.is_empty(song:instrument(count + 1)) then
+    song:delete_instrument_at(count + 1)
+  end
+  return loaded
 end
 
 -- The notes of the song that play instrument value `v` (counting from 0), within `budget` reads: a list of {pattern, track,

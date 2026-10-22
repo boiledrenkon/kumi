@@ -84,7 +84,16 @@ impl Integration for TestIntegration {
         self.name == "live"
     }
     async fn device_tree(&self, track_ref: &str, _: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
-        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![] }))
+        Ok(Some(DeviceTree { track_ref: track_ref.into(), devices: vec![], owner: None, layout: None }))
+    }
+    fn fingerprint(&self) -> Option<Value> {
+        Some(json!({"name": self.name}))
+    }
+    fn first_heard(&self, since: i64) -> Option<i64> {
+        Some(since + 1)
+    }
+    fn has_open_place(&self) -> bool {
+        self.name == "live"
     }
 }
 fn integration(name: &'static str, error: Option<RuntimeError>, log: Rc<RefCell<Vec<String>>>) -> Rc<TestIntegration> {
@@ -110,6 +119,8 @@ async fn live_setup_failure_closes_primary_then_chat_and_other_errors_propagate(
     assert!(!fallen.stop_live(Signal::new()).await.unwrap());
     assert!(fallen.undo(None, Signal::new()).await.unwrap_err().message().contains("isn't connected to Live"));
     assert!(fallen.device_tree("x", Signal::new()).await.unwrap().is_none());
+    // Live's question about another Set stays Live's while the session talks without it (review: has_open_place).
+    assert!(fallen.has_open_place(), "the DAW's own answer, not the chat integration's");
     assert!(fallen.has_goal());
     let request: AuditionRequest = serde_json::from_value(json!({"candidates":[]})).unwrap();
     assert!(fallen.goal(&request, Signal::new()).await.unwrap().is_err());
@@ -148,6 +159,9 @@ async fn connected_primary_forwards_focus_hints_and_optional_views() {
     wrapped.observe(Signal::new(), Some(hints.clone())).await.unwrap();
     assert_eq!(*primary.hints.borrow(), Some(hints));
     assert_eq!(wrapped.device_tree("1:track:0", Signal::new()).await.unwrap().unwrap().track_ref, "1:track:0");
+    // (#361 review K14) What the taste log reads of the DAW: the project's fingerprint and when it was heard.
+    assert_eq!(wrapped.fingerprint(), Some(json!({"name": "live"})));
+    assert_eq!(wrapped.first_heard(5), Some(6));
     wrapped.close().await.unwrap();
     assert!(primary.closed.get());
 }
@@ -185,7 +199,12 @@ async fn a_daw_that_cant_do_a_thing_yet_says_so_and_one_away_says_it_isnt_connec
     let logic = started(&DawProfile::LOGIC);
     logic.start(Signal::new()).await.unwrap();
     assert_eq!(logic.goal(&request, Signal::new()).await.unwrap().err().unwrap(), "Kumi can't pursue a goal in Logic Pro yet.");
-    let reaper = started(&DawProfile::REAPER);
+    // (REAPER hears and renders since its M5: a REAPER that couldn't stands for a DAW Kumi can't hear yet)
+    static DEAF: DawProfile = DawProfile {
+        caps: kumi_runtime::core::daw::Capabilities { hear: false, audition: false, ..DawProfile::REAPER.caps },
+        ..DawProfile::REAPER
+    };
+    let reaper = started(&DEAF);
     reaper.start(Signal::new()).await.unwrap();
     assert_eq!(
         reaper.hear(&HearRequest::default(), Signal::new()).await.unwrap().unwrap_err(),
@@ -193,8 +212,8 @@ async fn a_daw_that_cant_do_a_thing_yet_says_so_and_one_away_says_it_isnt_connec
     );
     assert_eq!(reaper.audition(&request, Signal::new()).await.unwrap().unwrap_err(), "Kumi can't render anything to hear in REAPER yet.");
     let away = with_fallback(
-        Rc::new(Known { profile: &DawProfile::REAPER, error: Some(KumiError::new(FailureKind::Daw, "REAPER isn't open").into()) }),
-        Rc::new(|| Rc::new(Known { profile: &DawProfile::REAPER, error: None }) as Rc<dyn Integration>),
+        Rc::new(Known { profile: &DEAF, error: Some(KumiError::new(FailureKind::Daw, "REAPER isn't open").into()) }),
+        Rc::new(|| Rc::new(Known { profile: &DEAF, error: None }) as Rc<dyn Integration>),
         Rc::new(|_| {}),
     );
     away.start(Signal::new()).await.unwrap();

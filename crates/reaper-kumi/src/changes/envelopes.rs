@@ -263,13 +263,19 @@ fn lane_ref(ctx: &Ctx, lane: &Lane) -> Done<String> {
 
 fn lane_label(ctx: &Ctx, lane: &Lane) -> String {
     match lane.item {
-        Some(item) => format!("the automation item at {} on {}", seconds(item.position), env_label(ctx, &lane.at)),
+        Some(item) => format!("the automation item at {} on {}", bar_at(ctx, item.position), env_label(ctx, &lane.at)),
         None => env_label(ctx, &lane.at),
     }
 }
 
+/// A length or an offset, in seconds.
 fn seconds(time: f64) -> String {
     format!("{:.3} s", time).replace(".000 s", " s")
+}
+
+/// Where a time on the project's timeline is, as items and markers say it: `bar 6`, `bar 6 beat 2.5`.
+fn bar_at(ctx: &Ctx, time: f64) -> String {
+    super::marks::bar_text(ctx.reaper, ctx.proj, time)
 }
 
 fn lane_points(ctx: &Ctx, lane: &Lane) -> Vec<EnvPoint> {
@@ -367,7 +373,11 @@ fn lane_time(ctx: &Ctx, lane: &Lane, time: f64) -> Done<f64> {
     if let Some(item) = lane.item {
         let length = ctx.reaper.ai_value(lane.at.envelope, item.index, "D_LENGTH");
         if time < item.position - 1e-9 || time > item.position + length + 1e-9 {
-            return Err(bad(format!("that automation item runs from {} to {}", seconds(item.position), seconds(item.position + length))));
+            return Err(bad(format!(
+                "that automation item runs from {} to {}",
+                bar_at(ctx, item.position),
+                bar_at(ctx, item.position + length)
+            )));
         }
         return Ok(time);
     }
@@ -379,8 +389,8 @@ fn lane_time(ctx: &Ctx, lane: &Lane, time: f64) -> Done<f64> {
             if time < start - 1e-9 || time > start + length + 1e-9 {
                 return Err(bad(format!(
                     "a take envelope's points are inside its item, from {} to {}",
-                    seconds(start),
-                    seconds(start + length)
+                    bar_at(ctx, start),
+                    bar_at(ctx, start + length)
                 )));
             }
             Ok((time - start).max(0.0))
@@ -569,11 +579,77 @@ fn plan_title(ctx: &Ctx, lane: &Lane, plan: &Plan, count: usize) -> String {
         Plan::Clear(start, end) => {
             format!(
                 "Cleared {label} from {} to {} ({points})",
-                seconds(project_time(ctx, lane, *start)),
-                seconds(project_time(ctx, lane, *end))
+                bar_at(ctx, project_time(ctx, lane, *start)),
+                bar_at(ctx, project_time(ctx, lane, *end))
             )
         }
     }
+}
+
+/// The most points of each side HISTORY's picture of a lane keeps.
+const DRAWN_POINTS: usize = 128;
+
+/// A lane's points before and after as HISTORY draws them (for the display only: no undo reads it): `[time, value]`, the
+/// time in seconds as the lane keeps it, the value in the envelope's units, at most `DRAWN_POINTS` a side (spread evenly,
+/// the ends kept); the units' range, and the envelope's name.
+fn drawn_curve(ctx: &Ctx, lane: &Lane, units: Units, before: &[EnvPoint], after: &[EnvPoint]) -> Value {
+    let (floor, top) = match units {
+        Units::Db(_) => (-60.0, 12.0),
+        Units::Pan | Units::Width => (-1.0, 1.0),
+        Units::Mute => (0.0, 1.0),
+        Units::Semitones => (-24.0, 24.0),
+        Units::Raw { min, max } if min.is_finite() && max.is_finite() => (min, max),
+        _ => (f64::NAN, f64::NAN),
+    };
+    let side = |points: &[EnvPoint]| -> Vec<Value> {
+        let shown = |p: &EnvPoint| {
+            let value = from_raw(ctx.reaper, units, p.value);
+            json!([p.time, if floor.is_finite() { value.max(floor) } else { value }])
+        };
+        if points.len() <= DRAWN_POINTS {
+            return points.iter().map(shown).collect();
+        }
+        let last = points.len() - 1;
+        (0..DRAWN_POINTS).map(|i| shown(&points[i * last / (DRAWN_POINTS - 1)])).collect()
+    };
+    let words = curve_words(ctx, units, if after.is_empty() { before } else { after });
+    let (before, after) = (side(before), side(after));
+    // A lane in units of its own (an FX parameter of no known range): the range its points span.
+    let (min, max) = if floor.is_finite() {
+        (floor, top)
+    } else {
+        let values = || before.iter().chain(&after).filter_map(|point| point[1].as_f64());
+        (values().fold(f64::INFINITY, f64::min), values().fold(f64::NEG_INFINITY, f64::max))
+    };
+    let (min, max) = if max > min { (min, max) } else { (min - 1.0, min + 1.0) };
+    json!({"parameter": rows::clip(&ctx.reaper.envelope_name(lane.at.envelope)), "min": min, "max": max, "before": before, "after": after, "words": words})
+}
+
+/// What a lane's points move between and where, as the producer reads them: "-18 to 0 dB over bars 5–9".
+fn curve_words(ctx: &Ctx, units: Units, points: &[EnvPoint]) -> Option<String> {
+    let (first, last) = (points.first()?, points.last()?);
+    let (low, high) = points
+        .iter()
+        .map(|point| from_raw(ctx.reaper, units, point.value))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| (low.min(value), high.max(value)));
+    let said = |value: f64| match units {
+        Units::Db(_) if value <= -150.0 => "-inf".to_string(),
+        _ => marks::trimmed(value),
+    };
+    let unit = match units {
+        Units::Db(_) => " dB",
+        Units::Semitones => " semitones",
+        Units::Tempo => " BPM",
+        _ => "",
+    };
+    let range = if said(low) == said(high) { format!("{}{unit}", said(low)) } else { format!("{} to {}{unit}", said(low), said(high)) };
+    let (from, to) = (marks::bar_text(ctx.reaper, ctx.proj, first.time), marks::bar_text(ctx.reaper, ctx.proj, last.time));
+    let bar = |text: &str| text.strip_prefix("bar ").filter(|n| n.parse::<i64>().is_ok()).map(str::to_owned);
+    Some(match (bar(&from), bar(&to)) {
+        _ if from == to => format!("{range} at {from}"),
+        (Some(a), Some(b)) => format!("{range} over bars {a}–{b}"),
+        _ => format!("{range} from {from} to {to}"),
+    })
 }
 
 fn lane_target(ctx: &Ctx, lane: &Lane) -> Done<Value> {
@@ -667,7 +743,8 @@ pub fn points_apply(ctx: &Ctx, edit: Edit, input: &Value, fence: &Value) -> Done
             ("uncertain".into(), "REAPER didn't take the points as asked, and Kumi could not put the lane back: read it".into())
         });
     }
-    Ok(Applied { applied: json!({"hash": points_hash(reaper, envelope, &after)}), display: json!({"title": title}), ..Default::default() })
+    let display = json!({"title": title, "curve": drawn_curve(ctx, &lane, units, &now, &after)});
+    Ok(Applied { applied: json!({"hash": points_hash(reaper, envelope, &after)}), display, ..Default::default() })
 }
 
 pub fn points_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -725,7 +802,7 @@ enum Shown {
     MakeTake(Take, &'static str, i32),
 }
 
-fn name_of<'a>(input: &'a Value) -> Done<&'a str> {
+fn name_of(input: &Value) -> Done<&str> {
     input.get("name").and_then(Value::as_str).ok_or_else(|| bad("name: which envelope (volume, pan, …)"))
 }
 
@@ -829,6 +906,22 @@ fn shown_of(ctx: &Ctx, input: &Value) -> Done<Shown> {
     }
 }
 
+/// A write to an envelope, noted for the sends between two tracks when it is one of a send's: whether it is on is part of
+/// what a ref to one of several sends between the same tracks carries (`sends::noting_writes`).
+fn writing<T>(ctx: &Ctx, at: &EnvAt, write: impl FnOnce() -> T) -> T {
+    let reaper = ctx.reaper;
+    let send = match at.owner {
+        EnvOwner::Track(track) => (0..reaper.send_count(track, 0)).find_map(|index| {
+            SEND_ENVELOPES.iter().any(|(_, chunk)| reaper.send_envelope(track, index, chunk) == Some(at.envelope)).then_some((track, index))
+        }),
+        EnvOwner::Take(_) => None,
+    };
+    match send {
+        Some((track, index)) => super::sends::noting_writes(reaper, track, index, write),
+        None => write(),
+    }
+}
+
 /// The flags a show asks for: shown and on unless said otherwise; armed only when given.
 fn wanted_flags(input: &Value) -> Done<(Option<bool>, Option<bool>, Option<bool>)> {
     let flag = |key: &str| -> Done<Option<bool>> {
@@ -849,13 +942,33 @@ fn flags_of(reaper: &Reaper, envelope: Envelope) -> Value {
     json!({"visible": reaper.envelope_flag(envelope, "VISIBLE"), "active": reaper.envelope_flag(envelope, "ACTIVE"), "armed": reaper.envelope_flag(envelope, "ARM")})
 }
 
+/// What envelope-show fences: the envelope's flags, its points, and its automation items, each as its state keeps them
+/// (an undo writes the whole state from before back, items' places, lengths, loops and mutes among it).
 fn env_state(ctx: &Ctx, envelope: Envelope) -> Value {
     let lane_hash = {
         let count = ctx.reaper.env_point_count(envelope, -1);
         let points: Vec<EnvPoint> = (0..count).filter_map(|i| ctx.reaper.env_point(envelope, -1, i)).collect();
         points_hash(ctx.reaper, envelope, &points)
     };
-    json!({"flags": flags_of(ctx.reaper, envelope), "points": lane_hash, "items": ctx.reaper.ai_count(envelope)})
+    json!({
+        "flags": flags_of(ctx.reaper, envelope),
+        "points": lane_hash,
+        "items": ctx.reaper.ai_count(envelope),
+        "itemsPrint": items_print(ctx, envelope),
+    })
+}
+
+/// Whether the envelope's state now is the recorded one (a state recorded before items were kept by their print is
+/// compared without it).
+fn same_env(now: &Value, recorded: &Value) -> bool {
+    if recorded.get("itemsPrint").is_some() {
+        return now == recorded;
+    }
+    let mut now = now.clone();
+    if let Some(fields) = now.as_object_mut() {
+        fields.remove("itemsPrint");
+    }
+    now == *recorded
 }
 
 fn set_flags(reaper: &Reaper, envelope: Envelope, (visible, active, armed): (Option<bool>, Option<bool>, Option<bool>)) {
@@ -1002,7 +1115,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let (at, created) = match shown {
         Shown::Has(at) => {
-            if fence["exists"] == false || env_state(ctx, at.envelope) != fence["state"] {
+            if fence["exists"] == false || !same_env(&env_state(ctx, at.envelope), &fence["state"]) {
                 return Err(changed(format!("{label} changed since the preview")));
             }
             (at, None)
@@ -1039,7 +1152,7 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let unwritten = created.is_none()
         && [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().all(|(k, v)| v.is_none_or(|v| before[*k] == v));
     if !unwritten {
-        set_flags(reaper, at.envelope, flags);
+        writing(ctx, &at, || set_flags(reaper, at.envelope, flags));
     }
     let after = flags_of(reaper, at.envelope);
     if [("visible", flags.0), ("active", flags.1), ("armed", flags.2)].iter().any(|(k, v)| v.is_some_and(|v| after[*k] != v)) {
@@ -1073,24 +1186,33 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     let label = env_label(ctx, &at);
     let now = env_state(ctx, at.envelope);
-    if restore.prior["exists"] == true && now == restore.prior["state"] {
+    if restore.prior["exists"] == true && same_env(&now, &restore.prior["state"]) {
         return Ok(Restored { restored: now, display: json!({"title": format!("{label} is as it was")}), unwritten: true });
     }
-    if !restore.discard && now != restore.applied["state"] {
-        return Err(changed(format!("{label} has been changed in REAPER since Kumi showed it")));
+    // (discard too: the envelope's whole state from before goes back, which would take points the producer drew since,
+    // and put their automation items back where they were)
+    if !same_env(&now, &restore.applied["state"]) {
+        return Err(changed(format!(
+            "{label} has been changed in REAPER since Kumi showed it: putting it back as it was would write over those changes \
+             too (its points and items), so Kumi leaves it, even with discard"
+        )));
     }
     let mut display = json!({"title": format!("{label} put back as it was")});
     if restore.prior["exists"] == true {
         let chunk = restore.prior["chunk"].as_str().ok_or_else(|| bad("prior.chunk"))?;
-        reaper.set_env_chunk(at.envelope, chunk);
-        mark_envelope(reaper, at.envelope);
-        if env_state(ctx, at.envelope) != restore.prior["state"] {
-            return Err(failed(format!("REAPER wouldn't put {label} back")));
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, chunk);
+            mark_envelope(reaper, at.envelope);
+        });
+        if !same_env(&env_state(ctx, at.envelope), &restore.prior["state"]) {
+            return Err(("uncertain".into(), format!("REAPER didn't put {label} back exactly: read it")));
         }
     } else {
         let chunk = reaper.env_chunk(at.envelope).ok_or_else(|| failed("REAPER wouldn't give the envelope's state"))?;
-        reaper.set_env_chunk(at.envelope, &emptied(&chunk));
-        mark_envelope(reaper, at.envelope);
+        writing(ctx, &at, || {
+            reaper.set_env_chunk(at.envelope, &emptied(&chunk));
+            mark_envelope(reaper, at.envelope);
+        });
         let flags = flags_of(reaper, at.envelope);
         if flags["visible"] == true || flags["active"] == true {
             return Err(failed(format!("REAPER kept {label}")));
@@ -1203,8 +1325,7 @@ pub fn item_add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         Some(pool) => format!("a pooled copy (pool {pool})"),
         None => "an automation item".into(),
     };
-    let mut display =
-        json!({"title": format!("Added {what} to {} at {} ({} long)", env_label(ctx, &at), seconds(position), seconds(length))});
+    let mut display = json!({"title": format!("Added {what} to {} from {} to {}", env_label(ctx, &at), bar_at(ctx, position), bar_at(ctx, position + length))});
     if pool.is_none() && points.iter().any(|p| p.time >= position && p.time < position + length) {
         display["note"] = "The envelope's points in its range go into the new item (REAPER's way); an undo puts them back.".into();
     }
@@ -1258,7 +1379,7 @@ pub fn item_add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> 
     Ok(Applied {
         applied: json!({"pool": made_pool, "position": made_position, "hash": points_hash(reaper, at.envelope, &points), "items": items_print(ctx, at.envelope)}),
         created: Some(json!({"ref": reference, "kind": "aitem"})),
-        display: json!({"title": format!("Added an automation item to {label} at {} ({} long)", seconds(made_position), seconds(length)), "ref": reference}),
+        display: json!({"title": format!("Added an automation item to {label} from {} to {}", bar_at(ctx, made_position), bar_at(ctx, made_position + length)), "ref": reference}),
         ..Default::default()
     })
 }
@@ -1300,6 +1421,20 @@ pub fn item_add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let item = match find_item(ctx, &at, pool, position) {
         Ok(item) => item,
         Err(fault) if fault.0 == "failed" => {
+            // Not where Kumi put it. Gone only when no item of its pool is left beyond the ones that were there besides
+            // it: one more is Kumi's, moved, which can't be told from the others now (discard or not).
+            if let Some(then) = restore.applied["items"].as_array() {
+                let then = then.iter().filter(|item| item["pool"].as_i64() == Some(pool)).count();
+                let now = (0..ctx.reaper.ai_count(at.envelope))
+                    .filter(|i| ctx.reaper.ai_value(at.envelope, *i, "D_POOL_ID") as i64 == pool)
+                    .count();
+                if now >= then.max(1) {
+                    return Err(changed(format!(
+                        "the automation item Kumi added to {label} has been moved in REAPER since: Kumi leaves it, as it can't tell it \
+                         apart now"
+                    )));
+                }
+            }
             return Ok(Restored {
                 restored: json!({}),
                 display: json!({"title": format!("The automation item is gone from {label} already")}),
@@ -1384,11 +1519,11 @@ fn item_title(ctx: &Ctx, at: &EnvAt, position: f64, writes: &[(&str, f64)]) -> S
             "D_AMPLITUDE" => format!("amplitude {v:.2}"),
             "D_PLAYRATE" => format!("rate {v}"),
             "D_STARTOFFS" => format!("start offset {}", seconds(*v)),
-            "D_POSITION" => format!("moved to {}", seconds(*v)),
+            "D_POSITION" => format!("moved to {}", bar_at(ctx, *v)),
             _ => format!("length {}", seconds(*v)),
         })
         .collect();
-    format!("The automation item at {} on {}: {}", seconds(position), env_label(ctx, at), parts.join(", "))
+    format!("The automation item at {} on {}: {}", bar_at(ctx, position), env_label(ctx, at), parts.join(", "))
 }
 
 pub fn item_set_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -1529,7 +1664,7 @@ pub fn item_delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         target,
         prior: state.clone(),
         fence: json!({"items": items_print(ctx, lane.at.envelope)}),
-        display: json!({"title": format!("Deleted the automation item at {} from {}", seconds(item.position), env_label(ctx, &lane.at))}),
+        display: json!({"title": format!("Deleted the automation item at {} from {}", bar_at(ctx, item.position), env_label(ctx, &lane.at))}),
     })
 }
 
@@ -1548,7 +1683,7 @@ pub fn item_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applie
     Ok(Applied {
         applied: json!({"deleted": {"pool": item.pool, "position": item.position}}),
         material: Some(json!({"state": state, "points": points_json(&points), "poolName": name})),
-        display: json!({"title": format!("Deleted the automation item at {} from {label}", seconds(item.position))}),
+        display: json!({"title": format!("Deleted the automation item at {} from {label}", bar_at(ctx, item.position))}),
         ..Default::default()
     })
 }
@@ -1574,7 +1709,7 @@ pub fn item_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     let lane = Lane { at: at.clone(), item: Some(ItemAt { index, pool, position }) };
     let points = points_from(&material["points"])?;
-    let mut display = json!({"title": format!("The automation item at {} put back on {label}", seconds(position))});
+    let mut display = json!({"title": format!("The automation item at {} put back on {label}", bar_at(ctx, position))});
     if lane_points(ctx, &lane).is_empty() && !points.is_empty() {
         // No other copy of its pool was left, so REAPER emptied the pool: its points go back in.
         for point in &points {
@@ -1757,8 +1892,9 @@ pub fn send_mode_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied>
         return Err(changed(format!("the automation mode of send {route} changed since the preview")));
     }
     if now != wanted
-        && (!ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
-            || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
+        && (!super::sends::noting_writes(ctx.reaper, track, index, || {
+            ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
+        }) || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
     {
         return Err(failed(format!("REAPER kept the automation mode of send {route}")));
     }
@@ -1778,7 +1914,7 @@ pub fn send_mode_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if !restore.discard && now != applied {
             return Err(changed(format!("the automation mode of send {route} has been changed in REAPER since Kumi set it")));
         }
-        if !ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64)
+        if !super::sends::noting_writes(ctx.reaper, track, index, || ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64))
             || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != prior
         {
             return Err(failed(format!("REAPER kept the automation mode of send {route}")));

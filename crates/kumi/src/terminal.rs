@@ -101,6 +101,31 @@ impl TerminalOptions {
         }
     }
 }
+/// The commands `PlainTerminal::command` answers (those before it, /help to /status, are answered first).
+const COMMANDS: [&str; 22] = [
+    "/model",
+    "/effort",
+    "/fast",
+    "/memory",
+    "/recipes",
+    "/resume",
+    "/conversations",
+    "/rename",
+    "/export",
+    "/share",
+    "/fork",
+    "/note",
+    "/pin",
+    "/unpin",
+    "/forget",
+    "/willington",
+    "/login",
+    "/logout",
+    "/undo",
+    "/refresh",
+    "/reconnect",
+    "/new",
+];
 fn help(daw: bool) -> String {
     format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to {app} again, keeping the conversation){daw} · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes{willington} · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {kumi} login <provider>.", app = crate::daw::words().app, daw = if daw { " · /daw [name] (which DAW Kumi works with, or open Kumi again with another)" } else { "" }, kumi = *KUMI, willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton { " · /willington (Willington's bindings on or off)" } else { "" })
 }
@@ -705,6 +730,12 @@ impl PlainTerminal {
             return Ok(());
         }
         if self.busy() {
+            // A command Kumi doesn't have is no turn: it's said so at once, as when Kumi isn't working.
+            let verb = command.split(|c: char| c.is_whitespace() || c == '\u{feff}').find(|s| !s.is_empty()).unwrap_or("");
+            if command.starts_with('/') && !COMMANDS.contains(&verb) {
+                self.notice("Unknown command. Use /help.");
+                return Ok(());
+            }
             let mut state = self.0.state.borrow_mut();
             if !state.answering && !command.starts_with('/') && state.queued.is_none() {
                 state.queued = Some(input.into());
@@ -728,6 +759,7 @@ impl PlainTerminal {
         }
         Ok(())
     }
+    /// Answers `verb`, one of [`COMMANDS`] (any other slash command is unknown), or sends a turn.
     async fn command(&self, verb: &str, argument: Option<&str>, command: &str, input: &str) -> Result<(), RuntimeError> {
         let controller = &self.0.options.controller;
         let models = &self.0.options.models;
@@ -1207,8 +1239,13 @@ impl Terminal for PlainTerminal {
                         .map(|set| format!("“{}”", clean(set)))
                         .unwrap_or_else(|| format!("a {} not saved yet", ask.noun));
                     let title = if ask.title.is_empty() { "This conversation".into() } else { format!("“{}”", clean(&ask.title)) };
+                    let first = if ask.by_hand {
+                        format!("Open {theirs} in {daw} yourself (this conversation carries on once it's open)", daw = ask.daw)
+                    } else {
+                        format!("Open {theirs} in {daw} ({daw} may ask whether to save {open} first)", daw = ask.daw)
+                    };
                     let question = format!(
-                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. Open {theirs} in {daw} ({daw} may ask whether to save {open} first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
+                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. {first} · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
                         daw = ask.daw
                     );
                     self.0.state.borrow_mut().asking = Some(question.clone());
@@ -1390,12 +1427,18 @@ impl Terminal for PlainTerminal {
                 if value["pending"] == true { format!(" (kept once the {} is saved)", crate::daw::words().place) } else { String::new() }
             )),
             "forgot" => self.notice(&format!("[memory] Forgot: {}", str_(&value["note"]["text"]))),
-            "action" => self.notice(&format!("[live] {}", get("title"))),
+            // (tagged with the DAW's name as /daw takes it: [live] in Live, as always)
+            "action" => self.notice(&format!("[{}] {}", crate::daw::command_name(crate::daw::current().id()), get("title"))),
             "watching" => self.notice(&if value["on"] == true {
                 let words = crate::daw::words();
-                format!("[live] Kumi is watching the {}; do it in {}, then tell Kumi you're done.", words.place, words.app)
+                format!(
+                    "[{}] Kumi is watching the {}; do it in {}, then tell Kumi you're done.",
+                    crate::daw::command_name(crate::daw::current().id()),
+                    words.place,
+                    words.app
+                )
             } else {
-                "[live] Kumi stopped watching.".to_string()
+                format!("[{}] Kumi stopped watching.", crate::daw::command_name(crate::daw::current().id()))
             }),
             "recipe" => self.notice(&format!(
                 "[recipe] {} “{}” ({} steps)",

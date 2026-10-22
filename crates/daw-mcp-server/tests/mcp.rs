@@ -41,6 +41,8 @@ impl Session {
             (home.to_string_lossy().into_owned(), "<home>".into()),
             (format!("\"pid\":{pid}"), "\"pid\":\"<pid>\"".into()),
             (format!("\\\"pid\\\":{pid}"), "\\\"pid\\\":<pid>".into()),
+            // The host's own version (serverInfo), which moves with each release.
+            (format!("bridge\",\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")), "bridge\",\"version\":\"<version>\"}".into()),
         ];
         Self { input, output: BufReader::new(output).lines(), transcript: String::new(), replace, served }
     }
@@ -79,10 +81,11 @@ impl Session {
 }
 
 async fn transcript_for(daw: Daw, config: fn(daw_bridge::auth::Secret, &str) -> SimulatorConfig, resources: [&str; 2]) -> String {
-    transcript_with(daw, config, resources, "render").await
+    transcript_with(daw, config, resources, "bounce").await
 }
 
-/// The same, with `unknown` the tool asked for that the DAW doesn't have (Logic has a render of its own since M5).
+/// The same, with `unknown` the tool asked for that the DAW doesn't have (REAPER and Renoise have no bounce; Logic has
+/// its own since M4).
 async fn transcript_with(
     daw: Daw,
     config: fn(daw_bridge::auth::Secret, &str) -> SimulatorConfig,

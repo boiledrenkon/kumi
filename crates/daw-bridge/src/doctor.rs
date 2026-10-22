@@ -70,7 +70,13 @@ fn receipt_target(inputs: &Inputs, any_target: &Target) -> Option<std::path::Pat
 }
 
 fn reaper_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
-    let mut installs = detect::detect_reaper(&inputs.env);
+    // A portable REAPER Kumi doesn't find by itself counts once its receipt says the extension went in it.
+    let receipt = std::fs::read_to_string(BridgePaths::new(inputs.kumi_home, Daw::Reaper).receipt())
+        .ok()
+        .and_then(|text| serde_json::from_str::<crate::lifecycle::Receipt>(&text).ok())
+        .filter(|receipt| receipt.status == "installed")
+        .map(|receipt| std::path::PathBuf::from(receipt.target));
+    let mut installs = detect::with_placed(&inputs.env, detect::detect_reaper(&inputs.env), receipt.as_deref());
     if installs.is_empty() {
         checks.push(check(
             "installed",
@@ -256,7 +262,11 @@ fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: 
                         checks.push(check(
                             "update",
                             Level::Warn,
-                            format!("this Kumi ships bridge {} and {daw} has {version}: update Kumi's {daw} bridge", bundled.version),
+                            format!(
+                                "this Kumi ships bridge {} and {daw} has {version}: kumi --daw {} bridge brings it up to date",
+                                bundled.version,
+                                daw.id()
+                            ),
                         ));
                     }
                 }
@@ -310,7 +320,22 @@ fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: 
 
     let pids = (inputs.running)(daw);
     let discovered = scan_discovery(&paths.discovery(), daw);
-    let alive: Vec<_> = discovered.iter().filter(|found| found.alive).filter_map(|found| found.discovery.as_ref().ok()).collect();
+    // A discovery file with no pid (Renoise on Windows writes none) is alive only while its port answers: one whose port
+    // nobody listens on is left from a run that ended (a crash, a folder the tool couldn't delete it from), so it goes, as
+    // the host sweeps it.
+    let alive: Vec<_> = discovered
+        .iter()
+        .filter(|found| found.alive)
+        .filter_map(|found| found.discovery.as_ref().ok().map(|discovery| (found, discovery)))
+        .filter(|(found, discovery)| {
+            let stale = discovery.pid == 0 && !listening(discovery.port, inputs.probe_timeout.min(Duration::from_millis(500)));
+            if stale {
+                let _ = std::fs::remove_file(&found.path);
+            }
+            !stale
+        })
+        .map(|(_, discovery)| discovery)
+        .collect();
     if pids.is_empty() && alive.is_empty() {
         checks.push(check("running", Level::Note, format!("{daw} isn't running")));
     } else if !pids.is_empty() {
@@ -610,6 +635,48 @@ mod tests {
     }
 
     #[test]
+    fn a_discovery_file_with_no_pid_whose_port_refuses_is_stale_and_goes() {
+        let root = tempfile::tempdir().unwrap();
+        let kumi = root.path().join("kumi");
+        let none = |_: &str| None;
+        let inputs = Inputs {
+            env: Env { os: Os::Mac, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) },
+            kumi_home: &kumi,
+            bundled: None,
+            running: &no_processes,
+            probe_timeout: Duration::from_secs(5),
+        };
+        // Renoise with Kumi's bridge set up.
+        std::fs::create_dir_all(root.path().join("home/Library/Preferences/Renoise/V3.5.4")).unwrap();
+        let target = install::renoise_target(&detect::detect_renoise(&inputs.env)).unwrap();
+        let source = root.path().join("src").join("com.kumi.Bridge.xrnx");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("main.lua"), "-- tool\n").unwrap();
+        Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
+        // A file with no pid (Renoise on Windows writes none) for a port nobody listens on: one just let go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let discovery = Discovery {
+            schema: DISCOVERY_SCHEMA.into(),
+            daw: "renoise".into(),
+            pid: 0,
+            host: "127.0.0.1".into(),
+            port,
+            protocol: PROTOCOL.into(),
+            version: "0.1.0".into(),
+            daw_version: "3.5.4".into(),
+            resource: root.path().join("home/Library/Preferences/Renoise/V3.5.4").to_string_lossy().into_owned(),
+            project: None,
+            started_ms: 1,
+        };
+        let dir = BridgePaths::new(&kumi, Daw::Renoise).discovery();
+        write_discovery(&dir, &discovery).unwrap();
+        let checks = doctor(Daw::Renoise, &inputs);
+        assert!(ids(&checks).contains(&("running", Level::Note)), "Renoise isn't running: {checks:?}");
+        assert!(!ids(&checks).contains(&("answering", Level::Fail)), "{checks:?}");
+        assert!(!dir.join(discovery.file_name()).exists(), "the stale file went");
+    }
+
+    #[test]
     fn reaper_wrong_architecture_and_unrecorded_files() {
         let root = tempfile::tempdir().unwrap();
         let kumi = root.path().join("kumi");
@@ -678,5 +745,50 @@ mod tests {
         assert!(installed.message.replace('\\', "/").contains("home/Applications/REAPER.app"), "{installed:?}");
         let others = checks.iter().find(|c| c.id == "installs").unwrap();
         assert!(others.message.contains("Application Support"), "the default folder is the other one: {others:?}");
+    }
+
+    /// Review K20: a portable REAPER outside the folders Kumi looks in (named once with KUMI_REAPER_RESOURCE_DIR) is
+    /// checked where its receipt says the extension went, not taken for the default REAPER with a missing reference.
+    #[test]
+    fn a_portable_reaper_kumi_doesnt_find_is_checked_where_its_receipt_says() {
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            let root = tempfile::tempdir().unwrap();
+            let kumi = root.path().join("kumi");
+            let none = |_: &str| None;
+            let default_resource = match os {
+                Os::Mac => root.path().join("home/Library/Application Support/REAPER"),
+                Os::Windows => root.path().join("home/AppData/Roaming/REAPER"),
+                Os::Linux => root.path().join("home/.config/REAPER"),
+            };
+            std::fs::create_dir_all(default_resource.join("UserPlugins")).unwrap();
+            std::fs::write(default_resource.join("reaper.ini"), "").unwrap();
+            let portable = root.path().join("Volumes/Stick/REAPER");
+            std::fs::create_dir_all(portable.join("UserPlugins")).unwrap();
+            std::fs::write(portable.join("reaper.ini"), "").unwrap();
+            let app = portable.join(match os {
+                Os::Mac => "REAPER.app",
+                Os::Windows => "reaper.exe",
+                Os::Linux => "reaper",
+            });
+            std::fs::create_dir_all(&app).unwrap();
+            let env = Env { os, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) };
+            let installs = detect::detect_reaper(&env);
+            assert_eq!(installs.len(), 1, "only the default REAPER is found by itself: {installs:?}");
+            let target = install::reaper_target(&detect::with_placed(&env, vec![], Some(&portable.join("UserPlugins/x"))).remove(0), os);
+            let source = root.path().join("reaper_kumi");
+            std::fs::write(&source, "extension").unwrap();
+            Lifecycle::new(&kumi, target.unwrap()).install(&source, "0.1.0").unwrap();
+            let inputs = Inputs { env, kumi_home: &kumi, bundled: None, running: &no_processes, probe_timeout: Duration::from_secs(1) };
+            let checks = doctor(Daw::Reaper, &inputs);
+            assert!(ids(&checks).contains(&("bridge", Level::Ok)), "{os:?}: {checks:?}");
+            assert!(!ids(&checks).contains(&("reference", Level::Fail)), "{os:?}: {checks:?}");
+            let installed = checks.iter().find(|c| c.id == "installed").unwrap();
+            assert!(installed.message.contains(&app.display().to_string()), "{os:?}: {installed:?}");
+            // Named by the variable, that folder is the only one: nothing is added beside it.
+            let named = |name: &str| (name == "KUMI_REAPER_RESOURCE_DIR").then(|| default_resource.display().to_string());
+            let env = Env { os, home: root.path().join("home"), var: &named, root: Some(root.path().join("sys")) };
+            let receipt = portable.join("UserPlugins").join(install::reaper_extension_name(os));
+            assert_eq!(detect::with_placed(&env, detect::detect_reaper(&env), Some(&receipt)).len(), 1);
+        }
     }
 }

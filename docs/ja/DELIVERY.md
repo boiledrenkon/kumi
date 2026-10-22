@@ -29,6 +29,16 @@ Kumi の Logic Pro 用ブリッジは別のプログラムで、Kumi はそれ�
 
 `KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は二つの Live のフォルダーを上書きし、`KUMI_HOME` は `~/.kumi` の場所を移し、`KUMI_BRIDGE_WAIT_SECONDS` は Live を待つ時間を設定します（`0` で待ちません）。Kumi は、ライフサイクルが Remote Script の隣に書き込む `bridge-reference.json` を通じて、インストールされたブリッジを見つけます。
 
+## REAPER の拡張機能と Renoise のツール
+
+REAPER と Renoise に入る Kumi のブリッジは、ブリッジの CLI ではなく Kumi 自身のライフサイクル（`crates/daw-bridge`）を通じてインストールされます。セットアップ、`kumi --daw reaper bridge`（または `renoise`）、`kumi update` がそれを実行します。プロデューサー側から見た説明は [Kumi ガイド](KUMI_GUIDE.md#reaper-や-renoise-につなぐ)にあります。
+
+- **バンドルの中：** `kumi` の隣に `daw-mcp-server`、そして `daws` フォルダー。`daws/reaper/reaper_kumi.dylib`（Windows では `.dll`、Linux では `.so`）と `reaper_kumi.version`、`daws/renoise/com.kumi.Bridge.xrnx/` です。バンドルの `package.json` と `kumi-install.json`、リリースの `kumi-release.json` は、それぞれのバージョンを `reaper` と `renoise` として持ちます。`bridge` は Live のもののままです。
+- **DAW の中へ：** REAPER の拡張機能は、Kumi が見つけた REAPER（ポータブル版、または `KUMI_REAPER_RESOURCE_DIR` で指定したフォルダー）の `UserPlugins` へ、隣に `kumi-bridge-reference.json` を置いて入れます。Renoise のツールは、3.5 以降でいちばん新しい設定フォルダーの `Scripts/Tools` へ、中に `bridge-reference.json` を置いて入れます。更新とロールバックはどちらも Kumi が入れた場所のまま行い、レシートの `copies` に載っている Kumi のコピー（新しい Renoise が自分のバージョンフォルダーに作ったものなど）も一緒に進めます。アンインストールはそれらも取り除きます。プロデューサーが取り除いたブリッジは入れ直しません。どちらも別の名前でコピーしてから名前を変えて配置し、その場で上書きすることはありません（動いている REAPER は古いファイルを保ち、Windows ではロックされます）。macOS では、Kumi のコピーからダウンロードの印を外します。
+- **レシートと世代：** `~/.kumi/bridges/<daw>/install-receipt.json` は各ステップを最新 20 件まで記録します：`install`、`upgrade`、`reinstall`（変わってしまったものに同じ版を入れ直す）、`rollback`、`uninstall`。配置中の版とその前の 3 つはロールバックのために `generations` に残り、すでに配置されている版を持ってくる更新は何も変えません。
+- **何も失わない：** DAW のフォルダーにあるものが Kumi の入れた版でない（その後変わった、または Kumi より前からあった）ときは、置き換えたり取り除いたりする前に `~/.kumi/bridges/<daw>/changed` に残します。Renoise が書く、ツールの `preferences.xml` はツールと一緒に残り、`.DS_Store`、`Thumbs.db`、`desktop.ini` は変更とみなしません。`kumi uninstall` はそれらの版をその場所に残し、離れていた間の変化を比べる状態（`snapshots`）も `--all` を付けない限り残します。`~/.kumi/bridges` のそれ以外は取り除きます。
+- **ロールバックと削除：** `kumi update --rollback` はそれぞれのブリッジを前の Kumi に付属する版に戻します（どちらの DAW も知らない Kumi は両方をそのまま残します）。`kumi uninstall` はレシートに書かれた場所から取り除きます。
+
 ## Logic Pro ブリッジ
 
 Logic Pro は外部から何も読み込まないので、そのブリッジは Logic Pro の中には入りません。ブリッジは Kumi のプログラム `logic-kumi` で、アクセシビリティ用のヘルパー `kumi-logic-hands-<hash>`（ユニバーサルでアドホック署名の Swift プログラム）を伴います。Kumi が自身のバイナリの隣から起動する、Logic Pro 用の Kumi のホスト `daw-mcp-server --daw logic` が、セッションの始まりに Logic Pro の横でブリッジを起動します。ブリッジを収めているのは Apple シリコン搭載 Mac の Kumi だけで、`kumi` の隣の `daws/logic/logic-kumi/` に、ブリッジ、ヘルパー、`version` ファイルがあります。

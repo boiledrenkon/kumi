@@ -54,6 +54,46 @@ long to wait for Live (`0` doesn't wait). Kumi finds the installed bridge
 through `bridge-reference.json`, which the lifecycle writes beside the Remote
 Script.
 
+## REAPER's extension and Renoise's tool
+
+Kumi's bridges in REAPER and Renoise go in through a lifecycle of Kumi's own
+(`crates/daw-bridge`), not the bridge's CLI. Setup, `kumi --daw reaper bridge`
+(or `renoise`) and `kumi update` run it; the
+[Kumi guide](KUMI_GUIDE.md#connect-to-reaper-or-renoise) covers this from a
+producer's side.
+
+- **In the bundle:** `daw-mcp-server` beside `kumi`, and a `daws` folder:
+  `daws/reaper/reaper_kumi.dylib` (`.dll` on Windows, `.so` on Linux) with
+  `reaper_kumi.version`, and `daws/renoise/com.kumi.Bridge.xrnx/`. The bundle's
+  `package.json` and `kumi-install.json`, and the release's `kumi-release.json`,
+  give their versions as `reaper` and `renoise`; `bridge` stays Live's.
+- **Into the DAW:** REAPER's extension into the `UserPlugins` folder of the
+  REAPER Kumi found (a portable one, or the folder `KUMI_REAPER_RESOURCE_DIR`
+  names), with `kumi-bridge-reference.json` beside it; Renoise's tool into
+  `Scripts/Tools` in its newest preferences folder from 3.5, with
+  `bridge-reference.json` inside. Updates and rollbacks keep each where Kumi put
+  it and bring along every copy of Kumi's the receipt lists (`copies`), such as
+  one a newer Renoise made in its own version folder; uninstall takes each of
+  those out too. A bridge the producer took out isn't put back. Each is copied
+  under another name and renamed into place, never written over where it is (a
+  running REAPER keeps the old file; Windows locks it). On macOS, Kumi's copies
+  lose the download mark.
+- **Receipt and generations:** `~/.kumi/bridges/<daw>/install-receipt.json`
+  records each step, the newest 20: `install`, `upgrade`, `reinstall` (the same
+  copy over one that changed), `rollback` and `uninstall`. The copy in place and
+  the three before it are kept in `generations` for rollback; an update that
+  brings the copy already in place changes nothing.
+- **Nothing lost:** a copy in the DAW's folder that isn't one Kumi put there
+  (changed since, or there before Kumi) is kept in `~/.kumi/bridges/<daw>/changed`
+  before anything replaces or removes it. The Renoise tool's `preferences.xml`,
+  which Renoise writes, stays with the tool, and `.DS_Store`, `Thumbs.db` and
+  `desktop.ini` never count as a change. `kumi uninstall` leaves those copies
+  where they are, and catch-up's baselines (`snapshots`) unless `--all`; the rest
+  of `~/.kumi/bridges` goes.
+- **Rollback and removal:** `kumi update --rollback` takes each bridge to the
+  copy the earlier Kumi carries (a Kumi that knows neither DAW leaves both where
+  they are); `kumi uninstall` takes them out where the receipt says they went.
+
 ## Logic Pro's bridge
 
 Logic Pro loads nothing from outside, so its bridge doesn't go into Logic Pro.

@@ -4,6 +4,9 @@ use crate::daw::Daw;
 use std::path::{Path, PathBuf};
 
 /// Kumi's folder: KUMI_HOME when set and not empty, else `.kumi` in the user's home.
+/// The reference file beside REAPER's extension in UserPlugins: Kumi's lifecycle writes it and the extension reads it.
+pub const REAPER_REFERENCE: &str = "kumi-bridge-reference.json";
+
 pub fn kumi_home() -> Option<PathBuf> {
     kumi_home_from(&|name| std::env::var(name).ok(), home::home_dir())
 }
@@ -38,6 +41,11 @@ impl BridgePaths {
     /// The bridge's own log (REAPER keeps none of its own).
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
+    }
+
+    /// What the host keeps of each project between sessions, to tell what changed since (catch-up).
+    pub fn snapshots(&self) -> PathBuf {
+        self.root.join("snapshots")
     }
 
     /// Each installed version of the bridge's files, kept for rollback.

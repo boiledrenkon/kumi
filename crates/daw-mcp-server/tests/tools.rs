@@ -113,7 +113,7 @@ async fn a_whole_session_of_reads_against_a_reaper_project() {
         (18, "focus_body", json!({})),
         (19, "read", json!({"kind": "pattern"})),
         (20, "read", json!({"kind": "item"})),
-        (21, "focus_body", json!({"kind": "mixer"})),
+        (21, "focus_body", json!({"kind": "console"})),
     ] {
         let (answer, is_error) = session.tool_full(id, tool, arguments, false).await;
         assert!(is_error && answer["error"].is_string(), "{answer}");

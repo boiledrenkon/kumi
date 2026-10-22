@@ -43,6 +43,8 @@ impl Session {
             (home.to_string_lossy().into_owned(), "<home>".into()),
             (format!("\"pid\":{pid}"), "\"pid\":\"<pid>\"".into()),
             (format!("\\\"pid\\\":{pid}"), "\\\"pid\\\":<pid>".into()),
+            // The host's own version (serverInfo), which moves with each release.
+            (format!("bridge\",\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")), "bridge\",\"version\":\"<version>\"}".into()),
         ];
         Self { input, output: BufReader::new(output).lines(), transcript: String::new(), replace, served }
     }
@@ -54,6 +56,12 @@ impl Session {
 
     /// Sends a message and returns the answer (Null for a notification). The transcript keeps both, with `bulk` set
     /// (long answers cut to their size) when the answer is too long to be worth keeping whole.
+    /// Sends a message without waiting for its answer.
+    #[allow(dead_code)]
+    pub async fn send(&mut self, message: Value) {
+        self.input.write_all(format!("{message}\n").as_bytes()).await.unwrap();
+    }
+
     pub async fn call(&mut self, message: Value) -> Value {
         self.call_as(message, false).await
     }
@@ -65,7 +73,16 @@ impl Session {
         if message.get("id").is_none() {
             return Value::Null;
         }
-        let answer = tokio::time::timeout(std::time::Duration::from_secs(20), self.output.next_line()).await.unwrap().unwrap().unwrap();
+        // (the bridge's events come between the answers, as notifications: kept in the transcript, not taken for the answer)
+        let answer = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(20), self.output.next_line()).await.unwrap().unwrap().unwrap();
+            let parsed: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            if parsed.get("id").is_none() && parsed.get("method").is_some() {
+                self.transcript.push_str(&format!("< {line}\n"));
+                continue;
+            }
+            break line;
+        };
         let mut shown = answer.clone();
         for (text, name) in &self.replace {
             shown = shown.replace(text, name);

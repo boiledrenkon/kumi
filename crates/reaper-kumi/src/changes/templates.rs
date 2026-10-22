@@ -33,7 +33,10 @@ fn template_path(ctx: &Ctx, input: &Value) -> Done<PathBuf> {
                     "name must be a template's name in REAPER's TrackTemplates folder (folders inside allowed, \"Drums/Kit\")",
                 ));
             }
-            Path::new(&ctx.reaper.resource_path()).join("TrackTemplates").join(format!("{name}.RTrackTemplate"))
+            // (a folder at a time, so the path has the system's separators throughout)
+            Path::new(&ctx.reaper.resource_path())
+                .join("TrackTemplates")
+                .join(Path::new(&format!("{name}.RTrackTemplate")).components().collect::<PathBuf>())
         }
         (None, Some(path)) => {
             let path = PathBuf::from(path);
@@ -286,19 +289,31 @@ fn routes_hash(reaper: &Reaper, track: Track) -> String {
     content_hash(&text)
 }
 
-/// The track's FX and its takes' FX, in order.
+/// The track's FX and its takes' FX, in order, each container followed by the FX inside it (at any depth).
 fn all_fx(reaper: &Reaper, track: Track) -> Vec<Fx> {
+    fn with_inside(reaper: &Reaper, fx: Fx, all: &mut Vec<Fx>) {
+        all.push(fx);
+        for child in reaper.fx_children(fx) {
+            with_inside(reaper, child, all);
+        }
+    }
     let mut owners = vec![FxOwner::Track(track)];
     for item in (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n)) {
         owners.extend((0..reaper.take_count(item)).filter_map(|n| reaper.take_at(item, n)).map(FxOwner::Take));
     }
-    owners.into_iter().flat_map(|owner| (0..reaper.fx_count(owner)).map(move |index| Fx { owner, index })).collect()
+    let mut all = Vec::new();
+    for owner in owners {
+        for index in 0..reaper.fx_count(owner) {
+            with_inside(reaper, Fx { owner, index }, &mut all);
+        }
+    }
+    all
 }
 
 /// What tells a track made from the template from how the insert left it: its state as the producer can change it (items
 /// and their MIDI, envelopes and their points, mix, routing, plug-ins in and out), its sends and receives, and each FX's
 /// signature (its parameters, less those that move by themselves).
-fn signature(ctx: &Ctx, track: Track) -> Value {
+pub(super) fn signature(ctx: &Ctx, track: Track) -> Value {
     let reaper = ctx.reaper;
     json!({
         "state": reaper.track_chunk(track).map(|chunk| content_hash(&chunk)),
@@ -308,7 +323,7 @@ fn signature(ctx: &Ctx, track: Track) -> Value {
 }
 
 /// Whether the track is as the insert left it, by its recorded signature.
-fn as_left(ctx: &Ctx, track: Track, recorded: &Value) -> bool {
+pub(super) fn as_left(ctx: &Ctx, track: Track, recorded: &Value) -> bool {
     let reaper = ctx.reaper;
     let fx = all_fx(reaper, track);
     let signatures = recorded["fx"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -327,6 +342,36 @@ fn selection(ctx: &Ctx) -> (Vec<String>, bool) {
         .map(|t| reaper.track_guid(t))
         .collect();
     (tracks, reaper.master_track(ctx.proj).is_some_and(|m| reaper.track_value(m, "I_SELECTED") != 0.0))
+}
+
+/// REAPER puts a template's tracks after the last touched track, not at the end (lab 7.82): the last track is made the last
+/// touched one first, so they come at the end; the producer's own (its GUID) is put back by `put_touched`.
+const SET_LAST_TOUCHED: i32 = 40914;
+
+fn touch_last(ctx: &Ctx) -> Option<String> {
+    let reaper = ctx.reaper;
+    let touched = reaper.last_touched_track().map(|t| reaper.track_guid(t));
+    if let Some(last) = reaper.track_at(ctx.proj, reaper.track_count(ctx.proj) - 1) {
+        select_only(ctx, Some(last));
+        reaper.run_action(SET_LAST_TOUCHED);
+    }
+    touched
+}
+
+fn put_touched(ctx: &Ctx, touched: &Option<String>) {
+    if let Some(track) = touched.as_deref().and_then(|guid| by_guid(ctx, guid)) {
+        select_only(ctx, Some(track));
+        ctx.reaper.run_action(SET_LAST_TOUCHED);
+    }
+}
+
+fn select_only(ctx: &Ctx, only: Option<Track>) {
+    let reaper = ctx.reaper;
+    for at in 0..reaper.track_count(ctx.proj) {
+        if let Some(t) = reaper.track_at(ctx.proj, at) {
+            reaper.set_track_selected(t, Some(t) == only);
+        }
+    }
 }
 
 fn put_selection(ctx: &Ctx, (tracks, master): &(Vec<String>, bool)) {
@@ -349,13 +394,15 @@ fn by_guid(ctx: &Ctx, guid: &str) -> Option<Track> {
     ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(guid.to_string())).ok()
 }
 
-/// Deletes these tracks, last first (what was made, taken away again inside the call that made it).
-fn delete_all(ctx: &Ctx, made: &[String]) {
+/// Deletes these tracks, last first (what was made, taken away again inside the call that made it), and puts the other
+/// tracks' folders back as they were (`depths`).
+fn delete_all(ctx: &Ctx, made: &[String], depths: &[(String, i64)]) {
     for guid in made.iter().rev() {
         if let Some(track) = by_guid(ctx, guid) {
             ctx.reaper.delete_track(track);
         }
     }
+    super::tracks::put_folder_depths_back(ctx, depths);
 }
 
 pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
@@ -374,7 +421,12 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let kept = selection(ctx);
     let before = guids(ctx);
-    if !reaper.open_project(&path.to_string_lossy()) {
+    let depths = super::tracks::folder_depths(ctx);
+    let touched = touch_last(ctx);
+    let opened = reaper.open_project(&path.to_string_lossy());
+    put_touched(ctx, &touched);
+    if !opened {
+        put_selection(ctx, &kept);
         return Err(failed("this REAPER can't insert track templates"));
     }
     // The tracks REAPER made: those it didn't have, in its order (at the end).
@@ -389,7 +441,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let first_at = count - made.len() as i64;
     if at < first_at {
         if net != 0 {
-            delete_all(ctx, &made);
+            delete_all(ctx, &made, &depths);
             put_selection(ctx, &kept);
             return Err(bad("the template's tracks open a folder they don't close: insert it at the end (no index)"));
         }
@@ -400,7 +452,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             }
         }
         if !reaper.reorder_selected(at as i32, 0) {
-            delete_all(ctx, &made);
+            delete_all(ctx, &made, &depths);
             put_selection(ctx, &kept);
             return Err(failed("REAPER wouldn't move the template's tracks to their place: they are taken away again"));
         }
@@ -410,7 +462,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         made.iter().filter_map(|guid| by_guid(ctx, guid)).map(|t| reaper.track_value(t, "IP_TRACKNUMBER") as i64 - 1).collect();
     let in_place = placed.len() == made.len() && placed.iter().enumerate().all(|(n, p)| *p == at + n as i64);
     if !in_place {
-        delete_all(ctx, &made);
+        delete_all(ctx, &made, &depths);
         return Err(failed("REAPER put the template's tracks elsewhere than asked: they are taken away again"));
     }
     let tracks: Vec<Value> =
@@ -462,11 +514,10 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(changed("a track of the producer's is inside the template's folder now: Kumi won't delete the folder around it"));
     }
     let names: Vec<String> = present.iter().map(|(_, t)| super::track_name(reaper, *t)).collect();
-    for (_, track) in present.iter().rev() {
-        if !reaper.delete_track(*track) {
-            return Err(("uncertain".into(), "REAPER wouldn't delete one of the template's tracks: read the tracks".into()));
-        }
-    }
+    // Every other track stays in the folder it is in (template tracks that close a folder take that closing with them in a
+    // bare delete).
+    let tracks_now: Vec<Track> = present.iter().map(|(_, t)| *t).collect();
+    super::tracks::delete_keeping_folders(ctx, &tracks_now, Some(&[]))?;
     Ok(Restored {
         restored: json!({"deleted": made.len()}),
         display: json!({"title": format!("Template tracks {} taken away again", names.iter().map(|n| super::quoted(n)).collect::<Vec<_>>().join(", "))}),

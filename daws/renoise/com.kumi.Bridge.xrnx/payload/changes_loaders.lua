@@ -78,6 +78,19 @@ local function chain_plan(song, env, input)
   return { index = index, track = track, file = file, name = name, devices = devices, count = count }
 end
 
+-- The devices after a track's mixer, by path (what the journal compares after Renoise's own undo or redo).
+local function chain_read(track)
+  local paths = {}
+  for d = 2, #track.devices do paths[#paths + 1] = track:device(d).device_path end
+  return { paths = paths }
+end
+
+local function paths_of_replaced(replaced)
+  local paths = {}
+  for k, kept in ipairs(replaced) do paths[k] = (kept.device or {}).path end
+  return { paths = paths }
+end
+
 local function chain_title(plan, loaded)
   local title = string.format("Loaded the device chain %s onto %s", q(plan.name), q(base.named(plan.index, plan.track)))
   if loaded then title = title .. string.format(" (%d device%s)", loaded, loaded == 1 and "" or "s") end
@@ -124,6 +137,15 @@ local function chain_apply(song, env, input, fence, desc)
   for k = 1, #mixer.parameters do levels[k] = mixer:parameter(k).value end
   local selected, selected_device = song.selected_track_index, song.selected_track_device_index
   song:describe_undo(desc)
+  -- (the producer's undo or redo of it changes the track's devices: watched, for the journal to compare)
+  if env.watch_undo then env.watch_undo(track.devices_observable) end
+  -- Kumi takes the devices off itself, the last first, each with the mark just after it went: when its undo puts them back,
+  -- the places kept of them before follow them there (places.back), as a delete's undo does. The chain then loads onto the
+  -- empty track (Renoise would remove them the same way, in this same step).
+  for d = #track.devices, 2, -1 do
+    track:delete_device_at(d)
+    replaced[d - 1].removed = env.device_mark and env.device_mark(index) or nil
+  end
   song.selected_track_index = index
   local loaded, result = pcall(function() return renoise.app():load_track_device_chain(plan.file) end)
   -- (another track was selected: it is again, with its device; on this one Renoise selects the chain's last device)
@@ -134,6 +156,11 @@ local function chain_apply(song, env, input, fence, desc)
     end)
   end
   if not loaded or result == false then
+    -- (the devices it took off go back, so nothing half-done stays)
+    local pattern_now = material_.pool_now(song, env, material.pool) or function(p) return p end
+    for k, kept in ipairs(replaced) do
+      pcall(devices_.put_back, song, env, index, track, math.min(k + 1, #track.devices + 1), kept, pattern_now, function(n) return n end, material_.new_tally())
+    end
     fail("failed", string.format("Renoise couldn't load the device chain %s: %s", q(plan.name), loaded and "it said no" or tostring(result)))
   end
   -- (the track's volume, pan and width as they were: a chain is its devices)
@@ -141,17 +168,21 @@ local function chain_apply(song, env, input, fence, desc)
   for k, value in ipairs(levels) do
     if k <= #mixer.parameters then pcall(function() mixer:parameter(k).value = value end) end
   end
-  local kept, states, names = {}, {}, {}
+  local kept, states, names, contents = {}, {}, {}, {}
   for d = 2, #track.devices do
     local device = track:device(d)
     kept[#kept + 1] = devices_.device_kept(env, index, d, device)
     states[#states + 1] = material_.device_state(device)
     names[#names + 1] = devices_.label(device)
+    -- (a Doofer's or a Splitter's devices inside, a Notepad's text, a plug-in's state: false for a device with none)
+    contents[#contents + 1] = material_.content_fence(device) or false
   end
   material.loaded = kept
   return {
-    applied = { count = #kept, devices = names, states = states }, material = material, target = base.target(env, index),
-    display = { title = chain_title(plan, #kept) }, undo = { desc = desc, entry = true }, prior = { devices = plan.count },
+    applied = { count = #kept, devices = names, states = states, contents = contents }, material = material, target = base.target(env, index),
+    display = { title = chain_title(plan, #kept) }, undo = { desc = desc, entry = true },
+    -- (the journal tells Renoise's own undo and redo of it by the track's devices: those it replaced, or those it loaded)
+    prior = paths_of_replaced(replaced), journal_applied = chain_read(track), place = { track = index },
   }
 end
 
@@ -160,6 +191,16 @@ local function replaced_back(track, replaced)
   if #track.devices - 1 ~= #replaced then return false end
   for k, kept in ipairs(replaced) do
     if track:device(k + 1).device_path ~= (kept.device or {}).path then return false end
+  end
+  return true
+end
+
+-- Whether the devices after the track's mixer are exactly those a chain load left (by kind, settings, name and bypass).
+local function loaded_again(track, states)
+  if type(states) ~= "table" or #states == 0 or #track.devices - 1 ~= #states then return false end
+  for j, was in ipairs(states) do
+    local now = material_.device_state(track:device(j + 1))
+    if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active then return false end
   end
   return true
 end
@@ -180,6 +221,12 @@ local function chain_restore(song, env, restore, desc)
     if d then found[#found + 1] = { d = d, j = j } else missing, why_missing = missing + 1, why_missing or why end
   end
   local replaced = material.replaced or {}
+  -- (Renoise's own undo and redo of the load take its devices off and make them again: the log sees them go, so none is
+  -- found by its place; the track holding exactly what Kumi loaded, device for device, is the chain again)
+  if missing > 0 and missing == #material.loaded and loaded_again(track, applied.states) then
+    found, missing = {}, 0
+    for j = 1, #material.loaded do found[j] = { d = j + 1, j = j } end
+  end
   if missing > 0 then
     if missing == #material.loaded and replaced_back(track, replaced) then
       return { restored = { count = 0 }, display = { title = string.format("%s is off %s already", name, track_name) }, undo = { desc = desc, entry = false }, unwritten = true }
@@ -192,7 +239,9 @@ local function chain_restore(song, env, restore, desc)
     local moved = {}
     for _, f in ipairs(found) do
       local now, was = material_.device_state(track:device(f.d)), (applied.states or {})[f.j] or {}
-      if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active then
+      local content = (applied.contents or {})[f.j]
+      if now.path ~= was.path or now.state ~= was.state or now.display ~= was.display or now.active ~= was.active
+        or (content and material_.content_fence(track:device(f.d)) ~= content) then
         moved[#moved + 1] = devices_.label(track:device(f.d))
       end
     end
@@ -205,13 +254,17 @@ local function chain_restore(song, env, restore, desc)
     fail("stale", "the song's patterns changed in a way Kumi couldn't follow since it loaded the chain, so it can't tell where the replaced devices' automation goes: nothing was written")
   end
   song:describe_undo(desc)
+  if env.watch_undo then env.watch_undo(track.devices_observable) end
   table.sort(found, function(a, b) return a.d > b.d end)
   for _, f in ipairs(found) do track:delete_device_at(f.d) end
   local tally, lost = material_.new_tally(), 0
   local moved = devices_.carried_from(env, restore.layout)
   for k, kept in ipairs(replaced) do
-    local _, not_back = devices_.put_back(song, env, index, track, math.min(k + 1, #track.devices + 1), kept, pattern_now, moved, tally)
+    local at = math.min(k + 1, #track.devices + 1)
+    local _, not_back = devices_.put_back(song, env, index, track, at, kept, pattern_now, moved, tally)
     lost = lost + not_back
+    -- (the device put back is the one the load took off: the places kept of it before follow it)
+    if env.device_back and type(kept.removed) == "string" then env.device_back(index, kept.removed, at) end
   end
   local note = material_.tally_note(tally)
   if lost > 0 then
@@ -220,12 +273,19 @@ local function chain_restore(song, env, restore, desc)
   end
   local title = string.format("Took the device chain %s off %s", name, track_name)
   if #replaced > 0 then title = title .. string.format(" and put back its %d device%s", #replaced, #replaced == 1 and "" or "s") end
+  base.note_restored_at(env.journal, "device-chain-load", { track = index })
   return { restored = { count = #found, back = #replaced }, display = { title = title, note = note }, undo = { desc = desc, entry = true } }
 end
 
 base.register({
   kind = "device-chain-load", custom = true, by_place = true,
   preview = chain_preview, apply = chain_apply, restore = chain_restore,
+  reread = function(song, place)
+    if place.track > rows.track_count(song) then return nil end
+    return song:track(place.track)
+  end,
+  read = chain_read,
+  same = function(a, b) return base.same_table(a.paths, b.paths) end,
 })
 
 -- phrase-load {ref: instrument, file, fileName, index?}: a new phrase at index (the end by default) with the file's lines and
@@ -266,6 +326,7 @@ base.register({
     local i = plan.n[1]
     local instrument = song:instrument(i)
     local selected_i, selected_p = song.selected_instrument_index, song.selected_phrase_index
+    local program_before = phrases_.program_of(instrument)
     song:describe_undo(desc)
     instrument:insert_phrase_at(plan.index)
     -- (Renoise loads a phrase file into the selected phrase: the new one)
@@ -282,9 +343,14 @@ base.register({
     end
     local phrase = instrument.phrases[plan.index]
     local m = { i, plan.index }
+    -- (the program plays the phrase it played before the new one came)
+    local program_place, program_after = phrases_.keep_program(env, instrument, i, program_before, plan.index)
+    -- (whether it plays as the program now: Renoise's doing, so Kumi's undo may take it; see changes_phrases.lua's in_use)
+    local program = instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == plan.index
     return {
-      applied = { index = plan.index, print = phrases_.phrase_print(phrase) }, created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase" },
-      material = { made = places_.place_of(env, "phrase", m) }, target = places_.target_of(env, "phrase", m),
+      applied = { index = plan.index, print = phrases_.phrase_print(phrase), program = program or nil }, created = { ref = places_.ref_of(env, "phrase", m), kind = "phrase" },
+      material = { made = places_.place_of(env, "phrase", m), program = program_place, programAfter = program_after },
+      target = places_.target_of(env, "phrase", m),
       display = {
         title = string.format("Loaded the phrase %s into %s", q(places_.phrase_label(plan.index, phrase)), q(plan.label)),
         before = { phrases = plan.count }, after = { phrases = plan.count + 1 },

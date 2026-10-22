@@ -124,6 +124,27 @@ pub(super) fn place_label(ctx: &Ctx, item: Item) -> String {
     format!("the item on {} at {}", quoted(&track), marks::bar_text(ctx.reaper, ctx.proj, ctx.reaper.item_value(item, "D_POSITION")))
 }
 
+/// An item as HISTORY draws it (for the display only: no undo reads it): its active take's name, where it starts and how
+/// long it is (seconds), its fades, whether it's muted, and where it starts in the ruler's words.
+pub(super) fn drawn(ctx: &Ctx, item: Item) -> Value {
+    let reaper = ctx.reaper;
+    let position = reaper.item_value(item, "D_POSITION");
+    json!({
+        "name": reaper.active_take(item).map(|take| rows::clip(&reaper.take_name(take))).unwrap_or_default(),
+        "start": position,
+        "length": reaper.item_value(item, "D_LENGTH"),
+        "fadeIn": reaper.item_value(item, "D_FADEINLEN"),
+        "fadeOut": reaper.item_value(item, "D_FADEOUTLEN"),
+        "muted": reaper.item_value(item, "B_MUTE") != 0.0,
+        "at": marks::bar_text(reaper, ctx.proj, position),
+    })
+}
+
+/// The items a change leaves before and after, for HISTORY's picture.
+pub(super) fn drawn_items(before: Vec<Value>, after: Vec<Value>) -> Value {
+    json!({"before": before, "after": after})
+}
+
 /// The same, to open a title with: a name stands bare there.
 pub(super) fn label_opening(ctx: &Ctx, item: Item) -> String {
     let name = ctx.reaper.active_take(item).map(|take| rows::clip(&ctx.reaper.take_name(take))).unwrap_or_default();
@@ -287,8 +308,8 @@ fn make_title(ctx: &Ctx, make: &Make, import: bool) -> String {
 pub fn make_preview(ctx: &Ctx, input: &Value, import: bool) -> Done<Preview> {
     let make = make_plan(ctx, input, import)?;
     let mut display = json!({"title": make_title(ctx, &make, import), "length": rows::seconds(make.end - make.start)});
-    if import {
-        display["note"] = "The file stays where it is: REAPER plays it from there.".into();
+    if let Some((path, _)) = &make.file {
+        display["note"] = super::kumi_files::note(ctx, path).into();
     }
     Ok(Preview {
         target: json!({"ref": null, "kind": "item"}),
@@ -313,9 +334,11 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
             reaper.create_midi_item(make.track, make.start, make.end).ok_or_else(|| failed("REAPER wouldn't make a MIDI item there"))?
         }
         Some((path, _)) => {
+            // (a file in Kumi's own folder plays from a copy in the project's media folder)
+            let played = super::kumi_files::playable(ctx, path)?;
             let item = reaper.add_item(make.track).ok_or_else(|| failed("REAPER wouldn't make an item"))?;
             let take = reaper.add_take(item);
-            let media = take.and_then(|take| reaper.set_take_file(take, path));
+            let media = take.and_then(|take| reaper.set_take_file(take, &played));
             if media.is_none() {
                 // Nothing half-made stays.
                 reaper.delete_item(make.track, item);
@@ -323,6 +346,14 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
             }
             reaper.set_item_value(item, "D_POSITION", make.start);
             reaper.set_item_value(item, "D_LENGTH", make.end - make.start);
+            // (m7) As the producer's own import (Insert Media) makes it: looped as their REAPER loops imported media, and
+            // with no fades (an item AddMediaItemToTrack makes always loops and has the new-item fades; KP1 lab: Insert
+            // Media gave none whatever the fade settings).
+            if let Some(loops) = crate::setup::loops_imported_media(reaper) {
+                reaper.set_item_value(item, "B_LOOPSRC", if loops { 1.0 } else { 0.0 });
+            }
+            reaper.set_item_value(item, "D_FADEINLEN", 0.0);
+            reaper.set_item_value(item, "D_FADEOUTLEN", 0.0);
             if let Some(take) = take {
                 let file = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
                 reaper.set_take_string(take, "P_NAME", make.name.as_deref().unwrap_or(&file));
@@ -348,7 +379,13 @@ pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
         applied: json!({"print": print, "position": reaper.item_value(item, "D_POSITION"), "length": reaper.item_value(item, "D_LENGTH")}),
         created: Some(json!({"ref": refs::item_ref(&guid), "kind": "item", "takeRef": take_ref})),
         material: None,
-        display: json!({"title": make_title(ctx, &make, import)}),
+        display: {
+            let mut display = json!({"title": make_title(ctx, &make, import), "items": drawn_items(vec![], vec![drawn(ctx, item)])});
+            if let Some((path, _)) = &make.file {
+                display["note"] = super::kumi_files::note(ctx, path).into();
+            }
+            display
+        },
         ..Default::default()
     })
 }
@@ -405,7 +442,8 @@ fn put_place(ctx: &Ctx, guid: &str, place: &Value) -> Done<Item> {
             if !reaper.move_item_to_track(item, track) {
                 return Err(failed("REAPER wouldn't move the item to that track"));
             }
-            item = item_by_guid(ctx, guid).ok_or_else(|| failed("the item went while it was moved"))?;
+            item = item_by_guid(ctx, guid)
+                .ok_or_else(|| ("uncertain".to_string(), "the item went while it was moved: read the items".to_string()))?;
         }
     }
     reaper.set_item_value(item, "D_POSITION", number(place, "position"));
@@ -486,6 +524,16 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if same_place(&now, &wanted) {
         return Ok(Applied { applied: now.clone(), display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
+    let was = drawn(ctx, found.item);
+    // Its lane, told by what is on it with it (lane numbers move when a lane goes in above): the other items on it.
+    let mates: Vec<String> = match now["lane"].as_i64() {
+        Some(lane) => (0..ctx.reaper.track_item_count(found.track))
+            .filter_map(|n| ctx.reaper.track_item(found.track, n))
+            .filter(|other| *other != found.item && ctx.reaper.item_value(*other, "I_FIXEDLANE") as i64 == lane)
+            .map(|other| ctx.reaper.item_guid(other))
+            .collect(),
+        None => vec![],
+    };
     let item = put_place(ctx, &found.guid, &wanted)?;
     let after = place_of(ctx.reaper, item);
     if !same_place(&after, &wanted) {
@@ -497,7 +545,32 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             ("uncertain".into(), "REAPER didn't put the item where it was asked to, and Kumi could not put it back: read it".into())
         });
     }
-    Ok(Applied { applied: after.clone(), display: json!({"title": title, "before": now, "after": after}), ..Default::default() })
+    let items = drawn_items(vec![was], vec![drawn(ctx, item)]);
+    let mut applied = after.clone();
+    if now["lane"].is_i64() {
+        // The lanes of the track it left as the move left them (REAPER drops a bottom lane left empty).
+        applied["from"] = json!({"lanes": super::lanes::lane_names(ctx.reaper, found.track), "mates": mates});
+    }
+    Ok(Applied { applied, display: json!({"title": title, "before": now, "after": after, "items": items}), ..Default::default() })
+}
+
+/// The lane an item goes back to on the track it left (`from`, kept by the move): the lane its old lane mates are on, or,
+/// with none left, its number while no lane went in or out above it since. None when that can't be told.
+fn lane_back(ctx: &Ctx, track: Track, lane: i64, from: &Value) -> Option<i64> {
+    let reaper = ctx.reaper;
+    let mates: Vec<&str> = from["mates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let lanes_now: Vec<i64> = (0..reaper.track_item_count(track))
+        .filter_map(|n| reaper.track_item(track, n))
+        .filter(|item| mates.contains(&reaper.item_guid(*item).as_str()))
+        .map(|item| reaper.item_value(item, "I_FIXEDLANE") as i64)
+        .collect();
+    if let Some(first) = lanes_now.first() {
+        return lanes_now.iter().all(|l| l == first).then_some(*first);
+    }
+    let Some(then) = from["lanes"].as_array() else { return Some(lane) };
+    let now = super::lanes::lane_names(reaper, track);
+    let kept = then.len().min(now.len()).min(lane as usize + 1);
+    then.iter().take(kept).zip(now.iter()).all(|(a, b)| a.as_str() == Some(b.as_str())).then_some(lane)
 }
 
 pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -513,10 +586,46 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_place(&now, restore.applied) {
         return Err(changed(format!("{} has been moved in REAPER since Kumi moved it", label(ctx, found.item))));
     }
-    let item = put_place(ctx, &found.guid, restore.prior)?;
+    // The lane it goes back to, as the track it goes back to has lanes now: one whose fixed lanes went off or on since
+    // can't hold it as it was, nor one where a lane went in or out above its lane (its number is another lane's now),
+    // which is the producer's change, found before anything is written. Told to undo anyway, it goes back to its place
+    // there: on its first lane, or at its lane's number. (A bottom lane REAPER dropped when the move emptied it is made
+    // again: its number is the lane after the last.)
+    let mut back = restore.prior.clone();
+    if let Some(track) = restore.prior["track"].as_str().and_then(|guid| track_by_guid(ctx, guid)) {
+        let lanes = lane_count(ctx.reaper, track);
+        let refused = |why: &str| {
+            changed(format!(
+                "{} {why} since Kumi moved {} off it: it can't go back to its lane",
+                quoted(&super::track_name(ctx.reaper, track)),
+                label(ctx, found.item)
+            ))
+        };
+        match (restore.prior["lane"].as_i64(), lanes) {
+            (Some(_), None) | (None, Some(_)) => {
+                if !restore.discard {
+                    return Err(refused("has had its fixed lanes turned off or on in REAPER"));
+                }
+                back["lane"] = lanes.map(|_| 0).into();
+            }
+            (Some(lane), Some(count)) => match lane_back(ctx, track, lane, &restore.applied["from"]) {
+                Some(at) => back["lane"] = at.min(count).into(),
+                None if restore.discard => back["lane"] = lane.min(count).into(),
+                None => return Err(refused("has had lanes added or taken away above its lane in REAPER")),
+            },
+            (None, None) => {}
+        }
+    }
+    let item = put_place(ctx, &found.guid, &back)?;
     let after = place_of(ctx.reaper, item);
-    if !same_place(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item back where it was"));
+    if !same_place(&after, &back) {
+        // Written, so never a plain failure: put where Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_place(ctx, &found.guid, &now).is_ok_and(|item| same_place(&place_of(ctx.reaper, item), &now));
+        return Err(if left {
+            failed("REAPER didn't put the item back where it was; it is where Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item back where it was, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored { restored: after, display: json!({"title": format!("{} moved back", label_opening(ctx, item))}), unwritten: false })
 }
@@ -567,6 +676,7 @@ pub fn split_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         )));
     }
     let title = format!("Split {} at {}", label(ctx, found.item), marks::bar_text(reaper, ctx.proj, at));
+    let whole = drawn(ctx, found.item);
     let right = reaper.split_item(found.item, at).ok_or_else(|| failed("REAPER wouldn't split the item there"))?;
     let right_guid = reaper.item_guid(right);
     ctx.reads.registry().note_item(ctx.proj, &right_guid, right);
@@ -580,7 +690,7 @@ pub fn split_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"left": left_print, "right": right_print}),
         created: Some(json!({"ref": refs::item_ref(&right_guid), "kind": "item"})),
         material: Some(json!({"chunk": chunk})),
-        display: json!({"title": title}),
+        display: json!({"title": title, "items": drawn_items(vec![whole], vec![drawn(ctx, left), drawn(ctx, right)])}),
         ..Default::default()
     })
 }
@@ -612,21 +722,18 @@ pub fn split_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             unwritten: true,
         });
     }
-    if !restore.discard {
-        if Some(left_print.as_str()) != restore.applied["left"].as_str() {
-            return Err(changed(format!("{words} has been changed in REAPER since Kumi split it")));
+    // (discard too: the item's whole state from before goes back over both parts, which would take the producer's edits
+    // since with it, or bring back a part they deleted)
+    let whole = "putting the item back whole would write over that too, so Kumi leaves it, even with discard";
+    if Some(left_print.as_str()) != restore.applied["left"].as_str() {
+        return Err(changed(format!("{words} has been changed in REAPER since Kumi split it: {whole}")));
+    }
+    match right {
+        None => return Err(changed(format!("the right part of the split has been deleted in REAPER since: {whole}"))),
+        Some(right) if chunks::item_print(reaper, right).as_deref() != restore.applied["right"].as_str() => {
+            return Err(changed(format!("the right part of the split has been changed in REAPER since Kumi split it: {whole}")));
         }
-        match right {
-            None => {
-                return Err(changed(
-                    "the right part of the split has been deleted in REAPER since: putting the item back whole would bring it back",
-                ))
-            }
-            Some(right) if chunks::item_print(reaper, right).as_deref() != restore.applied["right"].as_str() => {
-                return Err(changed("the right part of the split has been changed in REAPER since Kumi split it"));
-            }
-            Some(_) => {}
-        }
+        Some(_) => {}
     }
     if let Some(right) = right {
         let track = reaper.item_track(right).ok_or_else(|| failed("the right part isn't on a track"))?;
@@ -748,6 +855,7 @@ pub fn trim_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if same_edges(&now, &wanted) {
         return Ok(Applied { applied: now, display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
+    let was = drawn(ctx, found.item);
     put_edges(ctx, found.item, &wanted);
     let item = item_by_guid(ctx, &found.guid)
         .ok_or_else(|| ("uncertain".to_string(), "the item went while it was trimmed: read it".to_string()))?;
@@ -760,7 +868,11 @@ pub fn trim_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             ("uncertain".into(), "REAPER didn't trim the item as asked, and Kumi could not put it back: read it".into())
         });
     }
-    Ok(Applied { applied: after, display: json!({"title": title}), ..Default::default() })
+    Ok(Applied {
+        applied: after,
+        display: json!({"title": title, "items": drawn_items(vec![was], vec![drawn(ctx, item)])}),
+        ..Default::default()
+    })
 }
 
 pub fn trim_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -776,10 +888,37 @@ pub fn trim_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && !same_edges(&now, restore.applied) {
         return Err(changed(format!("{} has been changed in REAPER since Kumi trimmed it", label(ctx, found.item))));
     }
+    // Putting the start back moves its takes' offsets, and REAPER doesn't move stretch markers with them: markers the
+    // producer added since (the trim had none to move) would slide off the audio they hold, discard or not.
+    let reaper = ctx.reaper;
+    let offset_of = |state: &Value, guid: &str| {
+        state["offsets"].as_array().into_iter().flatten().find(|e| e[0].as_str() == Some(guid)).and_then(|e| e[1].as_f64())
+    };
+    let slid = (0..reaper.take_count(found.item)).filter_map(|n| reaper.take_at(found.item, n)).any(|take| {
+        let guid = reaper.take_guid(take);
+        let moves = match (offset_of(&now, &guid), offset_of(restore.prior, &guid)) {
+            (Some(now), Some(then)) => !close(now, then),
+            _ => false,
+        };
+        moves && !reaper.stretch_markers(take).is_empty()
+    });
+    if slid {
+        return Err(changed(format!(
+            "{} has stretch markers now, which REAPER doesn't move with its start: putting the start back would slide them off \
+             the audio they hold, so Kumi leaves it, even with discard",
+            label(ctx, found.item)
+        )));
+    }
     put_edges(ctx, found.item, restore.prior);
     let after = edges_of(ctx.reaper, found.item);
     if !same_edges(&after, restore.prior) {
-        return Err(failed("REAPER didn't put the item's edges back"));
+        // Written, so never a plain failure: put as Kumi left it, it is as before this undo; else it's uncertain.
+        let left = put_edges(ctx, found.item, &now) && same_edges(&edges_of(ctx.reaper, found.item), &now);
+        return Err(if left {
+            failed("REAPER didn't put the item's edges back; it is as Kumi left it")
+        } else {
+            ("uncertain".into(), "REAPER didn't put the item's edges back, and Kumi could not leave it as it was: read it".into())
+        });
     }
     Ok(Restored {
         restored: after,
@@ -995,6 +1134,7 @@ pub fn fade_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     refuse_locked(ctx, found.item)?;
     let asks = fade_asks(ctx, input, found.item)?;
+    let was = drawn(ctx, found.item);
     write_asks(ctx.reaper, found.item, &asks);
     let after = fades_of(ctx.reaper, found.item);
     if !asks_hold(&after, &asks) {
@@ -1003,7 +1143,13 @@ pub fn fade_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("REAPER didn't take that fade; the item's fades are as they were"));
     }
     let title = fade_title(ctx, found.item, &asks, Some(&after));
-    Ok(Applied { applied: after.clone(), display: json!({"title": title}), unwritten: same_fades(&now, &after), ..Default::default() })
+    let items = drawn_items(vec![was], vec![drawn(ctx, found.item)]);
+    Ok(Applied {
+        applied: after.clone(),
+        display: json!({"title": title, "items": items}),
+        unwritten: same_fades(&now, &after),
+        ..Default::default()
+    })
 }
 
 pub fn fade_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -1341,11 +1487,17 @@ pub fn props_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         ("lock", _) => 2,
         _ => 1,
     });
-    // A lock Kumi set is opened first, so the rest can be put back.
-    if is_locked(ctx.reaper, found.item) {
-        ctx.reaper.set_item_value(found.item, "C_LOCK", (ctx.reaper.item_value(found.item, "C_LOCK") as i64 & !1) as f64);
+    // A lock is opened first, so the rest can be put back; one that isn't Kumi's to put back (the producer's, set since)
+    // is closed again after.
+    let lock = ctx.reaper.item_value(found.item, "C_LOCK");
+    let locked = is_locked(ctx.reaper, found.item);
+    if locked {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", (lock as i64 & !1) as f64);
     }
     write_state(ctx.reaper, found.item, &order, restore.prior);
+    if locked && !fields.iter().any(|field| field.key == "lock") {
+        ctx.reaper.set_item_value(found.item, "C_LOCK", lock);
+    }
     ctx.reaper.update_item(found.item);
     let after = state_of(ctx.reaper, found.item, &fields);
     if !same_state(&fields, &after, restore.prior) {
@@ -1518,16 +1670,19 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         )));
     }
     let title = format!("Deleted {}", label(ctx, found.item));
+    let was = drawn(ctx, found.item);
     let material = json!({
         "chunk": chunk,
         "track": reaper.track_guid(found.track),
         "selected": reaper.item_value(found.item, "B_UISEL") != 0.0,
+        "tempo": marks::tempo_print(reaper, ctx.proj),
     });
     if !reaper.delete_item(found.track, found.item) {
         return Err(failed("REAPER wouldn't delete the item"));
     }
     settle_lanes(ctx, &[Some(found.track)]);
-    Ok(Applied { applied: json!({"deleted": true}), material: Some(material), display: json!({"title": title}), ..Default::default() })
+    let display = json!({"title": title, "items": drawn_items(vec![was], vec![])});
+    Ok(Applied { applied: json!({"deleted": true}), material: Some(material), display, ..Default::default() })
 }
 
 /// Makes an item again from its chunk (its GUIDs with it) on the track with this GUID.
@@ -1559,15 +1714,28 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = guid_of_ref(&restore.target["ref"], "target")?;
     if let Some(item) = item_by_guid(ctx, &guid) {
         let back = chunks::item_print(ctx.reaper, item).as_deref() == restore.prior["print"].as_str();
-        if back || restore.discard {
+        if back {
             return Ok(Restored {
                 restored: json!({"ref": refs::item_ref(&guid)}),
                 display: json!({"title": format!("{} is back already", label_opening(ctx, item))}),
                 unwritten: true,
             });
         }
+        // (with discard: it is there, but not as it was; nothing is written over it)
+        if restore.discard {
+            let name = label_opening(ctx, item);
+            return Ok(Restored {
+                restored: json!({"ref": refs::item_ref(&guid)}),
+                display: json!({
+                    "title": format!("{name} is in the project again, changed since"),
+                    "note": "It is in the project again, changed since it was deleted: Kumi left it as it is.",
+                }),
+                unwritten: true,
+            });
+        }
         return Err(changed("an item with that id is in the project again"));
     }
+    marks::tempo_unmoved(ctx, material, restore.discard, "the item")?;
     let item = remake(ctx, track_guid, chunk, &guid)?;
     // The producer's selection stands: the item is selected again only where nothing else is.
     let select = material["selected"] == true && !other_items_selected(ctx, item);
@@ -1663,7 +1831,10 @@ pub fn copy_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     Ok(Applied {
         applied: json!({"print": print, "position": reaper.item_value(item, "D_POSITION")}),
         created: Some(json!({"ref": refs::item_ref(&guid), "kind": "item"})),
-        display: json!({"title": copy_title(ctx, &copy)}),
+        display: json!({
+            "title": copy_title(ctx, &copy),
+            "items": drawn_items(vec![drawn(ctx, copy.found.item)], vec![drawn(ctx, copy.found.item), drawn(ctx, item)]),
+        }),
         ..Default::default()
     })
 }

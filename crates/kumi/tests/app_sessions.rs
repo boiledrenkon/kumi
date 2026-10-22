@@ -173,6 +173,7 @@ impl AppLab {
             version: Some("1.0.0".into()),
             sha256: None,
             previous: vec![],
+            copies: vec![],
             updated_ms: 0,
             history: vec![],
         };
@@ -375,7 +376,9 @@ case!(renoises_full_screen_made_as_the_app_makes_it_shows_busy_another_song_and_
     assert!(seen.last().unwrap().1.contains("Each song's conversation continues next time"), "{:?}", seen.last());
 });
 
-case!(daw_in_a_reaper_session_says_which_daw_and_opens_kumi_again_with_another, async {
+/// `/daw` in a REAPER session, with `here` saying which DAWs are on this computer (whatever this machine has): what it
+/// offers, and that `/daw renoise` opens Kumi again with Renoise.
+async fn daw_in_a_reaper_session(here: fn(DawId) -> bool) -> String {
     let script = ReaperScript::new(3, 0);
     let lab = AppLab::new(DawId::Reaper, Daw::Reaper, move |secret| script.config(secret, "/lab/REAPER")).await;
     let reopened: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
@@ -384,24 +387,46 @@ case!(daw_in_a_reaper_session_says_which_daw_and_opens_kumi_again_with_another, 
         io.reopen = Some(Rc::new(move |args| {
             *into.borrow_mut() = Some(args);
             async { 7 }.boxed_local()
-        }))
+        }));
+        io.daws_here = Some(Rc::new(here));
     });
     wait_for("the first look", &out, |text| text.lines().any(|l| l.starts_with("[observation] "))).await;
     let help = command(&input, &out, "/help").await;
     assert!(help.contains("/daw [name]"), "{help}");
-    let said = command(&input, &out, "/daw").await;
-    assert!(
-        said.contains(
-            "[daw] Kumi works with REAPER. /daw live, /daw renoise or /daw logic opens Kumi again with Live, Renoise or Logic Pro."
-        ),
-        "{said}"
-    );
+    let offered = command(&input, &out, "/daw").await;
     let said = command(&input, &out, "/daw reaper").await;
     assert!(said.contains("[daw] Kumi works with REAPER already."), "{said}");
-    input.write("/daw renoise\n");
+    // Asked for by name, a DAW is opened whether or not Kumi found it here. (A session still at its first look's work
+    // is busy, and /daw says to ask once it's done: asked again then.)
+    let (reopens, working) = ("[daw] Kumi closes and opens again with Renoise.", "[daw] Kumi is working; /daw once it's done");
+    for _ in 0..40 {
+        let before = out.0.borrow().len();
+        input.write("/daw renoise\n");
+        wait_for("/daw renoise's answer", &out, |text| text[before..].contains(reopens) || text[before..].contains(working)).await;
+        if out.0.borrow()[before..].contains(reopens) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 7, "{}", out.0.borrow());
     assert!(out.0.borrow().contains("[daw] Kumi closes and opens again with Renoise."), "{}", out.0.borrow());
     assert_eq!(reopened.borrow().clone(), Some(vec!["--daw".to_string(), "renoise".to_string()]));
+    offered
+}
+
+case!(daw_in_a_reaper_session_says_which_daw_and_opens_kumi_again_with_another, async {
+    let offered = daw_in_a_reaper_session(|_| true).await;
+    assert!(
+        offered.contains(
+            "[daw] Kumi works with REAPER. /daw live, /daw renoise or /daw logic opens Kumi again with Live, Renoise or Logic Pro."
+        ),
+        "{offered}"
+    );
+});
+
+case!(daw_in_a_reaper_session_offers_only_the_daws_on_this_computer, async {
+    let offered = daw_in_a_reaper_session(|daw| daw == DawId::Reaper).await;
+    assert!(offered.contains("[daw] Kumi works with REAPER, the only DAW it works with on this computer."), "{offered}");
 });
 
 case!(renoise_started_again_on_the_same_song_keeps_its_conversation_and_says_only_that_it_is_back, async {

@@ -29,9 +29,9 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Reaper => Kinds {
             read: &[
                 "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
-                "autoitem",
+                "autoitem", "call", "spans",
             ],
-            bodies: &["arrange", "midi", "fx", "routing"],
+            bodies: &["arrange", "midi", "fx", "routing", "mixer"],
             // (r-tracks) The project's notes, grid and timebase make no step in REAPER's history either (7.82 lab).
             outside_undo: &[
                 "loop-repeat",
@@ -41,6 +41,8 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "project-info",
                 "project-grid",
                 "project-timebase",
+                // (m6-places) The metronome is a project setting REAPER keeps no history of.
+                "metronome-switch",
             ],
         },
         Daw::Renoise => Kinds {
@@ -59,8 +61,9 @@ pub fn kinds(daw: Daw) -> Kinds {
                 "param",
                 "modset",
                 "chain",
+                "spans",
             ],
-            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp", "mixer"],
             outside_undo: &[
                 "track-mute",
                 "track-solo",
@@ -130,6 +133,9 @@ fn window_arg(arguments: &Value, daw: Daw) -> Result<Option<Value>, String> {
     }
 }
 
+/// The most points a parameter's text is read at across its range (`grid`, M5): Kumi asks 49, as Live's scan does.
+pub const MAX_GRID: u64 = 64;
+
 /// The arguments a `read` forwards: only the ones it knows, each checked.
 fn read_params(arguments: &Value) -> Result<Value, String> {
     let mut params = Map::new();
@@ -154,6 +160,9 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
     }
     layout_arg(arguments, &mut params)?;
     hidden_arg(arguments, &mut params)?;
+    grid_arg(arguments, &mut params)?;
+    call_args(arguments, &mut params)?;
+    items_arg(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -189,6 +198,47 @@ fn snapshot_params(arguments: &Value, daw: Daw) -> Result<Value, String> {
         },
     }
     Ok(Value::Object(params))
+}
+
+/// A parameter's text read at this many points across its range (kind `param`, M5's tune): 2 to `MAX_GRID`.
+fn grid_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("grid") {
+        None | Some(Value::Null) => Ok(()),
+        Some(value) => match value.as_u64().filter(|n| (2..=MAX_GRID).contains(n)) {
+            Some(points) => {
+                params.insert("grid".into(), points.into());
+                Ok(())
+            }
+            None => Err(format!("grid must be a whole number from 2 to {MAX_GRID}")),
+        },
+    }
+}
+
+/// REAPER's read of an API function by name (`kind: call`): the function and its arguments, in order or by name.
+fn call_args(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    if let Some(name) = text_arg(arguments, "fn")? {
+        params.insert("fn".into(), name.into());
+    }
+    match arguments.get("args") {
+        None | Some(Value::Null) => Ok(()),
+        Some(args @ (Value::Array(_) | Value::Object(_))) => {
+            params.insert("args".into(), args.clone());
+            Ok(())
+        }
+        Some(_) => Err("args must be the function's arguments: a list in order, or an object by their names".into()),
+    }
+}
+
+/// (M7) What a Renoise `where` read finds again: the places and refs Kumi kept (a list of objects, at most a page).
+fn items_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("items") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(items)) if items.len() <= MAX_LIMIT as usize && items.iter().all(Value::is_object) => {
+            params.insert("items".into(), Value::Array(items.clone()));
+            Ok(())
+        }
+        Some(_) => Err(format!("items must be a list of at most {MAX_LIMIT} objects")),
+    }
 }
 
 /// The arguments a `focus_body` forwards.
@@ -351,6 +401,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_wheres_items_are_forwarded_and_anything_else_under_items_refused() {
+        let items = json!([{"pattern": {"n": 4, "mark": "p:3"}}, {"track": "1:track:2"}]);
+        let params = read_params(&json!({"kind": "where", "items": items})).unwrap();
+        assert_eq!(params["items"], items);
+        assert!(read_params(&json!({"kind": "where", "items": "all"})).is_err());
+        assert!(read_params(&json!({"kind": "where", "items": [1]})).is_err());
+        assert!(read_params(&json!({"kind": "song"})).unwrap().get("items").is_none());
+    }
+
+    #[test]
     fn hidden_is_forwarded_only_when_true() {
         assert_eq!(
             read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})).unwrap(),
@@ -361,8 +421,32 @@ mod tests {
             json!({"kind": "pattern", "hidden": true})
         );
         assert_eq!(read_params(&json!({"kind": "line", "hidden": false})).unwrap(), json!({"kind": "line"}));
+        assert_eq!(
+            read_params(&json!({"kind": "param", "parent": "r:fx:{A}", "grid": 49})).unwrap(),
+            json!({"kind": "param", "parent": "r:fx:{A}", "grid": 49})
+        );
+        for grid in [json!(1), json!(65), json!(4.5), json!("49")] {
+            assert!(read_params(&json!({"kind": "param", "grid": grid})).is_err(), "{grid}");
+        }
         assert!(read_params(&json!({"kind": "line", "hidden": "yes"})).is_err());
         assert!(body_params(&json!({"kind": "pattern", "hidden": 1}), Daw::Renoise).is_err());
+    }
+
+    #[test]
+    fn a_call_read_forwards_its_function_and_arguments() {
+        assert_eq!(
+            read_params(&json!({"kind": "call", "fn": "GetMediaTrackInfo_Value", "args": ["r:track:master", "D_VOL"]})).unwrap(),
+            json!({"kind": "call", "fn": "GetMediaTrackInfo_Value", "args": ["r:track:master", "D_VOL"]})
+        );
+        assert_eq!(
+            read_params(&json!({"kind": "call", "fn": "CountTracks", "args": {"proj": 0}})).unwrap(),
+            json!({"kind": "call", "fn": "CountTracks", "args": {"proj": 0}})
+        );
+        for bad in
+            [json!({"kind": "call", "fn": ""}), json!({"kind": "call", "fn": 3}), json!({"kind": "call", "fn": "CountTracks", "args": "0"})]
+        {
+            assert!(read_params(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

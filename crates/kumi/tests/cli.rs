@@ -334,6 +334,39 @@ case!(a_database_that_cant_open_leaves_notes_in_their_files_and_says_so, async {
     assert_eq!(std::fs::read(&database).unwrap(), b"not a database", "and not the database");
     assert!(!f.folder.path().join("kumi.db-wal").exists());
 });
+case!(continue_and_resume_in_live_leave_another_daws_conversation_to_that_daw, async {
+    // Review L4: the newest conversation is REAPER's; Live's -c takes up Live's, and -r of REAPER's says whose it is.
+    use kumi_runtime::ConversationStore;
+    let f = Fixture::new(false);
+    f.settings(json!({"model":"anthropic/claude-sonnet-5-5","updateCheck":false,"libraryFolders":[]}));
+    let (set, project) = ("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "reaper-b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2");
+    let said = |text: &str, at: i64| -> kumi_runtime::SavedConversation {
+        serde_json::from_value(json!({"savedAt":at,"checkpoint":{"version":1,"messages":[{"role":"user","content":text},{"role":"assistant","content":"done"}]}}))
+            .unwrap()
+    };
+    let store = kumi_runtime::core::conversations::create_conversation_store_in(
+        f.folder.path().join("projects"),
+        None,
+        kumi_runtime::integrations::PLACES,
+    );
+    store.save(set, "mv66me0m3fa91c", &said("make the bass wider", 1)).await.unwrap();
+    store.save(project, "mv66zz0m3fa91c", &said("Mix notes for the song", 2)).await.unwrap();
+    drop(store);
+    assert_eq!(run(f.io(&["-r", "mv66zz0m3fa91c", "--inference-only"]), unused_factory()).await, 1);
+    let err = f.err.0.borrow().clone();
+    assert!(
+        err.contains("“Mix notes for the song” is about a REAPER project: cargo run -p kumi -- --daw reaper -r mv66zz0m3fa91c carries it on in REAPER."),
+        "{err}"
+    );
+    let task = tokio::task::spawn_local(run(f.io(&["-c", "--inference-only"]), unused_factory()));
+    f.input.wait_ready().await;
+    f.wait_output("Back to your conversation").await;
+    f.input.write("/status\n");
+    f.wait_output("Conversation: make the bass wider · mv66me0m3fa91c").await;
+    f.input.write("/quit\n");
+    f.input.end();
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+});
 case!(continue_and_resume_take_up_a_kept_conversation_or_say_why_not, async {
     use kumi_runtime::ConversationStore;
     let f = Fixture::new(false);

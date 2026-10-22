@@ -379,6 +379,41 @@ end
 
 -- A device told apart from another by what it is and how it is set: a state that two reads of a device that nobody touched
 -- agree on (its parameters' values, not the preset text, which can be megabytes).
+-- A text's print: two 32-bit sums of its bytes and its length. (Kumi's host computes the same: presets.rs `print_of`.)
+function M.print_of(text)
+  local a, b = 5381, 0
+  for i = 1, #text do
+    local c = text:byte(i)
+    a = (a * 33 + c) % 4294967296
+    b = (b * 65599 + c) % 4294967296
+  end
+  return string.format("%08x%08x:%d", a, b, #text)
+end
+
+-- Preset data as it reads, values and all, with what moves by itself left out: the inner devices' SelectedPresetIsModified and
+-- IsSelected (Renoise 3.5.4 turns the first true when it writes a container's data again, and the second follows the
+-- producer's clicks, lab 2026-10-20), and the view (a device folded or not, a Doofer's devices shown, the chain a Splitter
+-- shows or monitors, where a plug-in's editor sits): what the journal compares to tell Renoise's undo and redo of a Doofer's,
+-- a Splitter's or a Notepad's contents, and what a change's fence of them holds.
+M.VIEW_STATE = { "IsMaximized", "ShowDevices", "CurrentlyVisibleChain", "MonitorVisibleChain", "PluginEditorWindowPosition" }
+function M.content_of(xml)
+  local content = xml:gsub("<SelectedPresetIsModified>[^<]*</SelectedPresetIsModified>", "<SelectedPresetIsModified/>")
+  content = content:gsub("<IsSelected>[^<]*</IsSelected>", "<IsSelected/>")
+  for _, tag in ipairs(M.VIEW_STATE) do
+    content = content:gsub("<" .. tag .. ">[^<]*</" .. tag .. ">", "<" .. tag .. "/>")
+  end
+  return M.print_of(content)
+end
+
+-- A device whose settings hold more than its parameters: a Doofer's or a Splitter's devices inside, a Notepad's text, a
+-- plug-in's state. Its whole content is fenced, not only its parameters (nil for any other device).
+local DEEP = { ["Audio/Effects/Native/Doofer"] = true, ["Audio/Effects/Native/Splitter"] = true, ["Audio/Effects/Native/Notepad"] = true }
+function M.content_fence(device)
+  local path = device.device_path
+  if DEEP[path] or not path:find("^Audio/Effects/Native/") then return M.content_of(device.active_preset_data) end
+  return nil
+end
+
 function M.device_state(device)
   local a, b = 5381, 0
   local count = #device.parameters

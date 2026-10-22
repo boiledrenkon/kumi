@@ -2,7 +2,7 @@
 
 [English](../en/KUMI_CHANGES.md) · [简体中文](../zh-CN/KUMI_CHANGES.md) · 日本語
 
-Kumi は開いている Set を読み、頼まれた変更を行います。変更はそれぞれ普段の言葉で HISTORY に表示され、ほとんどの変更には専用の取り消しがあります。承認のステップはありません。取り消しが安全網なので、確実に頼れるものでなければなりません。このページではそのしくみを説明し、Kumi が行えるすべての変更を一覧します。
+Kumi は開いている Set を読み、頼まれた変更を行います。変更はそれぞれ普段の言葉で HISTORY に表示され、ほとんどの変更には専用の取り消しがあります。承認のステップはありません。取り消しが安全網なので、確実に頼れるものでなければなりません。このページではそのしくみを説明し、Kumi が行えるすべての変更を一覧します。REAPER と Renoise については [REAPER と Renoise](#reaper-と-renoise) を参照してください。
 
 ## 変更の流れ
 
@@ -209,3 +209,75 @@ Willington のツールは、ブリッジが提供すればいつでも現れま
 Kumi の各リリースにはブリッジが付属します：Kumi 1.19.2〜1.19.3 にはブリッジ 1.0.93、1.13.0〜1.19.1 には 1.0.92、1.11.3〜1.12.1 には 1.0.91、1.11.0〜1.11.2 には 1.0.90、1.10.0〜1.10.1 には 1.0.89、1.9.7 には 1.0.88、1.9.6 には 1.0.87、1.9.4〜1.9.5 には 1.0.86、1.9.0〜1.9.3 には 1.0.85、1.8.11 には 1.0.84、1.8.10 には 1.0.83、1.8.9 には 1.0.82、1.8.7〜1.8.8 には 1.0.81、1.8.6 には 1.0.80、1.8.5 には 1.0.79、1.8.4 には 1.0.78、1.8.3 には 1.0.77、1.8.2 には 1.0.76、1.7.5〜1.8.1 には 1.0.74、1.7.0〜1.7.4 には 1.0.73、1.6.1 には 1.0.72、1.6.0 には 1.0.71、1.5 には 1.0.70、1.4 には 1.0.69、1.3 には 1.0.68、1.2 には 1.0.66、1.1 には 1.0.53、1.0 には 1.0.52 です。
 
 Logic Pro ブリッジには独自のバージョンがあります。これを収めているのは Apple シリコン搭載 Mac 向けの Kumi だけです：`kumi --daw logic bridge` がそれを Kumi 自身のフォルダーに用意し、`kumi update` がそこで最新にします。Kumi はそれを Logic Pro の横で起動します。Logic Pro は何も読み込まないので、そのために Logic Pro が再起動することはありません。Apple シリコン搭載 Mac 向けの Kumi の各リリースには Logic Pro ブリッジが付属します：Kumi 1.20.0 には Logic Pro ブリッジ 0.1.0。
+
+## REAPER と Renoise
+
+REAPER と Renoise では、Kumi はそれぞれ専用のブリッジを通じてプロジェクトやソングを変更します（[つなぎ方](KUMI_GUIDE.md#reaper-や-renoise-につなぐ)）。変更の流れは Live と同じです。プレビューし、適用し、確かめてから、DAW の言葉のタイトル（"Moved “vox.wav” to bar 6"、"Wrote 4 lines in “Drop” on “Bass”"）と図付きで HISTORY に入ります。違うのは次の点です。
+
+- **参照は場所ではなく、ものを指します。** REAPER の参照は REAPER 自身の ID（GUID。センドには Kumi が ID を付けて保ちます）なので、トラックが動いても、読み込み直しても変わりません。Renoise の参照は、挿入、削除、移動をまたいで各トラック、デバイス、インストゥルメント、スロットを追いかけます。確かでないときは何も触れずに変更を断り、モデルが読み直します。
+- **中途半端にはしません。** 適用するときにプレビューが見たものを読み直し、その間にあなたが変えていれば何も書かずに断ります。DAW がダイアログやレンダリングで手が離せない間は、変更はすぐに断られます。
+- **DAW 自身の取り消し履歴**には、変更が名前付きのステップとして入ります（"Kumi: Bass volume −6 dB"）。REAPER ではプラン全体が一つのステップ、Renoise では変更ごとに一つのステップです。
+
+### REAPER と Renoise での取り消し
+
+- **Kumi の取り消し**は、変更が設定したものを正確に元に戻し、DAW の取り消し履歴に新しいステップ（"Kumi: undo …"）として入ります。DAW 自身の取り消しを押すことはないので、その後にあなたがしたことは残ります。その後あなたが同じものを変えた場合や、対象がなくなった場合は断られ（**kept** と理由）、すでに戻っていれば何もしません。Live と違って削除も戻せます。削除したトラック、アイテム、テイク、FX、センド、ハードウェア出力、マーカー、スロット、デバイス、インストゥルメント、サンプル、フレーズは、Kumi が保っておいたものから戻ります。
+- **DAW 自身の取り消し**（Cmd-Z。Windows と Linux では Ctrl-Z）は、REAPER ではプランを、Renoise では変更一つを戻します。HISTORY もそれに合わせて "Undone with REAPER's own undo"、"Put back with REAPER"、"REAPER may have redone it; Kumi can't tell" と表示します。
+- **DAW の取り消しが飛ばすもの**は Kumi の取り消しだけが戻せ、その行にそう書かれます。REAPER：リピート、メトロノームのオンオフ、ReaEQ のバンドの種類とオンオフ、オートメーションのオーバーライド、プロジェクトのメモ、タイトル、作者、グリッド、タイムベース、何もオンになっていないパラメーターモジュレーション。Renoise：ミュート、ソロ、ループ、パターンループ、メトロノームのオンオフ、編集の設定、プラグインの自動サスペンド。
+- **DAW の取り消しだけが戻せるもの：** Lua（`run_lua`）、REAPER の API（`api_call`）、REAPER のアクション（`run_action`。REAPER が取り消しポイントを作った場合）。プロジェクト、ソング、テンプレート、チェーン、インストゥルメント、プリセットの保存はファイルを書くだけで、HISTORY の行はありません。
+- **期間：** Kumi は最新の 400 件の変更を、DAW とのつながりが続く間だけ取り消せるように保ちます（[Live がいなくなったとき](KUMI_GUIDE.md#live-がいなくなったとき)）。
+- **削除の前のコピー。** 何かを削除したり上書きしたりする変更の前に、Kumi は最後に保存したプロジェクトやソングを、同じフォルダーの隣にコピーします（`Song (Kumi copy 2026-10-20 14.05.31 +0900).rpp`。REAPER のプロジェクトのメディアもコピーから見つかります）。保存した版ごとに一度だけコピーし、そのプロジェクトのコピーは最新の 5 件を残します。保存ファイルが 512 MB を超えるときや、コピーできないとき（書き込めないフォルダー、ディスクの空き不足）はコピーせず、変更がそう伝えます。保存していないプロジェクトやソングはコピーされません。
+
+### REAPER で Kumi が変更できるもの
+
+| ツール | 変更するもの |
+| --- | --- |
+| `track_add`, `track_move`, `track_delete`, `track_rename`, `track_color`, `track_visible`, `track_folder_state`, `track_lock` | トラックの追加（隣り合うトラックのフォルダーとしても）、移動、削除、名前の変更、色。アレンジビューとミキサーでの表示・非表示。フォルダーの開閉。コントロールのロック |
+| `track_volume`, `track_pan`, `track_width`, `track_pan_mode`, `track_dual_pan`, `track_pan_law`, `track_mute`, `track_solo`, `track_solo_defeat`, `track_phase`, `track_channels`, `track_main_send`, `track_fx_enabled` | ミキサー：ボリューム、パン（モード、幅、デュアルパン、パンロー）、ミュート、ソロとソロディフィート、極性、チャンネル数、親フォルダーかマスターへのセンド、FX チェーン全体のオンオフ。REAPER が許す範囲でマスターも |
+| `track_arm`, `track_record_input`, `track_monitoring`, `track_record_mode` | アーム、録音入力、モニタリング、録音モード |
+| `track_group`, `track_group_name`, `track_template_insert`, `track_lanes`, `lane_plays`, `lane_name`, `lane_comp`, `razor_set` | トラックグループとその名前。トラックテンプレートの挿入。固定レーン、どのレーンを鳴らすか、レーンの名前、コンピング。レイザーエリア |
+| `send_add`, `receive_add`, `send_remove`, `send_volume`, `send_pan`, `send_mute`, `send_mode`, `send_channels`, `send_phase`, `send_mono`, `send_automation_mode` | センドとレシーブ：追加（3/4 へのサイドチェイン、MIDI だけのセンド）、削除、レベル、パン、ミュート、トラックのどこから送るか、チャンネルと MIDI、極性、モノ、オートメーションモード |
+| `hw_out_add`, `hw_out_remove`, `hw_out_volume`, `hw_out_pan`, `hw_out_mute`, `hw_out_mode`, `hw_out_channels`, `hw_out_phase`, `hw_out_mono`, `track_midi_out` | ハードウェア出力と、トラックの MIDI のハードウェア MIDI 出力への送信 |
+| `fx_add`, `fx_delete`, `fx_move`, `fx_copy`, `fx_bypass`, `fx_offline`, `fx_wet`, `fx_pins`, `fx_preset`, `fx_state`, `fx_chain_load` | FX（REAPER の FX ブラウザーに表示される名前で指定）を、トラックのチェーン、入力 FX、テイクのチェーン、コンテナの中で、追加、削除、移動、コピー、バイパス、オフライン、ウェットとデルタ、ピンの割り当て、プリセット、プラグインの状態全体、FX チェーンファイル |
+| `fx_container_add`, `fx_container_move`, `fx_parallel`, `fx_container_map`, `fx_container_unmap` | FX コンテナ：追加、FX の出し入れ、直前の FX との並列化、コンテナのマクロの割り当てと解除 |
+| `fx_param`, `fx_params`, `fx_eq_band` | パラメーター一つ、または一つの FX の最大 256 個を一度に。ReaEQ のバンドの種類とオンオフ |
+| `fx_param_mod`, `fx_param_lfo`, `fx_param_acs`, `fx_param_link`, `fx_param_learn` | パラメーターモジュレーション：オンオフとベースライン、LFO、オーディオコントロールシグナル、ほかのパラメーターへのリンク、MIDI・OSC ラーン |
+| `envelope_show`, `envelope_points_add`, `envelope_points_change`, `envelope_points_delete`, `envelope_range_clear`, `automation_item_add`, `automation_item_set`, `automation_item_delete`, `track_automation_mode`, `automation_override` | エンベロープの表示とアーム。ポイントの追加、変更、削除、区間のクリア。オートメーションアイテム。トラックのオートメーションモード。グローバルなオートメーションオーバーライド |
+| `item_add`, `item_import`, `item_move`, `item_split`, `item_trim`, `item_fade`, `item_props`, `item_group`, `item_delete`, `item_duplicate`, `items_glue`, `items_render` | アイテム：空の MIDI アイテム、メディアファイルの読み込み、移動（ほかのトラックへも）、分割、トリム、フェード、プロパティ、グループ化、削除、複製。グルーと新しいテイクへのレンダリングは頼まれたときだけ |
+| `take_add`, `take_delete`, `take_active`, `take_props`, `stretch_markers_add`, `stretch_markers_change`, `stretch_markers_delete`, `take_markers_add`, `take_markers_change`, `take_markers_delete` | テイクの追加、削除、アクティブ化、プロパティ。ストレッチマーカー。テイクマーカー |
+| `notes_add`, `notes_change`, `notes_delete`, `notes_quantize`, `notes_humanize`, `midi_events_add`, `midi_events_change`, `midi_events_delete` | テイクの MIDI ノートの追加、変更、削除、クオンタイズ、ヒューマナイズ。ほかの MIDI イベント（CC、ピッチベンド、プログラム、プレッシャー、テキスト、SysEx） |
+| `marker_add`, `region_add`, `marker_move`, `marker_rename`, `marker_color`, `marker_delete`, `marker_lane`, `ruler_lane`, `ruler_lane_add`, `region_render`, `time_selection`, `loop_range`, `loop_repeat` | マーカーとリージョン。ルーラーレーン。リージョンレンダーマトリクス。タイムセレクション。ループとリピート |
+| `tempo_set`, `tempo_marker_set`, `tempo_marker_delete`, `metronome_switch`, `project_grid`, `project_timebase`, `project_notes`, `project_info` | テンポ、テンポマーカー（拍子、ランプ）、メトロノーム。グリッドとタイムベース。プロジェクトのメモ、タイトル、作者 |
+| `drum_kit`, `scratch_keep` | サウンドファイルから作る ReaSamplOmatic5000 のドラムキット（パッドごとのトラックのフォルダー、または一つのコンテナ。ハイハットはチョーク）。ゴールの最良のスクラッチコピーを残す |
+| `run_action`, `api_call`, `run_lua` | REAPER のアクション（ダイアログを開くもの、終了、プロジェクトを開く・閉じる・保存するもの、レンダリングは使いません）、プロジェクトを変える API 関数、Lua（ReaScript）。これらを戻せるのは REAPER の取り消しだけです |
+
+HISTORY の行がないもの：`play`、`stop`、`set_cursor`、`save_project`（その場所に、または REAPER の次のバージョンとして保存）、`save_track_template`、`fx_chain_save`。`reaper_read` はプロジェクトを読みます。トラック、アイテム、テイク、FX、パラメーター、センド、マーカー、リージョン、ノート、MIDI イベント、エンベロープ、オートメーションアイテム、そして読むだけの REAPER の API 関数です。
+
+### Renoise で Kumi が変更できるもの
+
+| ツール | 変更するもの |
+| --- | --- |
+| `song_bpm`, `song_lpb`, `song_tpl`, `song_groove`, `song_metronome`, `metronome_switch`, `edit_settings`, `song_info`, `song_headroom` | テンポ、LPB（Lines per beat）、TPL（Ticks per line）、グルーヴ、メトロノーム（1 小節の拍数、プリカウント）とそのオンオフ、編集の設定（Follow Player、Edit Step、オクターブ、録音のクオンタイズなど）、ソングの名前、アーティスト、コメント、トラックのヘッドルーム |
+| `track_add`, `track_move`, `track_group`, `track_delete`, `track_rename`, `track_color`, `track_collapse`, `track_columns`, `track_column` | シーケンサートラック、センドトラック、グループトラックの追加、移動、グループ化、削除、名前の変更、色、折りたたみ。ノート列とエフェクト列の表示・非表示、ノート列の名前 |
+| `track_volume`, `track_pan`, `track_width`, `track_mute`, `track_solo`, `track_output`, `track_delay` | ミキサー：ボリューム、パンニング、幅、ミュート、ソロ、出力のルーティング、出力のディレイ |
+| `slot_insert`, `slot_delete`, `slot_move`, `slot_clone`, `slot_unique`, `slot_pattern`, `slot_section`, `slot_mute`, `slot_color`, `loop_range`, `loop_pattern` | パターンシーケンスとパターンマトリクス：スロットの挿入、削除、移動、クローン、ユニーク化、別のパターンへの差し替え。セクション。一つのスロットでのトラックのミュート。マトリクスの色。シーケンスのループとパターンループ |
+| `notes_write`, `notes_clear`, `notes_transpose`, `notes_humanize`, `lines_copy`, `pattern_name`, `pattern_length`, `pattern_alias`, `automation_write` | パターントラックの行を Renoise の表記（ノート、インストゥルメント、ボリューム、パンニング、ディレイ、エフェクトの各列）で書き込み、クリア、トランスポーズ、ヒューマナイズ、コピー。パターンの名前、長さ、エイリアス。デバイスパラメーターのオートメーション |
+| `device_add`, `device_delete`, `device_move`, `device_bypass`, `device_set`, `device_param`, `device_params`, `device_preset`, `device_preset_data`, `device_chain_load` | トラックの DSP デバイス（ネイティブまたはプラグイン）の追加、削除、移動、バイパス、名前の変更。パラメーター一つ、または一つのデバイスの最大 256 個を一度に。プリセットとプリセットデータ。デバイスチェーンファイル（.xrnt） |
+| `doofer_make`, `doofer_macro`, `doofer_device_add`, `doofer_device_delete`, `doofer_device_move`, `doofer_device_set`, `splitter_set`, `notepad_write`, `meta_destination` | デバイスから作る Doofer と Splitter、そのマクロと中のデバイス。Splitter の分け方。Notepad のテキスト。メタデバイス（*LFO、*Key Tracker など）の行き先 |
+| `instrument_add`, `instrument_delete`, `instrument_duplicate`, `instrument_move`, `instrument_load`, `instrument_kit`, `instrument_rename`, `instrument_set`, `instrument_macro`, `instrument_macro_map` | インストゥルメントの追加、削除、複製、移動、読み込み（.xrni、.sfz、サンプル）、サンプルファイルからの作成（ミュートグループ付きのドラムキット、またはベロシティレイヤー付きのキー）。名前の変更、設定、マクロとその割り当て |
+| `sample_load`, `sample_delete`, `sample_set`, `sample_slices`, `keyzone_set`, `keyzone_overlap`, `keyzone_drumkit` | サンプルの読み込み、削除、設定、スライス。キーゾーン、重なったところで何を鳴らすか、ドラムキットの配置 |
+| `modset_add`, `modset_delete`, `modset_set`, `modset_load`, `moddevice_add`, `moddevice_delete`, `moddevice_move`, `moddevice_set`, `moddevice_param`, `chain_add`, `chain_delete`, `chain_set`, `chaindevice_add`, `chaindevice_delete`, `chaindevice_move`, `chaindevice_bypass`, `chaindevice_param` | モジュレーションセットとそのデバイス（.xrno ファイルからの読み込みも）。サンプル FX チェーンとそのデバイス |
+| `phrase_add`, `phrase_delete`, `phrase_set`, `phrase_map`, `phrase_playback`, `phrase_write`, `phrase_clear`, `phrase_script`, `phrase_render`, `phrase_load` | フレーズの追加、削除、設定、キーへの割り当て、インストゥルメントでの鳴らし方。行の書き込みとクリア。フレーズスクリプトの書き込みとレンダリング。フレーズファイル（.xrnz）の読み込み |
+| `plugin_load`, `plugin_param`, `plugin_preset`, `plugin_set`, `plugin_suspend`, `midi_set` | プラグインインストゥルメントの読み込み、パラメーター、プログラム、設定、自動サスペンド。MIDI インストゥルメントの出力 |
+| `scratch_keep`, `run_lua` | ゴールの最良のスクラッチコピーを残す。renoise API 全体を使う Lua（戻せるのは Renoise の取り消しだけ） |
+
+HISTORY の行がないもの：`play`、`stop`、`audition_note`（ノートを鳴らして聴かせる）、`select`（Renoise で何かを表示する）、`plugin_editor`、`save_song`、`save_instrument`、`save_device_preset`。`renoise_read` はソングを読みます。トラック、パターンシーケンス、パターンとその行、オートメーション、インストゥルメント、サンプル、フレーズ、デバイスとパラメーター、モジュレーションセット、サンプル FX チェーンです。
+
+### 既知の制限
+
+どの場合も HISTORY は正直なままです。Kumi は断るか、できないことを伝えます。
+
+- **Renoise：** 行の編集（`notes_write`、`notes_clear`、`notes_transpose`、`notes_humanize`、`lines_copy`、`phrase_write`、`phrase_clear`）を Renoise 自身の取り消しとやり直しにかけたあとは、Kumi の取り消しは断られます。Renoise のやり直しと、あなた自身が書いた同じ行を区別できないためです。行には "Renoise may have redone it" と表示され、Renoise の取り消しで戻せます。
+- **Renoise：** 長いセッションで、AU のプラグインインストゥルメントを読み込んだり外したりしたあと、取り消し履歴が空になることがありました（原因はわかっていません）。そのときは Renoise の取り消しで `plugin_load`、`plugin_param`、`plugin_set` を戻せません。`plugin_preset` は、プログラムが複数あるプラグインではまだ試していません。
+- **REAPER：** トラックがすべて一度に入れ替わったプロジェクト（すべてのトラックを消してほかを挿入するアクションなど）は別のプロジェクトとして読まれるので、Kumi の参照は古くなり、モデルが読み直します。
+- **REAPER：** パラメーターモジュレーションを Kumi の取り消しで戻すと、スイッチはオフになりますが、REAPER が一度作ると残すモジュレーションの設定はそのままです。行にそう書かれます。
+- **REAPER：** `track_midi_out` には、REAPER の環境設定で MIDI 出力デバイスが必要です。

@@ -130,6 +130,9 @@ impl TuiApp {
                     state.clip = None;
                     state.clip_key = None;
                     state.strip = Strip::default();
+                    // (a DAW's own body is read anew once it's back)
+                    state.own.key = None;
+                    state.own.body = None;
                 }
             }
             "observation" => self.0.state.borrow_mut().set_name = observed_name(&value),
@@ -163,6 +166,7 @@ impl TuiApp {
                 self.read_clip(false);
                 self.read_strip(false);
                 self.read_own(false);
+                self.follow_lines();
             }
             "pointed" => {
                 let pin: PinnedNode = serde_json::from_value(value["pin"].clone()).unwrap();
@@ -173,7 +177,8 @@ impl TuiApp {
                     "chain" => IconKind::Chain,
                     _ => IconKind::Device,
                 };
-                self.0.state.borrow_mut().pinned = Some(Pin { pin, kind });
+                let row = pin.r#ref.clone();
+                self.0.state.borrow_mut().pinned = Some(Pin { pin, kind, row });
             }
             "resumed" => {
                 let when = since(n("savedAt"), now_ms_f64());
@@ -507,8 +512,20 @@ impl TuiApp {
                 self.flash();
             }
             "transport" => {
-                self.0.state.borrow_mut().transport = serde_json::from_value(value["transport"].clone()).unwrap();
+                let started = {
+                    let mut state = self.0.state.borrow_mut();
+                    let transport: Option<Transport> = serde_json::from_value(value["transport"].clone()).unwrap();
+                    let was = state.transport.as_ref().is_some_and(|transport| transport.playing);
+                    let now = transport.as_ref().is_some_and(|transport| transport.playing);
+                    state.transport = transport;
+                    now && !was && matches!(state.own.body, Some(FocusBody::Tracker(_)))
+                };
                 self.next_beat();
+                // (a pattern that starts playing is read again for its playing line; then it's followed)
+                if started {
+                    self.read_own(true);
+                }
+                self.follow_lines();
             }
             "watching" => self.0.state.borrow_mut().watching = value["on"] == true,
             "heard" => {

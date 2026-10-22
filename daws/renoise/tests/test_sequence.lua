@@ -38,6 +38,35 @@ local function setup()
   return env, peer
 end
 
+test("sequence: after Renoise's own undo and redo of a clone or of patterns made unique, Kumi's undo takes the copies away; a copy edited since stays", function()
+  for _, case in ipairs({
+    { "slot-clone", function(E) return { ref = K.ref(E, "seq", 2) } end, "1,2,4,1,3", 4 },
+    { "slot-unique", function(E) return { ref = K.ref(E, "seq", 1), last = K.ref(E, "seq", 3) } end, "4,2,5,3", 4 },
+  }) do
+    for _, edited in ipairs({ false, true }) do
+      local _, peer = setup()
+      local desc = "Kumi: " .. case[1] .. " (kq01)"
+      local record = K.change(peer, case[1], case[2](K.place(peer)), desc)
+      local after = seq()
+      ok(K.told(peer) == "", "nothing told yet")
+      mock.song:undo()
+      eq(seq(), "1,2,1,3", case[1] .. ": Renoise's undo")
+      ok(K.told(peer):find("undo:" .. desc, 1, true), case[1] .. ": the undo told")
+      mock.song:redo()
+      eq(seq(), after, case[1] .. ": Renoise's redo")
+      ok(K.told(peer):find("redo:" .. desc, 1, true), case[1] .. ": the redo told")
+      if edited then mock.ops.set_note(case[4], 2, 5, 1, { note = 60 }) end
+      local undone = K.restore(peer, record, nil, { of = desc })
+      if edited then
+        K.failure(undone, "changed")
+      else
+        ok(undone.result, case[1] .. ": what Renoise's redo made again: " .. T.load_payload_module("json").encode(undone.error or {}))
+        eq(seq(), "1,2,1,3", case[1])
+      end
+    end
+  end
+end)
+
 test("sequence: a cloned slot gets a copy of its pattern, its mutes and section; Kumi's undo takes both away", function()
   local _, peer = setup()
   local E = K.place(peer)
@@ -97,6 +126,22 @@ test("sequence: the clone's undo leaves what the producer changed since: a copy 
   H.no_dialogs()
 end)
 
+test("sequence: a copy another pattern's track plays as an alias stays when Kumi's undo takes its slot away, and the answer says so (#361 N-S13)", function()
+  local _, peer = setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-clone", { ref = K.ref(E, "seq", 4) })
+  eq(seq(), "1,2,1,3,4")
+  mock.ops.alias(3, 1, 4) -- the producer: pattern 3's track 1 plays the copy
+  H.tick(2)
+  local undone = K.restore(peer, record)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(seq(), "1,2,1,3")
+  eq(#mock.data.patterns, 4, "the copy stays in the pool")
+  eq(mock.song:pattern(3):track(1).alias_pattern_index, 4, "and pattern 3's track still plays it")
+  ok((undone.result.display.note or ""):find("as an alias", 1, true), tostring(undone.result.display.note))
+  H.no_dialogs()
+end)
+
 test("sequence: a copy that patterns made later follow stays in the pool when its slot goes, and the answer says so", function()
   local _, peer = setup()
   local E = K.place(peer)
@@ -140,6 +185,27 @@ test("sequence: a slot moves with its section and mutes, and goes back to the ga
   eq(seq(), "1,2,1,3")
   eq(sections(), "2:Break")
   eq(mutes(), "1,2")
+  H.no_dialogs()
+end)
+
+test("sequence: a slot moved between slots that play the same pattern goes back with its section and mutes, not \"back already\" (#361 N-S6)", function()
+  local _, peer = K.setup(nil, { sequence = { 1, 1, 2, 3 }, sequence_length = 4 })
+  local sequencer = mock.song.sequencer
+  mock.run_callback(function()
+    sequencer:set_sequence_is_start_of_section(1, true)
+    sequencer:set_sequence_section_name(1, "Intro")
+    sequencer:set_track_sequence_slot_is_muted(2, 1, true)
+  end)
+  mock.data.undo.stack = {}
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-move", { ref = K.ref(E, "seq", 1), index = 2 }, "Kumi: move (ks61)")
+  eq(seq(), "1,1,2,3", "the list of patterns is the same")
+  ok(sequencer:sequence_is_start_of_section(2) and sequencer:track_sequence_slot_is_muted(2, 2), "the section and mute went with it")
+  local undone = K.restore(peer, record)
+  ok(undone.result, T.load_payload_module("json").encode(undone.error or {}))
+  eq(undone.result.undo.entry, true, "a move back, not back already")
+  ok(sequencer:sequence_is_start_of_section(1) and sequencer:sequence_section_name(1) == "Intro", "the section is on slot 1 again")
+  ok(sequencer:track_sequence_slot_is_muted(2, 1) and not sequencer:track_sequence_slot_is_muted(2, 2), "and the mute")
   H.no_dialogs()
 end)
 

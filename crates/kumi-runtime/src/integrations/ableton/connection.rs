@@ -797,6 +797,8 @@ impl LiveConnection {
                     tempo: row.get("tempo").and_then(Value::as_f64),
                     beat: row.get("position").and_then(Value::as_f64),
                     beats_per_bar: self.bar_beats.get().filter(|b| *b != 0. && !b.is_nan()),
+                    meter: None,
+                    line: None,
                 }));
             }
             Ok(())

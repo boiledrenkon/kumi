@@ -931,6 +931,31 @@ fn redacted_change(change: &ChangeRecord, redact: &dyn Fn(&str) -> String) -> Ch
                 levels(after);
             }
             ChangePicture::Notes { .. } => {}
+            ChangePicture::Lines { lines, .. } => {
+                for line in lines {
+                    line.before = redact(&line.before);
+                    line.after = redact(&line.after);
+                }
+            }
+            ChangePicture::Routes { routes } => {
+                for route in routes {
+                    route.from = redact(&route.from);
+                    route.to = redact(&route.to);
+                    values(&mut route.values);
+                }
+            }
+            ChangePicture::Zones { before, after, values: list } => {
+                for zone in before.iter_mut().chain(after.iter_mut()) {
+                    zone.name = redact(&zone.name);
+                }
+                values(list);
+            }
+            ChangePicture::Items { before, after, values: list } => {
+                for item in before.iter_mut().chain(after.iter_mut()) {
+                    item.name = redact(&item.name);
+                }
+                values(list);
+            }
         }
     }
     change
@@ -1028,9 +1053,35 @@ fn values_of(picture: &ChangePicture) -> Vec<String> {
         _ => None,
     };
     match picture {
-        ChangePicture::Values { values } | ChangePicture::Eq { values, .. } | ChangePicture::Dynamics { values, .. } => {
-            values.iter().map(value).collect()
+        ChangePicture::Values { values }
+        | ChangePicture::Eq { values, .. }
+        | ChangePicture::Dynamics { values, .. }
+        | ChangePicture::Zones { values, .. }
+        | ChangePicture::Items { values, .. } => values.iter().map(value).collect(),
+        ChangePicture::Lines { lines, more } => {
+            let mut said: Vec<String> = lines
+                .iter()
+                .map(|line| {
+                    let side = |text: &str| if text.is_empty() { "(empty)".to_string() } else { one_line(text) };
+                    format!("{}: {} → {}", line.line, side(&line.before), side(&line.after))
+                })
+                .collect();
+            if *more > 0 {
+                said.push(format!("and {more} more {}", if *more == 1 { "line" } else { "lines" }));
+            }
+            said
         }
+        ChangePicture::Routes { routes } => routes
+            .iter()
+            .flat_map(|route| {
+                let what = match route.change {
+                    super::picture::RouteChange::Made => " (new)",
+                    super::picture::RouteChange::Removed => " (taken away)",
+                    super::picture::RouteChange::Changed => "",
+                };
+                std::iter::once(one_line(&format!("{} → {}{what}", route.from, route.to))).chain(route.values.iter().map(value))
+            })
+            .collect(),
         ChangePicture::Mix { before, after } => {
             let mut lines: Vec<String> = [
                 level("Volume", before.volume_text.as_ref(), after.volume_text.as_ref()),

@@ -7,8 +7,16 @@ use std::ptr;
 use super::{Envelope, Fx, FxOwner, Item, Project, Reaper, Take, Track};
 use crate::api::{self, ProjectMarker};
 
-/// REAPER's string getters that take no size want a big buffer.
+/// The size told to REAPER's string getters that take one (the most of a text they write).
 const BIG: usize = 4096;
+/// The buffer of REAPER's string getters that take no size: REAPER writes the whole text whatever the buffer holds
+/// (lab 7.82: more than 96 KiB of a track's 200 KB P_EXT), so it is as big as a buffer gets. Its memory is taken only as far as
+/// REAPER writes, once: REAPER's main thread reads one text at a time.
+const UNSIZED: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    static UNSIZED_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 /// Added to an FX index to address the track's input chain.
 pub const INPUT_FX: i32 = 0x100_0000;
 /// Added to an FX index to address a container's child.
@@ -20,15 +28,26 @@ fn cstring(text: &str) -> CString {
     CString::new(text.replace('\0', "")).unwrap_or_default()
 }
 
-/// Reads a string a getter writes into a big buffer.
+/// Reads a string a getter writes into a big buffer: one it isn't told the size of (`…NeedBig`), which holds a text of any
+/// length REAPER gives (a name, a P_EXT value, razor edits), or one it is told `BIG` of.
 pub(super) fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
-    let mut buf = vec![0u8; BIG];
-    if !fill(buf.as_mut_ptr().cast()) {
-        return None;
-    }
-    buf[BIG - 1] = 0;
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(BIG - 1);
-    Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+    UNSIZED_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < UNSIZED {
+            *buf = vec![0u8; UNSIZED];
+        }
+        buf[0] = 0;
+        if !fill(buf.as_mut_ptr().cast()) {
+            return None;
+        }
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(UNSIZED - 1);
+        let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+        // (a long text's memory is given back; the next read takes a fresh buffer)
+        if len > 1 << 20 {
+            *buf = Vec::new();
+        }
+        Some(text)
+    })
 }
 
 /// Reads a string from a getter that takes the buffer and its size.
@@ -276,6 +295,15 @@ impl Reaper<'_> {
         (found > 0).then_some(value)
     }
 
+    /// Sets a value the project carries for an extension; false when this REAPER can't. It marks nothing changed and makes no
+    /// undo point (7.82 lab): REAPER writes it into the file with the producer's next save.
+    pub fn set_project_ext_state(&self, proj: Project, section: &str, key: &str, value: &str) -> bool {
+        let (section, key, value) = (cstring(section), cstring(key), cstring(value));
+        let Some(f) = self.api.SetProjExtState() else { return false };
+        unsafe { f(proj.0, section.as_ptr(), key.as_ptr(), value.as_ptr()) };
+        true
+    }
+
     /// How many entries the undo history holds (REAPER 7.79): one after a project is loaded, more with each edit.
     pub fn undo_entries(&self, proj: Project) -> Option<i32> {
         self.api.Undo_GetNumEntries().map(|f| unsafe { f(proj.0) })
@@ -305,6 +333,12 @@ impl Reaper<'_> {
 
     fn valid(&self, proj: Project, pointer: *mut c_void, class: &std::ffi::CStr) -> bool {
         self.api.ValidatePtr2().is_some_and(|f| unsafe { f(proj.0, pointer, class.as_ptr()) })
+    }
+
+    /// A track's peak level now on a channel (0 left, 1 right), as an amplitude: REAPER's meter. None where REAPER doesn't
+    /// give it.
+    pub fn track_peak(&self, track: Track, channel: i32) -> Option<f64> {
+        self.api.Track_GetPeakInfo().map(|f| unsafe { f(track.0, channel) }).filter(|peak| peak.is_finite())
     }
 
     pub fn track_value(&self, track: Track, parm: &str) -> f64 {
@@ -711,11 +745,13 @@ impl Reaper<'_> {
     // ----- MIDI -----
 
     /// A take's note, CC and text/sysex event counts.
+    /// A MIDI take's notes, CC events and text/sysex events. (REAPER answers their total: 0 for a take with no MIDI in it
+    /// yet, which isn't a failure. Whether a take is MIDI at all is `take_is_midi`.)
     pub fn midi_counts(&self, take: Take) -> Option<(i32, i32, i32)> {
         let f = self.api.MIDI_CountEvts()?;
         let (mut notes, mut ccs, mut texts) = (0, 0, 0);
-        let ok = unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) } != 0;
-        ok.then_some((notes, ccs, texts))
+        unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) };
+        Some((notes, ccs, texts))
     }
 
     pub fn midi_note(&self, take: Take, index: i32) -> Option<MidiNote> {

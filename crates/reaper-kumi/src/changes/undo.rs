@@ -118,8 +118,19 @@ impl Watch {
         self.nudged = true;
     }
 
-    /// Looks at the history; the producer's undo or redo of Kumi's points is an `undone_in_daw` event.
-    pub fn poll(&mut self, reaper: &Reaper, proj: Project, epoch: &str, out: &dyn Outbox) {
+    /// Looks at the history; the producer's undo or redo of Kumi's points is an `undone_in_daw` event. True when an undo
+    /// or redo (of anyone's point) moved the project since the last look: what it brought back may need sweeping.
+    pub fn poll(&mut self, reaper: &Reaper, proj: Project, epoch: &str, out: &dyn Outbox) -> bool {
+        let moved = self.epoch == epoch
+            && match (reaper.undo_position(proj), &self.seen) {
+                (Some((entries, at)), Some(seen)) => seen.entries == entries && seen.at != at,
+                _ => false,
+            };
+        self.look(reaper, proj, epoch, out);
+        moved
+    }
+
+    fn look(&mut self, reaper: &Reaper, proj: Project, epoch: &str, out: &dyn Outbox) {
         if self.epoch != epoch {
             // Another project in the tab: its history is not this one's to compare with.
             self.epoch = epoch.to_string();

@@ -23,9 +23,12 @@ pub struct Line {
     pub text: String,
 }
 
+pub mod listening;
 pub mod logic;
 pub mod reaper;
 pub mod renoise;
+mod renoise_dsp;
+mod renoise_takes;
 pub mod replay;
 
 /// What a simulated bridge answers beyond `ping` and `status`: `Some(Ok(result))`, `Some(Err((code, message)))`, or None
@@ -42,6 +45,9 @@ pub enum StatusShape {
     Logic,
 }
 
+/// `status` fields read as each status is answered (what listening the bridge can do now, M5).
+pub type StatusMore = Arc<dyn Fn() -> Map<String, Value> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SimulatorConfig {
     pub secret: Secret,
@@ -54,6 +60,8 @@ pub struct SimulatorConfig {
     pub discovery_dir: Option<PathBuf>,
     /// The methods beyond ping and status.
     pub respond: Option<Respond>,
+    /// `status` fields read at each status.
+    pub status_more: Option<StatusMore>,
 }
 
 impl std::fmt::Debug for SimulatorConfig {
@@ -90,6 +98,7 @@ impl SimulatorConfig {
             status_shape: StatusShape::Identity,
             discovery_dir: None,
             respond: None,
+            status_more: None,
         }
     }
 
@@ -121,6 +130,7 @@ impl SimulatorConfig {
             status_shape: StatusShape::Logic,
             discovery_dir: None,
             respond: None,
+            status_more: None,
         }
     }
 
@@ -155,6 +165,7 @@ impl SimulatorConfig {
             status_shape: StatusShape::Identity,
             discovery_dir: None,
             respond: None,
+            status_more: None,
         }
     }
 }
@@ -413,6 +424,11 @@ fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> 
             };
             for (key, value) in &config.status_extra {
                 status[key] = value.clone();
+            }
+            if let Some(more) = &config.status_more {
+                for (key, value) in more() {
+                    status[key] = value;
+                }
             }
             Frame::ok(request.id, status)
         }

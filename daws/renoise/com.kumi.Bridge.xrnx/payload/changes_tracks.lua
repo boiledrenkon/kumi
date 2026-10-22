@@ -24,6 +24,9 @@ local function track_reread(song, place)
   return nil
 end
 
+-- (a title names the pre-FX stage; the post-FX fader is the one the producer knows as the track's volume and pan)
+local function stage_text(state) return state.stage == "pre" and " pre-FX" or "" end
+
 local function prop(spec)
   spec.locate = function(song, env, input)
     local index, track = find(song, env, input.ref, spec.kind)
@@ -58,7 +61,7 @@ prop {
     (state.stage == "post" and track.postfx_volume or track.prefx_volume).value = state.volume
   end,
   same = function(a, b) return a.stage == b.stage and close(a.volume, b.volume) end,
-  title = function(name, _, to) return name .. " volume " .. base.db_text(to.volumeDb) .. " dB" end,
+  title = function(name, _, to) return name .. stage_text(to) .. " volume " .. base.db_text(to.volumeDb) .. " dB" end,
 }
 
 prop {
@@ -78,7 +81,7 @@ prop {
     (state.stage == "post" and track.postfx_panning or track.prefx_panning).value = (state.pan + 1) / 2
   end,
   same = function(a, b) return a.stage == b.stage and close(a.pan, b.pan) end,
-  title = function(name, _, to) return name .. " pan " .. base.pan_text(to.pan) end,
+  title = function(name, _, to) return name .. stage_text(to) .. " pan " .. base.pan_text(to.pan) end,
 }
 
 prop {
@@ -233,7 +236,9 @@ local function solo_preview(song, env, input)
     end
     notes[#notes + 1] = "Renoise solos by turning every other track Off but what it plays through (its group, the send tracks it feeds); "
       .. "the end of a solo turns every track back on, muted ones too. Kumi's undo puts each track back as it was."
-    if #others > 0 and not soloed then
+    -- (also when the track reads soloed only along with another's solo, a group's or a multi-solo made in Renoise: its own solo
+    -- ends theirs)
+    if #others > 0 then
       notes[#notes + 1] = string.format("Renoise's solo is exclusive: %s stops being soloed.", solo_names(song, others))
     end
     if #plan.with > 0 then
@@ -1388,9 +1393,9 @@ for _, sub in ipairs(SUBCOLUMNS) do
   }
 end
 
--- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil (and nil past what is worth
--- reading through).
-local HIDDEN_READS = 40000
+-- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil when they hold nothing; nil
+-- and "unknown" past what is worth reading through.
+M.HIDDEN_READS = 40000
 local function hidden_note(loc, wanted)
   local song, track, index = renoise.song(), loc.object, loc.place.track
   if not song then return nil end
@@ -1430,11 +1435,11 @@ local function hidden_note(loc, wanted)
             end
           end
         end
-        if found or reads > HIDDEN_READS then break end
+        if found or reads > M.HIDDEN_READS then break end
       end
     end
     if found then patterns = patterns + 1 end
-    if reads > HIDDEN_READS then return nil end
+    if reads > M.HIDDEN_READS then return nil, "unknown" end
   end
   if patterns == 0 then return nil end
   return string.format("What it hides holds notes in %s: Renoise keeps them, hidden (and plays them).",
@@ -1444,7 +1449,29 @@ end
 local columns_spec = base.settings({
   kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
 })
-columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+columns_spec.note = function(loc, _, wanted)
+  local note, why = hidden_note(loc, wanted)
+  if why == "unknown" then
+    return "The track is too big for Kumi to look through what it hides: it may hold notes, which Renoise keeps, hidden (and plays)."
+  end
+  return note
+end
+-- (the undo hides columns again: what they held when Kumi showed them may be hidden again, but what the producer wrote in
+-- them since is refused, unless discard; and so is hiding columns Kumi couldn't look through, then or now)
+columns_spec.keep = function(loc, before)
+  local note, why = hidden_note(loc, before)
+  return { heldHidden = note ~= nil or (why == "unknown" and "unknown") or false }
+end
+columns_spec.before_restore = function(loc, _, prior, applied)
+  if type(applied) ~= "table" or applied.heldHidden == true or applied.heldHidden == nil then return end
+  local note, why = hidden_note(loc, prior)
+  if applied.heldHidden == "unknown" or why == "unknown" then
+    fail("changed", loc.name .. " is too big for Kumi to tell whether the columns it showed hold notes written since: hiding them again might hide those, so Kumi left them")
+  end
+  if note ~= nil then
+    fail("changed", loc.name .. "'s columns Kumi showed hold notes written since: hiding them again would hide those, so Kumi left them")
+  end
+end
 prop(columns_spec)
 
 -- A note column's name and mute: the column is part of what the change is about, so the record keeps it (`col`).

@@ -18,8 +18,8 @@ use daw_bridge::{
     doctor::{self, Bundled, Level},
     files,
     install::{
-        self, reaper_extension_name, reaper_target, renoise_target, TargetError, LOGIC_BINARY, LOGIC_BRIDGE_FOLDER, LOGIC_HELPER_PREFIX,
-        LOGIC_VERSION_FILE, RENOISE_TOOL_FOLDER,
+        self, min_version, reaper_extension_name, reaper_install, reaper_target, renoise_target, renoise_targets, unloadable, TargetError,
+        LOGIC_BINARY, LOGIC_BRIDGE_FOLDER, LOGIC_HELPER_PREFIX, LOGIC_VERSION_FILE, RENOISE_TOOL_FOLDER,
     },
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
@@ -49,7 +49,6 @@ pub struct Own {
     pub daw: Daw,
     /// The bridge, as the producer knows it: "Kumi's extension", "Kumi's tool", "Kumi's Logic Pro bridge".
     pub bridge: &'static str,
-    pub min_major: u32,
     pub create: fn(OwnOptions) -> Rc<dyn Integration>,
     /// What chatting without the DAW says it is.
     pub instructions: &'static str,
@@ -59,7 +58,6 @@ pub static REAPER: Own = Own {
     id: DawId::Reaper,
     daw: Daw::Reaper,
     bridge: "Kumi's extension",
-    min_major: 7,
     create: kumi_runtime::integrations::reaper::create_reaper_integration,
     instructions: "REAPER isn't connected, so Kumi can't see your project: answer from what you know, and say so.",
 };
@@ -68,7 +66,6 @@ pub static RENOISE: Own = Own {
     id: DawId::Renoise,
     daw: Daw::Renoise,
     bridge: "Kumi's tool",
-    min_major: 3,
     create: kumi_runtime::integrations::renoise::create_renoise_integration,
     instructions: "Renoise isn't connected, so Kumi can't see your song: answer from what you know, and say so.",
 };
@@ -77,7 +74,6 @@ pub static LOGIC: Own = Own {
     id: DawId::Logic,
     daw: Daw::Logic,
     bridge: "Kumi's Logic Pro bridge",
-    min_major: 12,
     create: kumi_runtime::integrations::logic::create_logic_integration,
     instructions: "You are Kumi, a concise, practical producer collaborator. Logic Pro isn't connected, so Kumi can't see your project: answer from what you know and from Apple's Logic Pro User Guide (logic_manual), and say so.",
 };
@@ -125,17 +121,30 @@ impl Own {
 
     /// Where the bridge goes in the DAW, or why it can't go yet.
     fn target(&self, env: &Env) -> Result<Target, String> {
-        self.placed(env).map_err(|why| why.map(|why| why.to_string()).unwrap_or_else(|| format!("{} isn't installed", self.name())))
+        self.placed(env).map_err(|why| why.map(|why| why.to_string()).unwrap_or_else(|| self.not_found()))
+    }
+
+    /// Why the DAW isn't found, with the variable that shows Kumi where it is.
+    fn not_found(&self) -> String {
+        match self.daw {
+            Daw::Reaper => "REAPER isn't installed (or not where Kumi looks: set KUMI_REAPER_RESOURCE_DIR to its resource folder)".into(),
+            Daw::Renoise => {
+                "Renoise isn't installed (or not where Kumi looks: set KUMI_RENOISE_PREFS_DIR to its preferences folder)".into()
+            }
+            Daw::Logic => "Logic Pro isn't installed (or not where Kumi looks: set KUMI_LOGIC_APP to its app)".into(),
+        }
+    }
+
+    /// The REAPERs here, and the one Kumi's extension was put in (a portable one Kumi doesn't find by itself).
+    fn reapers(&self, env: &Env) -> Vec<detect::ReaperInstall> {
+        let placed = self.receipt(env).map(|receipt| PathBuf::from(receipt.target));
+        detected(env, |found| detect::with_placed(found, detect::detect_reaper(found), placed.as_deref()))
     }
 
     /// `target`, with why it can't go yet as detection says it; None when the DAW isn't installed.
     fn placed(&self, env: &Env) -> Result<Target, Option<TargetError>> {
         match self.daw {
-            Daw::Reaper => {
-                let installs = detected(env, detect::detect_reaper);
-                let install = installs.iter().find(|install| install.opened).or(installs.first()).ok_or(None)?;
-                reaper_target(install, Os::current()).map_err(Some)
-            }
+            Daw::Reaper => reaper_target(reaper_install(&self.reapers(env))?, Os::current()).map_err(Some),
             Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
             // Logic loads nothing: its bridge goes in Kumi's own folder, which waits on nothing.
             Daw::Logic => Ok(install::logic_target(&BridgePaths::new(&kumi_home(env), self.daw))),
@@ -160,15 +169,38 @@ impl Own {
         }
     }
 
-    /// Where an update or a rollback brings the bridge: REAPER's where Kumi put it, while that folder's there (a
-    /// portable REAPER, or a resource folder named once with KUMI_REAPER_RESOURCE_DIR); Renoise's in the version folder
-    /// detection finds, as a newer Renoise makes its own, else where Kumi put it.
-    fn update_target(&self, env: &Env) -> Result<Target, String> {
-        let placed = self.receipt(env).map(|receipt| self.receipt_target(&receipt)).filter(|target| target.dir.is_dir());
-        match (self.daw, placed) {
-            (Daw::Reaper, Some(placed)) => Ok(placed),
-            (_, placed) => self.target(env).or_else(|why| placed.ok_or(why)),
+    /// Renoise's version folders from 3.5, where a newer Renoise may have copied Kumi's tool: places for the lifecycle
+    /// to follow a copy of Kumi's to, and to take it out of. REAPER has none.
+    fn elsewhere(&self, env: &Env) -> Vec<Target> {
+        match self.daw {
+            Daw::Renoise => renoise_targets(&detected(env, detect::detect_renoise)),
+            // (Logic's bridge is one folder, in Kumi's own folder)
+            Daw::Reaper | Daw::Logic => vec![],
         }
+    }
+
+    /// Where an update or a rollback brings the bridge: where Kumi put it, as its receipt says (a portable REAPER, a
+    /// resource folder named once with KUMI_REAPER_RESOURCE_DIR, the Renoise version folder chosen at setup), with each
+    /// copy of Kumi's in Renoise's other version folders brought along; never into a DAW nobody chose. Err, in words,
+    /// when nothing of Kumi's is left where it was (the producer took it out, or the folder's gone): an update doesn't
+    /// put it back.
+    fn follow(&self, env: &Env) -> Result<Lifecycle, String> {
+        let home = kumi_home(env);
+        let receipt = self.receipt(env).ok_or_else(|| self.missing_words())?;
+        let at = self.receipt_target(&receipt);
+        let path = at.path();
+        let found = Lifecycle::new(&home, at).with_elsewhere(self.elsewhere(env)).found().map_err(|why| why.to_string())?;
+        let found = found.ok_or_else(|| {
+            format!(
+                "{} isn't in {} any more ({}), so it was left as it is: {} --daw {} bridge puts it back",
+                self.bridge,
+                self.name(),
+                path.display(),
+                *kumi_runtime::KUMI,
+                self.id.as_str()
+            )
+        })?;
+        Ok(Lifecycle::new(&home, found).with_elsewhere(self.elsewhere(env)))
     }
 
     /// The bridge the Kumi in `app` (its app folder) brings, laid out as a release lays it out (`daws/<daw>/`).
@@ -260,14 +292,20 @@ impl Own {
                 .bundled_source()
                 .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?,
         };
-        self.put(self.target(env)?, env, &source, false)
+        let target = self.target(env)?;
+        // A REAPER that can't load it (a 32-bit one, say) is said, and nothing goes in.
+        if self.daw == Daw::Reaper {
+            if let Some(why) = reaper_install(&self.reapers(env)).ok().and_then(|install| unloadable(&source, install)) {
+                return Err(why);
+            }
+        }
+        self.put(Lifecycle::new(&kumi_home(env), target).with_elsewhere(self.elsewhere(env)), &source, false)
     }
 
-    /// Puts `source` at `target` through the lifecycle (`rollback`: recorded as one): a copy it keeps already goes back
-    /// rather than in again, and nothing changes when it's the one in place.
-    fn put(&self, target: Target, env: &Env, source: &Path, rollback: bool) -> Result<Put, String> {
+    /// Puts `source` at the lifecycle's target, and in each copy of Kumi's it follows (`rollback`: recorded as one): a
+    /// copy it keeps already goes back rather than in again, and nothing changes when it's the one in place.
+    fn put(&self, life: Lifecycle, source: &Path, rollback: bool) -> Result<Put, String> {
         let version = self.version_of(source).unwrap_or_else(|| "dev".into());
-        let life = Lifecycle::new(&kumi_home(env), target);
         let before = life.receipt().ok().flatten();
         let receipt = if rollback { life.rollback_to(source, &version) } else { life.install(source, &version) };
         let receipt = receipt.map_err(|why| why.to_string())?;
@@ -327,7 +365,7 @@ impl Own {
             return true;
         }
         match self.daw {
-            Daw::Reaper => detected(env, detect::detect_reaper).iter().any(|install| install.opened),
+            Daw::Reaper => self.reapers(env).iter().any(|install| install.opened),
             Daw::Renoise => !detected(env, detect::detect_renoise).prefs.is_empty(),
             Daw::Logic => !detected(env, detect::detect_logic).is_empty(),
         }
@@ -515,8 +553,18 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
+    fn here(&self, env: &Env) -> bool {
+        match self.daw {
+            Daw::Reaper => !self.reapers(env).is_empty(),
+            Daw::Renoise => {
+                let found = detected(env, detect::detect_renoise);
+                !found.apps.is_empty() || !found.prefs.is_empty()
+            }
+            Daw::Logic => !detected(env, detect::detect_logic).is_empty(),
+        }
+    }
     fn running_now(&self) -> bool {
-        !detect::running(self.daw).is_empty()
+        super::processes().iter().any(|(_, name)| detect::process_is(self.daw, name))
     }
     fn app_open(&self, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let daw = self.daw;
@@ -554,8 +602,8 @@ impl DawProvider for Own {
             _ => None,
         }
     }
-    fn min_major(&self) -> u32 {
-        self.min_major
+    fn min_version(&self) -> &'static str {
+        min_version(self.daw)
     }
     fn integration(&self, mut context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
@@ -564,16 +612,13 @@ impl DawProvider for Own {
         context.project_store = Some(session.project_store.clone());
         (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect, open_file: None })
     }
-    fn probe(&self, _bridge_config: String, _factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
+    fn probe(&self, _bridge_config: String, factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         let create = self.create;
         let home = kumi_home(env);
+        let connect = factory.own_host.as_ref().map(|host| host(self.id));
         async move {
-            let integration = create(OwnOptions {
-                context: IntegrationContext::new(Rc::new(|_, _| {})),
-                kumi_home: home,
-                connect: None,
-                open_file: None,
-            });
+            let integration =
+                create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home, connect, open_file: None });
             if let Err(error) = integration.start(abort::timeout(20_000)).await {
                 let _ = integration.close().await;
                 return LiveProbe { started: false, said: Some(error.to_string()), ..Default::default() };
@@ -635,14 +680,22 @@ impl DawProvider for Own {
             };
             return async move { vec![note] }.boxed_local();
         }
-        let daw = self.daw;
+        let (daw, id, name) = (self.daw, self.id, self.name());
         let env = io.env.clone();
+        let probe = io.probe_own.clone();
         let bundled = self.bundled_source().and_then(|source| {
             let sha256 = daw_bridge::lifecycle::tree_sha256(&source).ok()?;
             Some(Bundled { version: self.bundled_version().unwrap_or_else(|| "dev".into()), sha256 })
         });
+        // What puts each failure right: the bridge put in again, or the DAW opened once first.
+        let again = format!("{} --daw {} bridge", *kumi_runtime::KUMI, id.as_str());
+        let next = move |id: &str| match id {
+            "bridge" | "reference" | "secret" | "quarantine" | "arch" => Some(again.clone()),
+            "opened" => Some(format!("Open {name} once, then run {again}")),
+            _ => None,
+        };
         async move {
-            tokio::task::spawn_blocking(move || {
+            let mut checks: Vec<Check> = tokio::task::spawn_blocking(move || {
                 let var = |name: &str| env.get(name).cloned();
                 let home_dir = kumi_home(&env);
                 let inputs = doctor::Inputs {
@@ -656,13 +709,28 @@ impl DawProvider for Own {
                     .into_iter()
                     .map(|check| match check.level {
                         Level::Ok => Check::ok(check.message),
-                        Level::Note | Level::Warn => Check::note(check.message, None),
-                        Level::Fail => Check::fix(check.message, None),
+                        Level::Note => Check::note(check.message, None),
+                        Level::Warn => Check::note(check.message, next(check.id)),
+                        Level::Fail => Check::fix(check.message, next(check.id)),
                     })
                     .collect()
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+            // Kumi's host, started once: a Kumi missing it (or one that won't run) can't reach the DAW at all.
+            if let Some(probe) = probe {
+                let host = probe(id).await;
+                if !host.started {
+                    let said = host.said.map(|said| format!(": {said}")).unwrap_or_default();
+                    let repair = if *kumi_runtime::INSTALLED {
+                        format!("Run {} to repair Kumi", *kumi_runtime::KUMI_REPAIR)
+                    } else {
+                        format!("Build it ({})", *kumi_runtime::KUMI_REPAIR)
+                    };
+                    checks.push(Check::fix(format!("Kumi's host for {name} didn't start{said}"), Some(repair)));
+                }
+            }
+            checks
         }
         .boxed_local()
     }
@@ -686,9 +754,17 @@ impl DawProvider for Own {
             let lines = match logs {
                 Some(logs) => logs().await.unwrap_or_default(),
                 None => {
+                    // Oldest first, so the report reads in the order things happened.
+                    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&folder)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|entry| (entry.metadata().and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH), entry.path()))
+                        .collect();
+                    files.sort();
                     let mut lines = vec![];
-                    for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
-                        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                    for (_, file) in files {
+                        if let Ok(text) = std::fs::read_to_string(&file) {
                             lines.extend(text.lines().rev().take(200).map(str::to_owned).collect::<Vec<_>>().into_iter().rev());
                         }
                     }
@@ -712,7 +788,15 @@ impl DawProvider for Own {
                 }
                 return 0;
             };
-            match self.update_target(&io.env).and_then(|target| self.put(target, &io.env, &source, false)) {
+            // Taken out by the producer: said, and left as it is.
+            let life = match self.follow(&io.env) {
+                Ok(life) => life,
+                Err(why) => {
+                    io.out.write(&format!("{why}.\n"));
+                    return 0;
+                }
+            };
+            match self.put(life, &source, false) {
                 Ok(put) if put.changed => io.out.write(&format!(
                     "{} {} is in {} now: {}.\n{}",
                     self.bridge,
@@ -734,10 +818,64 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
-    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, _run: Run, _repo: &'a str) -> LocalBoxFuture<'a, i32> {
+    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32> {
         async move {
-            if let (Some(_), Some(source)) = (self.receipt(&io.env), self.bundled_source()) {
-                let _ = self.update_target(&io.env).and_then(|target| self.put(target, &io.env, &source, false));
+            if self.receipt(&io.env).is_none() {
+                return 0;
+            }
+            let failed = |why: String| {
+                format!(
+                    "{} wasn't brought up to date: {why}. Run {} --daw {} bridge to try again.\n",
+                    self.bridge,
+                    *kumi_runtime::KUMI,
+                    self.id.as_str()
+                )
+            };
+            // The workspace's build leaves REAPER's extension out (a library, not a program): built here, in the profile
+            // this Kumi runs in, so what goes in REAPER is this checkout's and never an earlier build's.
+            if self.daw == Daw::Reaper {
+                let release = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.ends_with("release"))).unwrap_or(true);
+                let mut args: Vec<String> = ["build", "--locked", "-p", "reaper-kumi"].map(str::to_string).into();
+                if release {
+                    args.insert(1, "--release".into());
+                }
+                let built = crate::spinner::step(
+                    io.out.clone(),
+                    &io.env,
+                    "Building REAPER's extension…",
+                    run("cargo".into(), args, Some(repo.to_string())),
+                    true,
+                )
+                .await;
+                if built.code != 0 {
+                    let said = if built.stderr.trim().is_empty() { &built.stdout } else { &built.stderr };
+                    let why = said.trim().lines().next_back().unwrap_or("").chars().take(300).collect::<String>();
+                    io.out.write(&failed(format!("building it failed ({why})")));
+                    return 0;
+                }
+            }
+            let Some(source) = self.bundled_source() else {
+                io.out.write(&failed(format!("this checkout has no build of {} for {}", self.bridge, self.name())));
+                return 0;
+            };
+            let life = match self.follow(&io.env) {
+                Ok(life) => life,
+                Err(why) => {
+                    io.out.write(&format!("{why}.\n"));
+                    return 0;
+                }
+            };
+            match self.put(life, &source, false) {
+                Ok(put) if put.changed => io.out.write(&format!(
+                    "{} {} is in {} now: restart {} if it's open.\n{}",
+                    self.bridge,
+                    put.version,
+                    self.name(),
+                    self.name(),
+                    self.kept_words(&put)
+                )),
+                Ok(_) => {}
+                Err(why) => io.out.write(&failed(why)),
             }
             0
         }
@@ -754,8 +892,28 @@ impl DawProvider for Own {
         // Nothing moves before the swap: the bridge follows Kumi once it's back (see OwnRollback).
         async move { Ok(Box::new(OwnRollback(self.id)) as Box<dyn BridgeRollbackStep>) }.boxed_local()
     }
-    fn finish_transition<'a>(&'a self, _io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
-        async {}.boxed_local()
+    fn finish_transition<'a>(&'a self, io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
+        async move {
+            // An earlier Kumi's updater (1.19's knows no DAW bridge) put this Kumi in place: the bridge it carries goes
+            // in now, as its own kumi update would have put it. Nothing when it's in already, or the producer took it out.
+            let Some(receipt) = self.receipt(&io.env) else { return };
+            let (Some(source), Some(version)) = (self.bundled_source(), self.bundled_version()) else { return };
+            if receipt.version.as_deref() == Some(version.as_str()) {
+                return;
+            }
+            let Ok(life) = self.follow(&io.env) else { return };
+            if let Some(put) = self.put(life, &source, false).ok().filter(|put| put.changed) {
+                io.out.write(&format!(
+                    "{} {} is in {} now: restart {} if it's open.\n{}",
+                    self.bridge,
+                    put.version,
+                    self.name(),
+                    self.name(),
+                    self.kept_words(&put)
+                ));
+            }
+        }
+        .boxed_local()
     }
     fn setup_bridge(
         &self,
@@ -843,10 +1001,33 @@ impl DawProvider for Own {
             };
             // Where the receipt says it went: the DAW's folder may be gone (Renoise's preferences, a portable REAPER).
             let target = self.receipt_target(&receipt);
+            let path = target.path().display().to_string();
             match Lifecycle::new(&kumi_home(&io.env), target).uninstall(true) {
-                Ok(_) => Ok(RemovedBridge::Removed),
+                Ok(receipt) => {
+                    let row = receipt.history.first();
+                    let mut said = format!("{} is out of {} ({path}).\n", self.bridge, self.name());
+                    if let Some(kept) = row.and_then(|row| row.kept.as_ref()) {
+                        said.push_str(&format!(
+                            "The copy that was in {} had changed since Kumi put it there: it's kept in {kept}.\n",
+                            self.name()
+                        ));
+                    }
+                    if let Some(left) = row.and_then(|row| row.left.as_ref()) {
+                        said.push_str(&format!(
+                            "{} still holds an old copy, {left}: close {}, then delete it.\n",
+                            self.name(),
+                            self.name()
+                        ));
+                    }
+                    io.out.write(&said);
+                    Ok(RemovedBridge::Removed)
+                }
                 Err(why) => {
-                    io.out.write(&format!("{} stays in {}: {why}.\n", self.bridge, self.place_words()));
+                    io.out.write(&format!(
+                        "{} couldn't be taken out of {} ({why}): delete {path} by hand.\n",
+                        self.bridge,
+                        self.place_words()
+                    ));
                     Ok(RemovedBridge::Kept)
                 }
             }
@@ -907,7 +1088,14 @@ impl BridgeRollbackStep for OwnRollback {
             }
             return 0;
         };
-        match own.update_target(&io.env).and_then(|target| own.put(target, &io.env, &source, true)) {
+        let life = match own.follow(&io.env) {
+            Ok(life) => life,
+            Err(why) => {
+                io.out.write(&format!("{why}.\n"));
+                return 0;
+            }
+        };
+        match own.put(life, &source, true) {
             Ok(put) if put.changed => io.out.write(&format!(
                 "{} {} is back in {}, as Kumi {version} had it: {}.\n{}",
                 own.bridge,
@@ -937,9 +1125,10 @@ fn own_of(id: DawId) -> &'static Own {
 struct OwnSetup {
     own: DawId,
     env: Env,
-    /// The bridge configuration the session's integration starts from, and whether it was given (`--bridge-config`),
-    /// so the one put in place doesn't replace it.
+    /// The session's bridge slot: once setup puts the bridge in, it names the bridge (its reference), so the session's
+    /// next look connects through it instead of chatting without the DAW.
     bridge: Rc<RefCell<Option<String>>>,
+    /// A bridge configuration given on the command line stays.
     given: bool,
     controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
 }
@@ -948,12 +1137,58 @@ impl OwnSetup {
     fn own(&self) -> &'static Own {
         own_of(self.own)
     }
+    /// The app setup opens: the REAPER Kumi's extension goes in, the newest Renoise, the Logic Pro Kumi works with.
     fn app(&self) -> Option<PathBuf> {
         match self.own().daw {
-            Daw::Reaper => detected(&self.env, detect::detect_reaper).into_iter().find_map(|install| install.app),
-            Daw::Renoise => detected(&self.env, detect::detect_renoise).apps.into_iter().map(|app| app.path).next(),
+            Daw::Reaper => {
+                let installs = self.own().reapers(&self.env);
+                let chosen = reaper_install(&installs).ok().and_then(|install| install.app.clone());
+                chosen.or_else(|| installs.into_iter().find_map(|install| install.app))
+            }
+            Daw::Renoise => detected(&self.env, detect::detect_renoise)
+                .apps
+                .into_iter()
+                .max_by_key(|app| app.version.as_deref().and_then(detect::Version::of_app))
+                .map(|app| app.path),
             Daw::Logic => best_logic(&self.env).map(|install| install.app),
         }
+    }
+}
+
+/// Opens the DAW's app apart from Kumi: on macOS through `open`, whose answer says whether it opened; elsewhere as a
+/// process of its own ([`start_apart`]).
+fn open_app(app: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-a").arg(app).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        return open.status().is_ok_and(|status| status.success());
+    }
+    start_apart(std::process::Command::new(app))
+}
+
+/// Starts `command` with no terminal and in a process group of its own, so the DAW's output never prints over Kumi's,
+/// and closing Kumi's terminal (or Ctrl-C) never takes the DAW and its unsaved project with it. Whether it started.
+fn start_apart(mut command: std::process::Command) -> bool {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -993,26 +1228,18 @@ impl DawSetup for OwnSetup {
         tokio::task::spawn_blocking(move || own.install(&env).map(|put| put.version)).await.unwrap_or_else(|error| Err(error.to_string()))
     }
     async fn start(&self, app: Option<String>, _set: Option<String>) -> bool {
-        let Some(app) = app.map(PathBuf::from).or_else(|| self.app()) else { return false };
-        let mut command = if cfg!(target_os = "macos") {
-            let mut open = std::process::Command::new("open");
-            open.arg("-a").arg(&app);
-            open
-        } else {
-            std::process::Command::new(&app)
-        };
-        command.spawn().is_ok()
+        // An app setup didn't find ("") is looked for again.
+        let Some(app) = app.filter(|app| !app.is_empty()).map(PathBuf::from).or_else(|| self.app()) else { return false };
+        tokio::task::spawn_blocking(move || open_app(&app)).await.unwrap_or(false)
     }
+    /// The bridge is in and the DAW is opening (Logic Pro's bridge the host starts beside Logic as the session connects):
+    /// the session takes the bridge and reconnects (as Live's setup does); one still starting is asked again shortly.
     async fn connect(&self) {
-        // The session's integration starts from the bridge just put in place (unless one was given): for Logic, the
-        // host starts the bridge beside Logic as the session connects; for the others, it answers once the DAW has
-        // loaded it.
         if !self.given {
             if let Some(found) = self.own().bridge_config(&self.env) {
                 *self.bridge.borrow_mut() = Some(found);
             }
         }
-        // The session may still be starting: a busy one is asked again shortly.
         for _ in 0..40 {
             let session = self.controller.borrow().as_ref().and_then(Weak::upgrade);
             let Some(session) = session else { return };
@@ -1023,11 +1250,29 @@ impl DawSetup for OwnSetup {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
-    async fn version(&self, _app: Option<String>) -> Option<String> {
+    /// The version of `app` (else of any one found).
+    async fn version(&self, app: Option<String>) -> Option<String> {
+        let app = app.filter(|app| !app.is_empty()).map(PathBuf::from);
+        let is = |path: &Path| app.as_deref().is_none_or(|app| app == path);
         match self.own().daw {
-            Daw::Reaper => detected(&self.env, detect::detect_reaper).into_iter().find_map(|install| install.version),
-            Daw::Renoise => detected(&self.env, detect::detect_renoise).apps.into_iter().find_map(|app| app.version),
-            Daw::Logic => best_logic(&self.env).and_then(|install| install.version).map(|version| version.to_string()),
+            Daw::Reaper => self
+                .own()
+                .reapers(&self.env)
+                .into_iter()
+                .filter(|install| install.app.as_deref().is_some_and(is))
+                .find_map(|install| install.version),
+            Daw::Renoise => {
+                detected(&self.env, detect::detect_renoise).apps.into_iter().filter(|found| is(&found.path)).find_map(|found| found.version)
+            }
+            Daw::Logic => match app.as_deref() {
+                // (the Logic Pro Kumi works with, as setup chose it)
+                None => best_logic(&self.env).and_then(|install| install.version),
+                Some(_) => detected(&self.env, detect::detect_logic)
+                    .into_iter()
+                    .filter(|install| is(&install.app))
+                    .find_map(|install| install.version),
+            }
+            .map(|version| version.to_string()),
         }
     }
     async fn installed(&self) -> Installed {
@@ -1043,7 +1288,11 @@ impl DawSetup for OwnSetup {
         }
         match self.own().placed(&self.env) {
             Ok(_) => Installed::Ready,
-            Err(Some(TargetError::NeverOpened(_))) => Installed::NeverOpened(String::new()),
+            Err(Some(TargetError::Older(_, version))) => Installed::Older(version),
+            // The app setup opens once; with none found ("") the producer opens it.
+            Err(Some(TargetError::NeverOpened(_))) => {
+                Installed::NeverOpened(self.app().map(|app| app.to_string_lossy().into_owned()).unwrap_or_default())
+            }
             Err(None) => Installed::Missing,
         }
     }
@@ -1096,5 +1345,44 @@ mod tests {
         assert!(!live.is_match(said), "{said}");
         assert_eq!(REAPER.instructions, "REAPER isn't connected, so Kumi can't see your project: answer from what you know, and say so.");
         assert_eq!(RENOISE.instructions, "Renoise isn't connected, so Kumi can't see your song: answer from what you know, and say so.");
+    }
+
+    /// Review K19: an app that won't open (`open -a` answers it can't find it) says so, rather than leave setup
+    /// waiting for a DAW that never comes.
+    #[test]
+    fn an_app_that_wont_open_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!open_app(&dir.path().join("Nowhere").join(if cfg!(target_os = "macos") { "REAPER.app" } else { "reaper" })));
+    }
+
+    /// Review K21: the DAW starts with no terminal (its output can't print over Kumi's) and in a process group of its
+    /// own (closing Kumi's terminal, or Ctrl-C, doesn't reach it).
+    #[cfg(unix)]
+    #[test]
+    fn the_daw_starts_apart_from_kumis_terminal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("daw");
+        let said = dir.path().join("said");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ -c /dev/fd/1 ] && [ ! -t 1 ]; then out=null; else out=terminal; fi\n\
+             printf '%s\\n%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$out\" > \"$1.part\" && mv \"$1.part\" \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = std::process::Command::new(&script);
+        command.arg(&said);
+        assert!(start_apart(command));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !said.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&said).unwrap();
+        let mut lines = text.lines();
+        // SAFETY: getpgrp has no preconditions.
+        let ours = unsafe { libc::getpgrp() };
+        assert_ne!(lines.next().and_then(|pgid| pgid.parse::<i32>().ok()), Some(ours), "{text}");
+        assert_eq!(lines.next(), Some("null"), "{text}");
     }
 }

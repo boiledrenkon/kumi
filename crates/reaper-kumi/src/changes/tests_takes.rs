@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use super::tests_items::{code, guid_in, item, state, top, Lab, K1};
+use super::tests_items::{code, guid_in, item, kumi_render, state, top, Lab, K1};
 use crate::reaper::fake::{self, FakeTake};
 
 const T1: &str = "r:take:{TAKE-K1}";
@@ -142,6 +142,19 @@ fn an_empty_take_is_added_and_plays_and_the_undo_puts_the_item_back_whole() {
 }
 
 #[test]
+fn a_take_of_a_render_in_kumis_own_folder_plays_a_copy_in_the_projects_media_folder() {
+    let lab = Lab::new();
+    let (_kumi, media, render) = kumi_render(&lab, "idea.wav");
+    let copy = media.path().join("idea.wav").to_string_lossy().into_owned();
+    fake::items::add_media(&copy, "WAVE", 2.0, false);
+    let (preview, applied) = lab.make("take-add", json!({"ref": K1, "path": render}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("a copy of it"), "{}", preview["display"]);
+    let now = item("{ITEM-K1}").unwrap().1;
+    assert_eq!(now.takes[1].more.file.as_deref(), Some(copy.as_str()));
+    assert!(applied["display"]["note"].as_str().unwrap().contains("Kumi clears"));
+}
+
+#[test]
 fn a_take_playing_a_file_is_added_without_playing_when_asked() {
     let lab = Lab::new();
     let path = std::env::temp_dir().join(format!("kumi-takes-{}-alt.wav", std::process::id()));
@@ -158,14 +171,16 @@ fn a_take_playing_a_file_is_added_without_playing_when_asked() {
 }
 
 #[test]
-fn an_added_take_is_kept_once_the_producer_has_changed_the_item_unless_discarded() {
+fn an_added_take_is_kept_once_the_producer_has_changed_the_item_even_with_discard() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("take-add", json!({"ref": K1}));
     state(|s| s.tracks[1].items[0].position = 0.25);
     assert_eq!(code(lab.undo("take-add", &preview, &applied)), "changed");
     assert_eq!(item("{ITEM-K1}").unwrap().1.takes.len(), 2);
-    lab.undo_with("take-add", &preview, &applied, true).unwrap();
-    assert_eq!(item("{ITEM-K1}").unwrap().1.takes.len(), 1);
+    // The item's whole state from before would move it back too (review R4).
+    let (code_, why) = lab.undo_with("take-add", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!((item("{ITEM-K1}").unwrap().1.takes.len(), item("{ITEM-K1}").unwrap().1.position), (2, 0.25));
 }
 
 // ----- deleting a take -----
@@ -244,6 +259,20 @@ fn stretch_markers_are_added_moved_and_deleted_and_each_change_undone_by_value()
     assert_eq!(markers(), vec![(0.5, 0.5, 0.0), (1.0, 1.0, 0.0), (1.5, 1.5, 0.0)]);
     let again = lab.undo("stretch-markers-delete", &preview, &applied).unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
+#[test]
+fn a_stretch_marker_added_without_a_source_pins_what_plays_there_now_after_the_producers_markers_moved() {
+    let lab = Lab::new();
+    // The producer's markers: the second dragged so that source 0.8 plays at 1.0 s.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.5, 0.5, 0.0), (1.0, 0.8, 0.0)]);
+    let markers = || item("{ITEM-K1}").unwrap().1.takes[0].more.stretch.clone();
+    let (preview, applied) = lab.make("stretch-markers-add", json!({"ref": T1, "markers": [{"position": 1.5}]}));
+    // What plays at 1.5 s now is 0.8 + 0.5 into the source, not 1.5: the audio around it isn't re-timed.
+    assert_eq!(markers()[2], (1.5, 1.3, 0.0));
+    assert_eq!(applied["applied"]["added"][0][1], 1.3, "what REAPER wrote is kept");
+    lab.undo("stretch-markers-add", &preview, &applied).unwrap();
+    assert_eq!(markers(), vec![(0.5, 0.5, 0.0), (1.0, 0.8, 0.0)]);
 }
 
 #[test]

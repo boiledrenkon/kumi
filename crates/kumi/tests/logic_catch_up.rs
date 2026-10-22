@@ -151,6 +151,7 @@ impl Lab {
             previous: vec![],
             updated_ms: 0,
             history: vec![],
+            copies: vec![],
         };
         std::fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
         std::fs::write(

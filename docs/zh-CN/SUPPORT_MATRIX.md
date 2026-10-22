@@ -2,7 +2,7 @@
 
 [English](../en/SUPPORT_MATRIX.md) · 简体中文 · [日本語](../ja/SUPPORT_MATRIX.md)
 
-Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Live 和 Logic Pro，以及在哪里测试过什么。每一项“已测试”背后的证据列在[实现状态](IMPLEMENTATION_STATUS.md)中。
+Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Live、REAPER、Renoise 和 Logic Pro，以及在哪里测试过什么。每一项“已测试”背后的证据列在[实现状态](IMPLEMENTATION_STATUS.md)中。
 
 ## Kumi
 
@@ -10,7 +10,7 @@ Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Li
 | --- | --- | --- | --- |
 | macOS | 13（Ventura）或更高 | Apple 芯片、Intel；Logic Pro：仅限 Apple 芯片 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Apple 芯片上配合 Live 测试；Logic Pro 已在 Apple 芯片上测试 |
 | Windows | 10 或 11 | x64、ARM64 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Windows 10 上配合 Live 测试；见 [Windows](#windows) |
-| Linux | glibc 2.35 或更高（Ubuntu 22.04、Debian 12 或更新；不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版 |
+| Linux | glibc 2.35 或更高（Ubuntu 22.04、Debian 12 或更新；不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版，但 REAPER 和 Renoise 可以在上面运行 |
 
 - Kumi 和独立桥接都是原生 Rust 程序。全新安装不会下载 Node，也不要求 Node。
 - 使用 Node 24 的现有 Kumi 1.7.4 和 1.7.5 可通过 `kumi update` 迁移，保留原有设置、登录和数据。保留的 Node 用于回滚和可选的 YouTube 挑战处理。在 Windows 上，原生版首次启动时会替换旧启动器，之后的启动不再经过 Node。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序；见[更新说明](KUMI_GUIDE.md)。
@@ -29,6 +29,17 @@ Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Li
 版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。Willington（从带有它的文件的版本起在 Kumi 的桥接中，在此之前可以自己安装；在 `/willington` 开启之前一直关闭）有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5（机架链区域仅限 b5）以及 Windows x64 上 Live 12.4.15b5 的绑定；见 [Willington](WILLINGTON_INTEGRATION.md)。
 
 原生编辑（分组、编曲自动化、场景/全局 Follow Actions、逐音符 MPE）要求安装已验证的 `WillingtonEditing`、通过与实际库匹配的自测，并明确启用。仅支持 Live 12.4.15b5 macOS ARM64，不支持 b4、Intel macOS 或 Windows。参见[自测流程](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。
+
+## REAPER 与 Renoise
+
+| DAW | 版本 | 系统 | 状态 |
+| --- | --- | --- | --- |
+| REAPER | 7 或更高 | macOS（Apple 芯片和 Intel 共用一个扩展）、Windows x64（Windows on Arm 上的 REAPER 加载 x64，也用同一个扩展）、Linux x64 和 ARM64（glibc 2.35 或更高） | 已在 macOS 上用 REAPER 7.82（评估版、便携版）测试。CI 在每个系统上构建扩展、检查它，并用系统自己的加载器加载它。尚未在 Windows 或 Linux 上的 REAPER 中试用；Windows on Arm 未测试 |
+| Renoise | 3.5 或更高 | macOS、Windows、Linux | 已在 macOS 上用 Renoise 3.5.4 测试。CI 针对 Renoise API 的模拟运行工具的测试，并对照 Renoise 自己的 API 定义进行检查。尚未在 Windows 或 Linux 上的 Renoise 中试用 |
+
+- Linux 对两者来说都是 DAW 平台：和 macOS、Windows 一样，设置会在那里连接 REAPER 和 Renoise。
+- 在每个系统上，CI 都会通过 Kumi 自己的命令，把两个桥接装进临时的 DAW 文件夹，更新它们，回滚两次，再卸载。
+- Renoise 的试用版无法渲染，所以 Kumi 在那里无法聆听歌曲。
 
 ## Logic Pro
 
@@ -70,4 +81,4 @@ Kumi 及其各个桥接能在哪些系统上运行、适用于哪些版本的 Li
 
 ## CI 覆盖的范围
 
-CI 在 GitHub 托管的 macOS、Ubuntu 和 Windows 运行器上运行 Rust 构建和测试、Remote Script 和 Live 扩展的测试、macOS 上 Logic Pro 桥接的测试（基于录下的场景和一个模拟的 Logic Pro）、六个目标平台的发行包，以及安装和迁移测试。这些运行器都没有 Live 或 Logic Pro。[测试](TESTING.md#ci)列出了每个作业。
+CI 在 GitHub 托管的 macOS、Ubuntu 和 Windows 运行器上运行 Rust 构建和测试、Remote Script 和 Live 扩展的测试、六个目标平台的发行包，以及安装和迁移测试，还会在每个系统上加载 REAPER 的扩展，运行 Renoise 工具的测试，并在 macOS 上运行 Logic Pro 桥接的测试（基于录下的场景和一个模拟的 Logic Pro）。这些运行器都没有 Live、REAPER、Renoise 或 Logic Pro。[测试](TESTING.md#ci)列出了每个作业。

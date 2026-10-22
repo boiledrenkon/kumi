@@ -403,6 +403,7 @@ local function shell_quote(s)
 end
 
 local real_time = os.time
+local real_open = io.open
 local real_popen = io.popen
 local real_rename, real_remove = os.rename, os.remove
 
@@ -412,6 +413,14 @@ local function ansi_blind(path)
 end
 
 local function install_os_shims()
+  -- /dev/urandom gives M.urandom's bytes when it is set (zeros by default, so epochs start at 0 as the vectors were made).
+  io.open = function(path, mode)
+    if path == "/dev/urandom" and M.urandom then
+      local bytes = M.urandom
+      return { read = function(_, n) return bytes:sub(1, n) end, close = function() end }
+    end
+    return real_open(path, mode)
+  end
   -- Wall time follows the mock clock, from a fixed start.
   os.time = function(t)
     if t then return real_time(t) end
@@ -453,7 +462,14 @@ local function install_os_shims()
   end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
-    return { type = "file", mode = M.stat_modes[path] or 33152, size = 0, mtime = M.stat_mtimes[path] or os.time() }
+    -- (a real file's own size: the tool's size bounds read it)
+    local size = 0
+    local f = io.open(path, "rb")
+    if f then
+      size = f:seek("end") or 0
+      f:close()
+    end
+    return { type = "file", mode = M.stat_modes[path] or 33152, size = size, mtime = M.stat_mtimes[path] or os.time() }
   end
   -- Names (not paths) of the files in a folder, optionally only those matching {"*.log", ...}.
   os.filenames = function(dir, extensions)
@@ -499,6 +515,7 @@ function M.reset(options)
   -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
+  M.urandom = not options.real_random and string.rep("\0", 32) or nil
   M.song = nil
   M.name_first = false
   M.platform = options.platform or "MACINTOSH"
@@ -536,6 +553,8 @@ function M.reset(options)
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
     window = M.window,
+    -- (m7) Each tool as a table of its manifest's fields; a test adds to it. Kumi's own is always there.
+    installed_tools = { { name = "Kumi Bridge", id = "com.kumi.Bridge", author = "Kumi", version = "1.0", enabled = true } },
     -- M4 (n-song): saving, as Renoise does it (measured: a folder that isn't there shows a modal error; another file is
     -- written over with no prompt; the document points at the file it was saved as)
     save_song = function()
@@ -630,5 +649,8 @@ function M.reset(options)
   })
   return M
 end
+
+-- (M5 m5-renoise: rendering, Renoise's own solo, sample buffers, the playing transport)
+assert(loadfile(tests_dir .. "mock_listening.lua"))()(M, object)
 
 return M

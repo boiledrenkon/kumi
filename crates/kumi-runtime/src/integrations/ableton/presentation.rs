@@ -169,7 +169,7 @@ fn acts(tool: &str) -> bool {
 }
 
 /// How the app reads Live's focus and devices.
-pub const VIEW: ViewPresentation = ViewPresentation { fill_focus, device_role, heading, timeline_notes: false };
+pub const VIEW: ViewPresentation = ViewPresentation { fill_focus, device_role, heading, timeline_notes: false, open_containers: false };
 
 /// Live's word over each body FOCUS draws.
 fn heading(kind: BodyKind) -> &'static str {

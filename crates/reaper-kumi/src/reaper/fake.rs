@@ -9,6 +9,10 @@ pub mod items;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+// M5 listening (m5-reaper): render settings and renders, the audio device, sources, previews, accessors, the hook.
+mod listening;
+pub use listening::{audio_block, press_render_cancel, render_action, FakeListening, FakeMedia, FakeSource, RenderSeen};
+
 // m4-r-fxenv: FX in every chain, envelopes, points, automation items.
 mod fxenv;
 pub use fxenv::{chunk_of, points_of};
@@ -440,10 +444,14 @@ pub struct FakeTempo {
 pub struct State {
     pub version: String,
     pub resource: String,
+    /// The project's media folder (`GetProjectPathEx`): empty for none.
+    pub media: String,
     /// None: no project (REAPER never has none, but the bridge must not care).
     pub project: Option<(String, String)>,
     /// Which project object the active tab holds: a tab switch changes it, a new project in the tab doesn't.
     pub project_id: u64,
+    /// Calls that named a project no longer open (a pointer from before the tab changed): REAPER would read freed memory.
+    pub freed_project_uses: u32,
     /// The project objects of the other open tabs (by `project_id`).
     pub other_tabs: Vec<u64>,
     pub play_bits: i32,
@@ -526,6 +534,8 @@ pub struct State {
     pub calls: u64,
     /// ReaScripts registered as actions: (command id, file).
     pub scripts: Vec<(i32, String)>,
+    /// Every script file registered, with its permission bits (unix) as it was registered.
+    pub script_files: Vec<(String, u32)>,
     /// Called, with no borrow of the state held, with a registered script's text when it is run: a test's stand-in for
     /// REAPER's Lua (it does what the script would, and leaves its answer in the ext state).
     pub on_script: Option<fn(&str)>,
@@ -533,6 +543,8 @@ pub struct State {
     pub ext_state: HashMap<(String, String), String>,
     /// How often a script's registration was committed to REAPER's key map file (`reaper-kb.ini`).
     pub kb_writes: u32,
+    /// M5 listening (m5-reaper).
+    pub listening: FakeListening,
     // m4-r-fxenv
     /// Automation item pools: their points, from an item's start.
     pub pools: HashMap<i64, Vec<FakePoint>>,
@@ -555,8 +567,10 @@ impl Default for State {
         State {
             version: String::new(),
             resource: String::new(),
+            media: String::new(),
             project: None,
             project_id: 0,
+            freed_project_uses: 0,
             other_tabs: vec![],
             play_bits: 0,
             bpm: 0.0,
@@ -608,9 +622,11 @@ impl Default for State {
             project_ext: Default::default(),
             calls: 0,
             scripts: vec![],
+            script_files: vec![],
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
+            listening: FakeListening::default(),
             pools: HashMap::new(),
             pool_names: HashMap::new(),
             pool_made: 0,
@@ -684,6 +700,16 @@ fn take_ptr(track: usize, item: usize, take: usize) -> *mut MediaItem_Take {
 
 fn project_ptr(s: &State) -> *mut ReaProject {
     (PROJECT_BASE + s.project_id * 16) as *mut ReaProject
+}
+
+/// Whether a call names a project that isn't open now (null is REAPER's "the current one"): counted, as REAPER would read
+/// freed memory there.
+fn freed_project(s: &mut State, proj: *mut ReaProject) -> bool {
+    let freed = !proj.is_null() && proj != project_ptr(s);
+    if freed {
+        s.freed_project_uses += 1;
+    }
+    freed
 }
 
 fn track_of(s: &State, handle: u64) -> Option<&FakeTrack> {
@@ -847,6 +873,9 @@ unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) ->
         }
     })
 }
+unsafe extern "C" fn get_project_path_ex(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
+    with(|s| write(buf, size, &s.media))
+}
 unsafe extern "C" fn get_project_name(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
     with(|s| write(buf, size, s.project.as_ref().map(|p| p.1.as_str()).unwrap_or("")))
 }
@@ -860,8 +889,8 @@ unsafe extern "C" fn get_current_project_in_load_save() -> *mut ReaProject {
 unsafe extern "C" fn master_get_tempo() -> f64 {
     with(|s| s.bpm)
 }
-unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
-    with(|s| s.play_bits)
+unsafe extern "C" fn get_play_state_ex(proj: *mut ReaProject) -> c_int {
+    with(|s| if freed_project(s, proj) { 0 } else { s.play_bits })
 }
 unsafe extern "C" fn get_project_state_change_count(_proj: *mut ReaProject) -> c_int {
     counted(|s| s.state_count)
@@ -1027,6 +1056,11 @@ unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
     });
 }
 unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
+    // "Track: Set first selected track as last touched track"
+    if command == 40914 {
+        let first = with(|s| s.tracks.iter().find(|t| t.selected).map(|t| t.guid.clone()));
+        extra(|e| e.last_touched = first);
+    }
     let (hook, script, on_script) = with(|s| {
         s.actions.push(command);
         (s.on_action, s.scripts.iter().find(|(id, _)| *id == command).map(|(_, path)| path.clone()), s.on_script)
@@ -1046,6 +1080,14 @@ unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *co
         }
         if add {
             let id = 60_000 + s.scripts.len() as c_int + s.actions.len() as c_int;
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(&file).map_or(0, |m| m.permissions().mode() & 0o777)
+            };
+            #[cfg(not(unix))]
+            let mode = 0;
+            s.script_files.push((file.clone(), mode));
             s.scripts.push((id, file));
             id
         } else {
@@ -1322,8 +1364,8 @@ unsafe extern "C" fn get_tempo_time_sig_marker(
 
 // ----- tracks -----
 
-unsafe extern "C" fn count_tracks(_proj: *mut ReaProject) -> c_int {
-    counted(|s| s.tracks.len() as c_int)
+unsafe extern "C" fn count_tracks(proj: *mut ReaProject) -> c_int {
+    counted(|s| if freed_project(s, proj) { 0 } else { s.tracks.len() as c_int })
 }
 unsafe extern "C" fn get_track(_proj: *mut ReaProject, index: c_int) -> *mut MediaTrack {
     counted(|s| if index >= 0 && (index as usize) < s.tracks.len() { track_ptr(index as usize) } else { ptr::null_mut() })
@@ -1345,8 +1387,19 @@ unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, maste
     })
 }
 unsafe extern "C" fn get_last_touched_track() -> *mut MediaTrack {
-    counted(|s| s.tracks.iter().position(|t| t.selected).map_or(ptr::null_mut(), track_ptr))
+    let touched = extra(|e| e.last_touched.clone());
+    counted(|s| {
+        touched
+            .and_then(|guid| s.tracks.iter().position(|t| t.guid == guid))
+            .or_else(|| s.tracks.iter().position(|t| t.selected))
+            .map_or(ptr::null_mut(), track_ptr)
+    })
 }
+/// A track's meter: the fake keeps it in `extra` as `peak:<channel>` (amplitude), which REAPER has no attribute for.
+unsafe extern "C" fn track_get_peak_info(track: *mut MediaTrack, channel: c_int) -> f64 {
+    counted(|s| track_of(s, track as u64).and_then(|t| t.extra.get(&format!("peak:{channel}")).copied()).unwrap_or(0.0))
+}
+
 unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *const c_char) -> f64 {
     let parm = name_of(parm);
     counted(|s| {
@@ -1437,6 +1490,22 @@ unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, par
         _ => false,
     })
 }
+/// Writes as much as it's told (the size given, less the NUL: 'A's) and says how much it wrote: what a buffer handed to it
+/// must hold.
+unsafe extern "C" fn get_track_midi_lyrics(track: *mut MediaTrack, _flag: c_int, buf: *mut c_char, size: *mut c_int) -> bool {
+    counted(|s| {
+        if track_of(s, track as u64).is_none() || buf.is_null() || size.is_null() {
+            return false;
+        }
+        let told = unsafe { *size }.max(1) as usize;
+        unsafe {
+            ptr::write_bytes(buf.cast::<u8>(), b'A', told - 1);
+            *buf.add(told - 1) = 0;
+            *size = (told - 1) as c_int;
+        }
+        true
+    })
+}
 unsafe extern "C" fn get_track_name(track: *mut MediaTrack, buf: *mut c_char, size: c_int) -> bool {
     counted(|s| match track_of(s, track as u64) {
         Some(t) => {
@@ -1460,6 +1529,18 @@ unsafe extern "C" fn get_proj_ext_state(
             value.len() as c_int
         }
         None => 0,
+    })
+}
+/// (m6-places) The value a project carries for an extension; an empty one takes it away.
+unsafe extern "C" fn set_proj_ext_state(_proj: *mut ReaProject, section: *const c_char, key: *const c_char, value: *const c_char) -> c_int {
+    let (section, key, value) = (name_of(section), name_of(key), name_of(value));
+    counted(|s| {
+        if value.is_empty() {
+            s.project_ext.remove(&(section, key));
+        } else {
+            s.project_ext.insert((section, key), value.clone());
+        }
+        value.len() as c_int
     })
 }
 /// A track's FX chain as REAPER writes it into the track's chunk: an entry per FX, the plug-in's own block inside.
@@ -1513,9 +1594,92 @@ fn fx_from_entries(text: &str) -> Vec<FakeFx> {
     out
 }
 
+/// (m6-library) ReaSamplOmatic5000's parameters, as 7.82 lists them: a pad's note range is 3 and 4, its note-offs 11.
+const RS5K_PARAMS: [&str; 30] = [
+    "Volume",
+    "Pan",
+    "Gain for minimum velocity",
+    "Note range start",
+    "Note range end",
+    "Pitch for start note",
+    "Pitch for end note",
+    "MIDI channel",
+    "Max voices",
+    "Attack",
+    "Release",
+    "Obey note-offs",
+    "Loop",
+    "Sample start offset",
+    "Sample end offset",
+    "Pitch adjust",
+    "Pitchbend range",
+    "Minimum velocity",
+    "Maximum velocity",
+    "Probability of hitting",
+    "Round-robin mode",
+    "Filter played notes",
+    "Crossfade loop length",
+    "Loop start offset",
+    "Decay",
+    "Sustain",
+    "Release (note-off)",
+    "Use note-off release override",
+    "Legacy voice re-use mode",
+    "Portamento",
+];
+
+/// (m6-library) JS: MIDI Choke's sliders: its name, default and range.
+const CHOKE_SLIDERS: [(&str, f64, f64, f64); 10] = [
+    ("MIDI Channel", 1.0, 1.0, 16.0),
+    ("Choke Note Range Start", 42.0, 0.0, 127.0),
+    ("Number Of Choke Notes", 1.0, 1.0, 16.0),
+    ("Affected Note Range Start", 46.0, 0.0, 127.0),
+    ("Number Of Affected Notes", 1.0, 1.0, 16.0),
+    ("Action During Choke", 0.0, 0.0, 1.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+    ("Additional Choke Note", -1.0, -1.0, 127.0),
+];
+
 /// A plug-in the fake can instantiate by name: the catalogue is REAPER's own.
 fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
     let lower = name.to_ascii_lowercase();
+    // (m6-library) The sampler a pad is, and the choke a kit's hi-hats go through (when the fake's REAPER has it).
+    if lower.contains("reasamplomatic5000") {
+        s.fx_made += 1;
+        let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), "VSTi: ReaSamplOmatic5000 (Cockos)");
+        fx.instrument = true;
+        fx.params = RS5K_PARAMS
+            .iter()
+            .map(|name| {
+                let value = match *name {
+                    "Volume" => 0.5,
+                    "Note range end" | "Maximum velocity" | "Probability of hitting" | "Sample end offset" => 1.0,
+                    "Pan" | "Pitch for start note" | "Pitch for end note" | "Pitch adjust" => 0.5,
+                    _ => 0.0,
+                };
+                FakeParam::new(name, value, "")
+            })
+            .collect();
+        return Some(fx);
+    }
+    if lower.starts_with("js:") && lower.contains("midi_choke") {
+        if extra(|e| e.no_choke) {
+            return None;
+        }
+        s.fx_made += 1;
+        let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), "JS: MIDI Choke");
+        fx.params = CHOKE_SLIDERS
+            .iter()
+            .map(|(name, value, min, max)| {
+                let mut param = FakeParam::new(name, (value - min) / (max - min), "");
+                (param.min, param.max) = (*min, *max);
+                param
+            })
+            .collect();
+        return Some(fx);
+    }
     let full = if lower.starts_with("js:") {
         name.to_string()
     } else {
@@ -1639,7 +1803,7 @@ unsafe extern "C" fn track_fx_set_pin_mappings(
     counted(|s| {
         let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) else { return false };
         f.pins.insert((output != 0, pin), (low as u32 as u64) | ((hi as u32 as u64) << 32));
-        s.undo_dirty = true;
+        s.state_changed = true;
         true
     })
 }
@@ -2345,13 +2509,73 @@ unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const
             return false;
         };
         let Some(state) = s.chunks.get(n).cloned() else { return false };
+        let height = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("TRACKHEIGHT "))
+            .and_then(|rest| rest.split_whitespace().next()?.parse::<f64>().ok());
         let Some(slot) = track_mut(s, track as u64) else { return false };
-        // A track's sends are the destination's lines, not part of its chunk.
+        // A track's sends are the destination's lines, not part of its chunk, and nor is its selection (7.82 lab).
         let sends = std::mem::take(&mut slot.sends);
-        *slot = FakeTrack { sends: if state.sends.is_empty() { sends } else { state.sends }, ..state };
+        *slot = FakeTrack { sends: if state.sends.is_empty() { sends } else { state.sends }, selected: slot.selected, ..state };
+        if let Some(height) = height.filter(|height| *height != 0.0) {
+            slot.extra.insert("I_HEIGHTOVERRIDE".into(), height);
+        }
+        // Each plug-in's state is what its block in the text says (the number in the chunk names the rest).
+        for (fx, values) in slot.fx.iter_mut().zip(plugin_params(&chunk)) {
+            if let Some(values) = values {
+                for (param, value) in fx.params.iter_mut().zip(values) {
+                    param.value = value;
+                }
+            }
+        }
         s.undo_dirty = true;
         true
     })
+}
+
+/// The parameter values in each top-level entry of a track chunk's main FX chain, in order (`PARAM v name` lines inside
+/// a plug-in's block, as the fake writes them); None for an entry that isn't a plug-in block of that kind.
+pub(super) fn plugin_params(chunk: &str) -> Vec<Option<Vec<f64>>> {
+    let mut entries: Vec<Option<Vec<f64>>> = Vec::new();
+    let mut blocks: Vec<String> = Vec::new();
+    for line in chunk.lines().map(str::trim) {
+        let in_chain = blocks.len() == 2 && blocks[1] == "<FXCHAIN";
+        if in_chain && line.starts_with("BYPASS ") {
+            entries.push(None);
+        }
+        if line.starts_with('<') {
+            let word = line.split_whitespace().next().unwrap_or("<").to_string();
+            if in_chain && word == "<VST" {
+                if let Some(entry) = entries.last_mut() {
+                    *entry = Some(vec![]);
+                }
+            }
+            blocks.push(word);
+            continue;
+        }
+        if line == ">" {
+            blocks.pop();
+            continue;
+        }
+        if blocks.len() == 3 && blocks[1] == "<FXCHAIN" && blocks[2] == "<VST" {
+            if let (Some(Some(values)), Some(rest)) = (entries.last_mut(), line.strip_prefix("PARAM ")) {
+                values.push(rest.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0));
+            }
+        }
+    }
+    entries
+}
+
+/// A track as its chunk's number names it: its plug-ins' parameter values left to the text, as REAPER keeps a plug-in's
+/// state in its block.
+pub(super) fn chunk_key(track: &FakeTrack) -> FakeTrack {
+    let mut key = track.clone();
+    for fx in key.fx.iter_mut().filter(|fx| fx.children.is_none()) {
+        for param in fx.params.iter_mut() {
+            param.value = 0.0;
+        }
+    }
+    key
 }
 
 unsafe extern "C" fn create_track_send(track: *mut MediaTrack, dest: *mut MediaTrack) -> c_int {
@@ -2891,7 +3115,11 @@ pub fn api_without(missing: &[&str]) -> Api {
 }
 
 fn lookup(name: &CStr) -> *mut c_void {
-    // Items and takes (m4-r-items) first: some of its functions stand in for the reads-only ones below, and its
+    // M5 listening (m5-reaper): its functions first; each passes on whatever isn't listening's to the rest below.
+    if let Some(f) = listening::lookup(name) {
+        return f;
+    }
+    // Then items and takes (m4-r-items): some of its functions stand in for the reads-only ones below, and its
     // GetItemStateChunk, GetTrackStateChunk and Main_OnCommandEx hand on to m4-r-fxenv's.
     let mine = items::lookup(name);
     if !mine.is_null() {
@@ -2918,6 +3146,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"DeleteExtState" => delete_ext_state as unsafe extern "C" fn(*const c_char, *const c_char, bool),
         b"EnumProjects" => enum_projects as unsafe extern "C" fn(c_int, *mut c_char, c_int) -> *mut ReaProject,
         b"GetProjectName" => get_project_name as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
+        b"GetProjectPathEx" => get_project_path_ex as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
         b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as unsafe extern "C" fn() -> *mut ReaProject,
         b"GetPlayStateEx" => get_play_state_ex as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"Master_GetTempo" => master_get_tempo as unsafe extern "C" fn() -> f64,
@@ -2956,6 +3185,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
         b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
         b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"Track_GetPeakInfo" => track_get_peak_info as unsafe extern "C" fn(*mut MediaTrack, c_int) -> f64,
         b"SetMediaTrackInfo_Value" => set_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char, f64) -> bool,
         b"InsertTrackAtIndex" => insert_track_at_index as unsafe extern "C" fn(c_int, bool),
         b"DeleteTrack" => delete_track as unsafe extern "C" fn(*mut MediaTrack),
@@ -2986,7 +3216,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetMediaTrackInfo" => get_set_media_track_info as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_void) -> *mut c_void,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
+        b"GetTrackMIDILyrics" => get_track_midi_lyrics as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut c_char, *mut c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
+        b"SetProjExtState" => set_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *const c_char) -> c_int,
         b"TrackFX_AddByName" => track_fx_add_by_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool, c_int) -> c_int,
         b"TrackFX_Delete" => track_fx_delete as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
         b"TrackFX_CopyToTrack" => track_fx_copy_to_track as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut MediaTrack, c_int, bool),

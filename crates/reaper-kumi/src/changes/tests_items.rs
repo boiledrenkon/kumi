@@ -119,6 +119,18 @@ fn an_empty_midi_item_is_made_on_a_track_and_undone_while_it_is_as_kumi_made_it(
 }
 
 #[test]
+fn an_empty_midi_item_keeps_a_point_of_reapers_undo() {
+    // REAPER's undo doesn't notice an item CreateNewMIDIItemInProj makes (accept-reaper lab: a plan of one item-add made
+    // no point, and REAPER's undo took the producer's step before it instead).
+    let lab = Lab::new();
+    let input = json!({"ref": KICK, "position": 10.0, "length": 2.0});
+    let preview = lab.preview("item-add", input.clone()).unwrap();
+    let applied = lab.apply_with("item-add", &input, &preview, "Kumi: add (k9)").unwrap();
+    assert_eq!(applied["undo"]["entry"], true);
+    assert_eq!(top().as_deref(), Some("Kumi: add (k9)"));
+}
+
+#[test]
 fn an_item_kumi_made_is_kept_once_the_producer_has_filled_it_unless_discarded() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("item-add", json!({"ref": KICK, "position": 10.0, "length": 2.0}));
@@ -193,7 +205,8 @@ fn a_media_file_is_imported_in_place_and_a_missing_or_unreadable_one_is_refused(
     let unreadable = std::env::temp_dir().join(format!("kumi-items-{}-notes.txt", std::process::id()));
     std::fs::write(&unreadable, b"hello").unwrap();
     for (path, needle) in [
-        ("/nowhere/at/all.wav".to_string(), "no file"),
+        // (a full path on every system: "/nowhere" has no drive on Windows)
+        (std::env::temp_dir().join("nowhere").join("at").join("all.wav").to_string_lossy().into_owned(), "no file"),
         (std::env::temp_dir().to_string_lossy().into_owned(), "no file"),
         ("relative.wav".to_string(), "full path"),
         (unreadable.to_string_lossy().into_owned(), "reads nothing"),
@@ -202,6 +215,73 @@ fn a_media_file_is_imported_in_place_and_a_missing_or_unreadable_one_is_refused(
         assert_eq!(code, "bad-params", "{path}");
         assert!(message.contains(needle), "{path}: {message}");
     }
+}
+
+#[test]
+fn an_imported_file_loops_as_the_producers_reaper_loops_imported_media() {
+    let lab = Lab::new();
+    let path = media_file("pad.wav", "WAVE", 2.0, false);
+    let loops = |lab: &Lab| {
+        let (_, applied) = lab.make("item-import", json!({"ref": SNARE, "path": path, "position": 0.0}));
+        item(&guid_in(&applied["created"]["ref"])).unwrap().1.extra.get("B_LOOPSRC").copied()
+    };
+    assert_eq!(loops(&lab), Some(1.0), "REAPER's factory setting loops imported media");
+    // A power user's "loop source" off for imported media (loopnewitems without &4).
+    fake::extra(|e| e.config.insert("loopnewitems".into(), "10".into()));
+    assert_eq!(loops(&lab), Some(0.0), "the producer's setting holds for Kumi's imports too");
+}
+
+#[test]
+fn an_imported_file_has_no_fades_as_the_producers_own_import_has_none() {
+    let lab = Lab::new();
+    let path = media_file("kick.wav", "WAVE", 0.5, false);
+    // REAPER's factory setup: new items get 10 ms fades, but Insert Media's items get none, and an imported kick keeps
+    // its hit.
+    let (_, applied) = lab.make("item-import", json!({"ref": SNARE, "path": path, "position": 0.0}));
+    let (_, imported) = item(&guid_in(&applied["created"]["ref"])).unwrap();
+    let fade = |key: &str| imported.extra.get(key).copied().unwrap_or(0.0);
+    assert_eq!((fade("D_FADEINLEN"), fade("D_FADEOUTLEN")), (0.0, 0.0));
+}
+
+/// Kumi's own folder with a render in it, and the project's media folder: the render's path and the folders (kept alive).
+pub(super) fn kumi_render(lab: &Lab, name: &str) -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let kumi = tempfile::tempdir().unwrap();
+    let media = tempfile::tempdir().unwrap();
+    let listening = kumi.path().join("bridges/reaper/listening");
+    std::fs::create_dir_all(&listening).unwrap();
+    let path = listening.join(name);
+    std::fs::write(&path, b"RIFF render").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    fake::items::add_media(&path, "WAVE", 2.0, false);
+    lab.reads.set_kumi_folder(kumi.path().to_path_buf());
+    fake::with(|s| s.media = media.path().to_string_lossy().into_owned());
+    (kumi, media, path)
+}
+
+#[test]
+fn a_render_in_kumis_own_folder_is_imported_from_a_copy_in_the_projects_media_folder() {
+    let lab = Lab::new();
+    let (_kumi, media, render) = kumi_render(&lab, "bounce.wav");
+    // A file of that name in the media folder already is never written over.
+    std::fs::write(media.path().join("bounce.wav"), b"the producer's").unwrap();
+    let copy = media.path().join("bounce (2).wav").to_string_lossy().into_owned();
+    fake::items::add_media(&copy, "WAVE", 2.0, false);
+    let input = json!({"ref": SNARE, "path": render, "positionBeats": 0.0});
+    let preview = lab.preview("item-import", input.clone()).unwrap();
+    assert!(preview["display"]["note"].as_str().unwrap().contains("a copy of it in the project's media folder"), "{}", preview["display"]);
+    assert!(!std::path::Path::new(&copy).exists(), "the preview copies nothing");
+    let applied = lab.apply_with("item-import", &input, &preview, "Kumi: import (k1)").unwrap();
+    let (_, imported) = item(&guid_in(&applied["created"]["ref"])).unwrap();
+    assert_eq!(imported.takes[0].more.file.as_deref(), Some(copy.as_str()), "the project plays the copy");
+    assert_eq!(std::fs::read(&copy).unwrap(), b"RIFF render");
+    assert_eq!(std::fs::read(media.path().join("bounce.wav")).unwrap(), b"the producer's");
+    assert!(imported.takes[0].name.ends_with("bounce.wav"), "named after the render");
+    // Without a media folder to copy into, nothing is made.
+    fake::with(|s| s.media.clear());
+    let preview = lab.preview("item-import", input.clone()).unwrap();
+    let (code, message) = lab.apply_with("item-import", &input, &preview, "Kumi: import (k2)").unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("no media folder"), "{message}");
 }
 
 // ----- moving -----
@@ -311,9 +391,10 @@ fn a_split_is_undone_only_while_both_parts_are_as_it_left_them() {
     let (preview, applied) = lab.make("item-split", json!({"ref": K1, "position": 1.0}));
     state(|s| s.tracks[1].items[0].extra.insert("D_VOL".into(), 0.5));
     assert_eq!(code(lab.undo("item-split", &preview, &applied)), "changed");
-    // discard puts it back anyway.
-    lab.undo_with("item-split", &preview, &applied, true).unwrap();
-    assert_eq!(item("{ITEM-K1}").unwrap().1.length, 2.0);
+    // Discard too: the whole item from before would write over the producer's volume (review R4).
+    let (code_, why) = lab.undo_with("item-split", &preview, &applied, true).unwrap_err();
+    assert!(code_ == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.extra.get("D_VOL"), Some(&0.5), "the producer's edit stays");
 }
 
 #[test]
@@ -373,6 +454,25 @@ fn a_trim_moves_the_edges_and_the_takes_offsets_so_the_media_stays_in_place() {
     state(|s| s.tracks[1].items[0].takes[0].extra.insert("D_PLAYRATE".into(), 0.5));
     lab.make("item-trim", json!({"ref": K1, "start": 1.0}));
     assert_eq!(item("{ITEM-K1}").unwrap().1.takes[0].extra["D_STARTOFFS"], 0.5);
+}
+
+#[test]
+fn a_start_trims_undo_leaves_an_item_the_producer_put_stretch_markers_on_since() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].items[0].extra.insert("B_LOOPSRC".into(), 0.0));
+    let (preview, applied) = lab.make("item-trim", json!({"ref": K1, "start": 0.5}));
+    // The producer warps the trimmed item.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.25, 0.75, 0.0)]);
+    for discard in [false, true] {
+        let (code, message) = lab.undo_with("item-trim", &preview, &applied, discard).unwrap_err();
+        assert_eq!(code, "changed", "discard {discard}");
+        assert!(message.contains("stretch markers"), "{message}");
+        assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.5, "the item is as the producer has it");
+    }
+    // Without markers, the start goes back.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch.clear());
+    lab.undo("item-trim", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 0.0);
 }
 
 #[test]
@@ -518,6 +618,49 @@ fn items_are_grouped_in_a_new_group_and_put_back_in_theirs() {
 // ----- deleting -----
 
 #[test]
+fn a_deleted_items_undo_leaves_it_out_once_the_tempo_map_changed_unless_told_to_put_it_back_anyway() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // The producer adds a tempo change before where it was: at its old time it would sit at another bar.
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 90.0, num: 4, denom: 4, linear: false }));
+    let (code, message) = lab.undo("item-delete", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo map"), "{message}");
+    assert!(item("{ITEM-K1}").is_none(), "nothing put back");
+    lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert!(item("{ITEM-K1}").is_some());
+}
+
+#[test]
+fn a_deleted_items_undo_isnt_refused_because_the_cursor_moved_across_a_tempo_marker() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tempo_markers = vec![
+            fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false },
+            fake::FakeTempo { time: 8.0, bpm: 90.0, num: 4, denom: 4, linear: false },
+        ]
+    });
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // The cursor goes past the second marker: REAPER's tempo (at the cursor) reads 90 now, the map is the same.
+    state(|s| s.bpm = 90.0);
+    lab.undo("item-delete", &preview, &applied).unwrap();
+    assert!(item("{ITEM-K1}").is_some());
+}
+
+#[test]
+fn undoing_item_props_puts_back_only_kumis_fields_and_leaves_a_lock_the_producer_set_since() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-props", json!({"ref": K1, "mute": true}));
+    state(|s| {
+        s.tracks[1].items[0].extra.insert("C_LOCK".into(), 1.0);
+    });
+    lab.undo("item-props", &preview, &applied).unwrap();
+    let back = item("{ITEM-K1}").unwrap().1;
+    assert!(!back.mute, "Kumi's mute is taken back");
+    assert_eq!(back.extra.get("C_LOCK"), Some(&1.0), "the producer's lock stays");
+}
+
+#[test]
 fn a_deleted_item_comes_back_with_its_ids_from_its_chunk() {
     let lab = Lab::new();
     state(|s| s.tracks[1].items[0].takes[0].more.markers = vec![(0.2, "hit".into(), 0)]);
@@ -588,6 +731,11 @@ fn a_deleted_item_back_in_the_project_but_changed_is_the_producers() {
     });
     assert_eq!(code(lab.undo("item-delete", &preview, &applied)), "changed");
     assert_eq!(state(|s| s.tracks[1].items.iter().filter(|i| i.guid == "{ITEM-K1}").count()), 1, "no second item with its id");
+    // With discard: said as it is, there but changed and left so, not "back already" (review R18).
+    let left = lab.undo_with("item-delete", &preview, &applied, true).unwrap();
+    assert_eq!(left["display"]["note"], "It is in the project again, changed since it was deleted: Kumi left it as it is.");
+    assert!(!left["display"]["title"].as_str().unwrap().contains("back already"), "{left}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.position, 3.0);
     // Back as it was: back already.
     state(|s| s.tracks[1].items.iter_mut().find(|i| i.guid == "{ITEM-K1}").unwrap().position = was.position);
     let again = lab.undo("item-delete", &preview, &applied).unwrap();
@@ -722,4 +870,35 @@ fn a_fake_take_is_a_media_take_with_no_buffer_unless_given_one() {
     // (the fixture the tests above build on)
     let take = FakeTake::wave("{T}", "x.wav");
     assert!(take.more.raw.is_none() && take.more.file.is_none());
+}
+
+// ----- what HISTORY draws (m4-tui) -----
+
+#[test]
+fn each_item_kind_tells_history_the_items_it_leaves_before_and_after() {
+    let lab = Lab::new();
+    let drawn = |applied: &Value, side: &str| -> Vec<(f64, f64)> {
+        applied["display"]["items"][side]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["start"].as_f64().unwrap(), item["length"].as_f64().unwrap()))
+            .collect()
+    };
+    let (_, applied) = lab.make("item-move", json!({"ref": K1, "position": 4.0}));
+    assert_eq!((drawn(&applied, "before"), drawn(&applied, "after")), (vec![(0.0, 2.0)], vec![(4.0, 2.0)]));
+    let item = &applied["display"]["items"]["after"][0];
+    assert_eq!((item["name"].as_str(), item["at"].as_str()), (Some("kick.wav"), Some("bar 3")), "named, and where in the ruler's words");
+    let (_, applied) = lab.make("item-split", json!({"ref": K1, "position": 5.0}));
+    assert_eq!(
+        (drawn(&applied, "before"), drawn(&applied, "after")),
+        (vec![(4.0, 2.0)], vec![(4.0, 1.0), (5.0, 1.0)]),
+        "whole, then both parts"
+    );
+    let (_, applied) = lab.make("item-fade", json!({"ref": K1, "fadeOut": {"length": 0.25}}));
+    assert_eq!(applied["display"]["items"]["after"][0]["fadeOut"], 0.25);
+    let (_, applied) = lab.make("item-delete", json!({"ref": S1}));
+    assert_eq!((drawn(&applied, "before").len(), drawn(&applied, "after").len()), (1, 0));
+    let (_, applied) = lab.make("item-add", json!({"ref": KICK, "position": 8.0, "length": 2.0}));
+    assert_eq!((drawn(&applied, "before"), drawn(&applied, "after")), (vec![], vec![(8.0, 2.0)]));
 }

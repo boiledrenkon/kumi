@@ -13,6 +13,7 @@ local refs = import("refs")
 local base = import("changes_base")
 local presets = import("changes_presets")
 local json = import("json")
+local instruments_ = import("instruments")
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -170,13 +171,7 @@ local function new_work_file(env)
 end
 
 -- Runs fn with the instrument selected (save_instrument and load_instrument act on the selected one), then selects what was.
-local function with_selected(song, i, fn)
-  local before = song.selected_instrument_index
-  song.selected_instrument_index = i
-  local ok, err = pcall(fn)
-  if before >= 1 and before <= #song.instruments then song.selected_instrument_index = before end
-  if not ok then error(err, 0) end
-end
+local with_selected = import("changes_instruments").with_selected
 
 -- macro_read {ref, epoch, layout}: an instrument's macros and their mappings as Renoise's API reads them (no file).
 function M.read(params, env)
@@ -291,7 +286,7 @@ end
 local function load_file(song, env, i, file, name)
   with_selected(song, i, function()
     env.replacing_instrument(i, function()
-      local loaded = renoise.app():load_instrument(file)
+      local loaded = instruments_.load_xrni(song, i, file)
       if loaded == false then error({ code = "failed", message = "Renoise couldn't load the instrument file Kumi's host made" }, 0) end
     end)
     if type(name) == "string" then song:instrument(i).name = name end

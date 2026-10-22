@@ -19,6 +19,9 @@ pub use objects::*;
 // m4-r-fxenv: FX in any chain, envelopes, points and automation items.
 mod fxenv;
 pub use fxenv::{EnvPoint, EqParam};
+// M5 listening (m5-reaper): render settings, the audio device, sources, previews, accessors.
+mod audio;
+pub use audio::*;
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;
@@ -95,6 +98,8 @@ pub enum Busy {
     /// The main thread has been running one request for longer than a stall: a plug-in loading, or a dialog that request
     /// opened (a licence prompt), which nothing else can get past.
     Working,
+    /// M5 listening (m5-reaper): a render Kumi asked for is queued or running (it holds the main thread inside REAPER's).
+    KumiRender,
 }
 
 impl Busy {
@@ -105,6 +110,7 @@ impl Busy {
             Busy::Modal => "modal",
             Busy::Starting => "starting",
             Busy::Working => "working",
+            Busy::KumiRender => "rendering",
         }
     }
 
@@ -115,6 +121,7 @@ impl Busy {
             Busy::Modal => "REAPER isn't answering: a dialog may be open",
             Busy::Starting => "REAPER is starting",
             Busy::Working => "REAPER is still running a long request (a plug-in loading, or a dialog that request opened)",
+            Busy::KumiRender => "REAPER is rendering for Kumi",
         }
     }
 }
@@ -174,6 +181,12 @@ impl<'a> Reaper<'a> {
             None => String::new(),
         };
         Some(ProjectInfo { ptr: Project(proj), path, name })
+    }
+
+    /// The folder REAPER keeps a project's recorded media in (its own, or the default path when it has none).
+    pub fn project_media_folder(&self, proj: Project) -> Option<String> {
+        let f = self.api.GetProjectPathEx()?;
+        Some(api::read_buffer(|buf, size| unsafe { f(proj.0, buf, size) })).filter(|path| !path.is_empty())
     }
 
     pub fn is_dirty(&self, proj: Project) -> bool {

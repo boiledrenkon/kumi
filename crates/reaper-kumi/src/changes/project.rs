@@ -208,12 +208,44 @@ pub fn marker_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if let Some(base) = base {
         applied["base"] = base;
     }
+    // Where it is in beats: in beats timebase an earlier tempo change moves it in seconds, and its undo finds it there.
+    if let Some(qn) = reaper.quarter_notes_at(ctx.proj, plan.time) {
+        applied["qn"] = qn.into();
+    }
     Ok(Applied { applied, created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}), ..Default::default() })
+}
+
+/// Kumi's marker for an undo: at its time, else where its quarter note is now when the marker there is as Kumi left it
+/// (an earlier tempo change moved it in seconds, in beats timebase). `changed` when it is in neither place but a marker
+/// as Kumi left it is elsewhere: the producer moved it, and the undo can't tell it apart, discard or not.
+fn kumis_marker(ctx: &Ctx, restore: &Restore, time: f64) -> Done<(f64, Option<(i32, TempoMarker)>)> {
+    if let Some(found) = marker_at(ctx, time) {
+        return Ok((time, Some(found)));
+    }
+    if restore.applied["exists"] != true {
+        return Ok((time, None));
+    }
+    if let Some(moved) = restore.applied["qn"].as_f64().and_then(|qn| ctx.reaper.time_at_quarter_notes(ctx.proj, qn)) {
+        if let Some(found) = marker_at(ctx, moved).filter(|(_, m)| same_marker(&marker_state(Some(m)), restore.applied)) {
+            return Ok((moved, Some(found)));
+        }
+    }
+    let elsewhere = (0..ctx.reaper.tempo_marker_count(ctx.proj))
+        .filter_map(|i| ctx.reaper.tempo_marker(ctx.proj, i))
+        .any(|m| same_marker(&marker_state(Some(&m)), restore.applied));
+    if elsewhere {
+        return Err(changed(format!(
+            "the tempo marker Kumi set at {} isn't there any more (moved or deleted in REAPER since), and one like it is \
+             elsewhere: Kumi can't tell whether that one is it, so it leaves the tempo map as it is, even with discard",
+            bar_text(ctx.reaper, ctx.proj, time)
+        )));
+    }
+    Ok((time, None))
 }
 
 pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let time = restore.target["time"].as_f64().ok_or_else(|| bad("target: the marker's time"))?;
-    let found = marker_at(ctx, time);
+    let (time, found) = kumis_marker(ctx, restore, time)?;
     let now = marker_state(found.as_ref().map(|(_, m)| m));
     let title = format!("Tempo marker at {} put back", bar_text(ctx.reaper, ctx.proj, time));
     if same_marker(&now, restore.prior) {
@@ -282,10 +314,12 @@ pub fn marker_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Appl
     if !ctx.reaper.delete_tempo_marker(ctx.proj, index) || ctx.reaper.tempo_marker_count(ctx.proj) >= count {
         return Err(failed("REAPER wouldn't delete the tempo marker"));
     }
+    // The tempo map as the delete left it: changed since, the marker made again at its old time would sit at another bar.
+    let tempo = super::marks::tempo_print(ctx.reaper, ctx.proj);
     Ok(Applied {
         applied: json!({"deleted": true}),
         created: None,
-        material: Some(json!({"time": marker.time, "state": now})),
+        material: Some(json!({"time": marker.time, "state": now, "tempo": tempo})),
         display: json!({"title": format!("Deleted tempo marker at {}", bar_text(ctx.reaper, ctx.proj, marker.time))}),
         ..Default::default()
     })
@@ -309,6 +343,7 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             )))
         };
     }
+    super::marks::tempo_unmoved(ctx, material, restore.discard, "the tempo marker")?;
     if !put_marker(ctx, -1, time, saved) {
         return Err(failed("REAPER wouldn't make the tempo marker again"));
     }
@@ -343,9 +378,14 @@ fn loop_wanted(ctx: &Ctx, input: &Value) -> Done<Value> {
 fn loop_title(ctx: &Ctx, state: &Value) -> String {
     let (start, end) = (number(state, "start"), number(state, "end"));
     if start == 0.0 && end == 0.0 {
-        "Loop cleared".into()
-    } else {
-        format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end))
+        return "Loop cleared".into();
+    }
+    // (m6-places) Whole bars as a producer counts them: from bar 9's start to bar 17's is bars 9–16.
+    let bar = |time: f64| ctx.reaper.bar_and_beat_at(ctx.proj, time).filter(|(_, beat)| beat.abs() < 0.005).map(|(measure, _)| measure + 1);
+    match (bar(start), bar(end)) {
+        (Some(first), Some(after)) if after == first + 1 => format!("Loop bar {first}"),
+        (Some(first), Some(after)) if after > first + 1 => format!("Loop bars {first}–{}", after - 1),
+        _ => format!("Loop {} to {}", bar_text(ctx.reaper, ctx.proj, start), bar_text(ctx.reaper, ctx.proj, end)),
     }
 }
 
@@ -455,6 +495,78 @@ pub fn repeat_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"on": prior}),
         display: json!({"title": format!("Repeat back {}", on_off(prior))}),
+        unwritten: now == prior,
+    })
+}
+
+// ----- the metronome (m6-places) -----
+
+/// The project's metronome options (`projmetroen`): 1 is the metronome on; the other bits are its count-in and recording
+/// options, which a switch leaves as they are.
+fn metronome_flags(ctx: &Ctx) -> Done<i64> {
+    ctx.reaper
+        .config_text("projmetroen")
+        .and_then(|text| text.trim().parse::<i64>().ok())
+        .ok_or_else(|| failed("this REAPER can't say whether its metronome is on"))
+}
+
+fn metronome_on(ctx: &Ctx) -> Done<bool> {
+    Ok(metronome_flags(ctx)? & 1 != 0)
+}
+
+/// Switches the metronome, then reads it back: REAPER keeps it in the project's settings, outside its undo history.
+fn set_metronome(ctx: &Ctx, on: bool) -> Done<()> {
+    let flags = metronome_flags(ctx)?;
+    let wanted = if on { flags | 1 } else { flags & !1 };
+    if ctx.reaper.set_config_text("projmetroen", &wanted.to_string()) == 0 {
+        return Err(failed("REAPER wouldn't switch its metronome"));
+    }
+    if metronome_on(ctx)? != on {
+        return Err(failed("REAPER kept its metronome as it was"));
+    }
+    Ok(())
+}
+
+pub fn metronome_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+    let on = wanted_repeat(input)?;
+    let now = json!({"on": metronome_on(ctx)?});
+    let mut display = json!({"title": format!("Metronome {}", on_off(on)), "before": now, "after": {"on": on}});
+    if now["on"] == on {
+        display["unchanged"] = true.into();
+    }
+    Ok(Preview { target: json!({"ref": null, "kind": "project"}), prior: now.clone(), fence: now, display })
+}
+
+pub fn metronome_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+    let on = wanted_repeat(input)?;
+    let now = metronome_on(ctx)?;
+    if now != (fence["on"] == true) {
+        return Err(changed("the metronome was switched since the preview"));
+    }
+    if now != on {
+        set_metronome(ctx, on)?;
+    }
+    Ok(Applied {
+        applied: json!({"on": on}),
+        created: None,
+        material: None,
+        display: json!({"title": format!("Metronome {}", on_off(on))}),
+        unwritten: now == on,
+    })
+}
+
+pub fn metronome_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
+    let (prior, applied) = (restore.prior["on"] == true, restore.applied["on"] == true);
+    let now = metronome_on(ctx)?;
+    if now != prior {
+        if !restore.discard && now != applied {
+            return Err(changed("the metronome has been switched in REAPER since Kumi switched it"));
+        }
+        set_metronome(ctx, prior)?;
+    }
+    Ok(Restored {
+        restored: json!({"on": prior}),
+        display: json!({"title": format!("Metronome back {}", on_off(prior))}),
         unwritten: now == prior,
     })
 }

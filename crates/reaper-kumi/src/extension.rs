@@ -90,6 +90,8 @@ pub struct Snapshot {
     /// loading, a big take). That request's socket waits for its answer as long as the request allows; others are told
     /// REAPER is busy once it has run longer than a stall.
     pub working: Option<Instant>,
+    /// M5 listening (m5-reaper): the jobs and the preview, which the socket threads answer for themselves.
+    pub listening: Arc<crate::listening::Board>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -150,7 +152,7 @@ struct Sent {
 }
 
 /// How long the set of track GUIDs a project had may be before it is read again when the project changes.
-const WATCH_REFRESH: Duration = Duration::from_millis(250);
+pub(crate) const WATCH_REFRESH: Duration = Duration::from_millis(250);
 /// The most track GUIDs kept to tell one project from another.
 const WATCH_TRACKS: i32 = 2000;
 
@@ -241,10 +243,13 @@ pub struct Extension {
     last_heartbeat: Cell<Option<Instant>>,
     focus_value: RefCell<Value>,
     focus_at: Cell<Option<Instant>>,
+    /// M5 listening (m5-reaper): renders, captures, previews, scratch copies.
+    listening: crate::listening::Listening,
 }
 
 impl Extension {
     pub fn new(api: Api, jobs: Receiver<Job>, out: Box<dyn Outbox>, snapshot: Arc<Mutex<Snapshot>>) -> Extension {
+        let board = snapshot.lock().unwrap_or_else(|e| e.into_inner()).listening.clone();
         let extension = Extension {
             api,
             reads: Reads::default(),
@@ -266,6 +271,7 @@ impl Extension {
             last_heartbeat: Cell::new(None),
             focus_value: RefCell::new(Value::Null),
             focus_at: Cell::new(None),
+            listening: crate::listening::Listening::new(board),
         };
         extension.refresh_snapshot(None);
         extension
@@ -321,11 +327,26 @@ impl Extension {
     /// The extension is going: a plan's open undo block is closed.
     pub fn stop(&self) {
         self.changes.stop(&self.reaper(), &self.reads);
+        // M5 listening (m5-reaper): the preview stops, the hook comes out, what runs ends.
+        self.listening.stop(&self.reaper());
+    }
+
+    /// M5 listening (m5-reaper): where renders and captures go, once the reference names Kumi's folder.
+    pub fn set_listening_folder(&self, folder: std::path::PathBuf) {
+        self.listening.set_folder(folder);
+    }
+
+    /// Kumi's own folder: a file in it is copied into the project's media folder before a change makes REAPER play it.
+    pub fn set_kumi_folder(&self, folder: std::path::PathBuf) {
+        self.reads.set_kumi_folder(folder);
     }
 
     pub fn tick(&self, driver: Driver) {
         // A request's REAPER call can call back into the surface (Run included): that tick is skipped.
         if self.in_tick.replace(true) {
+            // M5 listening (m5-reaper): REAPER's render loop ticks while Kumi's render holds the main thread: the socket
+            // threads are told it renders, and a cancel presses the render window's Cancel; nothing else runs.
+            self.listening.nested(&self.snapshot, &*self.out);
             return;
         }
         // Cleared on the way out whatever happens, so one panic caught above doesn't skip every later tick.
@@ -348,10 +369,16 @@ impl Extension {
         if busy.is_none() && !blocked {
             self.run_jobs();
         }
+        // M5 listening (m5-reaper): a preview's end and a capture's drain each tick; a track's items, a planned render (held
+        // inside REAPER's render until it ends) and the first scratch sweep only while REAPER is free.
+        self.listening.tick(&self.reaper(), &self.reads, busy.is_none() && !blocked, &self.snapshot, &*self.out);
         if busy.is_none() {
             self.poll_focus();
-            // The producer's undo of Kumi's changes; a plan left open.
-            self.changes.tick(&self.reaper(), &self.reads, &*self.out);
+            // The producer's undo of Kumi's changes; a plan left open. An undo or redo may bring back scratch copies Kumi
+            // dropped (they were bare edits inside the producer's points): they're swept again.
+            if self.changes.tick(&self.reaper(), &self.reads, &*self.out) {
+                self.listening.undo_moved(&self.reaper(), &*self.out);
+            }
         }
         self.flush_events();
         self.refresh_snapshot(busy);
@@ -415,6 +442,7 @@ impl Extension {
             "quit" => self.quit(params),
             "read" => self.reads.read(&self.reaper(), params),
             "snapshot" => self.reads.snapshot(&self.reaper()),
+            "digest" => self.reads.digest(&self.reaper(), params),
             "focus_body" => self.reads.focus_body(&self.reaper(), params),
             "change_preview" => self.changes.preview(&self.reaper(), &self.reads, params),
             "change_apply" => self.changes.apply(&self.reaper(), &self.reads, params),
@@ -429,6 +457,12 @@ impl Extension {
             // (r-tracks) Saving: actions, no change.
             "project_save" => self.changes.project_save(&self.reaper(), &self.reads, params),
             "track_template_save" => self.changes.track_template_save(&self.reaper(), &self.reads, params),
+            // M5 listening (m5-reaper).
+            "render_start" => self.listening.render_start(&self.reaper(), &self.reads, params),
+            "capture_start" => self.listening.capture_start(&self.reaper(), &self.reads, params),
+            "audition" => self.listening.audition(&self.reaper(), params),
+            "audio_file" => self.listening.audio_file(&self.reaper(), &self.reads, params),
+            "scratch" => self.listening.scratch(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }
@@ -517,6 +551,8 @@ impl Extension {
             "api": {"resolved": self.api.resolved(), "total": api::FUNCTION_COUNT},
             "ticksPerSecond": {"timer": rates.timer_hz, "surface": rates.surface_hz},
         });
+        // M5 listening (m5-reaper): what listening can do now.
+        status["listening"] = self.listening.flags(&reaper);
         let missing = reaper.missing_features();
         if !missing.is_empty() {
             status["missing"] =
@@ -558,11 +594,14 @@ impl Extension {
             if let Some(info) = info.as_ref().filter(|_| replaced) {
                 self.reads.project_replaced(info.ptr);
             }
+            // M5 listening (m5-reaper): scratch copies an earlier session left in the project now in front are swept.
+            self.listening.project_changed(&reaper, &*self.out);
         }
         // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
         if let Some(info) = info.as_ref().filter(|_| settled) {
             self.reads.note_project(info.ptr);
             self.reads.project_id(&reaper, info.ptr, info);
+            self.reads.keep_project_id(&reaper, info.ptr, info);
         }
         if (changed && !first) || replaced {
             self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
@@ -885,7 +924,7 @@ mod tests {
             (&body["kind"], &body["epoch"], &body["routes"][0]["destRef"]),
             (&json!("routing"), &read["epoch"], &json!("r:track:{DDDD}"))
         );
-        assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "mixer"})).unwrap_err().0, "bad-params");
+        assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "console"})).unwrap_err().0, "bad-params");
     }
 
     fn focus_of(extension: &Extension) -> Value {
@@ -1078,6 +1117,42 @@ mod tests {
         set_id(Some(OWN_ID));
         assert_eq!(project_id(&extension, &tx), OWN_ID);
         assert_eq!(ask_with(&extension, &tx, "snapshot", json!({})).unwrap()["project"]["id"], OWN_ID);
+    }
+
+    /// m6-places: the id a saved project is named by goes into it, so its place holds through a Save As (as Live's Sets
+    /// do); a project made from a template gets its own over the template's at its first save, and an unsaved one none.
+    #[test]
+    fn a_saved_projects_path_id_is_written_into_it_and_a_save_as_keeps_it() {
+        let (extension, tx, _, _) = setup();
+        let stored = || fake::with(|s| s.project_ext.get(&("kumi".to_string(), "project".to_string())).cloned());
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let song = crate::read::path_id("/lab/Projects/Song.rpp");
+        assert_eq!(stored().as_deref(), Some(song.as_str()), "written into the project");
+        assert_eq!(project_id(&extension, &tx), song.as_str());
+        fake::with(|s| s.project = Some(("/lab/Projects/Song v2.rpp".into(), "Song v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), song.as_str(), "a Save As is the same place");
+        // An id of its own is never written over.
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(stored().as_deref(), Some(OWN_ID));
+        // From a template: nothing while unsaved; at the first save, the project's own over the template's.
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!((project_id(&extension, &tx), stored().as_deref()), (Value::Null, Some(TEMPLATE_ID)));
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix.rpp".into(), "Mix.rpp".into())));
+        extension.tick(Driver::Timer);
+        let mix = crate::read::path_id("/lab/Projects/Mix.rpp");
+        assert_eq!((project_id(&extension, &tx), stored()), (Value::String(mix.clone()), Some(mix.clone())));
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix v2.rpp".into(), "Mix v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), mix.as_str());
+        // An unsaved project with none: none written.
+        fake::reset();
+        extension.tick(Driver::Timer);
+        assert_eq!((project_id(&extension, &tx), stored()), (Value::Null, None));
     }
 
     #[test]
@@ -1282,8 +1357,10 @@ mod tests {
         extension.tick(Driver::Timer);
         assert_eq!(epoch_and_identity(&extension, &tx), unsaved);
         assert_eq!(project_id(&extension, &tx), crate::read::path_id("/lab/Projects/Mix.rpp"), "still not the template's id: its path's");
-        // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks.
+        // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks. (The
+        // file carries the template's id: the fake keeps one project's values, so the opened file's are set here.)
         project_with_history("/lab/Projects/Template copy.rpp", 1);
+        set_id(Some(TEMPLATE_ID));
         extension.tick(Driver::Timer);
         assert_ne!(epoch_and_identity(&extension, &tx), unsaved);
         assert_eq!(project_id(&extension, &tx), TEMPLATE_ID, "a copy of a file shares its place");

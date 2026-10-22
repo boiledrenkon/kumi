@@ -56,12 +56,24 @@ local function epoch_check(params, env)
   end
 end
 
+-- Ends an audition where its instrument, track and sample are now (an instrument or track made or deleted while it played
+-- moves them). Where they went can't be told: every note stops (Renoise's panic), so none hangs on, and the status bar says so.
 local function stop_one(song, playing)
+  local i, t, s = playing.instrument, playing.track, playing.sample
+  if playing.follow then
+    local ok, now_i, now_t, now_s = pcall(playing.follow)
+    if not ok or not now_i or not now_t or (s and not now_s) then
+      pcall(function() song.transport:panic() end)
+      pcall(function() renoise.app():show_status("Kumi stopped every note: what it auditioned moved while it played") end)
+      return
+    end
+    i, t, s = now_i, now_t, now_s
+  end
   pcall(function()
-    if playing.sample then
-      song:trigger_sample_note_off(playing.instrument, playing.sample, playing.track, playing.notes[1])
+    if s then
+      song:trigger_sample_note_off(i, s, t, playing.notes[1])
     else
-      song:trigger_instrument_note_off(playing.instrument, playing.track, playing.notes)
+      song:trigger_instrument_note_off(i, t, playing.notes)
     end
   end)
 end
@@ -139,7 +151,17 @@ function M.audition(params, env)
     end
   end)
   if not ok then fail("failed", "Renoise wouldn't play it: " .. tostring(err):gsub("^[^%s:]*%.lua:%d+: ", "")) end
-  M.playing[#M.playing + 1] = { instrument = i, track = t, notes = notes, sample = sample, until_ms = env.now_ms() + duration }
+  -- (where it plays, followed to its note-off: the instruments' and the sample list's marks, and the track layout, now)
+  local imark = env.instrument_mark and env.instrument_mark() or nil
+  local layout = env.layout and env.layout() or nil
+  local smark = sample and env.list_mark and env.list_mark("samples", i) or nil
+  local follow = function()
+    local now_i = imark and env.instrument_at and env.instrument_at(i, imark) or nil
+    local now_t = type(layout) == "number" and env.shifted and env.shifted(t, layout) or nil
+    local now_s = (sample and now_i and smark and env.list_at) and env.list_at("samples", now_i, nil, sample, smark) or nil
+    return now_i, now_t, now_s
+  end
+  M.playing[#M.playing + 1] = { instrument = i, track = t, notes = notes, sample = sample, until_ms = env.now_ms() + duration, follow = follow }
   local names = {}
   for k, value in ipairs(notes) do names[k] = note_name(value) end
   local instrument = song:instrument(i)
@@ -220,10 +242,11 @@ function M.select(params, env)
   if params.line ~= nil then
     local p = song.sequencer.pattern_sequence[plan.sequence or song.selected_sequence_index]
     local lines = song:pattern(p).number_of_lines
-    if type(params.line) ~= "number" or params.line ~= math.floor(params.line) or params.line < 1 or params.line > lines then
-      bad(string.format("line is a line of that pattern, from 1 to %d", lines))
+    -- (Renoise's number, from 0)
+    if type(params.line) ~= "number" or params.line ~= math.floor(params.line) or params.line < 0 or params.line >= lines then
+      bad(string.format("line is a line of that pattern, from 0 to %d", lines - 1))
     end
-    plan.line = params.line
+    plan.line = params.line + 1
   end
   local W = renoise.ApplicationWindow
   if params.frame ~= nil then
@@ -256,7 +279,7 @@ function M.select(params, env)
   if plan.phrase then set("the phrase", function() song.selected_phrase_index = plan.phrase end) end
   if plan.sequence and set("the slot", function() song.selected_sequence_index = plan.sequence end) then said[#said + 1] = "slot " .. plan.sequence end
   -- (Renoise moves the edit line a moment later: measured)
-  if plan.line and set("the line", function() song.selected_line_index = plan.line end) then said[#said + 1] = "line " .. plan.line end
+  if plan.line and set("the line", function() song.selected_line_index = plan.line end) then said[#said + 1] = string.format("line %02d", plan.line - 1) end
   local window = renoise.app().window
   if plan.frame and set("the frame", function() window.active_middle_frame = plan.frame end) then
     said[#said + 1] = "the " .. params.frame .. (params.frame == "mixer" and "" or " view")
@@ -281,7 +304,7 @@ function M.select(params, env)
       sampleRef = plan.sample and refs.make(epoch, "sample", plan.instrument, plan.sample) or nil,
       phraseRef = plan.phrase and refs.make(epoch, "phrase", plan.instrument, plan.phrase) or nil,
       sequenceRef = plan.sequence and refs.make(epoch, "seq", plan.sequence) or nil,
-      line = plan.line, frame = params.frame, lower = params.lower, matrix = plan.matrix,
+      line = plan.line and plan.line - 1, frame = params.frame, lower = params.lower, matrix = plan.matrix,
     },
     display = {
       title = #said > 0 and ("Selected " .. table.concat(said, ", ")) or "Showed what was asked",
@@ -296,21 +319,32 @@ end
 -- write in (it stops at a modal error otherwise): measured in 3.5.4.
 local function folder_of(path) return path:match("^(.*)[/\\][^/\\]+$") end
 
-local function save_as(path)
-  local absolute = path:match("^/") or path:match("^%a:[/\\]")
-  if not absolute or not path:lower():match("%.xrns$") then bad("path is a whole path to a .xrns file") end
-  local folder = folder_of(path)
-  if not folder or folder == "" or not io.exists(folder) then bad("there is no folder " .. tostring(folder) .. " (Renoise would stop at a dialog)") end
-  if io.exists(path) then bad(path .. " is there already: Kumi doesn't save over another file") end
-  -- (a folder Renoise can't write in would show a dialog too: tried first)
+-- A folder Renoise can save into: there, and writable (else Renoise stops at a modal error, its timers with it): tried first.
+-- `why` ends the refusal (what to do instead).
+local function check_folder(folder, why)
+  if not folder or folder == "" or not io.exists(folder) then bad("there is no folder " .. tostring(folder) .. " (Renoise would stop at a dialog)" .. why) end
+  -- (stock os.remove is ANSI on Windows: a probe in a folder named outside it would stay there, so there the folder's mode is read)
+  if folder:find("[\128-\255]") then
+    local stat = io.stat(folder)
+    if stat and type(stat.mode) == "number" and math.floor(stat.mode / 128) % 2 == 0 then bad("Renoise can't write in " .. folder .. why) end
+    return
+  end
   local probe = folder .. "/.kumi-save-check"
   local file = io.open(probe, "wb")
   if file then
     file:close()
     os.remove(probe)
   else
-    bad("Renoise can't write in " .. folder)
+    bad("Renoise can't write in " .. folder .. why)
   end
+end
+
+local function save_as(path)
+  local absolute = path:match("^/") or path:match("^%a:[/\\]")
+  if not absolute or not path:lower():match("%.xrns$") then bad("path is a whole path to a .xrns file") end
+  local folder = folder_of(path)
+  check_folder(folder, "")
+  if io.exists(path) then bad(path .. " is there already: Kumi doesn't save over another file") end
   renoise.app():save_song_as(path)
 end
 
@@ -326,6 +360,8 @@ function M.project_save(params, env)
   if path ~= nil and (type(path) ~= "string" or path == "") then bad("path: a whole path to a .xrns file to save the song as") end
   if path == nil or path == own then
     if own == "" then bad("the song has never been saved: give path, a .xrns file to save it as") end
+    -- (its own folder may be gone, renamed or read-only since it was opened: checked as Save As checks a new one)
+    check_folder(folder_of(own), ": give path, a .xrns file to save the song as somewhere else")
     renoise.app():save_song()
     -- (`dirty`: whether the song has changes no file holds, as REAPER's save answers; none, just saved)
     return { epoch = env.epoch(), saved = own, dirty = false, display = { title = "Saved the song" } }

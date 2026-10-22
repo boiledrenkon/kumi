@@ -140,7 +140,7 @@ local function note_value(l, col) return mock.song:pattern(1):track(3):line(l):n
 T.instruments = {
   setup = setup, place = place, preview = preview, apply = apply, change = change, restore = restore, failure = failure, call = call,
   steps = steps, newest = newest, instrument = instrument, names = names, iref = iref, sref = sref, note_at = note_at, note_value = note_value,
-  send = send, wait = wait,
+  send = send, wait = wait, told = told,
 }
 
 -- instrument-rename
@@ -202,7 +202,7 @@ test("places, instrument × insert, delete before, swap: Kumi's undo follows the
       mock.ops.swap_instruments(2, 3)
       at = 3
     else
-      change(peer, "instrument-add", { index = 1, name = "Made" })
+      change(peer, "instrument-add", { index = 0, name = "Made" })
       at = 3
     end
     eq(instrument(at).name, "Acid", how)
@@ -304,7 +304,7 @@ end)
 test("instruments: an instrument added at 1 renumbers the notes after it (Renoise's own doing); Kumi's undo takes it away", function()
   local env, peer = setup()
   note_at(1, 1) -- plays Bass synth (value 1)
-  local record, done = change(peer, "instrument-add", { index = 1, name = "Lead" })
+  local record, done = change(peer, "instrument-add", { index = 0, name = "Lead" })
   eq(names(), "Lead,Drums,Bass synth,Pad")
   eq(note_value(1), 2, "the note still plays Bass synth")
   eq(done.created.kind, "instrument")
@@ -337,7 +337,7 @@ end)
 
 test("instruments: the producer's undo of Kumi's add is told, and Kumi's undo after it is gone", function()
   local env, peer = setup()
-  local record = change(peer, "instrument-add", { index = 2 }, "Kumi: add (k300)")
+  local record = change(peer, "instrument-add", { index = 1 }, "Kumi: add (k300)")
   told(peer)
   mock.song:undo()
   local events = told(peer)
@@ -408,6 +408,37 @@ test("instruments: a note the producer wrote where Kumi's kept note was isn't ov
   ok(undone.result.display.note:find("weren't put back", 1, true), undone.result.display.note)
 end)
 
+test("instruments: Kumi's undo of a delete leaves out the notes of a pattern whose lines changed since (rows may have moved), and says so", function()
+  local env, peer = setup()
+  note_at(1, 1)
+  note_at(3, 1)
+  local record = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  -- (the producer inserts rows in the pattern: Renoise moves every line, Kumi's cleared cells too, which the tool sees only as
+  -- lines that changed)
+  mock.ops.set_note(1, 3, 9, 1, { note = 60, instrument = 0 })
+  H.tick(2)
+  local undone = restore(peer, "instrument-delete", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(names(), "Drums,Bass synth,Pad", "the instrument is back")
+  eq(note_value(1), 255, "nothing written where the lines may have moved")
+  eq(note_value(3), 255)
+  ok(undone.result.display.note:find("2 weren't put back", 1, true), undone.result.display.note)
+end)
+
+test("instruments: Kumi's undo of a delete puts its notes back where its own insert renumbers notes and tells the lines (#361 N-N17)", function()
+  local env, peer = setup()
+  note_at(1, 1)
+  note_at(3, 2) -- (Pad's note: Kumi's insert renumbers it)
+  mock.renumber_touches = true
+  local record = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  local undone = restore(peer, "instrument-delete", record)
+  mock.renumber_touches = nil
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(note_value(1), 1, "its note plays it again")
+  eq(note_value(3), 2, "Pad's note follows Pad")
+  ok(not (undone.result.display.note or ""):find("weren't put back", 1, true), tostring(undone.result.display.note))
+end)
+
 test("instruments: an instrument too big to keep isn't deleted, and the only instrument can't be", function()
   local env, peer = setup()
   instrument(2).samples[1].buffer.frames = 200 * 1024 * 1024
@@ -418,6 +449,96 @@ test("instruments: an instrument too big to keep isn't deleted, and the only ins
   eq(steps(), 0)
   env, peer = setup(nil, { instruments = 1, instrument_specs = { { name = "Only" } } })
   failure(call(peer, "change_preview", { kind = "instrument-delete", input = { ref = iref(place(peer), 1) }, epoch = place(peer) }), "bad-params")
+end)
+
+-- A setup whose payload has `from` replaced with `to` in `file` (a cap lowered for a test).
+local function patched(file, from, to)
+  return setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/" .. file
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local changed, count = text:gsub(from, to)
+    assert(count == 1, from .. " isn't in " .. file)
+    f = assert(io.open(path, "wb"))
+    f:write(changed)
+    f:close()
+  end })
+end
+
+test("instruments: a delete whose notes are more than its undo can write back, or too many to keep, refuses before anything is written (#361 N1, N16)", function()
+  for _, cap in ipairs({ { "changes_instruments.lua", "M%.MAX_KEPT_NOTES = 3500", "M.MAX_KEPT_NOTES = 1", "put back in one go" },
+    { "changes_base.lua", "M%.MAX_MATERIAL_BYTES = 8 %* 1024 %* 1024", "M.MAX_MATERIAL_BYTES = 200", "too many notes" } }) do
+    local env, peer = patched(cap[1], cap[2], cap[3])
+    note_at(1, 1)
+    note_at(5, 1)
+    local previewed, epoch, layout = preview(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+    local refused = apply(peer, "instrument-delete", { ref = iref(epoch, 2) }, "Kumi: d (k1)", previewed.fence, epoch, layout)
+    failure(refused, "failed")
+    ok(refused.error.message:find(cap[4], 1, true), refused.error.message)
+    ok(refused.error.message:find("delete it in Renoise", 1, true), "it says what the producer can do: " .. refused.error.message)
+    eq(#mock.data.instruments, 3, "the instrument is still there")
+    eq(note_value(1), 1, "its notes too")
+    eq(steps(), 0, "nothing written")
+  end
+end)
+
+test("instruments: in a big song Kumi's undo of an instrument it made looks for its notes in slices; notes refuse it, discard says it cleared them (#361 N10)", function()
+  local env, peer = patched("changes_instruments.lua", "M%.SCAN_BUDGET = 300000", "M.SCAN_BUDGET = 10")
+  local record = change(peer, "instrument-add", { index = 3, name = "Lead" })
+  note_at(1, 3) -- the producer plays it (its instrument value is 3: Renoise's 03)
+  note_at(5, 3)
+  local refused = restore(peer, "instrument-add", record)
+  failure(refused, "changed")
+  ok(refused.error.message:find("2 notes", 1, true), refused.error.message)
+  ok(not refused.error.message:find("discard", 1, true), "it doesn't point to discard: " .. refused.error.message)
+  eq(#mock.data.instruments, 4, "Lead stays")
+  local before = steps()
+  local forced = restore(peer, "instrument-add", record, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  ok((forced.result.display.note or ""):find("cleared the 2 notes", 1, true), "discard says what it cost: " .. tostring(forced.result.display.note))
+  eq(#mock.data.instruments, 3)
+  eq(steps(), before + 1, "one step")
+  -- nothing plays it: the sliced look ends in the undo
+  local plain = change(peer, "instrument-add", { name = "Empty" })
+  local undone = restore(peer, "instrument-add", plain)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#mock.data.instruments, 3)
+end)
+
+test("instruments: a delete's look counts reads, not lines: dense patterns under the line budget are looked through in a job (#361 N-S17)", function()
+  local env, peer = patched("changes_instruments.lua", "M%.SCAN_BUDGET = 300000", "M.SCAN_BUDGET = 700")
+  for p = 1, 2 do
+    for l = 1, 32 do
+      local column = mock.song:pattern(p):track(3):line(l):note_column(1)
+      column.note_value, column.instrument_value = 48, 0
+    end
+  end
+  note_at(1, 1)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, epoch, layout = preview(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  local id = send(peer, "change_apply", { kind = "instrument-delete", input = { ref = iref(epoch, 2) }, fence = previewed.fence, desc = "Kumi: d (k171)", epoch = epoch, layout = layout })
+  local answered = false
+  for _, line in ipairs(peer:frames(nil)) do
+    local frame = json.decode(line)
+    if frame.type == "response" and frame.id == id then answered = true end
+  end
+  ok(not answered, "not answered inside the request's own callback: a job looks")
+  local done = wait(peer, id, 800)
+  ok(done.result, json.encode(done.error or {}))
+  eq(#done.result.material.notes, 1)
+end)
+
+test("instruments: the copies kept for undo are bounded: past the bound the oldest goes, and its undo says the copy is gone (#361 N-S19)", function()
+  local env, peer = patched("instruments.lua", "M%.MAX_KEPT_FILES, M%.MAX_KEPT_BYTES = 256", "M.MAX_KEPT_FILES, M.MAX_KEPT_BYTES = 1")
+  local first = change(peer, "instrument-delete", { ref = iref(place(peer), 3) })
+  ok(io.exists(first.material.file), "kept")
+  local second = change(peer, "instrument-delete", { ref = iref(place(peer), 2) })
+  ok(io.exists(second.material.file), "the newest is kept")
+  eq(io.exists(first.material.file), false, "the oldest went")
+  local undone = restore(peer, "instrument-delete", first)
+  failure(undone, "failed")
+  ok(undone.error.message:find("is gone", 1, true), undone.error.message)
 end)
 
 test("instruments: a big song is looked through in slices before the delete, which is one step; a pattern changed meanwhile is looked at again", function()
@@ -456,10 +577,23 @@ local function saved_instrument(peer, i)
   return path
 end
 
+test("instruments: a zip named .xrni that isn't an instrument (a song renamed) is refused before Renoise's dialog (#361 N-N12)", function()
+  local env, peer = setup()
+  local path = mock.temp_dir .. "/renamed-song.xrni"
+  local f = assert(io.open(path, "wb"))
+  f:write("PK\3\4" .. string.rep("z", 200) .. "PK\1\2 Song.xml")
+  f:close()
+  local epoch = place(peer)
+  local refused = call(peer, "change_preview", { kind = "instrument-load", input = { path = path }, epoch = epoch })
+  failure(refused, "bad-params")
+  ok(refused.error.message:find("contents say otherwise", 1, true), refused.error.message)
+  os.remove(path)
+end)
+
 test("instruments: an .xrni, an .sfz and a sample file load into a new instrument; Kumi's undo takes it away", function()
   local env, peer = setup()
   local xrni = saved_instrument(peer, 2)
-  local record, done = change(peer, "instrument-load", { path = xrni, index = 1 })
+  local record, done = change(peer, "instrument-load", { path = xrni, index = 0 })
   eq(names(), "Bass synth,Drums,Bass synth,Pad")
   eq(done.created.kind, "instrument")
   eq(steps(), 1)
@@ -481,6 +615,81 @@ test("instruments: an .xrni, an .sfz and a sample file load into a new instrumen
   eq(instrument(5).name, "Clap")
   eq(instrument(5).samples[1].buffer.frames, 512)
   eq(mock.dialogs, 0)
+end)
+
+test("instruments: Renoise's empty instrument after a load into the last one is taken out again: a load at the end, into the last, a delete's undo", function()
+  local env, peer = setup()
+  local xrni = saved_instrument(peer, 2)
+  local record = change(peer, "instrument-load", { path = xrni, index = 3 })
+  eq(names(), "Drums,Bass synth,Pad,Bass synth", "no empty instrument after it")
+  ok(restore(peer, "instrument-load", record).result)
+  eq(names(), "Drums,Bass synth,Pad")
+  change(peer, "instrument-load", { path = xrni, ref = iref(place(peer), 3) })
+  eq(names(), "Drums,Bass synth,Bass synth", "loaded into Pad, the last, empty")
+  env, peer = setup()
+  record = change(peer, "instrument-delete", { ref = iref(place(peer), 3) })
+  eq(names(), "Drums,Bass synth")
+  ok(restore(peer, "instrument-delete", record).result)
+  eq(names(), "Drums,Bass synth,Pad")
+  H.no_dialogs()
+end)
+
+test("instruments: Renoise's undo and redo of an instrument loaded as the last one are told", function()
+  local env, peer = setup()
+  local xrni = saved_instrument(peer, 2)
+  change(peer, "instrument-load", { path = xrni, index = 3 }, "Kumi: load (k430)")
+  told(peer)
+  mock.song:undo()
+  eq(names(), "Drums,Bass synth,Pad")
+  local events = told(peer)
+  eq(#events, 1, "undone")
+  eq(events[1].data.how, "undo")
+  mock.song:redo()
+  eq(names(), "Drums,Bass synth,Pad,Bass synth")
+  events = told(peer)
+  eq(#events, 1, "redone")
+  eq(events[1].data.how, "redo")
+end)
+
+test("instruments: after Renoise's own undo and redo of an instrument Kumi added, duplicated or loaded, or a phrase it added, Kumi's undo takes it away; changed since: refused", function()
+  local cases = {
+    { "instrument-add", function(E) return { index = 3, name = "New" } end, "Drums,Bass synth,Pad" },
+    { "instrument-duplicate", function(E) return { ref = iref(E, 2) } end, "Drums,Bass synth,Pad" },
+    { "instrument-load", function(E, peer) return { path = saved_instrument(peer, 2), index = 0 } end, "Drums,Bass synth,Pad" },
+  }
+  for _, case in ipairs(cases) do
+    for _, changed in ipairs({ false, true }) do
+      local env, peer = setup()
+      local input = case[2](place(peer), peer)
+      local record, done = change(peer, case[1], input)
+      local made = done.created and done.created.ref
+      mock.song:undo()
+      eq(names(), "Drums,Bass synth,Pad", case[1] .. ": Renoise's undo")
+      mock.song:redo()
+      H.tick(2)
+      if changed then
+        -- (the producer adds a sample to it after the redo)
+        local i = tonumber(made:match(":(%d+)$"))
+        mock.song:instrument(i):insert_sample_at(1)
+      end
+      local undone = restore(peer, case[1], record)
+      if changed then
+        failure(undone, "changed")
+      else
+        ok(undone.result, case[1] .. ": what Renoise's redo made again is Kumi's: " .. json.encode(undone.error or {}))
+        eq(names(), case[3], case[1])
+      end
+    end
+  end
+  -- a phrase
+  local env, peer = setup()
+  local record = change(peer, "phrase-add", { ref = iref(place(peer), 3), name = "Hook" })
+  mock.song:undo()
+  mock.song:redo()
+  H.tick(2)
+  ok(restore(peer, "phrase-add", record).result, "the phrase Renoise's redo made again is Kumi's")
+  eq(#instrument(3).phrases, 0)
+  H.no_dialogs()
 end)
 
 test("instruments: a load into an empty instrument, refused into one that isn't; a missing file or a kind Renoise won't load is bad-params", function()
@@ -562,14 +771,14 @@ end)
 test("instruments: a move to 3 keeps the others in order and renumbers notes; Kumi's undo moves it back, refused after the producer moved others", function()
   local env, peer = setup()
   note_at(1, 0) -- Drums
-  local record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 3 })
+  local record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 2 })
   eq(names(), "Bass synth,Pad,Drums")
   eq(note_value(1), 2, "the note plays Drums still")
   local undone = restore(peer, "instrument-move", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(names(), "Drums,Bass synth,Pad")
   eq(note_value(1), 0)
-  record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 3 })
+  record = change(peer, "instrument-move", { ref = iref(place(peer), 1), index = 2 })
   mock.ops.insert_instrument_at(1, { name = "New" })
   failure(restore(peer, "instrument-move", record), "changed")
   eq(names(), "New,Bass synth,Pad,Drums")

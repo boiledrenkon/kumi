@@ -1,14 +1,14 @@
 //! A picture for every change: what a `ChangePicture` (DAW-neutral data) looks like on this terminal. An image where
 //! the terminal shows them (Kitty's graphics, through placeholder cells), braille and half-blocks in cells
 //! elsewhere, words on a basic console; and under it, each value that moved, with what was asked when the DAW set
-//! something else.
+//! something else. A tracker's lines and a route are words everywhere: the DAW's own text says them best.
 
 pub mod cells;
 pub mod kitty;
 pub mod raster;
 pub mod scene;
 
-use kumi_runtime::core::contracts::{ChangePicture, MixLevels, PictureValue};
+use kumi_runtime::core::contracts::{ChangePicture, MixLevels, PictureLine, PictureRoute, PictureValue, RouteChange};
 
 use super::alerts::TerminalProfile;
 use super::style::{palette, ColorDepth, Rgb, Style};
@@ -105,12 +105,69 @@ fn value_lines(value: &PictureValue, cols: usize) -> Vec<Vec<Span>> {
     vec![fit(line, cols), fit(vec![styled(format!("  {asked_words}"), palette::WARN)], cols)]
 }
 
+/// A tracker's line before and after, in the DAW's text: " 09 E-4 01 40 .. .. → OFF .. .. .. ..", or on two rows
+/// where that doesn't fit (the line before, then what it is now under it).
+fn tracker_lines(line: &PictureLine, cols: usize) -> Vec<Vec<Span>> {
+    // (as the tracker shows it: two digits at least, 00 the first line)
+    let number = format!("{:>3} ", format!("{:02}", line.line));
+    let side = |text: &str| if text.is_empty() { "(empty)".to_string() } else { text.to_string() };
+    let (before, after) = (side(&line.before), side(&line.after));
+    let one = text_width(&number) + text_width(&before) + 3 + text_width(&after);
+    if one as usize <= cols {
+        return vec![vec![
+            styled(number, palette::FAINT),
+            styled(before, palette::DIM),
+            styled(" → ", palette::FAINT),
+            styled(after, palette::TEXT),
+        ]];
+    }
+    vec![
+        fit(vec![styled(number, palette::FAINT), styled(before, palette::DIM)], cols),
+        fit(vec![styled("  → ", palette::FAINT), styled(after, palette::TEXT)], cols),
+    ]
+}
+
+/// A route's ends, and whether Kumi made it or took it away: "Bass → Reverb · new".
+fn route_line(route: &PictureRoute, cols: usize) -> Vec<Span> {
+    let mut line = vec![styled(route.from.clone(), palette::TEXT), styled(" → ", palette::FAINT), styled(route.to.clone(), palette::TEXT)];
+    match route.change {
+        RouteChange::Made => line.push(styled(" · new", palette::ACCENT)),
+        RouteChange::Removed => line.push(styled(" · taken away", palette::FAINT)),
+        RouteChange::Changed => {}
+    }
+    fit(line, cols)
+}
+
 /// The words of a picture: each value that moved, or what changed in notes and lanes.
 pub fn lines_of(picture: &ChangePicture, cols: usize) -> Vec<Vec<Span>> {
     match picture {
-        ChangePicture::Values { values } | ChangePicture::Eq { values, .. } | ChangePicture::Dynamics { values, .. } => {
-            values.iter().flat_map(|value| value_lines(value, cols)).collect()
+        ChangePicture::Values { values }
+        | ChangePicture::Eq { values, .. }
+        | ChangePicture::Dynamics { values, .. }
+        | ChangePicture::Zones { values, .. }
+        | ChangePicture::Items { values, .. } => values.iter().flat_map(|value| value_lines(value, cols)).collect(),
+        ChangePicture::Lines { lines, more } => {
+            let mut rows: Vec<Vec<Span>> = lines.iter().flat_map(|line| tracker_lines(line, cols)).collect();
+            if *more > 0 {
+                rows.push(fit(
+                    vec![styled(format!("    and {more} more {}", if *more == 1 { "line" } else { "lines" }), palette::FAINT)],
+                    cols,
+                ));
+            }
+            rows
         }
+        ChangePicture::Routes { routes } => routes
+            .iter()
+            .flat_map(|route| {
+                std::iter::once(route_line(route, cols)).chain(
+                    route
+                        .values
+                        .iter()
+                        .flat_map(|value| value_lines(value, cols.saturating_sub(2)))
+                        .map(|line| [vec![styled("  ", palette::TEXT)], line].concat()),
+                )
+            })
+            .collect(),
         ChangePicture::Notes { before, after, .. } => {
             let same = |a: &kumi_runtime::core::contracts::ClipNote, b: &kumi_runtime::core::contracts::ClipNote| {
                 a.pitch == b.pitch && (a.start - b.start).abs() < 1e-6 && (a.duration - b.duration).abs() < 1e-6
@@ -130,10 +187,15 @@ pub fn lines_of(picture: &ChangePicture, cols: usize) -> Vec<Vec<Span>> {
             }
             vec![fit(line, cols)]
         }
-        ChangePicture::Automation { parameter, before, after, .. } => {
+        ChangePicture::Automation { parameter, before, after, words, .. } => {
             let plural = |n: usize| format!("{n} point{}", if n == 1 { "" } else { "s" });
             let what = if parameter.is_empty() { String::new() } else { format!("{parameter} · ") };
-            vec![fit(vec![styled(format!("{what}{} → {}", before.len(), plural(after.len())), palette::TEXT)], cols)]
+            let mut lines = vec![fit(vec![styled(format!("{what}{} → {}", before.len(), plural(after.len())), palette::TEXT)], cols)];
+            // What it moves between and where, where the DAW said ("−18 to 0 dB over bars 5–9").
+            if let Some(words) = words {
+                lines.push(fit(vec![styled(words.clone(), palette::DIM)], cols));
+            }
+            lines
         }
         ChangePicture::Mix { before, after } => {
             mix_words(before, after).into_iter().map(|line| fit(vec![styled(line, palette::TEXT)], cols)).collect()
@@ -184,23 +246,37 @@ fn bars_of(picture: &ChangePicture, cols: usize) -> Option<Vec<Vec<Span>>> {
             })
             .collect()
     };
+    let value_bars = |values: &[PictureValue], cols: usize| -> Vec<Vec<Span>> {
+        values
+            .iter()
+            .flat_map(|value| {
+                let mut line = match (value.to, value.min, value.max) {
+                    (Some(to), Some(min), Some(max)) if max > min => bar(value.from, to, min, max),
+                    _ => Vec::new(),
+                };
+                let indent = if line.is_empty() { 0 } else { width + 1 };
+                if !line.is_empty() {
+                    line.push(styled(" ", palette::TEXT));
+                }
+                let mut words = value_lines(value, cols.saturating_sub(indent)).into_iter();
+                line.extend(words.next().unwrap_or_default());
+                // What was asked, when it took a line of its own, sits under the words.
+                std::iter::once(line).chain(words.map(move |more| [vec![styled(" ".repeat(indent), palette::TEXT)], more].concat()))
+            })
+            .collect()
+    };
     match picture {
-        ChangePicture::Values { values } => Some(
-            values
+        ChangePicture::Values { values } => Some(value_bars(values, cols)),
+        // Each route's ends, then its values as bars under them.
+        ChangePicture::Routes { routes } => Some(
+            routes
                 .iter()
-                .flat_map(|value| {
-                    let mut line = match (value.to, value.min, value.max) {
-                        (Some(to), Some(min), Some(max)) if max > min => bar(value.from, to, min, max),
-                        _ => Vec::new(),
-                    };
-                    let indent = if line.is_empty() { 0 } else { width + 1 };
-                    if !line.is_empty() {
-                        line.push(styled(" ", palette::TEXT));
-                    }
-                    let mut words = value_lines(value, cols.saturating_sub(indent)).into_iter();
-                    line.extend(words.next().unwrap_or_default());
-                    // What was asked, when it took a line of its own, sits under the words.
-                    std::iter::once(line).chain(words.map(move |more| [vec![styled(" ".repeat(indent), palette::TEXT)], more].concat()))
+                .flat_map(|route| {
+                    std::iter::once(route_line(route, cols)).chain(
+                        value_bars(&route.values, cols.saturating_sub(2))
+                            .into_iter()
+                            .map(|line| [vec![styled("  ", palette::TEXT)], line].concat()),
+                    )
                 })
                 .collect(),
         ),
@@ -333,15 +409,53 @@ mod tests {
 
     #[test]
     fn a_lane_says_its_parameter_and_its_points() {
-        let lane = |parameter: &str| ChangePicture::Automation {
+        let said = |parameter: &str, words: Option<&str>| ChangePicture::Automation {
             parameter: parameter.into(),
             min: -15.,
             max: 15.,
             before: vec![],
             after: vec![[0., 0.], [4., -8.]],
+            words: words.map(str::to_owned),
         };
+        let lane = |parameter: &str| said(parameter, None);
         assert_eq!(text(&lines_of(&lane("3 Gain A"), 40)), ["3 Gain A · 0 → 2 points"]);
         assert_eq!(text(&lines_of(&lane(""), 40)), ["0 → 2 points"]);
+        // (review U20) What it moves between and where, where the DAW said.
+        let volume = said("Volume", Some("−8 to 0 dB over bars 5–9"));
+        assert_eq!(text(&lines_of(&volume, 60)), ["Volume · 0 → 2 points", "−8 to 0 dB over bars 5–9"]);
+    }
+
+    #[test]
+    fn a_trackers_lines_read_before_and_after_and_fold_where_they_dont_fit() {
+        let line = PictureLine { line: 9, before: "E-4 01 40 .. ..".into(), after: "OFF .. .. .. ..".into() };
+        let picture = ChangePicture::Lines { lines: vec![line], more: 2 };
+        assert_eq!(text(&lines_of(&picture, 60)), [" 09 E-4 01 40 .. .. → OFF .. .. .. ..", "    and 2 more lines"]);
+        assert_eq!(text(&lines_of(&picture, 24)), [" 09 E-4 01 40 .. ..", "  → OFF .. .. .. ..", "    and 2 more lines"]);
+        let drawn = draw(&picture, 60, 6, Graphics::Cells, 1, palette::GROUND);
+        assert!(drawn.rows.is_empty() && drawn.image.is_none(), "words everywhere");
+        assert_eq!(text(&drawn.lines), text(&lines_of(&picture, 60)));
+    }
+
+    #[test]
+    fn a_route_says_its_ends_then_its_values_as_bars() {
+        let volume = PictureValue {
+            name: "Volume".into(),
+            from: Some(-12.),
+            to: Some(-6.),
+            min: Some(-60.),
+            max: Some(12.),
+            from_text: Some("−12 dB".into()),
+            to_text: Some("−6 dB".into()),
+            asked: None,
+        };
+        let route = |change| ChangePicture::Routes {
+            routes: vec![PictureRoute { from: "Bass".into(), to: "Reverb".into(), change, values: vec![volume.clone()] }],
+        };
+        let lines = text(&draw(&route(RouteChange::Changed), 40, 6, Graphics::Cells, 1, palette::GROUND).lines);
+        assert_eq!(lines[0], "Bass → Reverb");
+        assert!(lines[1].starts_with("  ") && lines[1].ends_with(" Volume −12 dB → −6 dB"), "{lines:?}");
+        assert_eq!(text(&lines_of(&route(RouteChange::Made), 40)), ["Bass → Reverb · new", "  Volume −12 dB → −6 dB"]);
+        assert_eq!(text(&lines_of(&route(RouteChange::Removed), 40))[0], "Bass → Reverb · taken away");
     }
 
     #[test]

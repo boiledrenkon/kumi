@@ -771,3 +771,38 @@ fn changes_say_what_became_of_them_without_undo_notes() {
     assert!(changes.iter().all(|change| change.get("note").is_none()), "{changes:?}");
     assert_eq!(changes[2]["state"], "unsure");
 }
+
+/// (m4-tui) REAPER's and Renoise's pictures are written out in words and pass the redactor: a tracker's lines, a route's
+/// ends and values, a keyzone's and items' values.
+#[test]
+fn a_tracker_route_keyzone_and_items_picture_say_their_words_and_pass_the_redactor() {
+    let mut conversation = conversation();
+    let value = |name: &str| json!({"name": format!("{name} {PLANTED}"), "fromText": "bar 5", "toText": format!("bar 6 {PLANTED}")});
+    let changes: Value = json!([{
+        "id": "d1", "family": "clip", "title": "Wrote 2 lines", "state": "applied", "at": NOW - 90,
+        "picture": {"kind": "lines", "lines": [{"line": 9, "before": "E-4 01 40 .. ..", "after": format!("OFF {PLANTED}")}], "more": 1}
+    }, {
+        "id": "d2", "family": "mixer", "title": "Added send", "state": "applied", "at": NOW - 80,
+        "picture": {"kind": "routes", "routes": [{"from": format!("Drums {PLANTED}"), "to": "Reverb", "change": "made", "values": [value("Volume")]}]}
+    }, {
+        "id": "d3", "family": "parameter", "title": "Keyzone", "state": "applied", "at": NOW - 70,
+        "picture": {"kind": "zones", "before": [{"name": format!("Snare {PLANTED}"), "notes": [48, 59], "velocities": [0, 127]}], "after": [], "values": [value("Keys")]}
+    }, {
+        "id": "d4", "family": "clip", "title": "Moved an item", "state": "applied", "at": NOW - 60,
+        "picture": {"kind": "items", "before": [{"name": format!("vox {PLANTED}"), "start": 8.0, "length": 4.0}], "after": [], "values": [value("Start")]}
+    }]);
+    conversation.changes = Some(serde_json::from_value(changes).unwrap());
+    let source =
+        Source { id: "k3x9a1b2", conversation: &conversation, title: "Pictures", place: None, words: ("REAPER", "project"), created: NOW };
+    let (page, words) = (markdown(&source, &options(false)), html(&source, &options(false)));
+    for out in [&page, &words, &json(&source, &options(false))] {
+        assert!(!out.contains(PLANTED), "a word skipped the redactor:\n{out}");
+    }
+    let said =
+        ["9: E-4 01 40 .. .. → OFF [secret]", "and 1 more line", "Drums [secret] → Reverb (new)", "Keys [secret]: bar 5 → bar 6 [secret]"];
+    for out in [&page, &words] {
+        for words in said {
+            assert!(out.contains(words), "{words:?} is missing:\n{out}");
+        }
+    }
+}

@@ -94,8 +94,11 @@ pub fn offline_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 
 // ----- wet and delta -----
 
+/// The wet and delta controls asked for: each with its parameter's index.
+type WetDelta = (Option<(i32, f64)>, Option<(i32, bool)>);
+
 /// The wet and delta controls REAPER gives every FX (`:wet`, `:delta`).
-fn wet_params(ctx: &Ctx, at: &FxAt, input: &Value) -> Done<(Option<(i32, f64)>, Option<(i32, bool)>)> {
+fn wet_params(ctx: &Ctx, at: &FxAt, input: &Value) -> Done<WetDelta> {
     let wet = match input.get("wet") {
         None | Some(Value::Null) => None,
         Some(value) => {
@@ -369,6 +372,8 @@ pub fn eq_band_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         band_write(ctx, at.fx, band, &now);
         return Err(failed("ReaEQ didn't take that band change; it is put back"));
     }
+    // (REAPER's undo state doesn't hold a band's type or switch, lab 7.82)
+    ctx.unkept.set(true);
     Ok(Applied { applied: after.clone(), display: json!({"title": band_title(ctx, &at, band, &after)}), unwritten, ..Default::default() })
 }
 
@@ -726,7 +731,7 @@ fn chain_file(ctx: &Ctx, input: &Value) -> Done<(String, String)> {
         if path.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
             return Err(bad("file: a name in REAPER's FXChains folder (sub-folders allowed, no ..), or an absolute path"));
         }
-        Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)
+        Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path.components().collect::<PathBuf>())
     };
     let full = with_chain_extension(full);
     let size = std::fs::metadata(&full)
@@ -801,7 +806,7 @@ pub fn chain_load_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied
         return Err(fx::take_back_added(ctx, holder, &before, "the chain isn't what it should be after loading the file"));
     }
     let signatures: Vec<Value> =
-        made.iter().map(|g| fxchain::adopt(ctx, holder, g).map(|at| signature(ctx, at.fx)).unwrap_or(Value::Null)).collect();
+        made.iter().map(|g| fxchain::adopt(ctx, holder, g).map(|at| fx::deep_signature(ctx, at.fx)).unwrap_or(Value::Null)).collect();
     let fx_refs: Vec<String> = made.iter().map(|g| refs::fx_ref(g)).collect();
     Ok(Applied {
         applied: json!({"guids": made, "index": place, "signatures": signatures}),
@@ -811,7 +816,8 @@ pub fn chain_load_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied
     })
 }
 
-/// Takes off FX Kumi added (a chain loaded, a copy), refusing when the producer has changed or automated any since.
+/// Takes off FX Kumi added (a chain loaded, a copy), refusing when the producer has changed or automated any since, or any
+/// FX inside a container of them (the container takes those with it).
 fn take_off(ctx: &Ctx, guids: &[String], signatures: &[Value], discard: bool) -> Done<(usize, String)> {
     let found: Vec<(FxAt, &Value)> = guids
         .iter()
@@ -826,11 +832,14 @@ fn take_off(ctx: &Ctx, guids: &[String], signatures: &[Value], discard: bool) ->
             return Err(changed("some of the FX Kumi added are gone: the rest stay (discard takes them off too)"));
         }
         for (at, sig) in &found {
-            if !fxchain::fx_envelopes(ctx.reaper, at).is_empty() {
+            if fxchain::fx_envelopes_deep(ctx.reaper, at) > 0 {
                 return Err(changed(format!("{} has automation in it now", super::quoted(&fx_label(ctx, at.fx)))));
             }
-            if !sig.is_null() && signature_as(ctx, at.fx, sig) != **sig {
-                return Err(changed(format!("{} has been changed in REAPER since", super::quoted(&fx_label(ctx, at.fx)))));
+            if !sig.is_null() && !fx::deep_as_recorded(ctx, at.fx, sig) {
+                return Err(changed(format!(
+                    "{} (or an FX inside it) has been changed in REAPER since",
+                    super::quoted(&fx_label(ctx, at.fx))
+                )));
             }
         }
     }
@@ -934,7 +943,7 @@ pub fn copy_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         }
     };
     Ok(Applied {
-        applied: json!({"guids": [made.guid], "index": place, "signatures": [signature(ctx, made.fx)]}),
+        applied: json!({"guids": [made.guid], "index": place, "signatures": [fx::deep_signature(ctx, made.fx)]}),
         created: Some(json!({"ref": refs::fx_ref(&made.guid), "kind": "fx"})),
         display: json!({"title": format!("Copied {} to {}", label(ctx, &at), fxchain::holder_label(ctx, holder)), "ref": refs::fx_ref(&made.guid)}),
         ..Default::default()
@@ -979,7 +988,8 @@ fn save_path(ctx: &Ctx, params: &Value) -> Done<PathBuf> {
     if !path.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(bad("name: a name in REAPER's FXChains folder (sub-folders as \"Vocals/Lead\"; no .., no absolute path)"));
     }
-    Ok(with_chain_extension(Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)))
+    // (a folder at a time, so the path has the system's separators throughout: "Vocals\\Lead.RfxChain" on Windows)
+    Ok(with_chain_extension(Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path.components().collect::<PathBuf>())))
 }
 
 /// An FX's entry without its automation (its `PARMENV` blocks): a chain file is the FX, not the project's timeline.
@@ -1010,7 +1020,7 @@ fn link_left_out(ctx: &Ctx, chain: &[Fx], chosen: &[usize]) -> Option<String> {
     for &place in chosen {
         let fx = chain[place];
         for p in 0..reaper.fx_param_count(fx).min(4096) {
-            if !reaper.fx_config(fx, &format!("param.{p}.plink.active")).is_some_and(|v| v.trim() == "1") {
+            if reaper.fx_config(fx, &format!("param.{p}.plink.active")).is_none_or(|v| v.trim() != "1") {
                 continue;
             }
             let source = reaper.fx_config(fx, &format!("param.{p}.plink.effect")).and_then(|v| v.trim().parse::<usize>().ok());

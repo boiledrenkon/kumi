@@ -1,4 +1,4 @@
-1 > {"type":"hello","protocol":"kumi-daw/1","nonce":"<nonce>","client":"daw-mcp-server/0.1.0"}
+1 > {"type":"hello","protocol":"kumi-daw/1","nonce":"<nonce>","client":"daw-mcp-server/1.19.3"}
 1 < {"type":"challenge","nonce":"<nonce>","proof":"<proof>"}
 1 > {"type":"auth","proof":"<proof>"}
 1 < {"type":"welcome","session":"<session>","daw":"logic","bridge":"0.1.0","dawVersion":"12.3.1","pid":"<pid>","resource":"com.apple.logic10","project":{"id":"e805ab87b3ca9d66f0f62d47b97caa29","name":"Scratch","path":"/Users/me/Music/Logic/Scratch.logicx"},"maxFrameBytes":67108864,"heartbeatMs":1000,"methods":["ping","status","focus","read","snapshot","focus_body","change_preview","change_apply","change_restore","transport_stop","transport_play","cursor_set","undo_step_begin","undo_step_end","project_save","bounce","export_tracks","hear","audition","render"],"events":["project","transport","tracks","selection","undone_in_daw"]}

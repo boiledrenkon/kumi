@@ -37,6 +37,26 @@ struct Current {
     client: BridgeClient,
 }
 
+/// The host's connection to one instance as work beside the calls follows it: a connection the host replaces (or makes
+/// again) is the one used from then on.
+pub(crate) struct Following {
+    current: std::sync::Arc<tokio::sync::Mutex<Option<Current>>>,
+    instance: Pick,
+}
+
+impl Following {
+    /// The connection the host has open to the instance now, if it has one: the host makes them, this only follows.
+    pub(crate) async fn client(&self) -> Option<BridgeClient> {
+        let current = self.current.lock().await;
+        let open = current.as_ref().filter(|open| {
+            !open.client.is_closed()
+                && self.instance.pid.is_none_or(|pid| pid == open.pid)
+                && self.instance.resource.as_ref().is_none_or(|resource| *resource == open.resource)
+        })?;
+        Some(open.client.clone())
+    }
+}
+
 /// Why a call to the bridge has no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallError {
@@ -99,14 +119,14 @@ pub type SpawnFuture = Pin<Box<dyn Future<Output = Result<Box<dyn SpawnedBridge>
 pub type Spawner = Box<dyn Fn(PathBuf) -> SpawnFuture + Send + Sync>;
 /// What the host asks again on a fresh connection when the old one was lost: the reads (and a preview, which writes
 /// nothing). A write is never sent twice.
-const RESENT: [&str; 6] = ["read", "snapshot", "focus", "focus_body", "status", "change_preview"];
+const RESENT: [&str; 7] = ["read", "snapshot", "focus", "focus_body", "status", "change_preview", "digest"];
 
 /// The host for one DAW.
 pub struct Host {
     daw: Daw,
     kumi_home: PathBuf,
     paths: BridgePaths,
-    current: tokio::sync::Mutex<Option<Current>>,
+    current: std::sync::Arc<tokio::sync::Mutex<Option<Current>>>,
     /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
     events: tokio::sync::broadcast::Sender<Value>,
     /// What starts the bridge of a DAW whose bridge the host starts, in place of the installed binary (a test's).
@@ -118,6 +138,10 @@ pub struct Host {
     spawned: tokio::sync::Mutex<Option<Box<dyn SpawnedBridge>>>,
     /// The changes previewed, applied and undone through this host (M3).
     journal: std::sync::Arc<crate::changes::Journal>,
+    /// The projects' snapshots, compared on connect and while watching (M6).
+    catchup: crate::catchup::Catchup,
+    /// The listening jobs started through this host (M5).
+    jobs: crate::listening::Jobs,
 }
 
 /// Which running instance a tool means, when several run.
@@ -193,13 +217,15 @@ impl Host {
             daw,
             kumi_home: kumi_home.to_path_buf(),
             paths: BridgePaths::new(kumi_home, daw),
-            current: tokio::sync::Mutex::new(None),
+            current: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             events: tokio::sync::broadcast::channel(1024).0,
             spawner: None,
             bridge_binary: None,
             spawn_wait: SPAWN_WAIT,
             spawned: tokio::sync::Mutex::new(None),
             journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
+            catchup: crate::catchup::Catchup::new(BridgePaths::new(kumi_home, daw).snapshots()),
+            jobs: crate::listening::Jobs::default(),
         }
     }
 
@@ -221,8 +247,25 @@ impl Host {
         self
     }
 
+    pub(crate) fn catchup(&self) -> &crate::catchup::Catchup {
+        &self.catchup
+    }
+
+    /// The host's connection to one instance, followed by work beside the calls (watch_me's looks).
+    pub(crate) fn following(&self, instance: Pick) -> Following {
+        Following { current: self.current.clone(), instance }
+    }
+
     pub(crate) fn journal(&self) -> &crate::changes::Journal {
         &self.journal
+    }
+
+    pub(crate) fn jobs(&self) -> &crate::listening::Jobs {
+        &self.jobs
+    }
+
+    pub(crate) fn paths(&self) -> &BridgePaths {
+        &self.paths
     }
 
     /// The bridge's events from now on, as `{name, data}` (a `tracks` shift, a project opened…).
@@ -329,8 +372,10 @@ impl Host {
                             Ok(status) => {
                                 row["project"] = status["project"].clone();
                                 row["busy"] = status["busy"].clone();
-                                if let Some(demo) = status.get("demo") {
-                                    row["demo"] = demo.clone();
+                                for key in ["demo", "listening"] {
+                                    if let Some(value) = status.get(key) {
+                                        row[key] = value.clone();
+                                    }
                                 }
                                 // What Logic's bridge lacks (`accessibility`), or null.
                                 if let Some(permission) = status.get("permission") {
@@ -381,14 +426,15 @@ impl Host {
         });
         let (mut alive, _, _) = self.instances();
         if !reusable {
-            if let Some(open) = current.take() {
-                open.client.close().await;
-            }
             let secret = self.secret()?;
             if alive.is_empty() && spawned_by_host(self.daw) {
                 alive = self.start_bridge().await?;
             }
+            // (a pick that matches nothing leaves the connection there is: the calls without a pick go on using it)
             let mut discovery = self.pick_from(&alive, pick)?;
+            if let Some(open) = current.take() {
+                open.client.close().await;
+            }
             let mut connected = self.connect(&discovery, &secret).await;
             if connected.is_none() && spawned_by_host(self.daw) {
                 // The file was a gone bridge's (ended with the session that started it, or crashed), removed just now:
@@ -512,8 +558,11 @@ impl Host {
             Ok(status) => {
                 result["project"] = status["project"].clone();
                 result["busy"] = status.get("busy").cloned().unwrap_or(Value::Bool(false));
-                if let Some(demo) = status.get("demo") {
-                    result["demo"] = demo.clone();
+                // (Renoise's demo; what listening each bridge can do now, M5)
+                for key in ["demo", "listening"] {
+                    if let Some(value) = status.get(key) {
+                        result[key] = value.clone();
+                    }
                 }
                 // What Logic's bridge lacks (`accessibility`), or null.
                 if let Some(permission) = status.get("permission") {
@@ -527,6 +576,28 @@ impl Host {
             Err(error) => result["busy"] = busy_word(&error).into(),
         }
         result
+    }
+
+    /// The instance a pick means now (connected to, if it wasn't), as a pick of that one alone: what a change is previewed
+    /// in, so its apply and undo go there and never to another one.
+    pub(crate) async fn pin(&self, pick: &Pick) -> Result<Pick, CallError> {
+        let mut current = self.current.lock().await;
+        self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
+        let open = current.as_ref().expect("connected above");
+        Ok(Pick { pid: Some(open.pid), resource: Some(open.resource.clone()) })
+    }
+
+    /// The refusal for a change whose instance isn't running any more (another one may be: the change isn't made there).
+    pub(crate) fn elsewhere(&self, instance: &Pick) -> Option<Value> {
+        let pid = instance.pid?;
+        if self.instances().0.iter().any(|discovery| instance.matches(discovery)) {
+            return None;
+        }
+        let folder = instance.resource.as_deref().map(|resource| format!(", {resource}")).unwrap_or_default();
+        Some(json!({
+            "error": format!("this change was made in another {} (pid {pid}{folder}), which isn't running now: preview it again", self.daw),
+            "code": "stale",
+        }))
     }
 
     /// Asks the chosen instance's bridge for one of its answers (`read`, `snapshot`, `focus`, `focus_body`). The
@@ -605,6 +676,8 @@ impl Host {
 
     /// Closes the connection, and stops the bridge the host started, if it started one.
     pub async fn close(&self) {
+        // A render or a capture still running is stopped, and what it changed put back, before the connection goes.
+        self.cancel_running_jobs().await;
         if let Some(open) = self.current.lock().await.take() {
             open.client.close().await;
         }

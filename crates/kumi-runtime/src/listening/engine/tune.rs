@@ -68,7 +68,7 @@ impl Listening {
         let tempo = self.host.tempo().unwrap_or(120.);
         let candidates: Vec<AuditionCandidate> =
             names.iter().map(|name| AuditionCandidate { track: name.clone(), mix: None, label: None, clip: None }).collect();
-        self.tell(format!("Playing {} · {what}", self.bars_of(window)), Some(true));
+        self.tell(format!("{} {} · {what}", self.hearing(), self.bars_of(window)), Some(true));
         let rendering = self.host.flag().begin();
         let pass = self.host.hear_pass(&candidates, window, false, signal.clone()).await;
         drop(rendering);

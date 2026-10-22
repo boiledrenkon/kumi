@@ -28,7 +28,7 @@ pub enum Which {
 }
 
 /// A plug-in's name as a producer says it: without the format in front and the maker behind.
-fn short_name(name: &str) -> String {
+pub(crate) fn short_name(name: &str) -> String {
     let rest = match name.split_once(": ") {
         Some((format, rest)) if format.len() <= 6 && !format.contains(' ') => rest,
         _ => name,
@@ -75,6 +75,43 @@ pub(super) fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
         return recorded.clone();
     }
     now
+}
+
+/// An FX's signature and, for a container, every FX inside it at any depth: each one's GUID and its own signature, so a
+/// knob turned or a plug-in dropped in inside a container counts as what it is, the producer's.
+pub(super) fn deep_signature(ctx: &Ctx, fx: Fx) -> Value {
+    let mut signature = signature(ctx, fx);
+    if fxchain::is_container(ctx.reaper, fx) {
+        signature["children"] = ctx
+            .reaper
+            .fx_children(fx)
+            .into_iter()
+            .map(|child| json!({"guid": ctx.reaper.fx_guid(child), "signature": deep_signature(ctx, child)}))
+            .collect::<Vec<_>>()
+            .into();
+    }
+    signature
+}
+
+/// Whether the FX, and every FX inside it, is as its `deep_signature` says (a signature taken without the FX inside,
+/// before they were kept, holds only while there are none).
+pub(super) fn deep_as_recorded(ctx: &Ctx, fx: Fx, recorded: &Value) -> bool {
+    let mut own = recorded.clone();
+    let inside = own.as_object_mut().and_then(|fields| fields.remove("children"));
+    if signature_as(ctx, fx, &own) != own {
+        return false;
+    }
+    let now = ctx.reaper.fx_children(fx);
+    match inside.as_ref().and_then(Value::as_array) {
+        None => now.is_empty(),
+        Some(kept) => {
+            kept.len() == now.len()
+                && kept.iter().zip(&now).all(|(kept, child)| {
+                    kept["guid"].as_str().is_some_and(|guid| guid.eq_ignore_ascii_case(&ctx.reaper.fx_guid(*child)))
+                        && deep_as_recorded(ctx, *child, &kept["signature"])
+                })
+        }
+    }
 }
 
 /// Whether two signatures differ only in their parameters' values.
@@ -267,6 +304,94 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 
 // ----- delete -----
 
+/// The keys of a parameter link, after `param.N.` (`modulation`'s fx-param-link), and the modulation switch it needs.
+const LINK_KEYS: [&str; 9] = [
+    "plink.effect",
+    "plink.param",
+    "plink.scale",
+    "plink.offset",
+    "plink.midi_bus",
+    "plink.midi_chan",
+    "plink.midi_msg",
+    "plink.midi_msg2",
+    "mod.active",
+];
+
+/// The parameter links of other FX in its chain that follow an FX (REAPER keeps a link's source by its place there), each
+/// with every key of the link: REAPER clears them when the FX is deleted (7.82 lab), and its undo makes them again.
+fn links_to(ctx: &Ctx, at: &FxAt) -> Vec<Value> {
+    let reaper = ctx.reaper;
+    if matches!(at.holder, Holder::Container(_)) {
+        return vec![];
+    }
+    let chain = fxchain::members(reaper, at.holder);
+    let Some(place) = chain.iter().position(|f| *f == at.fx) else { return vec![] };
+    let mut links = Vec::new();
+    for other in chain.iter().filter(|f| **f != at.fx) {
+        for p in 0..reaper.fx_param_count(*other).min(4096) {
+            let key = |k: &str| format!("param.{p}.{k}");
+            let active = reaper.fx_config(*other, &key("plink.active")).is_some_and(|v| v.trim() == "1");
+            let effect = reaper.fx_config(*other, &key("plink.effect")).and_then(|v| v.trim().parse::<i64>().ok());
+            if active && effect == Some(place as i64) {
+                let keys: serde_json::Map<String, Value> = LINK_KEYS
+                    .iter()
+                    .filter_map(|k| reaper.fx_config(*other, &key(k)).map(|v| (k.to_string(), Value::from(v.trim().to_string()))))
+                    .collect();
+                links.push(json!({"fx": reaper.fx_guid(*other), "param": p, "keys": keys}));
+            }
+        }
+    }
+    links
+}
+
+/// The macros of the container an FX is in that map its parameters: REAPER takes them off with it.
+fn macros_of(ctx: &Ctx, at: &FxAt) -> Vec<i64> {
+    let reaper = ctx.reaper;
+    let Holder::Container(container) = at.holder else { return vec![] };
+    let Some(place) = reaper.fx_children(container).iter().position(|c| *c == at.fx) else { return vec![] };
+    let number = |p: i32, key: &str| {
+        reaper.fx_config(container, &format!("param.{p}.container_map.{key}")).and_then(|v| v.trim().parse::<i64>().ok())
+    };
+    (0..reaper.fx_param_count(container))
+        .filter(|p| number(*p, "fx_index") == Some(place as i64))
+        .filter_map(|p| number(p, "fx_parm"))
+        .collect()
+}
+
+/// Makes again the links and macros that followed a deleted FX, now back at `at`: how many couldn't be (their FX gone),
+/// and how many were left as the producer has set them since (a link REAPER cleared reads effect −1 and off, 7.82 lab;
+/// one that reads otherwise is theirs now).
+fn relink(ctx: &Ctx, at: &FxAt, material: &Value) -> (usize, usize) {
+    let reaper = ctx.reaper;
+    let (mut lost, mut theirs) = (0, 0);
+    let place = fxchain::position_of(&fxchain::guids(reaper, at.holder), &at.guid);
+    for link in material["links"].as_array().into_iter().flatten() {
+        let other = link["fx"].as_str().and_then(|guid| fxchain::locate_guid(ctx, guid).ok()).filter(|other| other.holder == at.holder);
+        let (Some(other), Some(place), Some(p)) = (other, place, link["param"].as_i64()) else {
+            lost += 1;
+            continue;
+        };
+        let reads = |k: &str| reaper.fx_config(other.fx, &format!("param.{p}.{k}")).map(|v| v.trim().to_string());
+        let cleared = reads("plink.active").is_none_or(|v| v == "0") && reads("plink.effect").is_none_or(|v| v == "-1");
+        if !cleared {
+            theirs += 1;
+            continue;
+        }
+        for (k, value) in link["keys"].as_object().into_iter().flatten() {
+            let value = if k == "plink.effect" { place.to_string() } else { value.as_str().unwrap_or_default().to_string() };
+            reaper.fx_set_config(other.fx, &format!("param.{p}.{k}"), &value);
+        }
+        reaper.fx_set_config(other.fx, &format!("param.{p}.plink.active"), "1");
+        fxchain::mark_fx(reaper, other.fx);
+    }
+    if let (Holder::Container(container), Some(place)) = (at.holder, place) {
+        for param in material["macros"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
+            reaper.fx_config(container, &format!("container_map.add.{place}.{param}"));
+        }
+    }
+    (lost, theirs)
+}
+
 fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let at = fxchain::locate(ctx, &input["ref"])?;
     let now = json!({"guid": at.guid, "signature": signature(ctx, at.fx), "chain": fxchain::guids(ctx.reaper, at.holder)});
@@ -281,6 +406,18 @@ fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if envelopes > 0 {
         notes.push(format!(
             "Its {envelopes} automation envelope(s) go with it; an undo brings them back as new envelopes (their refs change)."
+        ));
+    }
+    let (links, macros) = (links_to(ctx, &at).len(), macros_of(ctx, &at).len());
+    if links + macros > 0 {
+        notes.push(format!(
+            "{} follow it: REAPER clears them with it, and an undo makes them again.",
+            [(links, "parameter link(s) of other FX"), (macros, "macro(s) of its container")]
+                .iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, what)| format!("{n} {what}"))
+                .collect::<Vec<_>>()
+                .join(" and ")
         ));
     }
     if !notes.is_empty() {
@@ -317,6 +454,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let name = reaper.fx_name(at.fx);
     let index = fxchain::position_of(&chain, &at.guid).unwrap_or(0);
     let envelopes = fxchain::fx_envelopes_deep(reaper, &at);
+    let (links, macros) = (links_to(ctx, &at), macros_of(ctx, &at));
     if !reaper.fx_delete(at.fx) {
         return Err(failed("REAPER wouldn't delete the FX"));
     }
@@ -336,6 +474,8 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             "after": chain.get(index + 1),
             "chain": fxchain::holder_value(ctx, at.holder),
             "envelopes": envelopes,
+            "links": links,
+            "macros": macros,
         })),
         display: json!({"title": format!("Deleted {} from {where_}", super::quoted(&label))}),
         ..Default::default()
@@ -380,9 +520,20 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let chain = fxchain::guids(ctx.reaper, holder);
     let place = back_place(&chain, material);
     let at = add_entry(ctx, holder, place, entry, guid)?;
+    let (lost, theirs) = relink(ctx, &at, material);
     let mut display = json!({"title": format!("{} put back {}", super::quoted(&fx_label(ctx, at.fx)), place_phrase(ctx, holder))});
+    let mut notes = Vec::new();
     if material["envelopes"].as_u64().unwrap_or(0) > 0 {
-        display["note"] = "Its automation came back as new envelopes: read them again for their refs.".into();
+        notes.push("Its automation came back as new envelopes: read them again for their refs.".to_string());
+    }
+    if lost > 0 {
+        notes.push(format!("{lost} parameter link(s) that followed it weren't made again: their FX are gone."));
+    }
+    if theirs > 0 {
+        notes.push(format!("{theirs} parameter link(s) that followed it were set otherwise in REAPER since: Kumi left them as they are."));
+    }
+    if !notes.is_empty() {
+        display["note"] = notes.join(" ").into();
     }
     Ok(Restored {
         restored: json!({"ref": refs::fx_ref(&at.guid), "was": refs::fx_ref(guid), "index": place}),
@@ -886,7 +1037,18 @@ fn param_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("the plug-in kept the parameter as it was"));
     }
     let title = param_title(ctx, &at, after["display"].as_str().unwrap_or_default());
-    Ok(Applied { applied: after, created: None, material: None, display: json!({"title": title}), unwritten })
+    // (for HISTORY's picture only: the parameter's name, and where it was and is)
+    let moved = json!({
+        "name": rows::clip(&ctx.reaper.param_name(at.at.fx, at.param)),
+        "from": before,
+        "to": read,
+        "min": 0.0,
+        "max": 1.0,
+        "fromText": now["display"],
+        "toText": after["display"],
+    });
+    let display = json!({"title": title, "values": [moved]});
+    Ok(Applied { applied: after, created: None, material: None, display, unwritten })
 }
 
 fn param_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {

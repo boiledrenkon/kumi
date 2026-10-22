@@ -20,6 +20,9 @@ const DOOFER: &str = include_str!("fixtures/renoise/doofer_eq5_gainer.xml");
 struct Song {
     xml: String,
     writes: Vec<(String, String)>,
+    /// Reads Renoise fails to answer after its next apply (busy, say).
+    reads_failing_after_apply: usize,
+    failing: usize,
 }
 
 struct Lab {
@@ -45,6 +48,10 @@ impl Lab {
             let mut song = state.lock().unwrap();
             let at = json!({"track": 3, "dev": {"n": 2, "mark": "d1:4", "print": {"path": "Audio/Effects/Native/Doofer", "name": "Doofer"}}, "label": "Doofer"});
             match method {
+                "preset_read" if song.failing > 0 => {
+                    song.failing -= 1;
+                    refusal("busy", "Renoise is busy")
+                }
                 "preset_read" => Some(Ok(json!({
                     "epoch": "e1", "layout": 0, "ref": "e1:device:3.2", "target": {"kind": "device", "track": 3, "device": 2}, "at": at,
                     "id": "track:Bass|Audio/Effects/Native/Doofer", "path": "Audio/Effects/Native/Doofer", "name": "Doofer", "label": "Doofer",
@@ -58,6 +65,7 @@ impl Lab {
                     let xml = input["presetData"].as_str().unwrap().to_string();
                     song.writes.push((params["desc"].as_str().unwrap().into(), xml.clone()));
                     song.xml = xml;
+                    song.failing = std::mem::take(&mut song.reads_failing_after_apply);
                     Some(Ok(json!({
                         "epoch": "e1", "layout": 0, "applied": {"shape": shape_of(&song.xml), "edit": input["edit"]}, "material": at,
                         "target": {"kind": "device", "track": 3, "device": 2}, "display": input["display"],
@@ -236,4 +244,45 @@ async fn a_doofer_read_by_ref_says_what_it_holds_its_preset_data_on_ask_and_the_
     assert!(!is_error, "{body}");
     assert_eq!(body["nodes"][1]["childNodes"][0]["name"], "EQ 5");
     assert_eq!(body["nodes"][0]["childNodes"], json!([]));
+}
+
+#[tokio::test]
+async fn kumis_undo_of_a_device_delete_puts_it_back_as_the_apply_found_it() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-delete", json!({"ref": "e1:device:3.2", "at": [2]})).await;
+    // The producer turns the Gainer's volume between the preview and the apply (a value: the apply goes on).
+    lab.edit_xml("<Volume>\n            <Value>1.0</Value>", "<Volume>\n            <Value>1.5</Value>");
+    let turned = lab.xml();
+    assert!(!lab.apply(&preview, "a1").await.1);
+    let (undone, is_error) = lab.undo(&preview, "u1", false).await;
+    assert!(!is_error, "{undone}");
+    assert_eq!(lab.xml(), turned, "the Gainer back as the apply took it out, at 1.5");
+}
+
+#[tokio::test]
+async fn a_device_kumi_added_is_kept_as_renoise_wrote_it_for_kumis_undo() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-add", json!({"ref": "e1:device:3.2", "path": "Gainer", "at": [3]})).await;
+    let (applied, is_error) = lab.apply(&preview, "a1").await;
+    assert!(!is_error, "{applied}");
+    assert!(applied["applied"]["edit"]["content"].as_str().is_some_and(|print| print.contains(':')), "{applied}");
+}
+
+#[tokio::test]
+async fn a_device_kumi_added_whose_write_cant_be_read_back_is_one_kumis_undo_cant_tell_about() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-add", json!({"ref": "e1:device:3.2", "path": "Gainer", "at": [3]})).await;
+    // Renoise answers neither read back after the apply.
+    lab.song.lock().unwrap().reads_failing_after_apply = 2;
+    let (applied, is_error) = lab.apply(&preview, "a1").await;
+    assert!(!is_error, "{applied}");
+    assert_eq!(applied["applied"]["edit"]["contentUnknown"], true, "{applied}");
+    let (refused, is_error) = lab.undo(&preview, "u1", false).await;
+    assert!(is_error && refused["code"] == "changed", "{refused}");
+    // Read back on the second try: kept as usual.
+    let mut lab = Lab::start().await;
+    let preview = lab.preview("doofer-device-add", json!({"ref": "e1:device:3.2", "path": "Gainer", "at": [3]})).await;
+    lab.song.lock().unwrap().reads_failing_after_apply = 1;
+    let (applied, _) = lab.apply(&preview, "a1").await;
+    assert!(applied["applied"]["edit"]["content"].is_string(), "{applied}");
 }

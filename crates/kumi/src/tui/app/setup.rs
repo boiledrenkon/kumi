@@ -235,11 +235,6 @@ fn open_recent() -> String {
     }
 }
 
-/// "12" from a Live version ("12.4", "11.3.21").
-fn major_of(version: &str) -> Option<u32> {
-    version.split('.').next()?.trim().parse().ok()
-}
-
 /// Open Live again, with the Set it had open when Kumi knows it. A Set that won't open (moved, or on a drive that's
 /// gone) doesn't keep Live closed: Live opens without it. Whether Live opened, and whether with its Set.
 async fn reopen(live: &Rc<dyn DawSetup>, app: Option<String>, set: Option<String>) -> (bool, bool) {
@@ -331,6 +326,14 @@ impl TuiApp {
         } else if !self.setup_sign_in().await {
             return self.end_setup(Some(Step::Sign), None).await;
         }
+        // Several DAWs here and none set up or chosen yet: the producer says which one Kumi works with.
+        if let Some(daw) = self.ask_daw().await {
+            if daw != crate::daw::current().id() {
+                // Chosen and remembered: Kumi opens again with it, and its own setup goes on there.
+                self.setup_show(|s| s.quit = Some((0, None)));
+                return self.end_setup(None, None).await;
+            }
+        }
         let live = self.0.options.connect_live.as_ref().map(|l| (l.live.clone(), l.why.clone()));
         if let Some((live, Some(why))) = live {
             let app = match self.setup_live(live.clone(), why).await {
@@ -354,6 +357,22 @@ impl TuiApp {
             }
         }
         self.end_setup(None, None).await;
+    }
+
+    /// "Which DAW do you work in?", among the DAWs here (`ask_daw`): the one chosen, given to `pick_daw`; None when
+    /// there's nothing to ask, or the producer put it off (this run's DAW goes on).
+    async fn ask_daw(&self) -> Option<kumi_runtime::core::daw::DawId> {
+        let (asked, pick) = (self.0.options.ask_daw.clone(), self.0.options.pick_daw.clone()?);
+        if asked.len() < 2 {
+            return None;
+        }
+        let app = |daw| crate::daw::provider(daw).map(|provider| provider.profile().words.app).unwrap_or_default();
+        let choices = asked.iter().map(|daw| choice(app(*daw), "", daw.as_str())).collect();
+        let said = vec!["Which DAW do you work in? Kumi sets itself up for it.".to_string()];
+        let picked = self.setup_choose("now", said, choices).await?;
+        let daw = kumi_runtime::core::daw::DawId::parse(&picked)?;
+        pick(daw);
+        Some(daw)
     }
 
     /// No model yet, but signed in somewhere: the provider's own first choice, as Kumi always chose.
@@ -583,7 +602,7 @@ impl TuiApp {
     /// quit, or waits for the producer to quit it, every way out of this step leaves Live open again. A Live
     /// that isn't open is looked for first: Live 12 has to be here, and opened once, to take the bridge.
     async fn setup_live(&self, live: Rc<dyn DawSetup>, why: String) -> LiveStep {
-        let min_major = crate::daw::current().min_major();
+        let min = crate::daw::current().min_version();
         let (app, site) = (crate::daw::words().app, crate::daw::site());
         let later = || choice("Later", &format!("chat without {app} for now"), "later");
         self.setup_show(|s| {
@@ -611,13 +630,13 @@ impl TuiApp {
                 // Open (again): nothing is held until the producer says how it closes.
                 self.setup_show(|s| s.holding = false);
                 // A Live older than 12 can't take Kumi's bridge: said before it's asked to quit, and it stays open.
-                let older = live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < min_major));
+                let older = live.version(open.clone()).await.filter(|version| crate::daw::older_than(version, min));
                 if let Some(version) = older {
                     let say = vec![format!(
-                        "Kumi works with {app} {min_major}: the {app} that's open is {version}. Open {app} {min_major} instead ({site} has it), then choose Look again."
+                        "Kumi works with {app} {min}: the {app} that's open is {version}. Open {app} {min} instead ({site} has it), then choose Look again."
                     )];
                     let again = vec![choice("Look again", "", "again"), later()];
-                    if self.setup_choose(&format!("{app} {min_major} needed"), say, again).await.as_deref() != Some("again") {
+                    if self.setup_choose(&format!("{app} {min} needed"), say, again).await.as_deref() != Some("again") {
                         return LiveStep::Later(None);
                     }
                     continue;
@@ -669,14 +688,14 @@ impl TuiApp {
                     missing => {
                         let say = vec![match missing {
                             LiveInstalled::Older(version) => format!(
-                                "Kumi works with {app} {min_major}: this computer has {app} {version}. Install {app} {min_major} ({site}) and open it once, then choose Look again."
+                                "Kumi works with {app} {min}: this computer has {app} {version}. Install {app} {min} ({site}) and open it once, then choose Look again."
                             ),
                             _ => format!(
-                                "Kumi works with {app} {min_major}: install it ({site}), or open it once if it's here, then choose Look again."
+                                "Kumi works with {app} {min}: install it ({site}), or open it once if it's here, then choose Look again."
                             ),
                         }];
                         let again = vec![choice("Look again", "", "again"), later()];
-                        if self.setup_choose(&format!("{app} {min_major} not found"), say, again).await.as_deref() != Some("again") {
+                        if self.setup_choose(&format!("{app} {min} not found"), say, again).await.as_deref() != Some("again") {
                             return LiveStep::Later(None);
                         }
                         continue;
@@ -741,7 +760,7 @@ impl TuiApp {
     /// Live 12 (`app`) is here but has never been opened, so it has no User Library for the bridge yet: Kumi opens it
     /// once and waits for it to make one. True once it has: Live is open then, and the step restarts it with the bridge.
     async fn first_open(&self, live: &Rc<dyn DawSetup>, app: String) -> bool {
-        let min_major = crate::daw::current().min_major();
+        let min = crate::daw::current().min_version();
         let daw = crate::daw::words().app;
         // Live keeps the bridge in its User Library; another DAW in a folder of its own it makes on its first run.
         let (folder, made) = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
@@ -750,7 +769,7 @@ impl TuiApp {
             ("no folder for Kumi's bridge yet", "")
         };
         let say = vec![format!(
-            "{daw} {min_major} hasn't been opened here yet, so it has {folder}. Kumi opens it once, then restarts it with the bridge."
+            "{daw} {min} hasn't been opened here yet, so it has {folder}. Kumi opens it once, then restarts it with the bridge."
         )];
         let open = vec![choice(&format!("Open {daw}"), "", "open"), choice("Later", &format!("chat without {daw} for now"), "later")];
         if self.setup_choose(&format!("{daw} hasn't been opened yet"), say, open).await.as_deref() != Some("open") {

@@ -251,7 +251,7 @@ fn automation(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture>
     } else {
         (low - 1., high + 1.)
     };
-    Some(ChangePicture::Automation { parameter: String::new(), min, max, before, after })
+    Some(ChangePicture::Automation { parameter: String::new(), min, max, before, after, words: None })
 }
 
 pub use crate::core::picture::{amount, asked_apart, name_lane, CurveReader, ParameterRow};

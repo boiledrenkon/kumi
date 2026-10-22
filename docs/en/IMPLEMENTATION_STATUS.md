@@ -13,11 +13,15 @@ Each release in the [changelog](../../CHANGELOG.md) names the bridge it ships
 with; [bridge versions](KUMI_CHANGES.md#bridge-versions) lists them all. The
 version numbers themselves live in the crates' `Cargo.toml` files (Kumi, the
 bridge), the root `package.json` (Kumi) and `apps/live-extension/manifest.json`
-(the extension).
+(the extension); REAPER's extension's in `crates/reaper-kumi/Cargo.toml`, and
+Renoise's tool's in `daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua` and
+its `manifest.xml`. [Connect to REAPER or Renoise](KUMI_GUIDE.md#connect-to-reaper-or-renoise)
+says which Kumi ships with which.
 
 | Part | Version |
 | --- | --- |
 | Live protocol | `ableton-live/v1`; each release's `release-manifest.json` records the registry's hash |
+| REAPER and Renoise protocol | `kumi-daw/1`, between Kumi's host and the bridge inside the DAW, on 127.0.0.1 |
 | MCP protocol eras | `2025-11-25` and `2026-07-28` |
 | Runtime | Native Rust app and standalone bridge; fresh installs require no Node |
 | Older installs (Kumi 1.7.5 and earlier) | Node 22/24; retained Node also supports rollback and optional YouTube challenges ([details](SUPPORT_MATRIX.md)) |
@@ -39,6 +43,17 @@ and migration checks do not replace a new real-Live acceptance run.
 - **Real Live on Windows** (Windows 10, Live 12.4.15 beta, Kumi 1.6.0 with
   bridge 1.0.71): installing the bridge into a moved User Library, the Remote
   Script loading, and Kumi connecting. There's no record file for this yet.
+- **REAPER and Renoise on macOS** (REAPER 7.82 evaluation, portable; Renoise
+  3.5.4; 20 October 2026): each change applied through Kumi, undone through
+  Kumi, then undone and redone with the DAW's own undo, big projects (REAPER 200
+  tracks and 2,000 items, Renoise 64 tracks and 100 patterns), and listening.
+  - REAPER, at commit `c80eb1e7`: 140 of its 141 kinds then, one known limit.
+    `drum_kit`, `scratch_keep` and `metronome_switch` came later and weren't run.
+  - Renoise, at commit `78faa00f`: 121 of 132 cases, 11 known limits.
+    `instrument_kit` and `scratch_keep` came later and weren't run.
+  - The limits are in [known limits](KUMI_CHANGES.md#known-limits). There's no
+    record file for these yet. REAPER and Renoise on Windows and Linux are
+    untested.
 - **Real Logic Pro on macOS** (Apple silicon, Logic Pro 12.3.1): the lab of what
   macOS gives Kumi to read and change Logic, a go or no-go per channel (M0), and
   the bridge beside Logic attaching through its Accessibility helper and
@@ -142,7 +157,7 @@ and migration checks do not replace a new real-Live acceptance run.
   `render` (a part bounced offline, a track soloed for it), each bounded by the
   part's length at the tempo Logic plays at, plus a margin; audio travels as a
   file, never as samples. Logic's integration gives the shared one a listening
-  hook (`OwnDaw::listening`; REAPER and Renoise give none), whose `Renderer`
+  hook (`OwnDaw::listening`), whose `Renderer`
   (`integrations/logic_listening.rs`) answers the listening tools (judge, tune,
   sound, form, groove, audition, render) and the listen tool's `hear`: a track
   is heard alone by soloing it for a pass of its own, the producer hears an
@@ -190,7 +205,7 @@ and migration checks do not replace a new real-Live acceptance run.
   says (`middleC`, 3 or 4): the session names notes in that octave (the listen
   tool's pitch of a sound, `find_sounds`' note words, FOCUS's keyzones), taking
   it from the open project rather than Logic's default. A recipe's save text
-  names `watch_me` only in a DAW that has it (Live and Logic Pro), and Logic's
+  names `watch_me` only in a DAW that has it, and Logic's
   example of a recipe's step names its own tools (`fx_param` on the plug-in an
   earlier `fx_add` inserted). `kumi export` takes the DAW's words from the
   conversation's place (a Logic project's says Logic Pro and project, as the
@@ -215,8 +230,8 @@ and migration checks do not replace a new real-Live acceptance run.
   Open Recent and the library keeps for its next run: the bridge knows a recent
   project's place only for the one open and for those Spotlight finds outside
   `~/Music` (macOS keeps that folder from the bridge), so others aren't learned
-  until opened. REAPER and Renoise keep Live's layout until their own places
-  come. Over Logic, judge and groove say a region and its ref where Live's say
+  until opened. REAPER and Renoise keep Live's layout, their own libraries
+  added. Over Logic, judge and groove say a region and its ref where Live's say
   a clip, groove names Logic's note changes and says in Logic's words that it
   can't read a region's notes there yet, and the gap guidance and `note_gap`
   name Kumi's tools alone, as Logic has no scripting Kumi reaches.
@@ -374,7 +389,8 @@ bridge, the version given is the one in the commit that added it.
 
 ## Open work
 
-- Support for Renoise and Reaper.
+- REAPER and Renoise on Windows and Linux, and REAPER for Windows on Arm, with
+  the real DAWs.
 - Logic Pro: the first release that carries its bridge (M8); the goal search
   over Logic (a `GoalRig`); a region's notes past the rows the Event List shows
   on its screen; a guard in code against ending a way round with `final: true`,

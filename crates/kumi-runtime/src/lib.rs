@@ -72,8 +72,8 @@ pub use library::{
     Source as LibrarySource, TasteLine, FIND_PRESETS_TOOL, FIND_SOUNDS_TOOL, MANUAL_TOOL, MY_SETS_TOOL,
 };
 pub use providers::local::{
-    context_for, list_local_models, local_installed, local_servers, parse_local_model_id, probe_local, resolve_local_model, start_hint,
-    LocalBinding, LocalKind, LocalServer, ServerSetting, LOCAL_PROVIDERS,
+    context_for, list_local_models, list_local_models_in, local_installed, local_servers, parse_local_model_id, probe_local,
+    resolve_local_model, start_hint, LocalBinding, LocalKind, LocalServer, ServerSetting, LOCAL_PROVIDERS,
 };
 pub use providers::models::{check_api_key, list_models, ModelInfo};
 pub use providers::{

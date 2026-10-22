@@ -4,7 +4,12 @@
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::abort::Signal;
-use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError};
+use kumi_runtime::core::{
+    context::IntegrationContext,
+    contracts::*,
+    errors::RuntimeError,
+    view::{BodyRequest, FocusBody},
+};
 use kumi_runtime::integrations::{
     logic::create_logic_integration,
     own_bridge::{Connect, OwnOptions},
@@ -33,6 +38,14 @@ impl McpEndpoint for Host {
         Ok(serde_json::from_value(json!({"tools": []})).unwrap())
     }
     async fn call(&self, name: &str, args: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+        // (M6: catch-up, and keeping the project's snapshot, run beside the looks: a project first seen, unless a test
+        // scripts them; not counted among what the test asked)
+        if matches!(name, "catch_up" | "baseline_save") && !self.answers.borrow().iter().any(|(tool, _, _)| *tool == name) {
+            let answer = if name == "catch_up" { json!({"first": true}) } else { json!({"saved": false}) };
+            return Ok(
+                serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": false})).unwrap()
+            );
+        }
         self.asked.borrow_mut().push((name.into(), Value::Object(args)));
         let answers = self.answers.borrow();
         let (_, answer, error) = answers.iter().rev().find(|(tool, _, _)| *tool == name).cloned().expect("an answer for each tool asked");
@@ -149,6 +162,29 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
         .await;
 }
 
+/// (#361 review K14) The project's fingerprint, for what Kumi logs of the producer's reactions: from the last look.
+#[tokio::test(flavor = "current_thread")]
+async fn a_projects_fingerprint_is_its_name_tempo_meter_and_the_roles_its_tracks_play() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", reaper_snapshot(), false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host, Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            assert_eq!(reaper.fingerprint(), None, "not before a look");
+            reaper.observe(Signal::new(), None).await.unwrap();
+            let print = reaper.fingerprint().unwrap();
+            assert_eq!(print["name"], "Night Drive");
+            assert_eq!(print["tempo"], 124);
+            assert_eq!(print["meter"], "4/4");
+            assert_eq!(print["roles"], json!({"bass": 1, "drums": 1}));
+            assert_eq!(print["tokens"], json!(["drums", "bass"]));
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn an_unsaved_project_is_the_dawss_unsaved_place_and_a_daw_not_there_is_said_in_its_words() {
     tokio::task::LocalSet::new()
@@ -225,6 +261,63 @@ async fn renoises_refs_are_positions_under_the_songs_epoch_and_a_new_song_retire
                 .unwrap();
             assert!(retired.is_error && retired.text.contains("isn't one of this turn's refs"), "{}", retired.text);
             assert_eq!(host.asked.borrow().len(), asked_before, "the retired name reads nothing of the new song: Renoise isn't asked");
+        })
+        .await;
+}
+
+/// (m7) Each look carries the producer's setup as the bridge read it, with the instructions to respect it; a render folder
+/// outside the project is named by its last folder only.
+#[tokio::test(flavor = "current_thread")]
+async fn each_look_carries_the_producers_setup_and_the_instructions_to_respect_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut snapshot = reaper_snapshot();
+            snapshot["setup"] = json!({
+                "newItemFades": "off", "loopSourceOfNewItems": {"imported": false, "midi": true}, "newTrackVolumeDb": -6.0,
+                "extensions": {"SWS": true, "ReaPack": true, "ReaImGui": false, "js_ReaScriptAPI": false},
+                "render": {"source": "region render matrix", "bounds": "all project regions", "channels": 2, "sampleRate": 48000,
+                           "pattern": "$region", "folder": "/Users/someone/Game/Renders/"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            let seen = reaper.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["setup"]["newItemFades"], "off");
+            assert_eq!(context["setup"]["loopSourceOfNewItems"]["imported"], false);
+            assert_eq!(context["setup"]["extensions"]["SWS"], true);
+            assert_eq!(context["setup"]["render"]["pattern"], "$region");
+            assert_eq!(context["setup"]["render"]["folder"], "…/Renders");
+            assert!(!seen.context.contains("/Users/someone"), "{}", seen.context);
+            for words in ["newItemFades", "loopSourceOfNewItems", "setup.extensions", "File > Render"] {
+                assert!(seen.instructions.contains(words), "{words}");
+            }
+
+            let song = json!({
+                "epoch": "3",
+                "project": {"id": null, "identity": "99:3", "name": "Amen", "bpm": 340, "lpb": 4},
+                "transport": {"playing": false},
+                "tracks": [{"ref": "3:track:1", "index": 1, "name": "Break", "type": "sequencer"}],
+                "selection": {"trackRef": "3:track:1"},
+                "setup": {"patternLines": 128, "groups": [{"name": "Drums", "color": "#ff0000", "tracks": 3}], "tools": ["Paketti"], "paketti": true},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["setup"]["patternLines"], 128);
+            assert_eq!(context["setup"]["groups"][0]["name"], "Drums");
+            assert_eq!(context["setup"]["paketti"], true);
+            for words in ["patternLines", "paketti", "2× or 4×"] {
+                assert!(seen.instructions.contains(words), "{words}");
+            }
         })
         .await;
 }
@@ -306,8 +399,9 @@ async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
             };
             assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "fx", "ref": BASS}));
             let chains = tree.devices[1].chains.as_ref().unwrap();
-            assert_eq!(chains.len(), 2, "a parallel FX starts its own chain");
-            assert_eq!(chains[1].devices.as_ref().unwrap()[0].name, "ReaDelay");
+            assert_eq!(chains.len(), 1, "a container keeps its one chain");
+            let delay = &chains[0].devices.as_ref().unwrap()[1];
+            assert_eq!((delay.name.as_str(), delay.note.as_deref()), ("ReaDelay", Some("parallel")), "a parallel FX says so beside its name");
 
             host.answers.borrow_mut().push((
                 "focus_body",
@@ -396,7 +490,7 @@ async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
             use kumi_runtime::core::view::ViewKind;
             let focus = json!({
                 "epoch": "3", "view": "pattern", "matrixVisible": true, "dspVisible": true, "changed": 2,
-                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay"},
+                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay", "line": 12},
                 "transport": {"playing": true, "followPlayer": true, "beat": 8.0, "tempo": 128, "beatsPerBar": 4},
             });
             let host = Rc::new(Host {
@@ -419,6 +513,7 @@ async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
             assert_eq!(focus.section_follows, Some(true), "playing and following: the sequence slot is playback's");
             assert_eq!(focus.section.as_ref().and_then(|s| s.index), Some(2.), "slots from 1 in Renoise, from 0 in FOCUS");
             assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("3:pattern:4"));
+            assert_eq!(focus.line, Some(12), "the pattern's edit line, by Renoise's numbers (review U7)");
             renoise.close().await.unwrap();
         })
         .await;
@@ -431,7 +526,12 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut snapshot = reaper_snapshot();
-            snapshot["truncated"] = json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}});
+            // (review K38: REAPER sends at most 100 of its 1,250 markers, and names the total)
+            let markers: Vec<Value> =
+                (0..100).map(|n| json!({"ref": format!("r:marker:{{M{n}}}"), "name": format!("M{n}"), "position": n})).collect();
+            snapshot["markers"] = json!(markers);
+            snapshot["truncated"] =
+                json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}, "markers": {"total": 1250, "nextCursor": "c1.2.100"}});
             let host = Rc::new(Host {
                 answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
                 asked: RefCell::default(),
@@ -440,6 +540,8 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
             reaper.start(Signal::new()).await.unwrap();
             let context: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
             assert_eq!(context["moreTracks"], "1,000 tracks in all, 2 listed here; reaper_read kind track pages through every one");
+            assert_eq!(context["markers"].as_array().map(Vec::len), Some(30));
+            assert_eq!(context["moreMarkers"], "1,220 more markers; reaper_read kind marker pages through every one");
 
             let renoise_snapshot = json!({
                 "epoch": "3", "moreTracks": true,
@@ -459,6 +561,56 @@ async fn a_project_bigger_than_the_snapshot_says_so() {
         .await;
 }
 
+/// Review K30: a project saved as a copy in another folder carries its original's id (REAPER's travels with the file),
+/// but while the original is still there the copy is a project of its own, by core's rules: its own place, the same
+/// each time and after a restart, so it never carries on the original's conversation. A copy beside the original is a
+/// version of the same song, and a project moved (its original gone) stays the same one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_copy_saved_elsewhere_is_a_project_of_its_own_while_its_original_is_there() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let file = |at: &str| {
+                let path = dir.path().join(at);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, "<REAPER_PROJECT").unwrap();
+                path.to_string_lossy().into_owned()
+            };
+            let (original, elsewhere, beside) = (file("A/Song A.rpp"), file("B/Song B.rpp"), file("A/Song A v2.rpp"));
+            let home = dir.path().join(".kumi");
+            let place_of = |path: &String| {
+                let (path, home) = (path.clone(), home.clone());
+                async move {
+                    let mut snapshot = reaper_snapshot();
+                    snapshot["project"]["path"] = json!(path);
+                    let host = Rc::new(Host {
+                        answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                        asked: RefCell::default(),
+                    });
+                    let mut options = options(host, Rc::default());
+                    options.kumi_home = home;
+                    let reaper = create_reaper_integration(options);
+                    reaper.start(Signal::new()).await.unwrap();
+                    let seen = reaper.observe(Signal::new(), None).await.unwrap();
+                    reaper.close().await.unwrap();
+                    seen.project.map(|project| project.id).unwrap()
+                }
+            };
+            let ours = format!("reaper-{PROJECT_ID}");
+            assert_eq!(place_of(&original).await, ours, "the original, first seen");
+            let copy = place_of(&elsewhere).await;
+            assert_ne!(copy, ours, "Save As in another folder, the original still there");
+            assert_eq!(place_of(&elsewhere).await, copy, "the same place each time, through a restart");
+            assert_eq!(place_of(&original).await, ours, "the original stays itself");
+            assert_eq!(place_of(&beside).await, ours, "a version beside it is the same song");
+            // The song's files deleted (the version, seen last, too): what's left of it is where it went.
+            std::fs::remove_file(&original).unwrap();
+            std::fs::remove_file(&beside).unwrap();
+            assert_eq!(place_of(&elsewhere).await, ours, "moved");
+        })
+        .await;
+}
+
 /// A look that can't read the song (Renoise behind a dialog, or quit) keeps the song's key and project, as Live's do:
 /// the conversation stays with it. A saved song's key is its id, so it holds through a restart of Renoise.
 #[tokio::test(flavor = "current_thread")]
@@ -467,7 +619,7 @@ async fn a_failed_look_keeps_the_songs_key_and_project() {
         .run_until(async {
             let snapshot = json!({
                 "epoch": "3",
-                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "bpm": 140},
+                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140},
                 "tracks": [{"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"}],
                 "selection": {"trackRef": "3:track:1"},
             });
@@ -491,6 +643,39 @@ async fn a_failed_look_keeps_the_songs_key_and_project() {
             let gone = renoise.observe(Signal::new(), None).await.unwrap();
             assert_eq!((gone.key.as_str(), gone.project.as_ref()), (seen.key.as_str(), Some(&project)), "away isn't another song");
             assert_eq!(states.borrow().last(), Some(&ConnectionState::Disconnected));
+        })
+        .await;
+}
+
+/// (#361 review K33) A fixed phrase after a look Renoise refused isn't planned from the look before it (a track may have
+/// been put above Drums since, and Renoise's refs are places): the model takes it. The project's fingerprint stays.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fixed_phrase_after_a_failed_look_goes_to_the_model_not_the_last_look() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({
+                "epoch": "3",
+                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140},
+                "tracks": [
+                    {"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"},
+                    {"ref": "3:track:2", "index": 2, "name": "Drums", "type": "sequencer"},
+                ],
+                "selection": {"trackRef": "3:track:1"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "a dialog is open", "code": "busy", "connected": true}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            let asked = host.asked.borrow().len();
+            let intent = kumi_runtime::core::phrases::parse("mute drums").expect("a fixed phrase");
+            assert!(renoise.instant(&intent, Signal::new()).await.unwrap().is_none(), "the model takes it");
+            assert_eq!(host.asked.borrow().len(), asked, "nothing asked of Renoise");
+            assert_eq!(renoise.fingerprint().unwrap()["name"], "Acid", "the song's fingerprint stays");
         })
         .await;
 }
@@ -522,6 +707,7 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
                 track: Some("Bass".into()),
                 live: None,
                 time: None,
+                layout: None,
             };
             let seen = reaper.observe(Signal::new(), Some(ObserveHints { pinned: Some(pin), continuing: None })).await.unwrap();
             let context: Value = serde_json::from_str(&seen.context).unwrap();
@@ -1045,6 +1231,250 @@ async fn logics_busy_words_name_a_dialog_another_desktop_or_a_project_still_open
                 assert!(seen.borrow().iter().any(|said| said == words), "{code}: {:?}", seen.borrow());
             }
             logic.close().await.unwrap();
+        })
+        .await;
+}
+
+/// A host whose events a test sends: Kumi's host passing on the bridge's.
+struct Eventful {
+    host: Rc<Host>,
+    listener: RefCell<Option<Rc<dyn Fn(JsonObject)>>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for Eventful {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        None
+    }
+    async fn list(&self, server: Option<&str>, signal: Signal) -> Result<ListToolsResult, RuntimeError> {
+        self.host.list(server, signal).await
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
+        self.host.call(name, args, signal).await
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        *self.listener.borrow_mut() = Some(listener);
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+// Review K3: a Renoise device pinned in FOCUS keeps naming it when a track is added above its track, and once Renoise
+// renumbers past what Kumi can follow, the pin is told by its name only.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pinned_renoise_device_keeps_naming_it_when_tracks_move_above_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = |layout: u64, names: &[&str]| {
+                let tracks: Vec<Value> =
+                    names.iter().enumerate().map(|(i, name)| json!({"ref": format!("1:track:{}", i + 1), "name": name})).collect();
+                json!({"epoch": "1", "layout": layout, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": tracks, "selection": {}})
+            };
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot(0, &["Kick", "Bass"]), false)]),
+                asked: RefCell::default(),
+            });
+            let eventful = Rc::new(Eventful { host: host.clone(), listener: RefCell::default() });
+            let connect: Connect = {
+                let eventful = eventful.clone();
+                Rc::new(move |_| {
+                    let eventful = eventful.clone();
+                    async move { Ok(eventful as Rc<dyn McpEndpoint>) }.boxed_local()
+                })
+            };
+            let renoise = create_renoise_integration(OwnOptions {
+                context: IntegrationContext::new(Rc::new(|_, _| {})),
+                kumi_home: std::env::temp_dir(),
+                connect: Some(connect), open_file: None });
+            renoise.start(Signal::new()).await.unwrap();
+            let pin = PinnedNode {
+                track_ref: "1:track:2".into(),
+                r#ref: "1:device:2.2".into(),
+                node: PinKind::Device,
+                name: "Compressor".into(),
+                trail: vec![],
+                siblings: vec![],
+                track: Some("Bass".into()),
+                live: None,
+                time: None,
+                // (FOCUS read its tree at layout 0)
+                layout: Some(0),
+            };
+            let look = |pin: &PinnedNode| {
+                let hints = ObserveHints { pinned: Some(pin.clone()), continuing: None };
+                renoise.observe(Signal::new(), Some(hints))
+            };
+            let seen = look(&pin).await.unwrap();
+            let first: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert_eq!(first["trackRef"], "track:2", "{first}");
+            // A track added at the top: Bass is track 3 now, and its Compressor 3.2.
+            let send = eventful.listener.borrow().clone().expect("Kumi listens to the host's events");
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 1, "made": [1]}}).as_object().unwrap().clone());
+            host.answers.borrow_mut().push(("snapshot", snapshot(1, &["New", "Kick", "Bass"]), false));
+            let seen = look(&pin).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert_eq!(pinned, first, "the same names, which name Bass and its Compressor where they are now");
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": []}), false));
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the Compressor on Bass, now track 3");
+            // Shifts Kumi didn't hear of (a gap in the layouts): the names retire, and the pin is told by its name only.
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 4, "made": [1]}}).as_object().unwrap().clone());
+            host.answers.borrow_mut().push(("snapshot", snapshot(4, &["A", "B", "C", "New", "Kick", "Bass"]), false));
+            let seen = look(&pin).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert!(pinned["gone"].as_str().unwrap().starts_with("The producer pinned “Compressor” on “Bass” in FOCUS, and Renoise has renumbered"), "{pinned}");
+            assert!(pinned.get("ref").is_none());
+        })
+        .await;
+}
+
+/// A Renoise song's snapshot at a layout, with these tracks.
+fn song_at(layout: u64, names: &[&str]) -> Value {
+    let tracks: Vec<Value> = names.iter().enumerate().map(|(i, name)| json!({"ref": format!("1:track:{}", i + 1), "name": name})).collect();
+    json!({"epoch": "1", "layout": layout, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": tracks, "selection": {}})
+}
+
+/// A Renoise song's host for the pin tests: Kick and Bass at layout 0, looked at once, whose events a test sends.
+async fn pinned_song() -> (Rc<Host>, Rc<Eventful>, Rc<dyn Integration>) {
+    let host = Rc::new(Host {
+        answers: RefCell::new(vec![
+            ("status", json!({"connected": true}), false),
+            ("snapshot", song_at(0, &["Kick", "Bass"]), false),
+            ("focus_body", json!({"epoch": "1", "layout": 0, "devices": []}), false),
+            ("read", json!({"epoch": "1", "layout": 1, "items": []}), false),
+        ]),
+        asked: RefCell::default(),
+    });
+    let eventful = Rc::new(Eventful { host: host.clone(), listener: RefCell::default() });
+    let connect: Connect = {
+        let eventful = eventful.clone();
+        Rc::new(move |_| {
+            let eventful = eventful.clone();
+            async move { Ok(eventful as Rc<dyn McpEndpoint>) }.boxed_local()
+        })
+    };
+    let renoise = create_renoise_integration(OwnOptions {
+        context: IntegrationContext::new(Rc::new(|_, _| {})),
+        kumi_home: std::env::temp_dir(),
+        connect: Some(connect),
+        open_file: None,
+    });
+    renoise.start(Signal::new()).await.unwrap();
+    renoise.observe(Signal::new(), None).await.unwrap();
+    // The producer pins from FOCUS's tree of Bass: it says the layout its refs were read at.
+    let Some(FocusBody::Tree(tree)) =
+        renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap()
+    else {
+        panic!("a tree")
+    };
+    assert_eq!(tree.layout, Some(0));
+    (host, eventful, renoise)
+}
+
+/// The pin FOCUS makes from Bass's tree as read at layout 0: its Compressor, stamped with that layout.
+fn compressor_on_bass() -> PinnedNode {
+    PinnedNode {
+        track_ref: "1:track:2".into(),
+        r#ref: "1:device:2.2".into(),
+        node: PinKind::Device,
+        name: "Compressor".into(),
+        trail: vec![],
+        siblings: vec![],
+        track: Some("Bass".into()),
+        live: None,
+        time: None,
+        layout: Some(0),
+    }
+}
+
+/// A track added at the top, as the host tells it: Bass is track 3 now, and its Compressor 3.2.
+fn track_added_at_the_top(host: &Host, eventful: &Eventful) {
+    let send = eventful.listener.borrow().clone().expect("Kumi listens to the host's events");
+    send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 1, "made": [1]}}).as_object().unwrap().clone());
+    host.answers.borrow_mut().push(("snapshot", song_at(1, &["New", "Kick", "Bass"]), false));
+}
+
+// #361 final review (K3): a pin made from a FOCUS tree read before a track was added at the top, first seen by Kumi after
+// it, names what was pinned where it is now, carried from the layout the tree was read at (not taken to be at the layout
+// Kumi is at when it first sees it).
+#[tokio::test(flavor = "current_thread")]
+async fn a_pin_first_seen_after_a_shift_names_what_was_pinned() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            let hints = ObserveHints { pinned: Some(compressor_on_bass()), continuing: None };
+            let seen = renoise.observe(Signal::new(), Some(hints)).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            assert!(pinned.get("gone").is_none(), "{pinned}");
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the Compressor on Bass, not Kick's device");
+        })
+        .await;
+}
+
+// #361 final review (K3): /recipe fills its blanks from the pin as the integration carries it, in the turn's short refs,
+// never with the raw refs FOCUS pinned with: after a track is added at the top, the recipe edits the pinned device.
+#[tokio::test(flavor = "current_thread")]
+async fn a_recipes_blanks_take_the_pin_where_it_is_now() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let blank = renoise.pin_for_recipe(&compressor_on_bass()).expect("the pin, carried");
+            assert_ne!(blank.r#ref, "1:device:2.2", "never the raw ref");
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": blank.r#ref}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "the pinned Compressor where it is now");
+            // Renumbered past what Kumi can follow: no blank is filled from it.
+            let send = eventful.listener.borrow().clone().unwrap();
+            send(json!({"name": "tracks", "data": {"epoch": "1", "layout": 4, "made": [1]}}).as_object().unwrap().clone());
+            assert!(renoise.pin_for_recipe(&compressor_on_bass()).is_none());
+        })
+        .await;
+}
+
+// #361 final review (K3, reviewer999): FOCUS reading `1:track:2`'s tree again after the shift (now Kick's) changes nothing
+// for a pin made from the tree read before it: the pin says where its own refs were read.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pin_keeps_the_layout_of_its_own_tree_when_the_same_ref_is_read_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (host, eventful, renoise) = pinned_song().await;
+            track_added_at_the_top(&host, &eventful);
+            host.answers.borrow_mut().push(("focus_body", json!({"epoch": "1", "layout": 1, "devices": []}), false));
+            renoise.focus_body(&BodyRequest::Tree { track_ref: "1:track:2".into() }, Signal::new()).await.unwrap();
+            let hints = ObserveHints { pinned: Some(compressor_on_bass()), continuing: None };
+            let seen = renoise.observe(Signal::new(), Some(hints)).await.unwrap();
+            let pinned: Value = serde_json::from_str::<Value>(&seen.context).unwrap()["pinned"].clone();
+            seen.tools[0]
+                .execute(json!({"kind": "param", "parent": pinned["ref"]}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "1:device:3.2", "Bass's Compressor, not Kick's device");
+            assert!(pinned.get("layout").is_none(), "the model isn't told where its refs were read: {pinned}");
         })
         .await;
 }

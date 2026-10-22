@@ -8,6 +8,7 @@ use kumi_runtime::{
     },
     core::{
         contracts::{JsonObject, KernelEvent, KernelTool, ToolResult, TurnResult},
+        daw::DawProfile,
         errors::{FailureKind, KumiError, RuntimeError},
     },
     kernel::agent::{create_agent_kernel, AgentKernelOptions, ModelBinding},
@@ -296,6 +297,9 @@ async fn ollama_catalog_capabilities_and_probe() {
         json!({"id":"ollama/qwen3:8b","provider":"ollama","model":"qwen3:8b","name":"qwen3:8b","description":"8.2B · Q4_K_M · loaded","efforts":[],"tools":true,"context":40960.0,"loaded":true,"where":"on this computer"})
     );
     assert_eq!(models[1].description.as_deref(), Some("8.2B · Q4_K_M · can't change the Set"));
+    // In another DAW's session, in its words.
+    let in_reaper = list_local_models_in(&server, fake.transport(), &DawProfile::REAPER).await.unwrap();
+    assert_eq!(in_reaper[1].description.as_deref(), Some("8.2B · Q4_K_M · can't change the project"));
     assert_eq!(models[1].tools, Some(false));
     assert_eq!(models[2].efforts.iter().map(|e| e.effort).collect::<Vec<_>>(), vec![Effort::Low, Effort::Medium, Effort::High]);
     assert_eq!(models[2].default_effort, Some(Effort::Medium));

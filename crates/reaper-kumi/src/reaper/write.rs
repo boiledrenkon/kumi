@@ -38,6 +38,12 @@ impl Reaper<'_> {
         self.track_at(proj, at)
     }
 
+    /// Names a note of a track (`SetTrackMIDINoteNameEx`; channel -1 for all): what the MIDI editor shows for its row.
+    pub fn set_note_name(&self, proj: Project, track: Track, pitch: i32, channel: i32, name: &str) -> bool {
+        let name = cstring(name);
+        self.api.SetTrackMIDINoteNameEx().is_some_and(|f| unsafe { f(proj.0, track.0, pitch, channel, name.as_ptr()) })
+    }
+
     pub fn delete_track(&self, track: Track) -> bool {
         match self.api.DeleteTrack() {
             Some(f) => {

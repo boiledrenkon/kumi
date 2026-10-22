@@ -251,6 +251,7 @@ fn plan(ctx: &Ctx, input: &Value, which: Which, fence_seed: Option<u64>) -> Done
     let shortened = fix_overlaps(&before, &mut remove, &mut add)?;
     remove.sort_unstable();
     remove.dedup();
+    notes::check_inside(ctx, take, item_qn, &events, &add)?;
     Ok(Plan { take, item_qn, before, events, remove, add, shortened, seed })
 }
 

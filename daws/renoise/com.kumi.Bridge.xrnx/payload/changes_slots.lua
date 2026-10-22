@@ -9,12 +9,25 @@ local import = ...
 local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
+local sequence_ = import("changes_sequence")
 
 local bad, fail = base.bad, base.fail
 local q = base.q
 local M = {}
 
 local function slot_count(song) return #song.sequencer.pattern_sequence end
+
+-- A ref's numbers. Once Renoise's redo put the change back (`restore.redone`: the journal held it, and the sequence and the pool
+-- changed by nothing but Renoise's undo and redo), its slots and patterns are where the change left them, whatever epoch the
+-- undo and redo moved to.
+local function numbers_of(env, restore, reference, kind, count)
+  local redone = restore and restore.redone
+  if redone and redone.redo_patterns == #renoise.song().patterns then
+    local ref = refs.parse(reference)
+    if ref and ref.kind == kind and #ref.n == count then return ref.n end
+  end
+  return refs.expect(reference, kind, count, env.epoch())
+end
 
 local function seq_of(song, env, reference, what)
   if type(reference) ~= "string" then bad(what .. ": ref must be a sequence slot ref") end
@@ -25,7 +38,7 @@ end
 
 local function pattern_label(song, p)
   local name = song:pattern(p).name
-  if name == nil or name == "" then name = string.format("Pattern %02X", p - 1) end
+  if name == nil or name == "" then name = string.format("Pattern %02d", p - 1) end
   return name
 end
 
@@ -87,8 +100,12 @@ local function insert_apply(song, env, input, fence, desc)
   if plan.pattern then sequencer:insert_sequence_at(plan.index, plan.pattern) else sequencer:insert_new_pattern_at(plan.index) end
   local pattern = sequencer.pattern_sequence[plan.index]
   return {
-    -- (a pattern is a number only within an epoch: the record keeps it as a ref, which a renumbered pool refuses)
-    applied = { index = plan.index, pattern = refs.make(env.epoch(), "pattern", pattern), slots = plan.slots + 1 },
+    -- (a pattern is a number only within an epoch: the record keeps it as a ref, which a renumbered pool refuses; a new one
+    -- is kept as it was made, so what the producer writes into it since stays theirs)
+    applied = {
+      index = plan.index, pattern = refs.make(env.epoch(), "pattern", pattern), slots = plan.slots + 1,
+      made = not plan.pattern and { print = sequence_.pattern_print(song, pattern) } or nil,
+    },
     created = { ref = refs.make(env.epoch(), "seq", plan.index), kind = "seq" }, target = seq_target(env, plan.index),
     display = {
       title = insert_title(song, plan), before = { slots = plan.slots }, after = { slots = plan.slots + 1, index = plan.index },
@@ -101,14 +118,20 @@ local function insert_restore(song, env, restore, desc)
   local created, applied = restore.created, restore.applied
   if type(created) ~= "table" or type(created.ref) ~= "string" then bad("created: the slot the change made") end
   if type(applied) ~= "table" then bad("applied: what the change wrote") end
-  local s = seq_of(song, env, created.ref, "slot-insert")
+  local s = numbers_of(env, restore, created.ref, "seq", 1)[1]
+  if s < 1 or s > slot_count(song) then fail("gone", "that sequence slot isn't in the song any more") end
   local sequencer = song.sequencer
   if type(applied.pattern) ~= "string" then bad("applied.pattern: the pattern the slot played, as a ref") end
-  local made = refs.expect(applied.pattern, "pattern", 1, env.epoch())[1]
+  local made = numbers_of(env, restore, applied.pattern, "pattern", 1)[1]
   if sequencer.pattern_sequence[s] ~= made then
     fail("changed", "the slot " .. s .. " holds another pattern now: it was changed in Renoise since Kumi made it")
   end
   if not restore.discard then
+    -- (a new pattern Kumi made with the slot: anything in it now is the producer's, lines or automation, its name, length or
+    -- colours; an empty one as made is nobody's, whatever Renoise's undo and redo did to it)
+    if type(applied.made) == "table" and (not song:pattern(made).is_empty or sequence_.pattern_print(song, made) ~= applied.made.print) then
+      fail("changed", string.format("the pattern %s that slot %d plays has something in it since Kumi made it: Kumi won't delete its slot", q(pattern_label(song, made)), s))
+    end
     if sequencer:sequence_is_start_of_section(s) then fail("changed", "slot " .. s .. " starts a section now: Kumi won't delete it") end
     for t = 1, rows.track_count(song) do
       if sequencer:track_sequence_slot_is_muted(t, s) then fail("changed", "tracks are muted in slot " .. s .. " now: Kumi won't delete it") end
@@ -207,7 +230,7 @@ local function delete_restore(song, env, restore, desc)
   local now = {}
   for k = 1, n do now[k] = sequencer.pattern_sequence[k] end
   -- (the pattern it played, if it stayed in the pool: a ref, `stale` when the pool was renumbered since)
-  local kept_pattern = not material.gone and refs.expect(material.pattern, "pattern", 1, env.epoch())[1] or nil
+  local kept_pattern = not material.gone and numbers_of(env, restore, material.pattern, "pattern", 1)[1] or nil
   -- back already (the producer's undo, or an earlier restore): the sequence is the delete's with the slot in its place
   if kept_pattern and n == material.count and now[index] == kept_pattern and type(material.after) == "table" then
     local without = {}
@@ -337,9 +360,12 @@ end
 -- slot-section: a slot starts a section, with a name (a name alone starts one)
 
 local function section_spec()
+  -- (Renoise keeps a slot's section name when it stops starting a section, and shows it again when it starts one: `hidden`
+  -- keeps it to put back, outside what is compared)
   local function read(object)
     local start = object.sequencer:sequence_is_start_of_section(object.s)
-    return { start = start, name = start and object.sequencer:sequence_section_name(object.s) or "" }
+    local name = object.sequencer:sequence_section_name(object.s)
+    return { start = start, name = start and name or "", hidden = not start and name or nil }
   end
   return {
     kind = "slot-section", noun = "section", undoable = true,
@@ -371,6 +397,9 @@ local function section_spec()
         sequencer:set_sequence_section_name(object.s, state.name)
       else
         sequencer:set_sequence_is_start_of_section(object.s, false)
+        if type(state.hidden) == "string" and sequencer:sequence_section_name(object.s) ~= state.hidden then
+          sequencer:set_sequence_section_name(object.s, state.hidden)
+        end
       end
     end,
     same = function(a, b) return a.start == b.start and a.name == b.name end,

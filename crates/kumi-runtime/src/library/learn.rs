@@ -21,6 +21,9 @@ pub struct PresetEntry {
     pub file: Entry,
     pub name: String,
     pub format: String,
+    /// What the DAW loads it by, where that isn't its path (a JSFX: "JS: midi/midi_choke").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,9 +162,10 @@ pub fn plugin_preset_folders(home: Option<&str>, platform: Option<&str>) -> Vec<
 
 use super::{
     classify::{classify, name_hints},
+    daw_sources,
     features::{measure_sound, MeasureOptions, FEATURES_VERSION},
     measure_worker::{MeasureJob, MeasurePool},
-    presets::{plugin_preset_facts, read_live_preset, read_max_device, PresetFacts, PRESET_EXTENSIONS},
+    presets::{plugin_preset_facts, read_daw_preset, read_live_preset, read_max_device, PresetFacts, PRESET_EXTENSIONS},
     sets::read_set,
     sources::DawLibrary,
     sources::{basename, below, browser_path, dirname, join, SourceKind},
@@ -293,6 +297,7 @@ async fn walk(
     let presets = library.map_or(PRESET_EXTENSIONS, |library| library.preset_extensions);
     let mut queue = vec![(source.path.clone(), 0)];
     let mut complete = true;
+    let daw_library = source.is_daw_library();
     while let Some((path, depth)) = queue.pop() {
         signal.check()?;
         // A folder that can't be read (a NAS's hiccup, a placeholder nothing serves now) is skipped, and the walk
@@ -354,6 +359,8 @@ async fn walk(
                     || lower.ends_with(".app")
                     || (parent == "samples" && PROJECT_COPIES.contains(&lower.as_str()))
                     || skip.contains(&full)
+                    // (a DAW's library: only the folders its layout says hold what Kumi learns)
+                    || (depth == 0 && daw_library && !daw_sources::walks_into(source, &name))
                 {
                     continue;
                 }
@@ -371,8 +378,21 @@ async fn walk(
             if ext == ".als" && backup_set(&lower) {
                 continue;
             }
+            let list = if daw_library {
+                // A DAW's library: what a file is, its top folder and extension say.
+                let top = Path::new(&full)
+                    .strip_prefix(&source.path)
+                    .ok()
+                    .and_then(|relative| relative.components().next())
+                    .map(|first| first.as_os_str().to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match daw_sources::role_of(source, &top, &ext) {
+                    Some(daw_sources::Role::Sound) if kinds.sounds => &mut found.sounds,
+                    Some(daw_sources::Role::Preset) if kinds.presets => &mut found.presets,
+                    _ => continue,
+                }
             // Formats Live accepts as samples, intentionally narrower than the general audio decoder (another DAW's own).
-            let list = if kinds.sounds && samples.contains(&ext.as_str()) {
+            } else if kinds.sounds && samples.contains(&ext.as_str()) {
                 &mut found.sounds
             } else if kinds.presets && presets.contains(&ext.as_str()) {
                 &mut found.presets
@@ -415,6 +435,8 @@ fn order(kind: SourceKind) -> usize {
         SourceKind::Splice => 3,
         SourceKind::Pack => 4,
         SourceKind::Core => 5,
+        SourceKind::Renoise => 6,
+        SourceKind::Reaper => 7,
     }
 }
 fn changed(known: Option<&Entry>, file: &Found) -> bool {
@@ -551,12 +573,14 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
     let library = crate::integrations::library(plan.daw);
     let mut sources = plan.sources.clone();
     sources.sort_by_key(|s| order(s.kind));
+    // A DAW's library inside another folder: what its layout reads is its own source's; the rest stays the outer folder's.
+    let daw_libraries: HashSet<String> = sources.iter().filter(|s| s.is_daw_library()).flat_map(daw_sources::owned_folders).collect();
     for source in &sources {
         progress.value.borrow_mut().at = Some(source.label.clone());
         progress.tell(false);
         let own = matches!(source.kind, SourceKind::UserLibrary | SourceKind::Place | SourceKind::Folder);
-        if walk(source, Kinds { sounds: true, presets: true, sets: own }, &mut found, &options.signal, 16, &HashSet::new(), library).await?
-        {
+        let skip = if source.is_daw_library() { HashSet::new() } else { daw_libraries.clone() };
+        if walk(source, Kinds { sounds: true, presets: true, sets: own }, &mut found, &options.signal, 16, &skip, library).await? {
             walked_sounds.push(source.path.clone());
             walked_presets.push(source.path.clone());
             if own {
@@ -621,11 +645,18 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
     for file in &todo_presets {
         gated(&options).await?;
         let ext = extension(&file.file.path);
-        let format = ext.to_lowercase().trim_start_matches('.').to_owned();
+        let daw_library = file.source.is_daw_library();
+        let format = if daw_library {
+            let top = file.relative.split(['\\', '/']).next().unwrap_or_default();
+            daw_sources::preset_format(&file.source, top, &ext.to_lowercase())
+        } else {
+            ext.to_lowercase().trim_start_matches('.').to_owned()
+        };
         let plugin = file.source.label == "Plug-in presets";
         let facts = match (library, format.as_str()) {
             // (M6) Another DAW's own presets, read its way (a Logic plug-in setting by its plug-in's folder).
             (Some(library), _) if !plugin => Ok((library.preset_facts)(&format, &file.relative)),
+            _ if daw_library => read_daw_preset(&format, &file.file.path, &file.relative).await,
             (_, "adv" | "adg") => read_live_preset(&file.file.path).await,
             (_, "amxd") => read_max_device(&file.file.path).await,
             _ => Ok(plugin_preset_facts(&file.relative)),
@@ -639,11 +670,12 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
         };
         let folder = dirname(&file.relative);
         let name = basename(&file.file.path);
-        let name = name.strip_suffix(&ext).unwrap_or(&name).to_owned();
+        let name = facts.name.clone().unwrap_or_else(|| name.strip_suffix(&ext).unwrap_or(&name).to_owned());
         let entry = PresetEntry {
             file: file.file.clone(),
             name,
             format,
+            load: facts.load,
             device: facts.device,
             category: if plugin { Some(PresetCategory::Plugin) } else { facts.category },
             inside: facts.inside,

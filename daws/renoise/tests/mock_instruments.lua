@@ -213,10 +213,55 @@ end
 -- Pattern data that names instruments: renumbered as Renoise renumbers it.
 
 local function each_note(fn)
-  for _, pattern in ipairs(M.data.patterns) do
-    for _, pattern_track in pairs(pattern.tracks) do
-      for _, l in pairs(pattern_track.lines or {}) do
-        for c, note in pairs(l.notes or {}) do fn(note, l, c) end
+  for p, pattern in ipairs(M.data.patterns) do
+    for t, pattern_track in pairs(pattern.tracks) do
+      for k, l in pairs(pattern_track.lines or {}) do
+        for c, note in pairs(l.notes or {}) do fn(note, l, c, p, t, k) end
+      end
+    end
+  end
+end
+
+-- (a test's Renoise whose renumbering of notes and 0Z commands tells the patterns' line notifiers, as an edit does: not
+-- measured, #361 N-N17)
+local function tell_lines(p, t, k)
+  if not M.renumber_touches then return end
+  local pattern = M.data.patterns[p]
+  local notifiers = {}
+  for i, fn in ipairs(pattern.notifiers or {}) do notifiers[i] = fn end
+  for _, fn in ipairs(notifiers) do
+    local ok, err = pcall(fn, { pattern = p, track = t, line = k })
+    if not ok then M.errors[#M.errors + 1] = "notifier: " .. tostring(err) end
+  end
+end
+
+-- The 0Z commands that name an instrument's phrases, on lines where a note plays it: a phrase deleted at `ph` clears those that
+-- name it and moves the later ones down; one made at `ph` moves those from it up, and never fills a cleared one (lab 2026-10-21).
+local ZERO_Z = 256 + 35 -- (the mock's value for the command 0Z: 256 + 36 * "0" + "Z")
+local function renumber_phrases(instrument, type_, ph)
+  local v
+  for k, candidate in ipairs(M.data.instruments) do if candidate == instrument then v = k - 1 end end
+  if v == nil then return end
+  for p, pattern in ipairs(M.data.patterns) do
+    for t, pattern_track in pairs(pattern.tracks) do
+      for k, l in pairs(pattern_track.lines or {}) do
+        local plays = false
+        for _, note in pairs(l.notes or {}) do if note.instrument == v then plays = true end end
+        if plays then
+          local function move(get, set)
+            local number, amount = get()
+            if number ~= ZERO_Z then return end
+            if type_ == "remove" and amount == ph then set(0, 0) tell_lines(p, t, k)
+            elseif type_ == "remove" and amount > ph then set(number, amount - 1) tell_lines(p, t, k)
+            elseif type_ == "insert" and amount >= ph then set(number, amount + 1) tell_lines(p, t, k) end
+          end
+          for _, effect in pairs(l.effects or {}) do
+            move(function() return effect.number, effect.amount end, function(n, a) effect.number, effect.amount = n, a end)
+          end
+          for _, note in pairs(l.notes or {}) do
+            move(function() return note.fxn, note.fxa end, function(n, a) note.fxn, note.fxa = n, a end)
+          end
+        end
       end
     end
   end
@@ -224,15 +269,15 @@ end
 
 local function renumber(type_, a, b)
   -- (instrument values count from 0; 255 is none)
-  each_note(function(note, l, c)
+  each_note(function(note, l, c, p, t, k)
     local v = note.instrument
     if v == 255 or v == nil then return end
     if type_ == "insert" then
-      if v >= a - 1 then note.instrument = v + 1 end
+      if v >= a - 1 then note.instrument = v + 1 tell_lines(p, t, k) end
     elseif type_ == "remove" then
-      if v == a - 1 then l.notes[c] = note_data({}) elseif v > a - 1 then note.instrument = v - 1 end
+      if v == a - 1 then l.notes[c] = note_data({}) tell_lines(p, t, k) elseif v > a - 1 then note.instrument = v - 1 tell_lines(p, t, k) end
     elseif type_ == "swap" then
-      if v == a - 1 then note.instrument = b - 1 elseif v == b - 1 then note.instrument = a - 1 end
+      if v == a - 1 then note.instrument = b - 1 tell_lines(p, t, k) elseif v == b - 1 then note.instrument = a - 1 tell_lines(p, t, k) end
     end
   end)
 end
@@ -436,8 +481,10 @@ local function buffer_object(sample)
       return true
     end,
     save_as = function(_, path, format)
-      local buffer = need()
       if format ~= "wav" and format ~= "flac" then error("invalid format", 2) end
+      -- (M5: a WAV export is a real file the bridge reads back, as Renoise writes it; see mock_listening.lua)
+      if format == "wav" and M.save_wav then return M.save_wav(sample, path) end
+      local buffer = need()
       M.write_file(path, { kind = "audio", buffer = buffer, name = sample.name })
       return true
     end,
@@ -453,6 +500,8 @@ local function buffer_object(sample)
     sample_data = function(_, channel, frame)
       local buffer = need()
       if frame < 1 or frame > buffer.frames or channel < 1 or channel > buffer.channels then error("frame or channel out of range", 2) end
+      -- (an edit a test makes at a few frames, as the sample editor would: buffer.edits[frame] = value)
+      if buffer.edits and buffer.edits[frame] then return buffer.edits[frame] end
       local h = 7
       for i = 1, #buffer.content do h = (h * 31 + buffer.content:byte(i)) % 1000003 end
       return math.sin(h + frame * 0.001 + channel)
@@ -543,6 +592,8 @@ local function sample_object(instrument, s)
     for k, v in pairs(from) do if k ~= "obs" then write(sample, k, copy(v)) end end
   end
   fields.__data = sample
+  -- (M5 m5-renoise: what listening adds to a sample; see mock_listening.lua)
+  if M.sample_extras then M.sample_extras(sample, fields, getters, setters) end
   return object("renoise.Sample", fields, getters, setters)
 end
 M.sample_object = sample_object
@@ -667,8 +718,10 @@ local function script_object(phrase)
     end,
     render_to_pattern = function(_, options, done)
       if type(options) == "function" then done, options = options, {} end
+      -- (a render Renoise refuses at once answers false and why, and calls nothing back: M.render_refuses sets the why)
+      if M.render_refuses then return false, M.render_refuses end
       M.pending_renders = M.pending_renders or {}
-      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done }
+      M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done, lines = phrase.lines }
       -- (Renoise rewrites the phrase's length by itself before the tool's next callback, well before it answers: lab 2026-10-19)
       M.idle_work = M.idle_work or {}
       M.idle_work[#M.idle_work + 1] = function()
@@ -690,8 +743,9 @@ local function script_object(phrase)
       script.pending = script.pending + 1
       M.fire(obs(script, "paragraphs"))
       local new = copy(value)
-      M.record(function() script.paragraphs = copy(old); M.fire(obs(script, "paragraphs")) end,
-        function() script.paragraphs = copy(new); M.fire(obs(script, "paragraphs")) end)
+      -- (Renoise's undo and redo put the text back uncommitted: the player keeps what was committed, lab "pending 2")
+      M.record(function() script.paragraphs = copy(old); script.pending = script.pending + 1; M.fire(obs(script, "paragraphs")) end,
+        function() script.paragraphs = copy(new); script.pending = script.pending + 1; M.fire(obs(script, "paragraphs")) end)
     end,
   })
 end
@@ -711,7 +765,8 @@ function M.compile_scripts()
   M.pending_compiles = {}
 end
 
--- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does).
+-- A render of a script to the phrase's lines: notes on every 4th line, in its own undo step (as Renoise's callback does), which
+-- also takes back the length Renoise rewrote and the switch to playing the lines (one undo reverts the whole render: lab).
 function M.finish_renders(fail)
   for _, render in ipairs(M.pending_renders or {}) do
     if fail then
@@ -725,8 +780,10 @@ function M.finish_renders(fail)
         l:note_column(1).note_string = "C-4"
         count = count + 1
       end
-      phrase.playback_mode = 1
-      M.fire(obs(phrase, "playback_mode"))
+      local before, after = render.lines, phrase.lines
+      M.record(function() phrase.lines = before; M.fire(obs(phrase, "number_of_lines")) end,
+        function() phrase.lines = after; M.fire(obs(phrase, "number_of_lines")) end)
+      write(phrase, "playback_mode", 1)
       M.callback_end()
       render.done(nil, count, 0)
     end
@@ -914,6 +971,20 @@ local function modulation_device_object(set, k)
       fields.play_step_observable = obs(data, "play_step")
     end
   end
+  -- (the plain fields of a type that aren't parameters: 3.5's API types)
+  local TYPED = {
+    ["Modulation/LFO"] = { "renoise.SampleLfoModulationDevice", "mode", 1, 4 },
+    ["Modulation/Velocity Tracking"] = { "renoise.SampleVelocityTrackingModulationDevice", "mode", 1, 2 },
+    ["Modulation/Fader"] = { "renoise.SampleFaderModulationDevice", "scaling", 3, 5 },
+  }
+  local typed = TYPED[data.path]
+  if typed then
+    class = typed[1]
+    local typed_getters, typed_setters, typed_fields = fields_of(data, { [typed[2]] = { typed[3], range(1, typed[4], true) } })
+    for key, fn in pairs(typed_getters) do getters[key] = fn end
+    for key, fn in pairs(typed_setters) do setters[key] = fn end
+    for key, value in pairs(typed_fields) do fields[key] = value end
+  end
   return object(class, fields, getters, setters)
 end
 
@@ -1075,6 +1146,8 @@ local function plugin_device_object(instrument)
   }, {
     active_preset = function(value)
       check_range("active_preset", value, 0, #(plugin.presets or {}), true)
+      -- (a plug-in that keeps its program reads none chosen, its state as it was: Apple's DLSMusicDevice, lab)
+      if plugin.keeps_program then return end
       write(plugin, "preset", value, plugin.preset_not_a_step)
       -- (a program sets the plug-in's parameters: the mock moves the first to the program's number)
       if plugin.params[1] and value > 0 then plugin.params[1].value = math.min(plugin.params[1].max or 1, value / 10) end
@@ -1107,6 +1180,12 @@ local function plugin_props_object(instrument)
   end
   fields.load_plugin = function(_, path)
     local old = instrument.plugin
+    -- (a plug-in Renoise lets go of the old one for, then fails to load: M.plugin_unloads_and_fails names it)
+    if M.plugin_unloads_and_fails and path == M.plugin_unloads_and_fails then
+      instrument.plugin = nil
+      M.fire(obs(instrument, "plugin"))
+      return false
+    end
     local made
     if path ~= "" then
       local spec = (M.plugin_catalog or {})[path]
@@ -1348,6 +1427,7 @@ function M.instrument_proxy(i)
     if #instrument.phrases >= 126 then error("can't have more than 126 phrases", 2) end
     if ph < 1 or ph > #instrument.phrases + 1 then out_of_range("phrase", ph) end
     -- (Renoise's new phrase: lab)
+    renumber_phrases(instrument, "insert", ph)
     list_op(instrument.phrases, instrument.phrases_observable, "insert", ph, nil, phrase_data({ name = string.format("Phrase %02d", #instrument.phrases + 1),
       lpb = M.data.transport_fields.lpb, lines = 32, loop_end = 32, key_tracking = 2, autoseek = true, note_columns = 4, instrument_column_visible = false }))
     return M.phrase_proxy(instrument, ph)
@@ -1358,7 +1438,21 @@ function M.instrument_proxy(i)
     for m, mapping in ipairs(instrument.mappings) do
       if mapping.phrase == phrase then list_op(instrument.mappings, instrument.mappings_observable, "remove", m) break end
     end
+    renumber_phrases(instrument, "remove", ph)
     list_op(instrument.phrases, instrument.phrases_observable, "remove", ph)
+    -- (measured, 3.5.4: the program moves off a phrase deleted, 2 to 1, and down with the phrases after it; an insert leaves
+    -- it where it is: M7 lab 2026-10-21)
+    local program = instrument.phrase_program
+    if program == ph then
+      write(instrument, "phrase_program", #instrument.phrases == 0 and 0 or math.max(1, ph - 1))
+    elseif program > ph then
+      write(instrument, "phrase_program", program - 1)
+    end
+    -- (a test's Renoise that moves the program as it was also seen to, off its phrase: program 2, delete 4 -> 3, lab 2026-10-21)
+    if M.program_after_delete then
+      local moved = M.program_after_delete(program, ph, #instrument.phrases)
+      if moved then write(instrument, "phrase_program", moved) end
+    end
   end
   fields.can_insert_phrase_mapping_at = function(_, m) return m >= 1 and m <= #instrument.mappings + 1 end
   fields.insert_phrase_mapping_at = function(_, m, phrase_proxy)
@@ -1514,8 +1608,8 @@ end
 function M.write_file(path, value)
   local f = io.open(path, "wb")
   if not f then return false end
-  -- (an instrument file is a zip: it starts as one)
-  f:write((value.kind == "instrument" and "PK\3\4" or "") .. "MOCKRENOISE " .. serialize(value))
+  -- (an instrument file is a zip: it starts as one, and its central directory at its end names Instrument.xml)
+  f:write((value.kind == "instrument" and "PK\3\4" or "") .. "MOCKRENOISE " .. serialize(value) .. (value.kind == "instrument" and "\n--PK\1\2 Instrument.xml" or ""))
   f:close()
   M.files_written = (M.files_written or 0) + 1
   return true
@@ -1526,6 +1620,7 @@ function M.read_file(path)
   if not f then return nil end
   local text = f:read("*a")
   f:close()
+  text = text:gsub("\n%-%-PK\1\2 Instrument%.xml$", "")
   local body = text:match("^MOCKRENOISE (.*)$") or text:match("^PK\3\4MOCKRENOISE (.*)$")
   if not body then return nil, text end
   local chunk = loadstring("return " .. body)
@@ -1578,17 +1673,33 @@ function M.app_load_instrument(path, how)
   local instruments = d.instruments
   local old = instruments[i]
   local made = M.instrument_copy(value.instrument)
+  -- (into the last instrument, Renoise first adds an empty one after it, and leaves it: lab, 2026-10-20)
+  local extra = i == #instruments and M.instrument_data({}) or nil
   local function swap_in()
+    if extra then
+      table.insert(instruments, i + 1, extra)
+      M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
+    end
     table.insert(instruments, i + 1, made)
     M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
     table.remove(instruments, i)
     M.fire(song.instruments_observable, { type = "remove", index = i })
   end
   local function swap_out()
-    table.insert(instruments, i + 1, old)
-    M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
-    table.remove(instruments, i)
-    M.fire(song.instruments_observable, { type = "remove", index = i })
+    if extra then
+      table.insert(instruments, i, old)
+      M.fire(song.instruments_observable, { type = "insert", index = i })
+      for _ = 1, 2 do
+        table.remove(instruments, i + 1)
+        M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
+      end
+      return
+    end
+    -- (Renoise's undo tells the old one back at i, then the loaded one's remove after it: lab 2026-10-20)
+    table.insert(instruments, i, old)
+    M.fire(song.instruments_observable, { type = "insert", index = i })
+    table.remove(instruments, i + 1)
+    M.fire(song.instruments_observable, { type = "remove", index = i + 1 })
   end
   swap_in()
   M.record(swap_out, swap_in)

@@ -537,6 +537,10 @@ async fn busy_rejection_cancel_preserves_input_and_close_is_once() {
             flush().await;
             assert_eq!(f.control.calls.borrow().iter().filter(|c| c.starts_with("submit:")).cloned().collect::<Vec<_>>(), ["submit:first"]);
             assert!(f.text().contains("Busy; cancel first"));
+            // A command Kumi doesn't have is no turn: it's answered while Kumi works too.
+            f.input.write("/nonsense\r");
+            flush().await;
+            assert!(f.text().contains("Unknown command. Use /help."), "{}", f.text());
             f.input.write("follow\x03");
             flush().await;
             assert!(f.control.calls.borrow().contains(&"cancel".into()));
@@ -788,6 +792,11 @@ async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_nu
             f.input.write("hello\n");
             flush().await;
             assert!(f.control.calls.borrow().contains(&"submit:hello".into()));
+            // Review K13: a DAW Kumi can't open places in is opened by the producer, and nothing says Kumi will.
+            f.emit(json!({"type":"set-asked","ask":{"id":"there3","title":"warmer pads","set":"Song C","open":"Song A","daw":"REAPER","noun":"project","byHand":true}}));
+            assert!(f.text().contains("1. Open “Song C” in REAPER yourself (this conversation carries on once it's open) · 2. Carry it on here"), "{}", f.text());
+            f.input.write("3\n");
+            flush().await;
             // Names, forks and the status line.
             f.input.write("/rename Night drive\n/rename there1 Bass, take two\n/new Second\n/fork\n/fork Alt\n");
             flush().await;
@@ -913,6 +922,8 @@ async fn plain_mode_in_reaper_renoise_and_logic_never_speaks_lives_words() {
                         json!({"type":"change","change":{"id":"c1","family":"mixer","title":"Bass volume","state":"unsure","at":1}}),
                         json!({"type":"remembered","scope":"set","note":{"id":"s1","text":"The Reese is the main bass","at":1},"pending":true}),
                         json!({"type":"watching","on":true}),
+                        json!({"type":"action","title":"Playing"}),
+                        json!({"type":"watching","on":false}),
                         json!({"type":"connection","state":"disconnected"}),
                     ] {
                         f.emit(event);

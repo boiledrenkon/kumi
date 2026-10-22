@@ -74,4 +74,13 @@ async fn a_preset_file_in_the_user_library_is_read_by_the_host_and_one_elsewhere
     let (refused, is_error) = session.tool_full(4, "change_preview", named, false).await;
     assert!(is_error && refused["code"] == "bad-params", "{refused}");
     assert_eq!(asked.lock().unwrap().len(), 2);
+    // A phrase script file: its text goes to the tool as the code.
+    let scripts = home.path().join("Documents").join("Renoise").join("User Library").join("Phrase Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join("Arp.lua"), "return cycle(\"c4 e4 g4\")\n").unwrap();
+    let script = json!({"kind": "phrase-script", "input": {"ref": "e1:phrase:1.1", "path": scripts.join("Arp.lua").to_string_lossy()}, "epoch": "e1", "layout": 0});
+    let (answer, is_error) = session.tool_full(5, "change_preview", script, false).await;
+    assert!(!is_error, "{answer}");
+    let sent = asked.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((&sent["input"]["code"], &sent["input"]["codeName"]), (&json!("return cycle(\"c4 e4 g4\")\n"), &json!("Arp")));
 }

@@ -26,7 +26,7 @@ use kumi_runtime::{
         openai_codex::OPENAI_CODEX,
         store::{open_credential_store, Credential, CredentialStore},
     },
-    core::errors::RuntimeError,
+    core::{daw::DawId, errors::RuntimeError},
     library::{
         learn::LearnPhase,
         sources::{dirname, join},
@@ -116,6 +116,8 @@ pub struct DoctorIo {
     pub node_version: Option<String>,
     pub terminal: Option<TerminalInfo>,
     pub probe_live: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Result<LiveProbe, RuntimeError>>>>,
+    /// Starts Kumi's host for REAPER or Renoise once, as Live's probe starts Live's bridge.
+    pub probe_own: Option<Rc<dyn Fn(DawId) -> LocalBoxFuture<'static, LiveProbe>>>,
     pub node_version_of: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Option<String>>>>,
     pub bundled_bridge_version: Option<String>,
     pub video_programs: Option<AsyncCheck<VideoPrograms>>,
@@ -134,6 +136,7 @@ impl DoctorIo {
             node_version: None,
             terminal: None,
             probe_live: None,
+            probe_own: None,
             node_version_of: None,
             bundled_bridge_version: None,
             video_programs: None,

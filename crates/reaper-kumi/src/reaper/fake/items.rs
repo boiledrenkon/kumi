@@ -238,12 +238,28 @@ pub(super) unsafe extern "C" fn create_new_midi_item_in_proj(
         take.more.length = (end - start) * s.bpm / 60.0;
         let t = &mut s.tracks[at as usize];
         t.items.push(FakeItem::new(&item_id, start, end - start, vec![take]));
-        s.undo_dirty = true;
+        // (REAPER's undo doesn't notice an item made by this call: MarkTrackItemsDirty makes it, lab 7.82)
         item_ptr(at as usize, t.items.len() - 1)
     })
 }
 
+pub(super) unsafe extern "C" fn mark_track_items_dirty(track: *mut MediaTrack, _item: *mut MediaItem) {
+    counted(|s| {
+        if track_of(s, track as u64).is_some() {
+            s.undo_dirty = true;
+        }
+    })
+}
+
 pub(super) unsafe extern "C" fn add_media_item_to_track(track: *mut MediaTrack) -> *mut MediaItem {
+    // As REAPER 7.82's: the new-item fades unless the producer turned them off (splitautoxfade &8), deffadelen long.
+    let fades = super::extra(|e| {
+        let number = |name: &str| e.config.get(name).and_then(|value| value.trim().parse::<f64>().ok());
+        match (number("splitautoxfade"), number("deffadelen")) {
+            (Some(flags), Some(length)) if flags as i64 & 8 == 0 => length,
+            _ => 0.0,
+        }
+    });
     counted(|s| {
         let at = unpack(track as u64).1;
         if at == MASTER || track_of(s, track as u64).is_none() {
@@ -251,7 +267,15 @@ pub(super) unsafe extern "C" fn add_media_item_to_track(track: *mut MediaTrack) 
         }
         let id = new_id(s, "ITEM");
         let t = &mut s.tracks[at as usize];
-        t.items.push(FakeItem::new(&id, 0.0, 0.0, vec![]));
+        let mut item = FakeItem::new(&id, 0.0, 0.0, vec![]);
+        // As REAPER 7.82's: an item this makes loops its source whatever the preferences say, and has the new-item fades
+        // (m7 KP1 lab).
+        item.extra.insert("B_LOOPSRC".into(), 1.0);
+        if fades > 0.0 {
+            item.extra.insert("D_FADEINLEN".into(), fades);
+            item.extra.insert("D_FADEOUTLEN".into(), fades);
+        }
+        t.items.push(item);
         s.undo_dirty = true;
         item_ptr(at as usize, t.items.len() - 1)
     })
@@ -713,7 +737,15 @@ pub(super) unsafe extern "C" fn set_take_stretch_marker(take: *mut MediaItem_Tak
                 -1
             } else {
                 let at = list.iter().position(|m| m.0 > pos).unwrap_or(list.len());
-                list.insert(at, (pos, given.unwrap_or(pos * rate + offs), 0.0));
+                // Without a source, the point that plays there now: between two markers, in proportion; past the
+                // last (or before the first), from it at the take's rate; with none, the offset plus the position.
+                let source = given.unwrap_or_else(|| match (at.checked_sub(1).map(|i| list[i]), list.get(at).copied()) {
+                    (Some(a), Some(b)) if b.0 > a.0 => a.1 + (pos - a.0) * (b.1 - a.1) / (b.0 - a.0),
+                    (Some(a), _) => a.1 + (pos - a.0) * rate,
+                    (None, Some(b)) => b.1 - (b.0 - pos) * rate,
+                    (None, None) => pos * rate + offs,
+                });
+                list.insert(at, (pos, source, 0.0));
                 at as c_int
             }
         } else if let Some(marker) = list.get(index as usize).copied() {
@@ -1305,12 +1337,17 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
             write(buf, size, &text);
             return true;
         }
-        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
+        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk. Its selection isn't in it
+        // either, and its height is a line of its own (7.82 lab: selecting the track changes nothing in its chunk, a
+        // height change moves `TRACKHEIGHT`).
         t.sends.clear();
-        let n = match s.chunks.iter().position(|kept| *kept == t) {
+        t.selected = false;
+        let height = t.extra.remove("I_HEIGHTOVERRIDE").unwrap_or(0.0);
+        let key = super::chunk_key(&t);
+        let n = match s.chunks.iter().position(|kept| *kept == key) {
             Some(n) => n,
             None => {
-                s.chunks.push(t.clone());
+                s.chunks.push(key);
                 s.chunks.len() - 1
             }
         };
@@ -1318,7 +1355,8 @@ pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, bu
         let lanerec = if comping { "LANEREC -1 0 -1 0\n" } else { "LANEREC -1 -1 -1 0\n" };
         // (r-tracks) A track whose controls are locked says so in its state.
         let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
-        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}FAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
+        let text =
+            format!("<TRACK {}\nNAME \"{}\"\n{lock}{lanerec}TRACKHEIGHT {height} 0 0 0 0 0 0\nFAKECHUNK {n}\n{chains}>\n", t.guid, t.name);
         write(buf, size, &text);
         true
     })
@@ -1338,6 +1376,7 @@ pub(super) fn lookup(name: &CStr) -> *mut c_void {
         b"GetMediaItemInfo_Value" => get_media_item_info_value as unsafe extern "C" fn(*mut MediaItem, *const c_char) -> f64,
         b"SetMediaItemInfo_Value" => set_media_item_info_value as unsafe extern "C" fn(*mut MediaItem, *const c_char, f64) -> bool,
         b"CreateNewMIDIItemInProj" => create_new_midi_item_in_proj as unsafe extern "C" fn(*mut MediaTrack, f64, f64, *const bool) -> *mut MediaItem,
+        b"MarkTrackItemsDirty" => mark_track_items_dirty as unsafe extern "C" fn(*mut MediaTrack, *mut MediaItem),
         b"AddMediaItemToTrack" => add_media_item_to_track as unsafe extern "C" fn(*mut MediaTrack) -> *mut MediaItem,
         b"DeleteTrackMediaItem" => delete_track_media_item as unsafe extern "C" fn(*mut MediaTrack, *mut MediaItem) -> bool,
         b"MoveMediaItemToTrack" => move_media_item_to_track as unsafe extern "C" fn(*mut MediaItem, *mut MediaTrack) -> bool,

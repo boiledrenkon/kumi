@@ -436,28 +436,40 @@
           "epoch": "1",
           "items": [
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 0,
               "patternRef": "1:pattern:1",
+              "positionBeats": 0,
               "ref": "1:seq:1",
               "section": "Intro"
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 1,
               "patternRef": "1:pattern:2",
+              "positionBeats": 8,
               "ref": "1:seq:2",
               "section": null
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [
                 2
               ],
+              "pattern": 0,
               "patternRef": "1:pattern:1",
+              "positionBeats": 16,
               "ref": "1:seq:3",
               "section": null
             },
             {
+              "lengthBeats": 8,
               "mutedTracks": [],
+              "pattern": 2,
               "patternRef": "1:pattern:3",
+              "positionBeats": 24,
               "ref": "1:seq:4",
               "section": null
             }
@@ -482,20 +494,23 @@
               "aliases": {},
               "lines": 32,
               "name": "",
+              "number": 0,
               "ref": "1:pattern:1"
             },
             {
               "aliases": {
-                "2": 1
+                "2": 0
               },
               "lines": 32,
               "name": "",
+              "number": 1,
               "ref": "1:pattern:2"
             },
             {
               "aliases": {},
               "lines": 32,
               "name": "",
+              "number": 2,
               "ref": "1:pattern:3"
             }
           ],
@@ -518,7 +533,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -528,7 +543,7 @@
               ]
             },
             {
-              "line": 5,
+              "line": 4,
               "notes": [
                 {
                   "col": 1,
@@ -560,7 +575,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -590,7 +605,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 1,
+              "line": 0,
               "notes": [
                 {
                   "col": 1,
@@ -600,7 +615,7 @@
               ]
             },
             {
-              "line": 5,
+              "line": 4,
               "notes": [
                 {
                   "col": 1,
@@ -632,7 +647,7 @@
           "epoch": "1",
           "items": [
             {
-              "line": 3,
+              "line": 2,
               "notes": [
                 {
                   "col": 1,
@@ -664,7 +679,7 @@
           "items": [
             {
               "chainCount": 0,
-              "index": 1,
+              "index": 0,
               "kind": "sample",
               "macros": [
                 {
@@ -715,7 +730,7 @@
             },
             {
               "chainCount": 0,
-              "index": 2,
+              "index": 1,
               "kind": "plugin",
               "macros": [
                 {
@@ -791,7 +806,7 @@
               "fineTune": 0,
               "frames": 0,
               "fxChainRef": null,
-              "index": 1,
+              "index": 0,
               "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
@@ -819,7 +834,7 @@
               "fineTune": 0,
               "frames": 0,
               "fxChainRef": null,
-              "index": 2,
+              "index": 1,
               "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
@@ -868,8 +883,8 @@
               "keyRange": null,
               "keyTracking": "none",
               "lines": 16,
-              "loopEnd": 16,
-              "loopStart": 1,
+              "loopEnd": 15,
+              "loopStart": 0,
               "looping": true,
               "lpb": 4,
               "name": "Phrase 1",
@@ -1114,7 +1129,7 @@
             "cursor": {
               "column": 1,
               "columnKind": "note",
-              "line": 1,
+              "line": 0,
               "sequence": 1,
               "track": 1
             },
@@ -1122,7 +1137,7 @@
             "deviceRef": "1:device:1.2",
             "instrumentName": "Kit",
             "instrumentRef": "1:instrument:1",
-            "line": 1,
+            "line": 0,
             "patternName": "",
             "patternRef": "1:pattern:1",
             "phraseRef": "1:phrase:1.1",
@@ -1135,6 +1150,23 @@
               "type": "sequencer"
             },
             "trackRef": "1:track:1"
+          },
+          "setup": {
+            "groups": [
+              {
+                "color": "#29a699",
+                "name": "Drums",
+                "tracks": 2
+              },
+              {
+                "color": "#29a699",
+                "name": "Mix",
+                "tracks": 4
+              }
+            ],
+            "paketti": false,
+            "patternLines": 32,
+            "tools": []
           },
           "tracks": [
             {
@@ -1333,7 +1365,7 @@
             "bpm": 128,
             "editMode": false,
             "followPlayer": false,
-            "line": 1,
+            "line": 0,
             "loop": {
               "block": false,
               "end": 16,
@@ -1368,7 +1400,7 @@
             "cursor": {
               "column": 1,
               "columnKind": "note",
-              "line": 1,
+              "line": 0,
               "sequence": 1,
               "track": 1
             },
@@ -1376,7 +1408,7 @@
             "deviceRef": "1:device:1.2",
             "instrumentName": "Kit",
             "instrumentRef": "1:instrument:1",
-            "line": 1,
+            "line": 0,
             "patternName": "",
             "patternRef": "1:pattern:1",
             "phraseRef": "1:phrase:1.1",
@@ -1396,7 +1428,7 @@
             "bpm": 128,
             "editMode": false,
             "followPlayer": false,
-            "line": 1,
+            "line": 0,
             "loop": {
               "block": false,
               "end": 16,
@@ -1811,6 +1843,12 @@
           "slots": [
             {
               "aliases": {},
+              "emptyTracks": [
+                2,
+                3,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 1,
@@ -1821,6 +1859,14 @@
               "aliases": {
                 "2": 1
               },
+              "emptyTracks": [
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 2,
@@ -1829,6 +1875,12 @@
             },
             {
               "aliases": {},
+              "emptyTracks": [
+                2,
+                3,
+                6,
+                7
+              ],
               "mutedTracks": [
                 2
               ],
@@ -1839,6 +1891,15 @@
             },
             {
               "aliases": {},
+              "emptyTracks": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ],
               "mutedTracks": [],
               "name": "",
               "pattern": 3,
@@ -2040,6 +2101,744 @@
             }
           ],
           "ref": "1:track:1"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "digest",
+        "params": {}
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "bounded": {},
+          "changed": 9,
+          "epoch": "1",
+          "facts": {
+            "bpm": 128,
+            "lpb": 4,
+            "name": "Demo",
+            "sequence": {
+              "sequenceHash": "80271b6e",
+              "slots": 4
+            },
+            "tpl": 6
+          },
+          "project": {
+            "id": "b9e741f2bc26a406294ae3e2318dbafc",
+            "identity": "4242:2",
+            "name": "demo.xrns",
+            "path": "/s/demo.xrns",
+            "title": "Demo"
+          },
+          "records": [
+            {
+              "f": {
+                "color": "#ff0000",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": 1
+                },
+                "group": {
+                  "name": "Drums"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Drums"
+                }
+              },
+              "k": "track",
+              "n": "Kick",
+              "o": 1
+            },
+            {
+              "f": {
+                "active": true,
+                "parameters": {
+                  "count": 0,
+                  "parametersHash": "811c9dc5"
+                },
+                "path": "Audio/Effects/Native/Doofer"
+              },
+              "k": "device",
+              "n": "Doofer",
+              "o": 2,
+              "p": "track#/1"
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Drums"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 1,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": -6.02,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Drums"
+                }
+              },
+              "k": "track",
+              "n": "Hat",
+              "o": 2
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Mix"
+                },
+                "kind": "group",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Mix"
+                }
+              },
+              "k": "track",
+              "n": "Drums",
+              "o": 3
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 2
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Mix"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Mix"
+                }
+              },
+              "k": "track",
+              "n": "Bass",
+              "o": 4
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 2,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "group",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Master"
+                }
+              },
+              "k": "track",
+              "n": "Mix",
+              "o": 5
+            },
+            {
+              "f": {
+                "color": "#dcdcdc",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "master",
+                "mixer": {
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Built-in Output"
+                }
+              },
+              "k": "track",
+              "n": "Master",
+              "o": 6
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "send",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Master"
+                }
+              },
+              "k": "track",
+              "n": "Send 1",
+              "o": 7
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {
+                  "Bass": "1 notes, 0 effects #c92aa97b",
+                  "Kick": "2 notes, 0 effects #e46562eb",
+                  "Mix": "0 notes, 1 effects #1c11cb2c"
+                }
+              },
+              "k": "pattern",
+              "n": "Pattern 00",
+              "o": 1
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {
+                  "Hat": "alias of Pattern 00",
+                  "Kick": "1 notes, 0 effects #7115f11f"
+                }
+              },
+              "k": "pattern",
+              "n": "Pattern 01",
+              "o": 2
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {}
+              },
+              "k": "pattern",
+              "n": "Pattern 02",
+              "o": 3
+            },
+            {
+              "f": {
+                "effects": {
+                  "count": 0
+                },
+                "macros": {
+                  "macrosHash": "2c8f8444"
+                },
+                "modulation": {
+                  "count": 1
+                },
+                "phrases": {
+                  "count": 1,
+                  "phrasesHash": "3a54b833"
+                },
+                "plugin": "",
+                "samples": {
+                  "count": 2,
+                  "samplesHash": "8d72f28e"
+                }
+              },
+              "k": "instrument",
+              "n": "Kit",
+              "o": 1
+            },
+            {
+              "f": {
+                "effects": {
+                  "count": 0
+                },
+                "macros": {
+                  "macrosHash": "101988c5"
+                },
+                "modulation": {
+                  "count": 1
+                },
+                "phrases": {
+                  "count": 0,
+                  "phrasesHash": "811c9dc5"
+                },
+                "plugin": "Serum",
+                "samples": {
+                  "count": 1,
+                  "samplesHash": "c0123765"
+                }
+              },
+              "k": "instrument",
+              "n": "Pad",
+              "o": 2
+            }
+          ],
+          "summaries": {
+            "device": "devices"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "digest",
+        "params": {
+          "values": true
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "bounded": {},
+          "changed": 9,
+          "epoch": "1",
+          "facts": {
+            "bpm": 128,
+            "lpb": 4,
+            "name": "Demo",
+            "sequence": {
+              "sequenceHash": "80271b6e",
+              "slots": 4
+            },
+            "tpl": 6
+          },
+          "project": {
+            "id": "b9e741f2bc26a406294ae3e2318dbafc",
+            "identity": "4242:2",
+            "name": "demo.xrns",
+            "path": "/s/demo.xrns",
+            "title": "Demo"
+          },
+          "records": [
+            {
+              "f": {
+                "color": "#ff0000",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": 1
+                },
+                "group": {
+                  "name": "Drums"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Drums"
+                }
+              },
+              "k": "track",
+              "n": "Kick",
+              "o": 1
+            },
+            {
+              "f": {
+                "active": true,
+                "parameters": {
+                  "count": 0,
+                  "parametersHash": "811c9dc5"
+                },
+                "path": "Audio/Effects/Native/Doofer"
+              },
+              "k": "device",
+              "n": "Doofer",
+              "o": 2,
+              "p": "track#/1",
+              "r": "1:device:1.2",
+              "v": []
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Drums"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 1,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": -6.02,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Drums"
+                }
+              },
+              "k": "track",
+              "n": "Hat",
+              "o": 2
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Mix"
+                },
+                "kind": "group",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Mix"
+                }
+              },
+              "k": "track",
+              "n": "Drums",
+              "o": 3
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 2
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": "Mix"
+                },
+                "kind": "sequencer",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "delay": 0,
+                  "output": "Mix"
+                }
+              },
+              "k": "track",
+              "n": "Bass",
+              "o": 4
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 2,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "group",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Master"
+                }
+              },
+              "k": "track",
+              "n": "Mix",
+              "o": 5
+            },
+            {
+              "f": {
+                "color": "#dcdcdc",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "master",
+                "mixer": {
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Built-in Output"
+                }
+              },
+              "k": "track",
+              "n": "Master",
+              "o": 6
+            },
+            {
+              "f": {
+                "color": "#29a699",
+                "columns": {
+                  "effects": 1,
+                  "notes": 1
+                },
+                "devices": {
+                  "count": -1
+                },
+                "group": {
+                  "name": null
+                },
+                "kind": "send",
+                "mixer": {
+                  "mute": "active",
+                  "pan": 0,
+                  "postPan": 0,
+                  "postVolume": 0,
+                  "solo": false,
+                  "volume": 0,
+                  "width": 0
+                },
+                "routing": {
+                  "output": "Master"
+                }
+              },
+              "k": "track",
+              "n": "Send 1",
+              "o": 7
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {
+                  "Bass": "1 notes, 0 effects #c92aa97b",
+                  "Kick": "2 notes, 0 effects #e46562eb",
+                  "Mix": "0 notes, 1 effects #1c11cb2c"
+                }
+              },
+              "k": "pattern",
+              "n": "Pattern 00",
+              "o": 1
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {
+                  "Hat": "alias of Pattern 00",
+                  "Kick": "1 notes, 0 effects #7115f11f"
+                }
+              },
+              "k": "pattern",
+              "n": "Pattern 01",
+              "o": 2
+            },
+            {
+              "dn": true,
+              "f": {
+                "automation": {
+                  "automationHash": "811c9dc5",
+                  "count": 0
+                },
+                "length": 32,
+                "lines": {}
+              },
+              "k": "pattern",
+              "n": "Pattern 02",
+              "o": 3
+            },
+            {
+              "f": {
+                "effects": {
+                  "count": 0
+                },
+                "macros": {
+                  "macrosHash": "2c8f8444"
+                },
+                "modulation": {
+                  "count": 1
+                },
+                "phrases": {
+                  "count": 1,
+                  "phrasesHash": "3a54b833"
+                },
+                "plugin": "",
+                "samples": {
+                  "count": 2,
+                  "samplesHash": "8d72f28e"
+                }
+              },
+              "k": "instrument",
+              "n": "Kit",
+              "o": 1
+            },
+            {
+              "f": {
+                "effects": {
+                  "count": 0
+                },
+                "macros": {
+                  "macrosHash": "101988c5"
+                },
+                "modulation": {
+                  "count": 1
+                },
+                "phrases": {
+                  "count": 0,
+                  "phrasesHash": "811c9dc5"
+                },
+                "plugin": "Serum",
+                "samples": {
+                  "count": 1,
+                  "samplesHash": "c0123765"
+                }
+              },
+              "k": "instrument",
+              "n": "Pad",
+              "o": 2
+            }
+          ],
+          "summaries": {
+            "device": "devices"
+          }
         }
       }
     },

@@ -107,7 +107,24 @@ fn a_sends_midi_buses_and_faders_are_written_and_a_midi_only_send_takes_no_audio
     assert_eq!(lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "midi": {"fromBus": 200}})).unwrap_err().0, "bad-params");
 }
 
-// ----- hardware outputs -----
+#[test]
+fn a_change_of_one_end_of_a_send_is_checked_with_the_other_end_it_has() {
+    let lab = Lab::new();
+    // Drums has 4 channels, Reverb 2; the send takes 1/2 to 1/2.
+    state(|s| {
+        s.tracks[0].extra.insert("I_NCHAN".into(), 4.0);
+    });
+    // Four channels from Drums would reach channels 3/4 of Reverb, which it hasn't.
+    let (code, message) =
+        lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "srcChannels": {"offset": 1, "count": 4}})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("“Reverb” has 2 channels"), "{message}");
+    // A send of one channel, mono: its destination alone moved to channel 2 fits; as a stereo pair it wouldn't.
+    lab.make("send-channels", json!({"ref": DRUMS_TO_REVERB, "srcChannels": {"offset": 1, "count": 1}}), "Kumi: x (kc001)");
+    lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "dstChannels": {"offset": 2}})).unwrap();
+}
+
+// ----- hardware outputs -----// ----- hardware outputs -----
 
 fn kick_outputs() -> Vec<FakeSend> {
     state(|s| s.tracks[1].hw_outs.clone())
@@ -124,6 +141,10 @@ fn a_hardware_output_is_added_to_an_output_the_device_has_and_undone_by_its_mark
     let (preview, made) =
         lab.make("hw-out-add", json!({"ref": KICK, "output": {"first": 1}, "volumeDb": -6.0}), "Kumi: Added output (kh001)");
     assert_eq!(made["display"]["title"], "Added hardware output “Kick” → output 1/2");
+    // (m4-tui) HISTORY's picture: the track to its output, made, with its volume.
+    let route = &made["display"]["route"];
+    assert_eq!((route["from"].as_str(), route["to"].as_str(), route["change"].as_str()), (Some("Kick"), Some("output 1/2"), Some("made")));
+    assert_eq!(route["values"][0]["toText"], "−6 dB");
     let outputs = kick_outputs();
     assert_eq!((outputs.len(), outputs[0].dst_chan), (1, 0));
     assert!((outputs[0].volume - 10f64.powf(-6.0 / 20.0)).abs() < 1e-12);
@@ -177,6 +198,20 @@ fn a_hardware_outputs_settings_are_changed_and_put_back_and_a_producer_change_af
     state(|s| s.tracks[1].hw_outs[0].pan = 0.25);
     let (code, _) = lab.apply("hw-out-volume", &input, &preview, "Kumi: x (ku002)").unwrap_err();
     assert_eq!((code.as_str(), kick_outputs()[0].volume), ("changed", 1.0));
+}
+
+#[test]
+fn an_outputs_mono_is_its_output_codes_mono_bit_which_reaper_keeps() {
+    // B_MONO on a hardware output reads back but REAPER neither saves nor undoes it (accept-reaper lab, 7.82: REAPER's undo
+    // took the step before Kumi's instead, and a reload loses it); the output's mono is I_DSTCHAN's 1024 bit.
+    let lab = Lab::new();
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-mono", json!({"ref": output, "mono": true}), "Kumi: x (km001)");
+    assert_eq!(kick_outputs()[0].dst_chan, 1024);
+    assert_eq!(lab.call("read", json!({"kind": "send", "parent": KICK})).unwrap()["items"][0]["mono"], true);
+    lab.undo("hw-out-mono", &preview, &made, "Kumi: undo (km002)").unwrap();
+    assert_eq!(kick_outputs()[0].dst_chan, 0);
 }
 
 #[test]
@@ -333,6 +368,34 @@ fn an_unmarked_output_is_written_or_removed_only_as_kumi_left_it_even_told_to_un
     state(|s| s.tracks[1].hw_outs[1].volume = 1.0);
     lab.undo("hw-out-add", &preview, &made, "Kumi: undo (kn006)").unwrap();
     assert_eq!(kick_outputs().iter().map(|o| o.dst_chan).collect::<Vec<_>>(), [1 | 1024], "the producer's stays");
+}
+
+#[test]
+fn kumis_undo_of_a_send_receive_or_output_it_added_leaves_it_once_the_producer_drew_its_envelopes() {
+    let lab = Lab::new();
+    // (Kick has no sends of its own: Kumi's is its first)
+    for (kind, input) in [
+        ("send-add", json!({"ref": KICK, "toRef": REVERB})),
+        ("receive-add", json!({"ref": REVERB, "fromRef": KICK})),
+        ("hw-out-add", json!({"ref": KICK, "output": {"first": 1}})),
+    ] {
+        let (preview, made) = lab.make(kind, input, "Kumi: x (kv001)");
+        let chunk = if kind == "hw-out-add" { "hw<VOLENV" } else { "<VOLENV" };
+        // Drawn, then bypassed: off, but its points are still the producer's.
+        state(|s| {
+            let mut envelope = FakeEnvelope::for_send("Volume", 0, chunk, 4);
+            envelope.active = false;
+            s.tracks[1].envelopes.push(envelope);
+        });
+        let (code, message) = lab.undo(kind, &preview, &made, "Kumi: undo (kv002)").unwrap_err();
+        assert_eq!(code, "changed", "{kind}: {message}");
+        assert!(message.contains("1 envelope(s)"), "{kind}: {message}");
+        assert_eq!(state(|s| s.tracks[1].sends.len() + s.tracks[1].hw_outs.len()), 1, "{kind}: kept");
+        // Told to undo anyway, it goes with them.
+        lab.undo_anyway(kind, &preview, &made, "Kumi: undo (kv003)").unwrap();
+        state(|s| s.tracks[1].envelopes.clear());
+        assert_eq!(state(|s| s.tracks[1].sends.len() + s.tracks[1].hw_outs.len()), 0, "{kind}");
+    }
 }
 
 #[test]

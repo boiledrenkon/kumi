@@ -23,6 +23,30 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 宽度不足 100 列时，Live 窗格会折叠为输入框上方的两行条带（先是你所在的位置和 Kumi 正在做的事，然后是最近一次修改及其撤销）。窗口小于 24×8 时，Kumi 会请你把窗口调大。
 
+## REAPER 与 Renoise
+
+在 REAPER 和 Renoise 中界面也一样（[如何连接](KUMI_GUIDE.md#连接-reaper-或-renoise)），用的是该 DAW 自己的说法和视图。
+
+- **标题栏：** 工程或歌曲的名称，以及与 DAW 的连接（"● REAPER"；被对话框或渲染占住时显示 "REAPER busy"）。节拍灯跟随 DAW 自己的时间闪烁，并在速度旁显示拍子：REAPER 是经由速度图得出的拍号（"7/8"），Renoise 是每拍行数（"LPB 4"）。
+- **REAPER 的 FOCUS** 跟随 REAPER 中拥有焦点的部分：
+  - **编排视图**：所选轨道前后的轨道，按文件夹层级缩进（完全折叠的文件夹会隐藏其中的轨道），对象（item）显示为条块，还有标记与区域、循环区间和播放头；
+  - **MIDI 编辑器**：take 的音符显示为小型钢琴卷帘，下方最多三条控制器轨道（CC、弯音、音色切换、通道压力、复音触后），以及 "and n more lanes"；
+  - **FX 链**：以树状显示，输入 FX 自成一枝，容器展开显示其中的 FX，旁通、离线和并联的 FX 会有标注；take 的 FX 拥有焦点时显示 take 的 FX 链（"Kick · take “kick.wav”"）；
+  - 轨道的**路由**窗口：它的发送、接收和硬件输出及其电平，以及 MIDI 硬件输出；
+  - **混音器**窗口（未停靠的；停靠的混音器无法分辨）：主控和所选轨道前后的轨道，显示音量、声像、静音、独奏、录音预备和峰值表。
+- **Renoise 的 FOCUS** 跟随中间的主框架和各个面板（Renoise 不告诉 Kumi 键盘焦点在哪里，所以 FOCUS 按发生变化的部分来跟随）：
+  - **Pattern Editor**（模式编辑器）：光标附近的行（播放且开启 Follow Player 时则是播放位置附近），以 Renoise 的记法显示每条轨道的音符、乐器、音量、声像、延迟和效果列，轨道名用轨道颜色显示；
+  - **Pattern Matrix**（模式矩阵，显示时）：序列中每个槽位的模式、段落和静音的轨道，以及当前槽位；
+  - **Phrase Editor**（乐句编辑器）：同样的网格，附上乐句的 LPB、键位跟踪和循环；
+  - **乐器**（Instrument Editor 或 Sample Editor）：键区（keyzone）显示为琴键图，以及每个采样的静音组和切片、宏、乐句、调制组和 FX 链；
+  - **Track DSPs**（该面板打开时）：以树状显示效果链，Doofer 连同其中的设备，Splitter 每条通道一枝（Frequency Low 与 High、Mid 与 Side、Parallel Lane 1 与 2），旁通的设备会有标注；
+  - **Mixer**（混音器）：每条轨道效果后的音量、声像、静音和独奏（没有电平表：Renoise 的 API 不提供）。
+- **指向：** 在 FX 和 DSP 树中，Tab 和点击与在 Live 的设备树中一样可用。
+- **图示：** NOW 和 HISTORY 中每类修改各有一种图示：模式或乐句的行在修改前后的样子、包络或自动化的点、变动的参数（带名称和条形）、路由的数值（发送、接收、硬件输出）、键区、轨道上的对象、设置的前后，以及载入效果链后轨道上的设备。键区和对象以图画显示（终端能显示图片时为图片）；行和路由以文字显示。
+- **设置**在那里只有两步，在 Linux 上也一样：登录，以及 Connect to REAPER（或 Renoise）。没有 Control Surface。
+- **命令**使用该 DAW 的说法：`/refresh` 重新读取你的 REAPER 工程，`/stop` 停止 REAPER 的走带和录音，以及 Kumi 正在大声播放的内容。`/willington` 只属于 Live。
+- **离开 Kumi 时：** Kumi 的那一行显示在 Renoise 的状态栏中。REAPER 没有 Kumi 能写入的状态栏，所以用通知告诉你；`/status` 会说明是哪一种。
+
 ## 终端中的命令
 
 以 `kumi <command>` 运行；在仓库副本中，以 `npm run kumi -- <command>` 运行。
@@ -30,22 +54,24 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | 命令 | 作用 |
 | --- | --- |
 | `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
+| `kumi --daw reaper`、`kumi --daw renoise` | 在当前打开的 REAPER 工程或 Renoise 歌曲上打开 Kumi；第一次时登录，并装入 Kumi 的扩展或工具。`KUMI_DAW` 作用相同；`kumi --daw reaper doctor`（或 `report`）说的是那个 DAW |
+| `kumi --daw reaper bridge [--yes]`（或 `renoise`） | 把 Kumi 的扩展装入 REAPER，或把它的工具装入 Renoise，或把它们更新到最新；`--yes` 预先回答它的提问 |
+| `kumi --daw logic [<command>]` | 配合 Logic Pro 而不是 Live 工作（`--daw ableton` 即 Live），可用于一次会话或一条命令：`kumi --daw logic bridge [--yes]` 把 Kumi 的 Logic Pro 桥接安装到 Kumi 自己的文件夹中，Logic Pro 打开与否都可以；`kumi --daw logic doctor` 检查 Logic Pro 这一侧（[连接 Logic Pro](KUMI_GUIDE.md#连接-logic-pro)） |
 | `kumi -c`（或 `--continue`） | 接着你上次使用的对话继续，不论它属于哪个工程 |
 | `kumi -r [ID 或名称]`（或 `--resume`） | 按 ID（或其开头）或名称继续一段保存的对话；不加参数则从列表中选择。两者都可与 `--inference-only` 一起使用 |
 | `kumi export [ID 或名称 \| --last] [--md \| --html \| --json] [--full] [--raw] [-o 路径]` | 将保存的对话存为 Markdown（默认）、网页或供 Kumi 使用的文件；不写 ID 或加 `--last` 时为最近的对话。`--full` 加上每个步骤的输入和结果，`--raw` 保留密钥和路径 |
 | `kumi import <文件>` | 导入用 `kumi export --json` 保存的对话，之后可用 `kumi -r` 继续 |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
-| `kumi --daw logic [<command>]` | 配合 Logic Pro 而不是 Live 工作（`--daw ableton` 即 Live），可用于一次会话或一条命令：`kumi --daw logic bridge [--yes]` 把 Kumi 的 Logic Pro 桥接安装到 Kumi 自己的文件夹中，Logic Pro 打开与否都可以；`kumi --daw logic doctor` 检查 Logic Pro 这一侧（[连接 Logic Pro](KUMI_GUIDE.md#连接-logic-pro)） |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
 | `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`，通过 SSH 时默认如此；要用浏览器则加 `--browser`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
 | `kumi logout <provider>` | 移除 Kumi 在该提供方的登录 |
 | `kumi model [<provider>/<model>]` | 显示或选择模型，也可以是你电脑上的模型（`ollama/<model>`） |
 | `kumi auth` | 哪些提供方可用、当前模型以及登录文件（从不显示机密信息） |
 | `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭（没有终端时，不加它就什么都不改）；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
-| `kumi doctor [--json]` | 检查安装（版本、回滚、PATH、更新、可用空间、Live、用户库、桥接的端口、Developer Mode）、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么。`--json` 输出时不含密钥和主文件夹 |
+| `kumi doctor [--json]` | 检查安装（版本、回滚、PATH、更新、可用空间、Live、用户库、桥接的端口、Developer Mode）、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单、终端，以及你在用的 REAPER 和 Renoise；告诉你该运行什么。`--json` 输出时不含密钥和主文件夹 |
 | `kumi library [--rebuild]` | Kumi 学习你的声音、预设和工程进行到了哪里；`--rebuild` 全部重新学习 |
-| `kumi update [--check \| --rollback \| --version <x.y.z>]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接）；`--version` 安装那个版本，较新或较旧都可以（仅限已安装的 Kumi） |
+| `kumi update [--check \| --rollback \| --version <x.y.z>]` | 获取最新的 Kumi（桥接较旧时也一并更新，REAPER 的扩展和 Renoise 的工具换成它附带的版本）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接）；`--version` 安装那个版本，较新或较旧都可以（仅限已安装的 Kumi） |
 | `kumi report` | 写出 `~/kumi-report-<date and time>.txt`，出问题时把它发给我们 |
 | `kumi uninstall [--all] [--yes] [--dry-run]` | 卸载已安装的 Kumi 及其下载的内容；`--all` 同时删除对话、笔记、配方、登录信息、素材库和参考曲目；`--yes` 跳过第一个确认问题；`--dry-run` 只说明会删除什么 |
 | `kumi --version`（或 `-v`）、`kumi --help`（或 `-h`、`help`） | 版本；帮助 |
@@ -64,7 +90,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/export [copy \| md \| html \| json]` | 将这段对话存为文件：复制为 Markdown，或保存为 Markdown、网页、供 Kumi 使用的文件（`kumi import`）；不加参数时可以选择。超过 64 KB 时改为保存文件 |
 | `/share` | 将这段对话保存为随处可打开的网页（没有变化时仍是同一个网页），然后打开它、在访达（资源管理器）中显示它，或复制它的路径，直到选择 Done；通过 SSH 连接时，会告诉你网页在哪里 |
 | `/reconnect` | 通过新的桥接重新连接 Live，保留对话（之前的修改将失去 Kumi 的撤销） |
-| `/daw [name]` | Kumi 配合哪个 DAW 工作；`/daw logic` 或 `/daw live` 会关闭 Kumi，再以那个 DAW 重新打开它，不带上这段对话（每个 DAW 的工程各自保留自己的对话）。你用到 Live 以外的 DAW 之后才会提供 |
+| `/daw [name]` | 显示 Kumi 正在使用哪个 DAW；`/daw live`、`/daw reaper`、`/daw renoise` 或 `/daw logic` 会关闭 Kumi，并用那个 DAW 重新打开，不带上这段对话（每个 DAW 的工程各自保留自己的对话）。在你使用 REAPER、Renoise 或 Logic Pro，或装好了其中之一的 Kumi 桥接后显示 |
 | `/undo` | 撤销 Kumi 最近一次修改 |
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
 | `/refresh` | 重新读取工程，不询问模型 |
@@ -106,6 +132,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 - 轨道可以用名称指定（不区分大小写）；如果只有一条轨道的名称以你输入的内容开头，就是那条；也可以用位置指定：`mute track 3`。
 - 带有更多内容的消息（"mute the drums a bit"、"solo the bass?"），或者 Kumi 无法确定是哪条轨道时，会按原样发给模型。
 - 只有在 Kumi 没有回答时才会立即执行；回答过程中按 Enter，仍然像平时一样用于引导回答。
+- **在 REAPER 中：** 带有速度标记或拍号标记的工程，`tempo` 和 `loop` 会交给模型（速度指的是哪个标记、一小节有多长，都取决于位置）。`loop 9-16` 还会打开循环播放。
+- **在 Renoise 中：** `loop 9-16` 循环包含这些小节的序列槽位；在模式中间开始或结束的小节会交给模型。`arm` 会被拒绝：Renoise 在编辑模式开启时，把音符录入所选轨道的模式。速度范围为 32 到 999 BPM。
 - 在 `~/.kumi/settings.json` 中设置 `"instantPhrases": false` 即可关闭。
 
 ## 按键
@@ -151,14 +179,14 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 ## 纯文本模式
 
-设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [编号、ID 或名称]`（以及 `/conversations`）、`/rename <name>`、`/fork [name]`、`/export [md|html|json]`、`/share`（都会保存文件并告诉你位置）、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。`/resume` 先为本工程的对话编号，再为其他工程的对话编号；Kumi 关于其他工程对话的提问用 1、2 或 3 回答（等待回答时命令照常可用，输入其他内容会再问一次）。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
+设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [编号、ID 或名称]`（以及 `/conversations`）、`/rename <name>`、`/fork [name]`、`/export [md|html|json]`、`/share`（都会保存文件并告诉你位置）、`/daw [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。`/resume` 先为本工程的对话编号，再为其他工程的对话编号；Kumi 关于其他工程对话的提问用 1、2 或 3 回答（等待回答时命令照常可用，输入其他内容会再问一次）。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
 
 ## 离开 Kumi 时
 
 - **终端中的状态：** Kumi 用 OSC 7501 报告它在做什么（工作中，附 NOW 的文字和运行进度；等你选择或登录；完成；失败），支持它的终端会显示在标签页或侧栏中。Windows Terminal、ConEmu 和 Ghostty 还会收到 OSC 9;4 进度。Kumi 退出时两者都会清除。
 - **Kumi 的窗口在其他窗口后面时**，Kumi 会在以下情况告诉你：完成一个用时 15 秒或更久的回答、需要你选择或登录、等待套餐上限、因错误停止，或结束一次 `/goal`、`/loop` 或匹配：
   - 桌面通知：用终端自己的通知（Ghostty、WezTerm 和 foot 用 OSC 777；iTerm2 用 OSC 9；kitty 用 OSC 99），否则用 macOS 的通知（Terminal.app 等）、Linux 上的 `notify-send`，或 Windows Terminal 的响铃（任务栏会闪烁）；
-  - Live 状态栏中的一行（“Kumi · done · the bass is darker”）；从不弹出对话框，也不进入 HISTORY。
+  - Live（或 Renoise）状态栏中的一行（“Kumi · done · the bass is darker”）；从不弹出对话框，也不进入 HISTORY。REAPER 没有 Kumi 能写入的状态栏。
   - 每 10 秒最多一条（等待中的最新一条届时送出）；Live 录音时一条也不送，等录音停止；你回来后不再发送。
   - 对从不告知自己是否在前台的终端，在 Mac 上，只有在有事要告诉你时，Kumi 才询问系统哪个应用在前台。
   - 没有看到通知？请在“系统设置 › 通知”中允许你的终端（若是 macOS 自身的通知，则为“脚本编辑器”）发送通知。

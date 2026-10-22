@@ -188,7 +188,13 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         (json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"}}), None),
         (
             json!({"track":track,"trackRef":"r:track:{B}","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"routing","label":"Routing"}}),
-            Some(FocusBody::Routing(RoutingView { track_ref: "r:track:{B}".into(), routes: vec![], parent_send: Some(true) })),
+            Some(FocusBody::Routing(RoutingView {
+                track_ref: "r:track:{B}".into(),
+                name: None,
+                routes: vec![],
+                parent_send: Some(true),
+                midi_out: Some("Launchpad · channel 2".into()),
+            })),
         ),
         (
             json!({"track":track,"trackRef":"r:track:{B}","device":"ReaComp","mainView":{"kind":"timeline","label":"Arrange"},"editorView":{"kind":"device-chain","label":"FX"}}),
@@ -232,7 +238,13 @@ case!(a_logic_session_never_speaks_lives_words, async {
         ),
         (
             json!({"track":track,"trackRef":"1:track:2","mainView":{"kind":"timeline","label":"Tracks"},"editorView":{"kind":"routing","label":"Routing"}}),
-            Some(FocusBody::Routing(RoutingView { track_ref: "1:track:2".into(), routes: vec![], parent_send: None })),
+            Some(FocusBody::Routing(RoutingView {
+                track_ref: "1:track:2".into(),
+                name: None,
+                routes: vec![],
+                parent_send: None,
+                midi_out: None,
+            })),
         ),
     ];
     // HISTORY over Logic's profile: a change to check, the catch-up, watching, and the producer's /undo, each in
@@ -257,6 +269,8 @@ case!(a_logic_session_never_speaks_lives_words, async {
         "Imported 64 notes",
         "Cycle bar 5",
         "Kumi closed. Each project's conversation continues next time.",
+        // (/status: REAPER has no status bar Kumi can write to)
+        "no status bar",
     ];
     // (M4, M4b) HISTORY's rows for Logic's two M4 slices: a key command only Logic's own undo takes back (kept, in Logic's
     // words), a split past Kumi's undo (no undo), an import whose undo Logic didn't finish (unsure, Logic's words
@@ -302,6 +316,8 @@ case!(a_renoise_session_never_speaks_lives_words, async {
         cursor: Some(0),
         playing: None,
         lpb: Some(4.),
+        heading: None,
+        facts: vec![],
         tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells: vec!["C-4 01 .. .. ..".into()] }],
     };
     let focuses = vec![
@@ -315,7 +331,13 @@ case!(a_renoise_session_never_speaks_lives_words, async {
             Some(FocusBody::Keyzones(KeyzoneMap { item_ref: "3:instrument:1".into(), name: "Kit".into(), ..Default::default() })),
         ),
     ];
-    let seen = ["Ask Kumi about your song", "paused while Renoise plays", "Kumi closed. Each song's conversation continues next time."];
+    // (/status: Renoise's status bar shows Kumi's lines)
+    let seen = [
+        "Ask Kumi about your song",
+        "paused while Renoise plays",
+        "Kumi closed. Each song's conversation continues next time.",
+        "status bar too",
+    ];
     tui_states(DawId::Renoise, "Renoise — Night Drive", focuses, vec![]).await.saw(&seen.map(String::from)).assert_none("Renoise");
 });
 
@@ -421,7 +443,7 @@ case!(reapers_and_renoises_setup_never_speak_lives_words, async {
         "REAPER 7 hasn't been opened here yet",
     ];
     setup_states(DawId::Reaper).await.saw(&reaper.map(String::from)).assert_none("REAPER's setup");
-    let renoise = ["Renoise is open · restart needed", "Renoise 3 not found", "renoise.com", "chat without Renoise for now"];
+    let renoise = ["Renoise is open · restart needed", "Renoise 3.5 not found", "renoise.com", "chat without Renoise for now"];
     setup_states(DawId::Renoise).await.saw(&renoise.map(String::from)).assert_none("Renoise's setup");
 });
 
@@ -567,4 +589,41 @@ case!(logics_setup_never_speaks_lives_words_and_never_restarts_logic, async {
     for word in ["restart", "quit"] {
         assert!(!seen.contains(word), "Logic's setup says {word:?}:\n{seen}");
     }
+});
+
+/// REAPER's and Renoise's FOCUS bodies and change pictures (tui_own_bodies' goldens: each body, each family's picture in
+/// NOW and HISTORY, wide, narrow and plain) speak their DAW's words, never Live's.
+#[test]
+fn reapers_and_renoises_bodies_and_pictures_never_speak_lives_words() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/tui/daw");
+    let mut screens = 0;
+    for entry in std::fs::read_dir(&folder).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found = leaks(&text);
+        assert!(found.is_empty(), "{}: {found:?}", path.display());
+        screens += 1;
+    }
+    assert!(screens >= 50, "every scene's screens are read: {screens}");
+}
+
+// Review K11: /reconnect in REAPER or Renoise leaves each row to the integration, which retires it in the DAW's words;
+// Live's note ("Kumi reconnected to Live since…; Live's own undo still can") is for Live's rows alone.
+case!(a_reconnect_in_renoise_never_gives_rows_lives_note, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    c.set("reconnect", json!(true));
+    let h = Harness::with(120, 36, c, |_| {});
+    h.start().await;
+    h.connect();
+    h.emit(json!({"type":"change","change":{"id":"c5","family":"mixer","title":"Track 1 muted","state":"applied","at":1}}));
+    h.type_text("/reconnect\r").await;
+    assert!(h.calls().contains(&"reconnect".into()));
+    assert!(!h.screen().iter().any(|s| s.contains("Track 1 muted") && s.contains("no undo")), "{:?}", h.screen());
+    // The integration's own word for it arrives as a change, and that's what the row says.
+    let note = "Kumi's link to Renoise started again, so Kumi can't undo this anymore, and Renoise's own undo doesn't take this back: neither can now, so change it by hand if needed.";
+    h.emit(json!({"type":"change","change":{"id":"c5","family":"mixer","title":"Track 1 muted","state":"expired","note":note,"at":1}}));
+    assert!(h.screen().iter().any(|s| s.contains("Track 1 muted") && s.contains("no undo")), "{:?}", h.screen());
+    h.close().await;
+    work_with(DawId::Ableton);
 });

@@ -17,6 +17,8 @@ import("changes_samples")
 import("changes_modfx")
 import("changes_phrases")
 import("changes_plugins")
+-- M6 (m6-library): an instrument made from sample files
+import("changes_kit")
 -- M4 (n-song)
 import("changes_patterns")
 local sequence_ = import("changes_sequence")
@@ -25,6 +27,8 @@ local presets = import("changes_presets")
 local macros = import("changes_macros")
 import("changes_params")
 import("changes_loaders")
+-- (M5 m5-renoise)
+import("changes_scratch")
 
 local M = {}
 
@@ -86,7 +90,7 @@ function M.apply(params, env)
   -- (n-instruments: a change that reads in slices before its one writing callback, or waits for Renoise after it, is a job)
   if done.kumi_job then
     local work = done.kumi_job
-    return { kumi_job = function(job) return applied_answer(env, spec, desc, work(job)) end }
+    return { kumi_job = function(job) return applied_answer(env, spec, desc, work(job)) end, kumi_wrote = done.kumi_wrote }
   end
   return applied_answer(env, spec, desc, done)
 end
@@ -97,13 +101,27 @@ function M.restores_by_place(kind)
   return spec ~= nil and spec.by_place == true
 end
 
+-- (the journal is told which change is being put back, by its desc, for the length of the restore's own callback)
+local restore_in
+
 function M.restore(params, env)
+  local journal = env.journal
+  if journal then journal.restoring = type(params.of) == "string" and params.of or nil end
+  local ok, done = pcall(restore_in, params, env)
+  if journal then journal.restoring = nil end
+  if not ok then error(done, 0) end
+  return done
+end
+
+function restore_in(params, env)
   local song = base.context(params, env)
   local spec = kind_of(params)
   local desc = base.need_text(params, "desc")
   local restore = {
     target = base.need_object(params, "target"), prior = params.prior, applied = params.applied, material = params.material,
     created = params.created, discard = params.discard == true, layout = params.layout,
+    -- (the change Renoise's redo put back, when it did: its journal entry)
+    redone = base.redone_entry(env.journal, params.of),
   }
   local done
   if spec.custom then
@@ -238,5 +256,6 @@ M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
 M.journal_pattern_event, M.journal_sequence_event = base.journal_pattern_event, base.journal_sequence_event
 M.journal_list_event = base.journal_list_event -- (n-instruments)
+M.redone_entry, M.journal_poll = base.redone_entry, base.journal_poll
 
 return M

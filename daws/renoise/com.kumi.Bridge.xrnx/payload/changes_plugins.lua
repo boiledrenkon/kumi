@@ -25,13 +25,7 @@ M.UNDO_COVERS = { plugin = true, preset = true, midi = true }
 local NOT_IN_UNDO = "Renoise's own undo won't take this back; Kumi can."
 
 local function state_hash(text)
-  local a, b = 5381, 0
-  for i = 1, #text do
-    local byte = text:byte(i)
-    a = (a * 33 + byte) % 4294967296
-    b = (b * 65599 + byte) % 4294967296
-  end
-  return string.format("%08x%08x", a, b)
+  return base.hash(text)
 end
 
 local function plugin_now(instrument)
@@ -109,7 +103,16 @@ base.register({
     local name = plan.instrument.name
     local loaded = plan.instrument.plugin_properties:load_plugin(plan.path)
     if not loaded or (plan.path ~= "" and not plan.instrument.plugin_properties.plugin_loaded) then
-      fail("failed", "Renoise wouldn't load the plug-in " .. plan.path)
+      -- (the plug-in it had, with its state, loaded again if Renoise let it go before refusing)
+      local properties, back = plan.instrument.plugin_properties, true
+      if plan.kept.path ~= "" and (not properties.plugin_loaded or properties.plugin_device.device_path ~= plan.kept.path) then
+        back = pcall(function()
+          if not properties:load_plugin(plan.kept.path) then error("refused") end
+          properties.plugin_device.active_preset_data = plan.kept.state
+        end)
+      end
+      pcall(function() if plan.instrument.name ~= name then plan.instrument.name = name end end)
+      fail("failed", "Renoise wouldn't load the plug-in " .. plan.path .. (back and "" or "; the plug-in it had couldn't be loaded back either: Renoise's own undo may bring it"))
     end
     if plan.now.path == "" and name ~= "" and plan.instrument.name ~= name then plan.instrument.name = name end
     if plan.instrument.name ~= name and plan.instrument.name == "" then
@@ -185,7 +188,7 @@ local function preset_plan(song, env, input)
   end
   local state = device.active_preset_data or ""
   if #state > M.MAX_STATE_BYTES then fail("failed", "the plug-in's state is more than Kumi keeps to put it back") end
-  return { n = n, label = label, device = device, index = index, name = presets[index], now = device.active_preset, state = state }
+  return { n = n, label = label, device = device, index = index, name = presets[index], now = device.active_preset, state = state, path = device.device_path }
 end
 
 base.register({
@@ -207,9 +210,16 @@ base.register({
     end
     if M.UNDO_COVERS.preset then song:describe_undo(desc) end
     plan.device.active_preset = plan.index
+    -- (a plug-in may keep its program: Apple's DLSMusicDevice, one program, reads none chosen before and after, its state as
+    -- it was, lab 2026-10-20. Nothing changed: no step, no record)
+    local kept_hash = state_hash(plan.device.active_preset_data or "")
+    if plan.device.active_preset ~= plan.index and kept_hash == fence.hash then
+      display.unchanged, display.note = true, "the plug-in kept its program as it was (Renoise reads none chosen), so nothing changed"
+      return { applied = { preset = plan.device.active_preset, hash = kept_hash }, display = display, undo = { desc = desc, entry = false }, prior = { preset = plan.now }, target = places_.target_of(env, "instrument", plan.n) }
+    end
     if not M.UNDO_COVERS.preset then display.note = NOT_IN_UNDO end
     return {
-      applied = { preset = plan.device.active_preset, hash = state_hash(plan.device.active_preset_data or "") }, material = { state = plan.state },
+      applied = { preset = plan.device.active_preset, hash = state_hash(plan.device.active_preset_data or "") }, material = { state = plan.state, path = plan.path },
       target = places_.target_of(env, "instrument", plan.n), display = display, undo = { desc = desc, entry = M.UNDO_COVERS.preset },
       prior = { preset = plan.now }, place = places_.journal_place("instrument", plan.n),
     }
@@ -219,6 +229,10 @@ base.register({
     if type(material) ~= "table" or type(prior) ~= "table" or type(applied) ~= "table" then bad("material: the plug-in's state before") end
     local n, objects, label = places_.locate(song, env, "instrument", { place = restore.target and restore.target.place }, "plugin-preset")
     local device = plugin_device_of(objects)
+    -- (the state kept is that plug-in's: another one loaded since never gets it, discard or not)
+    if material.path ~= nil and device.device_path ~= material.path then
+      fail("changed", string.format("%s plays another plug-in now: Kumi won't give it the old one's state", q(label)))
+    end
     local hash = state_hash(device.active_preset_data or "")
     if device.active_preset == prior.preset and hash == state_hash(material.state or "") then
       return { restored = { preset = prior.preset }, display = { title = q(label) .. "'s program is back already" }, undo = { desc = desc, entry = false }, unwritten = true }

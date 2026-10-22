@@ -14,16 +14,20 @@ use std::{env, fs};
 const FUNCTIONS_HEADER: &str = "sdk/reaper_plugin_functions.h";
 const PLUGIN_HEADER: &str = "sdk/reaper_plugin.h";
 const SHIM: &str = "shim/csurf.cpp";
+/// The preview listening plays out loud (M5): REAPER's preview_register_t, made where the OS's lock type is known.
+const PREVIEW_SHIM: &str = "shim/preview.cpp";
 
 fn main() {
     println!("cargo:rerun-if-changed={FUNCTIONS_HEADER}");
     println!("cargo:rerun-if-changed={PLUGIN_HEADER}");
     println!("cargo:rerun-if-changed={SHIM}");
+    println!("cargo:rerun-if-changed={PREVIEW_SHIM}");
     println!("cargo:rerun-if-changed=build.rs");
 
     let functions_header = fs::read_to_string(FUNCTIONS_HEADER).expect("read reaper_plugin_functions.h");
     let plugin_header = fs::read_to_string(PLUGIN_HEADER).expect("read reaper_plugin.h");
     let shim = fs::read_to_string(SHIM).expect("read the shim");
+    let preview_shim = fs::read_to_string(PREVIEW_SHIM).expect("read the preview shim");
 
     let functions = parse_functions(&functions_header);
     check_loader_table(&functions_header, &functions);
@@ -35,7 +39,8 @@ fn main() {
     fs::write(out_dir.join("reaper_generic.rs"), emit_generic(&functions)).expect("write reaper_generic.rs");
 
     check_shim(&plugin_header, &shim);
-    build_shim(Path::new(SHIM));
+    check_preview(&plugin_header, &preview_shim);
+    build_shim(&[Path::new(SHIM), Path::new(PREVIEW_SHIM)]);
     // The name the library gives itself on macOS: the linker's default is the absolute path it was built at. REAPER
     // loads it by path, so this only keeps the build folder out of the file Kumi ships.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -271,9 +276,51 @@ fn virtuals(source: &str, class: &str) -> Vec<String> {
         .collect()
 }
 
-fn build_shim(shim: &Path) {
+// The preview shim declares preview_register_t itself (the header needs SWELL outside Windows): its fields must be the
+// header's, in the header's order, since REAPER reads the struct Kumi hands it.
+fn check_preview(plugin_header: &str, shim: &str) {
+    let header = fields(plugin_header, "typedef struct _REAPER_preview_register_t");
+    let ours = fields(shim, "typedef struct _REAPER_preview_register_t");
+    assert!(header.len() >= 8, "preview_register_t not found in {PLUGIN_HEADER}");
+    assert_eq!(ours, header, "{PREVIEW_SHIM}'s preview_register_t differs from {PLUGIN_HEADER}'s");
+}
+
+fn fields(source: &str, start: &str) -> Vec<String> {
+    let at = source.find(start).unwrap_or_else(|| panic!("{start} not found"));
+    let body = &source[at..];
+    let open = body.find('{').expect("the struct's body");
+    let end = body.find("} preview_register_t;").expect("the struct's end");
+    let mut out = Vec::new();
+    let mut in_comment = false;
+    for line in body[open + 1..end].lines() {
+        let mut line = line.trim();
+        if in_comment {
+            match line.find("*/") {
+                Some(close) => {
+                    in_comment = false;
+                    line = line[close + 2..].trim();
+                }
+                None => continue,
+            }
+        }
+        if line.starts_with("/*") {
+            in_comment = !line.contains("*/");
+            continue;
+        }
+        let line = line.split("//").next().unwrap().trim();
+        if !line.is_empty() {
+            out.push(line.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    out
+}
+
+fn build_shim(shims: &[&Path]) {
     let mut build = cc::Build::new();
-    build.cpp(true).file(shim).warnings(true);
+    build.cpp(true).warnings(true);
+    for shim in shims {
+        build.file(shim);
+    }
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // REAPER's C++ interfaces need the MSVC ABI; a static CRT means no VC++ runtime to install. cc follows the
         // target feature (/MT), so the release build passes -C target-feature=+crt-static.
@@ -290,11 +337,20 @@ fn build_shim(shim: &Path) {
 // ----- the generic call: every function the API table has, called by name with JSON arguments -----
 //
 // Each parameter is read from the call's arguments by what its C type and name say it is: a number or a flag, text, a
-// buffer REAPER writes into (with its size, which the caller never passes), a value REAPER writes back (`…Out`), a handle
-// given as a ref (a track, item, take, envelope or project). A function with any other parameter or return (callbacks,
-// windows, bitmaps, sources) can't be called this way: run-lua can.
+// buffer REAPER writes into (with its size, which the caller never passes), a buffer whose size REAPER reads and writes
+// back (`int* name_sz`: made as big as that size says), a value REAPER writes back (`…Out`), a handle given as a ref (a
+// track, item, take, envelope or project). A function with any other parameter or return (callbacks, windows, bitmaps,
+// sources, arrays REAPER fills, binary data passed with its size) can't be called this way: run-lua can.
 
 const HANDLES: [&str; 5] = ["MediaTrack", "MediaItem", "MediaItem_Take", "TrackEnvelope", "ReaProject"];
+
+/// The flags that make a GetSet… function set (generic.rs's `reads_only` reads the same names).
+const SET_FLAGS: [&str; 7] = ["setNewValue", "setnewvalue", "set", "is_set", "isSet", "bSet", "setNewValueOptional"];
+
+/// A value REAPER only writes back (`…Out`, `…OutOptional`), never reads.
+fn out_only(name: &str) -> bool {
+    !name.contains("InOut") && (name.ends_with("Out") || name.contains("OutOptional"))
+}
 
 fn scalar_kind(base: &str) -> Option<&'static str> {
     Some(match base {
@@ -331,6 +387,9 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
         None => (false, base),
     };
     match (stars, constant, base) {
+        // (GetTrackInfo's `track`: a number REAPER reads as a MediaTrack* when it isn't a track's index, so any other
+        // number crashes it; GetTrack, GetTrackName and GetMediaTrackInfo_Value read the same by ref)
+        (0, _, "INT_PTR") => Err("a number REAPER also reads as a pointer (INT_PTR)".into()),
         (0, _, b) => match scalar_kind(b) {
             Some(kind) => Ok(match kind {
                 "int" => format!("c.int({}, {name:?}, {optional})? as _", at(k)),
@@ -341,19 +400,30 @@ fn param_expr(p: &Param, next: Option<&Param>, k: Option<usize>, sized: &mut boo
             }),
             None => Err(format!("a {ty}")),
         },
+        // (bytes with their size: REAPER reads that many from a JSON text that can hold no NUL, nor bytes past 0x7f as
+        // themselves)
+        (1, true, "char") if next.is_some_and(|n| n.ty.trim() == "int" && n.name == format!("{name}_sz")) => {
+            Err(format!("binary data with its size ({name})"))
+        }
         (1, true, "char") => Ok(format!("c.text({}, {name:?}, {optional})?", at(k))),
         (1, false, "char") => {
             let size = next.filter(|n| n.ty.trim() == "int" && n.name == format!("{name}_sz"));
             let input = in_out || name.contains("NeedBig") && !out_only;
             *sized = size.is_some();
             let k = if input { at(k) } else { "None".into() };
-            Ok(format!("c.buf({k}, {name:?})?"))
+            // (a buffer REAPER isn't told the size of is never made smaller than the default, whatever the caller asks)
+            Ok(format!("c.buf({k}, {name:?}, {sized})?", sized = size.is_some()))
         }
         (1, true, b) if scalar_kind(b).is_some() => Ok(format!("c.in_ptr_{}({}, {name:?})? as _", scalar_kind(b).unwrap(), at(k))),
         (1, false, b) if scalar_kind(b).is_some() => {
             let kind = scalar_kind(b).unwrap();
             if kind == "float" || kind == "isize" || kind == "usize" {
                 return Err(format!("a {ty}"));
+            }
+            // (an array REAPER fills, as GetMediaItemTake_Peaks's buf: one value would be overrun)
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("buf") || lower.contains("samples") || lower.contains("array") {
+                return Err(format!("an array REAPER fills ({name})"));
             }
             let k = if out_only { "None".into() } else { at(k) };
             Ok(format!("c.out_{kind}({k}, {name:?})? as _"))
@@ -413,12 +483,48 @@ fn emit_generic(functions: &[Function]) -> String {
         let mut k = 0usize;
         let mut names = Vec::new();
         let mut skip = false;
+        // A GetSet… function's values REAPER writes back (`…Out`) are also the values it sets (GetSet_LoopTimeRange's
+        // start and end): taken from the caller, and needed, when its set flag is on.
+        let set_flag = f
+            .name
+            .starts_with("GetSet")
+            .then(|| f.params.iter().find(|p| p.ty.trim() == "bool" && SET_FLAGS.contains(&p.name.as_str())))
+            .flatten();
+        let mut set_k = None;
         for (i, p) in f.params.iter().enumerate() {
             if skip {
                 skip = false;
                 continue;
             }
+            if set_flag.is_some_and(|flag| flag.name == p.name) {
+                set_k = Some(k);
+            }
+            if let (Some(flag), Some(flag_k), "double*") = (set_flag, set_k, p.ty.trim()) {
+                if out_only(&p.name) {
+                    exprs.push(format!("c.out_double_set(Some({k}), {:?}, Some({flag_k}), {:?})?", p.name, flag.name));
+                    names.push(format!("{:?}", p.name));
+                    k += 1;
+                    continue;
+                }
+            }
             let input = is_input(p);
+            // A buffer whose size REAPER reads and writes back (`char* name` then `int* name_sz`): one expression that makes
+            // both, the buffer as big as the size the caller gives (the size is an input; the buffer is one when REAPER reads it).
+            if let Some(size) =
+                f.params.get(i + 1).filter(|n| p.ty.trim() == "char*" && n.ty.trim() == "int*" && n.name == format!("{}_sz", p.name))
+            {
+                let at = |k: Option<usize>| k.map_or("None".to_string(), |k| format!("Some({k})"));
+                let buf_k = input.then_some(k);
+                if input {
+                    names.push(format!("{:?}", p.name));
+                    k += 1;
+                }
+                exprs.push(format!("c.buf_in_out({}, {:?}, {}, {:?})?", at(buf_k), p.name, at(Some(k)), size.name));
+                names.push(format!("{:?}", size.name));
+                k += 1;
+                skip = true;
+                continue;
+            }
             let mut sized = false;
             match param_expr(p, f.params.get(i + 1), input.then_some(k), &mut sized) {
                 Ok(expr) => {
@@ -449,7 +555,7 @@ fn emit_generic(functions: &[Function]) -> String {
                 let mut lets = String::new();
                 let mut call_args = Vec::new();
                 for (n, expr) in exprs.iter().enumerate() {
-                    if expr.starts_with("{ let (b, n)") {
+                    if expr.starts_with("{ let (b, n)") || expr.starts_with("c.buf_in_out(") {
                         writeln!(lets, "            let (a{n}, a{n}_sz) = {expr};").unwrap();
                         call_args.push(format!("a{n}"));
                         call_args.push(format!("a{n}_sz"));

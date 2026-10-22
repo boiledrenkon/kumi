@@ -398,7 +398,10 @@ impl Changes {
                 if name.is_empty() || relative.is_absolute() || relative.components().any(|c| !matches!(c, Component::Normal(_))) {
                     return Err(bad("name must be a template's name (folders inside TrackTemplates allowed, \"Drums/Kit\")"));
                 }
-                Path::new(&reaper.resource_path()).join("TrackTemplates").join(format!("{name}.RTrackTemplate"))
+                // (a folder at a time, so the path has the system's separators throughout)
+                Path::new(&reaper.resource_path())
+                    .join("TrackTemplates")
+                    .join(Path::new(&format!("{name}.RTrackTemplate")).components().collect::<PathBuf>())
             }
             (None, Some(path)) => {
                 let path = plain_path(path)?;
@@ -432,11 +435,14 @@ impl Changes {
             reaper.set_track_selected(m, false);
         }
         let before = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let before_text = before.and_then(|_| std::fs::read(&path).ok());
         let text = path.to_string_lossy().into_owned();
         let saved = reaper.save_project_as(ctx.proj, &text, options);
         put_back(&ctx, &kept);
         let after = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if !saved || after.is_none() || (before.is_some() && before == after) {
+        // A save over a file can keep its time where file times are coarse (Windows): then the contents say whether it was written.
+        let unchanged = before.is_some() && before == after && std::fs::read(&path).ok() == before_text;
+        if !saved || after.is_none() || unchanged {
             return Err(failed("REAPER didn't write the track template"));
         }
         let names: Vec<String> = tracks.iter().map(|t| super::track_name(reaper, *t)).collect();

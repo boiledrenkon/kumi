@@ -104,6 +104,8 @@ pub struct Control {
     pub arrangement: RefCell<Option<ArrangementStrip>>,
     /// The body of a DAW's own view (a tracker's pattern, its matrix, keyzones, routing), for any request of its kind.
     pub own: RefCell<Option<FocusBody>>,
+    /// The DAW refuses its own bodies (Renoise while Kumi renders): they read as nothing, though it can show them.
+    pub own_refused: Cell<bool>,
     /// What /export and /share get as the conversation going on now.
     pub export: RefCell<Option<ConversationToExport>>,
     /// The session's profile, as the open project sets it apart from the DAW's (its middle C); None for the app's.
@@ -131,6 +133,7 @@ impl Default for Control {
             session: RefCell::default(),
             arrangement: RefCell::default(),
             own: RefCell::default(),
+            own_refused: Cell::default(),
             export: RefCell::default(),
             profile: RefCell::default(),
         }
@@ -545,7 +548,7 @@ impl SessionController for Control {
             BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
             other => {
                 self.call(format!("own:{other:?}"));
-                self.own.borrow().clone().filter(|own| own_kind(own) == other.kind())
+                self.own.borrow().clone().filter(|own| own_kind(own) == other.kind() && !self.own_refused.get())
             }
         })
     }
@@ -557,6 +560,7 @@ fn own_kind(body: &FocusBody) -> BodyKind {
         FocusBody::Matrix(_) => BodyKind::Matrix,
         FocusBody::Keyzones(_) => BodyKind::Keyzones,
         FocusBody::Routing(_) => BodyKind::Routing,
+        FocusBody::Mixer(_) => BodyKind::Mixer,
         FocusBody::Tree(_) => BodyKind::Tree,
         FocusBody::Notes(_) => BodyKind::Notes,
         FocusBody::Grid(_) => BodyKind::Grid,
@@ -713,6 +717,57 @@ impl Harness {
     }
     pub async fn wait_until_selection_clears(&self) {
         self.wait_for_screen("selection highlight to disappear", |_| !self.has_selection_highlight()).await;
+    }
+    /// The style (style_key's "fg|bg|flags") of the cell just before where `text` shows: a dot or a light beside words.
+    pub fn style_before(&self, text: &str) -> Option<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars.iter().enumerate().find_map(|(row, cells)| {
+            let line: String = cells.concat();
+            let at = line.find(text)?;
+            let (mut bytes, mut cell) = (0, 0);
+            while bytes < at {
+                bytes += cells[cell].len();
+                cell += 1;
+            }
+            vt.styles[row].get(cell.checked_sub(1)?).cloned()
+        })
+    }
+    /// The style of the first cell of each row's first `text`, top to bottom.
+    pub fn styles_of(&self, text: &str) -> Vec<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars
+            .iter()
+            .enumerate()
+            .filter_map(|(row, chars)| {
+                let at = chars.concat().find(text)?;
+                let (mut bytes, mut cell) = (0, 0);
+                while bytes < at {
+                    bytes += chars[cell].len();
+                    cell += 1;
+                }
+                vt.styles[row].get(cell).cloned()
+            })
+            .collect()
+    }
+    /// The styles of the `cells` cells just before where `text` shows (a tracker line's number beside its cells).
+    pub fn styles_before(&self, text: &str, cells: usize) -> Vec<String> {
+        self.screen();
+        let vt = self.vt.borrow();
+        vt.chars
+            .iter()
+            .enumerate()
+            .find_map(|(row, chars)| {
+                let at = chars.concat().find(text)?;
+                let (mut bytes, mut cell) = (0, 0);
+                while bytes < at {
+                    bytes += chars[cell].len();
+                    cell += 1;
+                }
+                Some(vt.styles[row][cell.saturating_sub(cells)..cell].to_vec())
+            })
+            .unwrap_or_default()
     }
     pub fn has(&self, text: &str) {
         let lines = self.screen();

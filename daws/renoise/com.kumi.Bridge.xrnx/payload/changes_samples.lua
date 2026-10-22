@@ -19,21 +19,25 @@ M.MAX_SAMPLE_BYTES = 64 * 1024 * 1024
 -- The most slice markers one change inserts, deletes or moves.
 M.MAX_SLICE_OPS = 64
 
--- A sample's buffer in brief: its shape and a few of its values, enough to tell it is the one Kumi left.
+-- A sample's buffer in brief: its shape and some of its values (256 points through it and its last frame, every channel), enough
+-- to tell it is the one Kumi left: an edit in the sample editor (a fade at its end, a short cut) moves one of them.
+M.BUFFER_PROBES = 256
 function M.buffer_print(buffer)
   if not buffer.has_sample_data then return { frames = 0 } end
   local frames, channels = buffer.number_of_frames, buffer.number_of_channels
   local a, b = 5381, 0
-  for k = 0, 15 do
-    local frame = math.max(1, math.floor(frames * k / 16) + 1)
+  for k = 0, M.BUFFER_PROBES do
+    local frame = k == M.BUFFER_PROBES and frames or math.max(1, math.floor(frames * k / M.BUFFER_PROBES) + 1)
     -- (the definitions say a list, the guide a number: either is read)
-    local value = buffer:sample_data(1, math.min(frame, frames))
-    local x = type(value) == "table" and value[1] or value
-    local text = string.format("%.6f|", tonumber(x) or 0)
-    for i = 1, #text do
-      local byte = text:byte(i)
-      a = (a * 33 + byte) % 4294967296
-      b = (b * 65599 + byte) % 4294967296
+    for channel = 1, channels do
+      local value = buffer:sample_data(channel, math.min(frame, frames))
+      local x = type(value) == "table" and value[1] or value
+      local text = string.format("%.6f|", tonumber(x) or 0)
+      for i = 1, #text do
+        local byte = text:byte(i)
+        a = (a * 33 + byte) % 4294967296
+        b = (b * 65599 + byte) % 4294967296
+      end
     end
   end
   return { frames = frames, channels = channels, rate = buffer.sample_rate, bits = buffer.bit_depth, values = string.format("%08x%08x", a, b) }
@@ -221,10 +225,10 @@ local LAYERS = named({ ["note-on"] = 1, ["note-off"] = 2 })
 
 local ZONE_FIELDS = {
   noteRange = { get = function(m) return copy_range(m.note_range) end, set = function(m, v) m.note_range = copy_range(v) end, field = "note_range",
-    check = range_check(0, 119), says = "noteRange is [low, high], notes from 0 to 119 (C-4 is 48)", text = function(v) return "notes " .. v[1] .. "-" .. v[2] end },
+    check = range_check(0, 119), says = "noteRange is [low, high], notes from 0 to 119 (C-4 is 48)", text = function(v) return "notes " .. base.notes_text(v[1], v[2]) end },
   velocityRange = { get = function(m) return copy_range(m.velocity_range) end, set = function(m, v) m.velocity_range = copy_range(v) end, field = "velocity_range",
     check = range_check(0, 127), says = "velocityRange is [low, high] from 0 to 127", text = function(v) return "velocity " .. v[1] .. "-" .. v[2] end },
-  baseNote = plain("base_note", whole(0, 119), "baseNote is a note from 0 to 119 (C-4 is 48)", function(v) return "base note " .. v end),
+  baseNote = plain("base_note", whole(0, 119), "baseNote is a note from 0 to 119 (C-4 is 48)", function(v) return "base note " .. base.note_name(v) end),
   layer = enum("layer", LAYERS, "layer is note-on or note-off", function(v) return "plays on " .. v end),
   keyTracking = plain("map_key_to_pitch", is_boolean, "keyTracking is true or false", function(v) return v and "pitch follows the key" or "fixed pitch" end),
   velocityToVolume = plain("map_velocity_to_volume", is_boolean, "velocityToVolume is true or false", function(v) return v and "velocity to volume" or "fixed volume" end),
@@ -484,8 +488,10 @@ local function load_plan(song, env, input)
   local instrument = objects.instrument
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then bad(q(label) .. " is sliced: Renoise takes no other samples in it") end
   local count = #instrument.samples
-  local index = input.index == nil and count + 1 or input.index
-  if not whole(1, count + 1)(index) then bad(string.format("index is a place from 1 to %d among the samples", count + 1)) end
+  -- (`index` by Renoise's number, from 0, as it numbers samples from 00)
+  local index = input.index == nil and count or input.index
+  if not whole(0, count)(index) then bad(string.format("index is a sample's number from 0 to %d, as Renoise numbers them (00 the first)", count)) end
+  index = index + 1
   return { path = path, instrument = n[1], index = index, count = count, label = label }
 end
 
@@ -524,7 +530,14 @@ local function load_apply(song, env, input, fence, desc)
     end
     song:describe_undo(desc)
     local loaded = sample.sample_buffer:load_from(plan.path)
-    if not loaded then fail("failed", "Renoise wouldn't load " .. plan.path) end
+    if not loaded then
+      -- (the audio it had, loaded again if Renoise cleared it before refusing)
+      local back = true
+      if kept.file and not base.same_table(M.buffer_print(sample.sample_buffer), fence.print) then
+        back = pcall(function() if not sample.sample_buffer:load_from(kept.file) then error("refused") end end)
+      end
+      fail("failed", "Renoise wouldn't load " .. plan.path .. (back and "" or "; the audio it had couldn't be loaded back either: Renoise's own undo may bring it"))
+    end
     if input.name ~= nil then sample.name = input.name end
     if env.watch_undo then env.watch_undo(sample.sample_buffer_observable) end
     local print = M.buffer_print(sample.sample_buffer)
@@ -548,7 +561,7 @@ local function load_apply(song, env, input, fence, desc)
   if input.name ~= nil then sample.name = input.name elseif sample.name == "" then sample.name = file_name(plan.path) end
   local n = { plan.instrument, plan.index }
   return {
-    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name },
+    applied = { print = M.buffer_print(sample.sample_buffer), name = sample.name, work = places_.sample_work(sample) },
     created = { ref = places_.ref_of(env, "sample", n), kind = "sample" }, material = { made = places_.place_of(env, "sample", n) },
     target = sample_target(env, n),
     display = { title = string.format("Loaded %s into %s", q(file_name(plan.path)), q(plan.label)), before = { samples = plan.count }, after = { samples = #instrument.samples } },
@@ -570,8 +583,9 @@ local function load_restore(song, env, restore, desc)
   local label = string.format("%s in %s", q(places_.sample_label(n[2], sample)), q(places_.instrument_label(n[1], instrument)))
   local now = M.buffer_print(sample.sample_buffer)
   if material.made then
-    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name) then
-      fail("changed", label .. " changed in Renoise since Kumi loaded it")
+    if not restore.discard and (not base.same_table(now, applied.print) or sample.name ~= applied.name
+      or (applied.work ~= nil and not base.same_table(places_.sample_work(sample), applied.work))) then
+      fail("changed", label .. " changed in Renoise since Kumi loaded it (its audio, slices or settings)")
     end
     song:describe_undo(desc)
     delete_sample(instrument, n[2])
@@ -685,6 +699,11 @@ local function delete_restore(song, env, restore, desc)
   if instrument.samples[1] and #instrument.samples[1].slice_markers > 0 then
     fail("changed", q(places_.instrument_label(i, instrument)) .. " is sliced now: Renoise takes no other samples in it")
   end
+  -- (a sliced sample is its instrument's only one: its slices come back only into an instrument that holds no other)
+  if material.markers and #instrument.samples > 0 then
+    fail("changed", string.format("%s was sliced, and %s holds other samples now: its slices can't come back beside them, so Kumi left it",
+      label, q(places_.instrument_label(i, instrument))))
+  end
   if material.file and not io.exists(material.file) then fail("failed", "the audio Kumi kept is gone (Renoise empties its temporary folder as it quits)") end
   song:describe_undo(desc)
   local sample = instrument:insert_sample_at(at)
@@ -696,7 +715,11 @@ local function delete_restore(song, env, restore, desc)
   if env.back then env.back("samples", i, nil, material.after, at) end
   local lost = put_settings(env, sample, material, true)
   if material.markers then
-    pcall(function() sample.slice_markers = material.markers end)
+    local sliced = pcall(function() sample.slice_markers = material.markers end)
+    if not sliced or #sample.slice_markers ~= #material.markers then
+      pcall(delete_sample, instrument, at)
+      fail("failed", "Renoise wouldn't slice " .. label .. " again: nothing was put back")
+    end
     for k, kept in ipairs(material.slices or {}) do
       local alias = instrument.samples[at + k] and instrument:sample(at + k)
       if alias and alias.is_slice_alias then lost = lost + put_settings(env, alias, kept, false) end

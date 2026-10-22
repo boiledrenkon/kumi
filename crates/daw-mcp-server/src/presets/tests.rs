@@ -50,7 +50,7 @@ fn prints_and_shapes_are_the_tools() {
     assert_eq!(print_of("abc"), "0b885c8b3025f862:3");
     assert_eq!(print_of(""), "0000150500000000:0");
     assert_eq!(print_of(SPLITTER), "f340bd8e46a1f501:5889");
-    assert_eq!(shape_of(SPLITTER), "1d1f047e3dbda60f:5362");
+    assert_eq!(shape_of(SPLITTER), "a338cfe56459c7ac:5244");
     assert_eq!(
         shape_of("<a><Value>1.0</Value><ParameterChunk><![CDATA[xx]]></ParameterChunk><Value><b/></Value></a>"),
         "f1e1d47b13de377c:51"
@@ -66,6 +66,16 @@ fn prints_and_shapes_are_the_tools() {
     assert_ne!(clicked, SPLITTER, "the fixture has both flags");
     assert_eq!(shape_of(&clicked), shape_of(SPLITTER));
     assert_ne!(shape_of(&DOOFER.replacen("<Name>Macro 1</Name>", "<Name>Drive</Name>", 1)), shape_of(DOOFER));
+    // Nor what Renoise's view shows of it (folded, a lane or its devices shown, a plug-in's editor moved): the tool's
+    // shape_of gives the same number for this text (test_devices_m4).
+    let viewed = "<a><IsMaximized>true</IsMaximized><Value>1</Value><ShowDevices>false</ShowDevices><CurrentlyVisibleChain>1</CurrentlyVisibleChain></a>";
+    assert_eq!(shape_of(viewed), "4d722c4cf7fe3489:67");
+    let folded = SPLITTER
+        .replacen("<IsMaximized>true</IsMaximized>", "<IsMaximized>false</IsMaximized>", 1)
+        .replacen("<CurrentlyVisibleChain>0</CurrentlyVisibleChain>", "<CurrentlyVisibleChain>1</CurrentlyVisibleChain>", 1)
+        .replacen("<MonitorVisibleChain>false</MonitorVisibleChain>", "<MonitorVisibleChain>true</MonitorVisibleChain>", 1);
+    assert_ne!(folded, SPLITTER, "the fixture has the view's elements");
+    assert_eq!(shape_of(&folded), shape_of(SPLITTER));
 }
 
 #[test]
@@ -76,7 +86,7 @@ fn a_macro_is_named_set_and_mapped_and_only_its_lines_change() {
     assert_eq!(gone, ["<Value>50</Value>", "<Name>Macro 1</Name>"]);
     assert_eq!(new, ["<Value>75</Value>", "<Name>Drive</Name>"]);
     assert_eq!(edited.title, "Doofer on Bass: macro 1 named \u{201c}Drive\u{201d}, at 75 %");
-    assert_eq!(edited.prior, json!({"macro": 1, "name": "Macro 1", "value": 50.0}));
+    assert_eq!(edited.prior, json!({"macro": 1, "name": "Macro 1", "value": 50.0}), "no lanes for an edit of no mappings");
     // Mapped to the Gainer's gain (place 2, its parameter 1, by name too) over half its range, logarithmically.
     let mapped = ok(
         "doofer-macro",
@@ -317,6 +327,21 @@ fn a_splitter_splits_another_way_and_a_notepad_says_something_else() {
     assert!(text.contains("<Paragraph>keep the sub &amp; kick apart</Paragraph>"), "{text}");
     assert_eq!(note.title, "Wrote the Notepad on Bass");
     assert_eq!(written(undone("notepad-write", &note, &text, "Notepad", false)), NOTEPAD);
+    // A Notepad that said nothing (no Paragraphs, as Renoise writes a new one): its undo writes one empty paragraph, which
+    // clears it in Renoise (it keeps its text when the element is left out), and reads as saying nothing again.
+    let start = NOTEPAD.find("    <Paragraphs>").unwrap();
+    let end = NOTEPAD.find("</Paragraphs>\n").unwrap() + "</Paragraphs>\n".len();
+    let empty = format!("{}{}", &NOTEPAD[..start], &NOTEPAD[end..]);
+    let first = ok("notepad-write", json!({"text": "one"}), &empty, "Notepad");
+    assert_eq!(first.prior["paragraphs"], json!([]));
+    let cleared = written(undone("notepad-write", &first, &first.document.to_xml(), "Notepad", false));
+    assert!(cleared.contains("<Paragraphs>") && !cleared.contains("one"), "{cleared}");
+    assert!(matches!(undone("notepad-write", &first, &cleared, "Notepad", false), Ok(Undo::Back(_))));
+    // An empty text clears it the same way; a blank line in a text is kept.
+    let blank = ok("notepad-write", json!({"text": ""}), NOTEPAD, "Notepad").document.to_xml();
+    assert!(blank.contains("<Paragraphs>") && !blank.contains("mono"), "{blank}");
+    let spaced = ok("notepad-write", json!({"text": "a\n\nb"}), NOTEPAD, "Notepad");
+    assert_eq!(written(undone("notepad-write", &spaced, &spaced.document.to_xml(), "Notepad", false)), NOTEPAD);
     // One inside a Doofer.
     let with_pad = ok("doofer-device-add", json!({"path": "Notepad", "at": [1]}), FRESH, "Doofer").document.to_xml();
     let inner = ok("notepad-write", json!({"at": [1], "text": "macro 1: drive"}), &with_pad, "Doofer");
@@ -380,6 +405,15 @@ fn a_dsp_body_gets_each_containers_devices_as_branches_a_splitters_second_lane_s
     let lanes = child_nodes(SPLITTER);
     assert_eq!(lanes.len(), 2);
     assert!(lanes[0].get("parallel").is_none() && lanes[1]["parallel"] == true, "{lanes:?}");
+    // (m4-tui) Each device's lane, and the lanes' names by the Splitter's type.
+    assert_eq!((lanes[0]["lane"].clone(), lanes[1]["lane"].clone()), (json!(1), json!(2)));
+    assert_eq!(super::lanes(SPLITTER), Some(vec!["Low", "High"]), "the fixture splits by frequency");
+    let parallel = ok("splitter-set", json!({"type": "parallel"}), SPLITTER, "Splitter").document.to_xml();
+    assert_eq!(super::lanes(&parallel), Some(vec!["Lane 1", "Lane 2"]));
+    let mid_side = ok("splitter-set", json!({"type": "mid-side"}), SPLITTER, "Splitter").document.to_xml();
+    assert_eq!(super::lanes(&mid_side), Some(vec!["Mid", "Side"]));
+    assert_eq!(super::lanes(DOOFER), None);
+    assert!(nodes[2].get("lane").is_none(), "a Doofer's devices run in its one chain");
     assert!(child_nodes(NOTEPAD).is_empty());
 }
 
@@ -454,4 +488,250 @@ fn a_plug_in_inside_a_doofer_reads_by_the_name_renoise_gives_it() {
     // Without the names (and after them), its type.
     let (_, unnamed) = super::inside(&with_au, false).unwrap();
     assert_eq!(unnamed["devices"].as_array().unwrap().last().unwrap()["name"], "AudioPlugin");
+}
+
+/// The first mapping of a container's macro 1: its device index.
+fn first_mapping(container: &Element) -> Option<String> {
+    container.child("Macro0")?.child("Mappings")?.element(0)?.child_text("DestDeviceIndex")
+}
+
+#[test]
+fn a_device_moved_into_or_out_of_a_doofer_inside_moves_the_other_mappings_and_aims_of_both_lanes() {
+    // Macro 1 drives the Gainer (place 2); an LFO at the end aims at it; a Doofer at place 3 holds a Gainer its own
+    // macro 1 drives.
+    let mapped = ok("doofer-macro", json!({"macro": 1, "mappings": [{"device": 2, "param": 1}]}), DOOFER, "Doofer").document.to_xml();
+    let nested = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), &mapped, "Doofer").document.to_xml();
+    let inner = ok("doofer-device-add", json!({"path": "Gainer", "at": [3, 1]}), &nested, "Doofer").document.to_xml();
+    let lfo = "        <LfoDevice type=\"LfoDevice\">\n          <DestEffect>\n            <Value>1</Value>\n          </DestEffect>\n          <DestParameter>\n            <Value>1</Value>\n          </DestParameter>\n        </LfoDevice>\n";
+    let end = inner.rfind("      </Devices>").unwrap();
+    let with_lfo = format!("{}{lfo}{}", &inner[..end], &inner[end..]);
+    // (the inner Doofer is the only <DooferDevice> element: the outer one is the slot)
+    let open = with_lfo.find("<DooferDevice type=\"DooferDevice\">").unwrap() + "<DooferDevice type=\"DooferDevice\">".len();
+    let macro_ = "<Macro0><Value>50</Value><Name>Macro 1</Name><Mappings><Mapping><DestChainIndex>0</DestChainIndex><DestDeviceIndex>0</DestDeviceIndex><DestParameterIndex>1</DestParameterIndex><Min>0.0</Min><Max>1.0</Max><Scaling>Linear</Scaling></Mapping></Mappings></Macro0>";
+    let before = xml::parse(&format!("{}{macro_}{}", &with_lfo[..open], &with_lfo[open..])).unwrap().to_xml();
+    // The EQ into the Doofer, before its Gainer.
+    let moved = ok("doofer-device-move", json!({"at": [1], "to": [2, 1]}), &before, "Doofer");
+    let text = moved.document.to_xml();
+    let document = xml::parse(&text).unwrap();
+    let top = slot(&document).unwrap();
+    let list = devices_in(top, DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["GainerDevice", "DooferDevice", "LfoDevice"]);
+    assert_eq!(first_mapping(top).as_deref(), Some("0"), "macro 1 still drives the Gainer, now place 1");
+    assert_eq!(value_of(list[2], "DestEffect"), Some(0.0), "the LFO still aims at the Gainer");
+    assert_eq!(devices_in(list[1], DOOFER_TYPE, 0).iter().map(|d| d.name()).collect::<Vec<_>>(), ["Eq5Device", "GainerDevice"]);
+    assert_eq!(first_mapping(list[1]).as_deref(), Some("1"), "the inner macro still drives the inner Gainer, now place 2");
+    // Kumi's undo moves it back out to the first place (the top's make room, the inner ones close up): as it was.
+    assert_eq!(written(undone("doofer-device-move", &moved, &text, "Doofer", false)), before);
+    // Out of the Doofer to after it: the inner mapping closes up; the top's, before the new place, stay.
+    let out = ok("doofer-device-move", json!({"at": [2, 1], "to": [3]}), &text, "Doofer");
+    let document = xml::parse(&out.document.to_xml()).unwrap();
+    let top = slot(&document).unwrap();
+    let list = devices_in(top, DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["GainerDevice", "DooferDevice", "Eq5Device", "LfoDevice"]);
+    assert_eq!(first_mapping(top).as_deref(), Some("0"));
+    assert_eq!(value_of(list[3], "DestEffect"), Some(0.0));
+    assert_eq!(first_mapping(list[1]).as_deref(), Some("0"), "the inner Gainer is place 1 again");
+}
+
+#[test]
+fn kumis_undo_of_a_deleted_meta_device_puts_it_back_aimed_where_it_was() {
+    // An LFO before the EQ and the Gainer, aimed at the Gainer (place 3, index 2).
+    let lfo = "        <LfoDevice type=\"LfoDevice\">\n          <DestEffect>\n            <Value>2</Value>\n          </DestEffect>\n          <DestParameter>\n            <Value>1</Value>\n          </DestParameter>\n        </LfoDevice>\n";
+    let start = DOOFER.find("<Devices>\n").unwrap() + "<Devices>\n".len();
+    let before = xml::parse(&format!("{}{lfo}{}", &DOOFER[..start], &DOOFER[start..])).unwrap().to_xml();
+    let deleted = ok("doofer-device-delete", json!({"at": [1]}), &before, "Doofer");
+    let back = written(undone("doofer-device-delete", &deleted, &deleted.document.to_xml(), "Doofer", false));
+    let document = xml::parse(&back).unwrap();
+    assert_eq!(value_of(devices_in(slot(&document).unwrap(), DOOFER_TYPE, 0)[0], "DestEffect"), Some(2.0), "still the Gainer");
+    assert_eq!(back, before);
+}
+
+#[test]
+fn kumis_undo_of_a_device_delete_puts_its_mappings_back_in_their_order() {
+    // Macro 1 maps the EQ's first two parameters, then the Gainer's first.
+    let mapped = ok(
+        "doofer-macro",
+        json!({"macro": 1, "mappings": [{"device": 1, "param": 1}, {"device": 1, "param": 2}, {"device": 2, "param": 1}]}),
+        DOOFER,
+        "Doofer",
+    )
+    .document
+    .to_xml();
+    let deleted = ok("doofer-device-delete", json!({"at": [1]}), &mapped, "Doofer");
+    assert_eq!(written(undone("doofer-device-delete", &deleted, &deleted.document.to_xml(), "Doofer", false)), mapped);
+}
+
+#[test]
+fn a_notepads_text_takes_no_control_characters_but_tabs_and_new_lines() {
+    for text in ["bell\u{7}", "nul\u{0}here", "escape \u{1b}[0m", "stray\rreturn"] {
+        assert!(
+            matches!(refused("notepad-write", json!({"text": text}), NOTEPAD, "Notepad"), Refusal::Bad(m) if m.contains("control")),
+            "{text:?}"
+        );
+    }
+    let written = ok("notepad-write", json!({"text": "Kick:\ttune to F\r\nBass: sidechain"}), NOTEPAD, "Notepad");
+    assert_eq!(written.applied["paragraphs"], json!(["Kick:\ttune to F", "Bass: sidechain"]));
+}
+
+/// The Doofer with an LFO last (place 3), aimed at the Gainer's gain (index 1, parameter 1).
+fn with_lfo() -> String {
+    let lfo = "        <LfoDevice type=\"LfoDevice\">\n          <DestEffect>\n            <Value>1</Value>\n          </DestEffect>\n          <DestParameter>\n            <Value>1</Value>\n          </DestParameter>\n        </LfoDevice>\n";
+    let end = DOOFER.rfind("      </Devices>").unwrap();
+    xml::parse(&format!("{}{lfo}{}", &DOOFER[..end], &DOOFER[end..])).unwrap().to_xml()
+}
+
+#[test]
+fn a_meta_device_inside_aims_along_its_own_lane_at_what_is_there() {
+    let text = with_lfo();
+    let set =
+        |param: &str, value: f64| edit("doofer-device-set", &json!({"at": [3], "param": param, "value": value}), &text, &device("Doofer"));
+    // Its own track only; another device of its lane (from 0), not itself or past the end; a parameter that device has.
+    for (param, value) in [("Dest. Track", 2.0), ("Dest. Effect", 2.0), ("Dest. Effect", 3.0), ("Dest. Parameter", 200.0)] {
+        assert!(matches!(set(param, value), Err(Refusal::Bad(_))), "{param} {value}: {:?}", set(param, value).map(|e| e.title));
+    }
+    for (param, value) in
+        [("Dest. Track", -1.0), ("Dest. Effect", 0.0), ("Dest. Effect", -1.0), ("Dest. Parameter", 2.0), ("Dest. Parameter", -1.0)]
+    {
+        assert!(set(param, value).is_ok(), "{param} {value}: {:?}", set(param, value).err());
+    }
+}
+
+#[test]
+fn a_moves_words_say_where_it_lands_with_it_out_of_its_place_and_place_0_is_refused() {
+    let nested = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), DOOFER, "Doofer").document.to_xml();
+    // The EQ (place 1) into the Doofer: place 2 once the EQ is out of its place.
+    let moved = ok("doofer-device-move", json!({"at": [1], "to": [2, 1]}), &nested, "Doofer");
+    assert_eq!(moved.title, "Moved \u{201c}EQ 5\u{201d} in \u{201c}Doofer on Bass\u{201d} to place 2, place 1");
+    assert!(matches!(refused("doofer-device-move", json!({"at": [1], "to": [0]}), &nested, "Doofer"), Refusal::Bad(_)));
+}
+
+#[test]
+fn a_device_leaving_a_doofer_two_levels_down_for_an_earlier_place_moves_and_answers() {
+    let outer = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), DOOFER, "Doofer").document.to_xml();
+    let inner = ok("doofer-device-add", json!({"path": "Doofer", "at": [3, 1]}), &outer, "Doofer").document.to_xml();
+    let deep = ok("doofer-device-add", json!({"path": "Gainer", "at": [3, 1, 1]}), &inner, "Doofer").document.to_xml();
+    let moved = ok("doofer-device-move", json!({"at": [3, 1, 1], "to": [1]}), &deep, "Doofer");
+    let document = xml::parse(&moved.document.to_xml()).unwrap();
+    let list = devices_in(slot(&document).unwrap(), DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["GainerDevice", "Eq5Device", "GainerDevice", "DooferDevice"]);
+    assert_eq!(moved.applied["chain"]["from"]["types"], json!([]), "the Doofer it left is empty: {}", moved.applied);
+}
+
+#[test]
+fn kumis_undo_of_a_device_it_added_leaves_one_the_producer_worked_on_or_aimed_at_but_on_discard() {
+    // Before Kumi's add, an LFO is last, aimed at the EQ.
+    let before = with_lfo().replacen("<DestEffect>\n            <Value>1</Value>", "<DestEffect>\n            <Value>0</Value>", 1);
+    let added = ok("doofer-device-add", json!({"path": "Gainer", "at": [3]}), &before, "Doofer");
+    // (as Renoise writes it: the Gainer with every parameter, like the one at place 2)
+    let mut document = xml::parse(&added.document.to_xml()).unwrap();
+    let list = list_mut(slot_mut(&mut document), &[], 0);
+    let whole = list.element(1).unwrap().clone();
+    *list.element_mut(2).unwrap() = whole;
+    let text = document.to_xml();
+    let shape = shape_of(&text);
+    // (as the host keeps it after the apply: what Renoise wrote for the device added)
+    let mut applied = added.applied.clone();
+    applied["content"] = content_at(&text, &[3]).expect("the added Gainer").into();
+    let undo_from = |now: &str, discard: bool| {
+        undo(
+            &Kept { kind: "doofer-device-add", prior: &added.prior, applied: &applied, shape: &shape, discard },
+            now,
+            &shape_of(now),
+            &device("Doofer"),
+        )
+    };
+    assert_eq!(written(undo_from(&text, false)), before, "as Kumi left it: taken out");
+    // The producer turns it (its gain) since: theirs, unless discard.
+    let mut document = xml::parse(&text).unwrap();
+    set_value(list_mut(slot_mut(&mut document), &[], 0).element_mut(2).unwrap(), "Volume", 2.0);
+    let turned = document.to_xml();
+    assert!(matches!(undo_from(&turned, false), Err(Refusal::Changed(m)) if m.contains("changed in Renoise since Kumi added it")));
+    assert!(matches!(undo_from(&turned, true), Ok(Undo::Write { .. })));
+    // They aim the LFO at it (place 3, index 2): theirs too; on discard, the LFO aims at nothing, and that's said.
+    let mut document = xml::parse(&text).unwrap();
+    set_value(list_mut(slot_mut(&mut document), &[], 0).element_mut(3).unwrap(), "DestEffect", 2.0);
+    let aimed = document.to_xml();
+    assert!(matches!(undo_from(&aimed, false), Err(Refusal::Changed(m)) if m.contains("aims at it now")));
+    match undo_from(&aimed, true) {
+        Ok(Undo::Write { note: Some(note), .. }) => assert!(note.contains("aims at nothing now"), "{note}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn kumis_undo_of_a_move_refuses_once_a_meta_device_aims_at_it_where_it_went() {
+    // A Doofer last holds an LFO aimed at nothing; Kumi moves the Gainer into it, before the LFO.
+    let nested = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), DOOFER, "Doofer").document.to_xml();
+    let lfo = ok("doofer-device-add", json!({"path": "*LFO", "at": [3, 1]}), &nested, "Doofer").document.to_xml();
+    let unaimed = ok("doofer-device-set", json!({"at": [3, 1], "param": "Dest. Effect", "value": -1}), &lfo, "Doofer").document.to_xml();
+    let moved = ok("doofer-device-move", json!({"at": [2], "to": [2, 1]}), &unaimed, "Doofer");
+    let text = moved.document.to_xml();
+    // The producer aims the LFO at the Gainer (index 0 of the Doofer's lane): moved back out, the aim would point at the LFO.
+    let aimed = ok("doofer-device-set", json!({"at": [2, 2], "param": "Dest. Effect", "value": 0}), &text, "Doofer").document.to_xml();
+    assert!(matches!(undone("doofer-device-move", &moved, &aimed, "Doofer", false), Err(Refusal::Changed(m)) if m.contains("aim at")));
+    assert_eq!(written(undone("doofer-device-move", &moved, &text, "Doofer", false)), unaimed, "as Kumi left it: back where it was");
+}
+
+#[test]
+fn kumis_undo_of_a_macros_mappings_refuses_once_the_devices_moved() {
+    // Macro 2 drives the Gainer (place 2); Kumi clears it; the producer drops a device in at place 1.
+    let mapped = ok("doofer-macro", json!({"macro": 2, "mappings": [{"device": 2, "param": 1}]}), DOOFER, "Doofer").document.to_xml();
+    let cleared = ok("doofer-macro", json!({"macro": 2, "mappings": []}), &mapped, "Doofer");
+    let text = cleared.document.to_xml();
+    let dropped = ok("doofer-device-add", json!({"path": "Gainer", "at": [1]}), &text, "Doofer").document.to_xml();
+    assert!(
+        matches!(undone("doofer-macro", &cleared, &dropped, "Doofer", true), Err(Refusal::Changed(m)) if m.contains("mappings can't be put back")),
+        "the mapping would go to the EQ, discard or not"
+    );
+    assert_eq!(written(undone("doofer-macro", &cleared, &text, "Doofer", false)), mapped);
+}
+
+#[test]
+fn kumis_undo_of_a_macros_mappings_puts_back_one_to_a_plug_in_whose_parameters_kumi_cant_count() {
+    let plugin = "        <AudioPluginDevice type=\"AudioPluginDevice\">\n          <PluginType>AU</PluginType>\n          <PluginIdentifier>aufx:dely:appl</PluginIdentifier>\n        </AudioPluginDevice>\n";
+    let end = DOOFER.rfind("      </Devices>").unwrap();
+    let with_plugin = format!("{}{plugin}{}", &DOOFER[..end], &DOOFER[end..]);
+    let start = with_plugin.find("<Macro0>").unwrap();
+    let stop = with_plugin.find("</Macro0>").unwrap() + "</Macro0>".len();
+    let macro_ = "<Macro0><Value>50</Value><Name>Macro 1</Name><Mappings><Mapping><DestChainIndex>0</DestChainIndex><DestDeviceIndex>2</DestDeviceIndex><DestParameterIndex>5</DestParameterIndex><Min>0.0</Min><Max>1.0</Max><Scaling>Linear</Scaling></Mapping></Mappings></Macro0>";
+    let theirs = xml::parse(&format!("{}{macro_}{}", &with_plugin[..start], &with_plugin[stop..])).unwrap().to_xml();
+    let unmapped = ok("doofer-macro", json!({"macro": 1, "mappings": []}), &theirs, "Doofer");
+    let back = written(undone("doofer-macro", &unmapped, &unmapped.document.to_xml(), "Doofer", false));
+    assert!(back.contains("<DestDeviceIndex>2</DestDeviceIndex>") && back.contains("<DestParameterIndex>5</DestParameterIndex>"), "{back}");
+}
+
+#[test]
+fn a_preview_holds_the_lanes_it_addresses_so_an_apply_after_a_device_was_dropped_in_refuses() {
+    let dropped = ok("doofer-device-add", json!({"path": "Gainer", "at": [1]}), DOOFER, "Doofer").document.to_xml();
+    for input in [json!({"at": [2], "bypass": true}), json!({"macro": 1, "mappings": [{"device": 2, "param": 1}]})] {
+        let kind = if input.get("at").is_some() { "doofer-device-set" } else { "doofer-macro" };
+        let previewed = ok(kind, input.clone(), DOOFER, "Doofer");
+        let applied = ok(kind, input, &dropped, "Doofer");
+        assert_ne!(comparable(&previewed.prior), comparable(&applied.prior), "{kind}: place 2 is the EQ now, not the Gainer");
+    }
+    // A macro's name, value or how many show depend on no place: dropped in or not, the apply goes on.
+    let renamed = json!({"macro": 1, "name": "Drive", "value": 60, "activeMacros": 2});
+    assert_eq!(
+        comparable(&ok("doofer-macro", renamed.clone(), DOOFER, "Doofer").prior),
+        comparable(&ok("doofer-macro", renamed, &dropped, "Doofer").prior)
+    );
+}
+
+#[test]
+fn kumis_undo_of_a_device_it_added_cant_tell_when_renoises_write_couldnt_be_read_back() {
+    let added = ok("doofer-device-add", json!({"path": "Gainer", "at": [3]}), DOOFER, "Doofer");
+    let text = added.document.to_xml();
+    let shape = shape_of(&text);
+    let mut applied = added.applied.clone();
+    applied["contentUnknown"] = true.into();
+    let undo_from = |discard: bool| {
+        undo(
+            &Kept { kind: "doofer-device-add", prior: &added.prior, applied: &applied, shape: &shape, discard },
+            &text,
+            &shape,
+            &device("Doofer"),
+        )
+    };
+    assert!(matches!(undo_from(false), Err(Refusal::Changed(m)) if m.contains("couldn't read what")));
+    assert_eq!(written(undo_from(true)), DOOFER);
 }

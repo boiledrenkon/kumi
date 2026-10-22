@@ -46,6 +46,7 @@ pub fn pointed_pin(event: &JsonObject) -> Option<PinnedNode> {
             live: Some(true),
             track: (!name.is_empty()).then_some(name),
             time: span,
+            layout: None,
         });
     }
     let reference =
@@ -86,6 +87,7 @@ pub fn pointed_pin(event: &JsonObject) -> Option<PinnedNode> {
         live: Some(true),
         track,
         time: None,
+        layout: None,
     })
 }
 static REFERENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+:([a-z_]+):").unwrap());

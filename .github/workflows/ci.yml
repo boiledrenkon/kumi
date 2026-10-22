@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.paths.outputs.code }}
+      rust: ${{ steps.paths.outputs.rust }}
+      reaper: ${{ steps.paths.outputs.reaper }}
+      renoise: ${{ steps.paths.outputs.renoise }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
@@ -42,29 +45,51 @@ jobs:
             *) base= ;;
           esac
           # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
-          if [[ -n "$base" ]]; then changed="$(git diff --name-only "$base...HEAD")"; fi
-          if [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$' <<<"$changed"; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
+          if [[ -n "$base" ]]; then
+            changed="$(git diff --name-only "$base...HEAD")"
+            moved="$(git diff --name-only --diff-filter=ADR "$base...HEAD")"
           fi
+          # Each world's jobs run for the changes they test (main runs every one): Rust's for all but the Renoise tool's
+          # Lua alone; REAPER's extension for its crate, the parts of daw-bridge it links, the lockfile and the release
+          # script's check; Renoise's tool for its folder. CI's own workflow runs them all.
+          # Kumi's Rust tests read some of the tool, so they run for those: its change kinds (changes*.lua, against Kumi's
+          # list of them), its version, its entry and manifest, and files added to it, removed or renamed (the folder as
+          # it's installed).
+          tool='^daws/renoise/com\.kumi\.Bridge\.xrnx/(main\.lua|manifest\.xml|payload/(changes[^/]*|version)\.lua)$'
+          code=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$' <<<"$changed" && echo true || echo false )
+          rust=$( [[ -z "$base" ]] || grep -q -v -E '^$|^(docs/|LICENSE)|\.md$|^daws/renoise/' <<<"$changed" \
+            || grep -q -E "$tool" <<<"$changed" || grep -q -E '^daws/renoise/com\.kumi\.Bridge\.xrnx/' <<<"$moved" && echo true || echo false )
+          ci='^\.github/workflows/ci\.yml$'
+          reaper=$( [[ -z "$base" ]] || grep -q -E "$ci|^crates/reaper-kumi/|^crates/daw-bridge/(Cargo\.toml|src/(lib|auth|contract|daw|files|frame|handshake|loopback|owner|paths|wire)\.rs)|^Cargo\.(toml|lock)$|^scripts/build-native-release\.py$" <<<"$changed" && echo true || echo false )
+          renoise=$( [[ -z "$base" ]] || grep -q -E "$ci|^daws/renoise/" <<<"$changed" && echo true || echo false )
+          { echo "code=$code"; echo "rust=$rust"; echo "reaper=$reaper"; echo "renoise=$renoise"; } | tee -a "$GITHUB_OUTPUT"
 
   rust-linux:
     # The tests that guard producers' Sets and Kumi's wire, the unit tests and Live's pins: the `ci` set in
-    # .config/nextest.toml, built once and run on one runner. The long simulations, the recorded-source oracles, the
-    # SDK interoperability and migration tests and the benchmarks are the Extended workflow's.
-    name: Rust / Linux
+    # .config/nextest.toml. The long simulations, the recorded-source oracles, the SDK interoperability and migration
+    # tests and the benchmarks are the Extended workflow's. Three runners at once, by crate, so no one builds every test
+    # binary: Kumi and its runtime; Live's bridge (which needs only kumi-common); REAPER's and Renoise's bridges
+    # (daw-bridge, the host, the extension; Kumi links the first two but none of their tests).
+    name: Rust / ${{ matrix.label }}
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { part: kumi, label: Linux, crates: "--exclude ableton-mcp-server --exclude daw-bridge --exclude daw-mcp-server --exclude reaper-kumi" }
+          - { part: live-bridge, label: "Linux (Live's bridge)", crates: "-p ableton-mcp-server" }
+          - { part: daw-bridges, label: "Linux (DAW bridges)", crates: "-p daw-bridge -p daw-mcp-server -p reaper-kumi" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       # Saved from main only. A pull request restores main's; caches saved from pull requests (about 300 MB a job)
-      # pushed main's out of the repository's 10 GB.
+      # pushed main's out of the repository's 10 GB. One cache per part: each builds other crates.
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
+          key: ${{ matrix.part }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2
         with:
@@ -79,13 +104,15 @@ jobs:
           # Temporary files in memory: the tests' homes, Sets and stores write and sync many small files, which a
           # runner's disk makes several times slower.
           TMPDIR: /dev/shm
-        run: sh scripts/test-isolated.sh --profile ci
-      - run: git diff --check
+        # (word splitting on purpose: the part's crate options)
+        run: sh scripts/test-isolated.sh --profile ci ${{ matrix.crates }}
+      - if: matrix.part == 'kumi'
+        run: git diff --check
 
   rust-lint:
     name: Rust / Lint
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -111,7 +138,7 @@ jobs:
     # Windows console; Hands; paths, files and child processes; the store. Each platform's every test runs in Extended.
     name: Rust / ${{ matrix.label }}
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -212,7 +239,7 @@ jobs:
     # the Ubuntu the bundles build on, whose glibc is the one the extension may need.
     name: REAPER extension loads / ${{ matrix.os }}
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.reaper == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -264,7 +291,7 @@ jobs:
     # of github.com/renoise/definitions.
     name: Renoise tool
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.renoise == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -389,12 +416,13 @@ jobs:
           set -euo pipefail
           test "${{ needs.changes.result }}" = "success"
           test "${{ needs.scripts.result }}" = "success"
-          ok() { [[ "$1" == "success" || ( "$1" == "skipped" && "${{ needs.changes.outputs.code }}" == "false" ) ]]; }
-          ok "${{ needs.rust-linux.result }}"
-          ok "${{ needs.rust-lint.result }}"
-          ok "${{ needs.rust-platforms.result }}"
-          ok "${{ needs.remote-script.result }}"
-          ok "${{ needs.live-extension.result }}"
-          ok "${{ needs.reaper-extension.result }}"
-          ok "${{ needs.renoise-tool.result }}"
-          ok "${{ needs.logic-bridge.result }}"
+          # A job passed, or was skipped because nothing it tests changed.
+          ok() { [[ "$1" == "success" || ( "$1" == "skipped" && "$2" == "false" ) ]]; }
+          ok "${{ needs.rust-linux.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.rust-lint.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.rust-platforms.result }}" "${{ needs.changes.outputs.rust }}"
+          ok "${{ needs.remote-script.result }}" "${{ needs.changes.outputs.code }}"
+          ok "${{ needs.live-extension.result }}" "${{ needs.changes.outputs.code }}"
+          ok "${{ needs.reaper-extension.result }}" "${{ needs.changes.outputs.reaper }}"
+          ok "${{ needs.renoise-tool.result }}" "${{ needs.changes.outputs.renoise }}"
+          ok "${{ needs.logic-bridge.result }}" "${{ needs.changes.outputs.code }}"

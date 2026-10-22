@@ -26,15 +26,38 @@ pub struct Extra {
     /// Track chunks that read the same while the track is the same (a template's undo compares them), with no token to
     /// put back by: for the tests of what compares chunks.
     pub stable_chunks: bool,
+    /// A file system whose times are coarser than two saves (Windows' can be): a save over a file keeps its time.
+    pub coarse_file_times: bool,
     /// Files saved through `Main_SaveProjectEx`: (path, options).
     pub saved_as: Vec<(String, i32)>,
     pub made_from_templates: u32,
+    /// (m6-library) A REAPER without JS: MIDI Choke (its Effects folder lacks it).
+    pub no_choke: bool,
+    /// (m6-library) A sampler that takes no file (DONE commits nothing).
+    pub sampler_refuses_files: bool,
+    /// (m6-library) Note names a track was given (`SetTrackMIDINoteNameEx`): (track GUID, pitch, channel, name).
+    pub note_names: Vec<(String, i32, i32, String)>,
+    /// The track REAPER takes as last touched once an action made it so (40914, by GUID); else the first selected one.
+    pub last_touched: Option<String>,
+    /// (m7) API functions extensions registered (SWS's `CF_GetSWSVersion`…), for `APIExists`.
+    pub extension_apis: Vec<String>,
 }
 
 impl Default for Extra {
     fn default() -> Self {
-        let config =
-            [("panmode", "3"), ("panlaw", "1"), ("itemtimelock", "1"), ("tempoenvtimelock", "1"), ("defsavepath", "/lab/Projects")];
+        let config = [
+            ("panmode", "3"),
+            ("panlaw", "1"),
+            ("itemtimelock", "1"),
+            ("tempoenvtimelock", "1"),
+            ("defsavepath", "/lab/Projects"),
+            ("projmetroen", "0"),
+            // (m7) REAPER 7.82's factory defaults for new items and tracks (KP1, lab 2026-10-21).
+            ("deffadelen", "0.01000000000000"),
+            ("splitautoxfade", "0"),
+            ("loopnewitems", "14"),
+            ("deftrackvol", "1.00000000000000"),
+        ];
         let project_info = [("RULER_LANE_COUNT", 2.0), ("RULER_LANE_DEFAULT:0", 1.0), ("RULER_LANE_DEFAULT:1", 2.0)];
         let actions = [
             (1007, "Transport: Play"),
@@ -77,8 +100,14 @@ impl Default for Extra {
             actions: actions.into_iter().map(|(id, name)| (id, name.to_string())).collect(),
             marked: false,
             stable_chunks: false,
+            coarse_file_times: false,
             saved_as: vec![],
             made_from_templates: 0,
+            no_choke: false,
+            sampler_refuses_files: false,
+            note_names: vec![],
+            last_touched: None,
+            extension_apis: vec![],
         }
     }
 }
@@ -324,6 +353,12 @@ unsafe extern "C" fn get_config_var_string(name: *const c_char, buf: *mut c_char
         None => false,
     }
 }
+/// REAPER's own functions (the fake's table) and those an extension registered.
+unsafe extern "C" fn api_exists(name: *const c_char) -> bool {
+    let name = name_of(name);
+    let c_name = CString::new(name.as_str()).unwrap_or_default();
+    !super::lookup(&c_name).is_null() || extra(|e| e.extension_apis.contains(&name))
+}
 unsafe extern "C" fn set_config_var_string(name: *const c_char, value: *const c_char, _persist: c_int) -> c_int {
     let (name, value) = (name_of(name), name_of(value));
     extra(|e| match e.config.get_mut(&name) {
@@ -390,7 +425,13 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
         e.made_from_templates += made.len() as u32;
         first
     });
+    // REAPER puts the template's tracks after the last touched track, the end only when that's the last (lab 7.82).
+    let touched = extra(|e| e.last_touched.clone());
     with(|s| {
+        let mut at = touched
+            .and_then(|guid| s.tracks.iter().position(|t| t.guid == guid))
+            .or_else(|| s.tracks.iter().position(|t| t.selected))
+            .map_or(s.tracks.len(), |at| at + 1);
         for t in s.tracks.iter_mut() {
             t.selected = false;
         }
@@ -409,7 +450,8 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
                     fx
                 })
                 .collect();
-            s.tracks.push(track);
+            s.tracks.insert(at, track);
+            at += 1;
         }
         s.undo_dirty = true;
     });
@@ -427,7 +469,11 @@ unsafe extern "C" fn main_save_project_ex(_proj: *mut ReaProject, path: *const c
     } else {
         "<REAPER_PROJECT 0.1 \"7.82/fake\"\n>\n".to_string()
     };
+    let kept_time = std::fs::metadata(&path).and_then(|m| m.modified()).ok().filter(|_| extra(|e| e.coarse_file_times));
     let _ = std::fs::write(&path, text);
+    if let Some(time) = kept_time {
+        let _ = std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(time));
+    }
     extra(|e| e.saved_as.push((path.clone(), options)));
     if options & 1 == 0 && options & 8 != 0 {
         with(|s| {
@@ -486,6 +532,7 @@ pub fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetProjectNotes" => get_set_project_notes as unsafe extern "C" fn(*mut ReaProject, bool, *mut c_char, c_int),
         b"GetSetProjectGrid" => get_set_project_grid as unsafe extern "C" fn(*mut ReaProject, bool, *mut f64, *mut c_int, *mut f64) -> c_int,
         b"get_config_var_string" => get_config_var_string as unsafe extern "C" fn(*const c_char, *mut c_char, c_int) -> bool,
+        b"APIExists" => api_exists as unsafe extern "C" fn(*const c_char) -> bool,
         b"set_config_var_string" => set_config_var_string as unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
         b"SectionFromUniqueID" => section_from_unique_id as unsafe extern "C" fn(c_int) -> *mut api::KbdSectionInfo,
         b"kbd_enumerateActions" => kbd_enumerate_actions as unsafe extern "C" fn(*mut api::KbdSectionInfo, c_int, *mut *const c_char) -> c_int,
@@ -493,5 +540,22 @@ pub fn lookup(name: &CStr) -> *mut c_void {
         b"Main_SaveProjectEx" => main_save_project_ex as unsafe extern "C" fn(*mut ReaProject, *const c_char, c_int),
         b"SetMediaItemSelected" => set_media_item_selected as unsafe extern "C" fn(*mut MediaItem, bool),
         b"SelectAllMediaItems" => select_all_media_items as unsafe extern "C" fn(*mut ReaProject, bool),
+        b"SetTrackMIDINoteNameEx" => set_track_midi_note_name_ex as unsafe extern "C" fn(*mut ReaProject, *mut MediaTrack, c_int, c_int, *const c_char) -> bool,
     }
+}
+
+unsafe extern "C" fn set_track_midi_note_name_ex(
+    _: *mut ReaProject,
+    track: *mut MediaTrack,
+    pitch: c_int,
+    channel: c_int,
+    name: *const c_char,
+) -> bool {
+    let name = name_of(name);
+    let Some(guid) = with(|s| track_of(s, track as u64).map(|t| t.guid.clone())) else { return false };
+    extra(|e| {
+        e.note_names.retain(|(g, p, c, _)| !(g == &guid && *p == pitch && *c == channel));
+        e.note_names.push((guid, pitch, channel, name));
+    });
+    true
 }

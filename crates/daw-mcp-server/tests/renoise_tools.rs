@@ -210,8 +210,10 @@ async fn renoises_actions_are_its_own_and_another_daws_host_refuses_them() {
     let mut reaper = Session::start(Daw::Reaper, home.path());
     let listed = reaper.call_as(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}), false).await;
     assert!(!listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "audition_note"));
-    let (answer, is_error) = reaper.tool_full(9, "audition_note", json!({"instrumentRef": "1:instrument:1"}), false).await;
-    assert!(is_error && answer["error"].as_str().unwrap().contains("Renoise's"), "{answer}");
+    let answer = reaper
+        .call(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "audition_note", "arguments": {"instrumentRef": "1:instrument:1"}}}))
+        .await;
+    assert_eq!(answer["error"]["message"], "Unknown tool: audition_note", "REAPER's host has no Renoise action: {answer}");
 }
 
 #[tokio::test]
@@ -227,7 +229,8 @@ async fn an_instrument_saves_through_renoises_host_only() {
     let mut reaper = Session::start(Daw::Reaper, home.path());
     let listed = reaper.call_as(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}), false).await;
     assert!(!listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "instrument_save"));
-    let (answer, is_error) =
-        reaper.tool_full(9, "instrument_save", json!({"instrumentRef": "1:instrument:1", "path": "/tmp/a.xrni"}), false).await;
-    assert!(is_error && answer["error"].as_str().unwrap().contains("Renoise's"), "{answer}");
+    let answer = reaper
+        .call(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "instrument_save", "arguments": {"instrumentRef": "1:instrument:1", "path": "/tmp/a.xrni"}}}))
+        .await;
+    assert_eq!(answer["error"]["message"], "Unknown tool: instrument_save", "{answer}");
 }

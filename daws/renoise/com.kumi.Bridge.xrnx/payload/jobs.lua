@@ -13,10 +13,12 @@ function M.new(ctx)
   return setmetatable({ ctx = ctx, list = {}, last_run_ms = 0 }, M)
 end
 
--- fn(job) does the work, calling job.slice() between steps, and returns the answer or raises {code, message}.
-function M:add(record, request, fn)
+-- fn(job) does the work, calling job.slice() between steps, and returns the answer or raises {code, message}. `wrote` says
+-- what a job wrote before it was made (a change written in its request's callback that then waits for Renoise), as
+-- `job.wrote` does once a job writes.
+function M:add(record, request, fn, wrote)
   local ctx = self.ctx
-  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), shape = ctx.shape(), deadline = 0 }
+  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), shape = ctx.shape(), deadline = 0, wrote = wrote }
   -- Whether the song is still the one the request was made against; raises the error to answer with if it isn't.
   function job.check()
     if ctx.epoch() ~= job.epoch then
@@ -62,10 +64,14 @@ function M:run_if_stale(stale_ms, budget)
   if self.list[1] and self.ctx.now_ms() - self.last_run_ms >= stale_ms then self:run(budget) end
 end
 
--- Drops the jobs of a connection that is gone.
+-- Drops the jobs of a connection that is gone. A job that has written to the song (`job.wrote`) runs to its end, unheard:
+-- stopped there, it would leave half of what it does in the song (a track half put back, scratch copies never taken away).
 function M:cancel(record)
   for i = #self.list, 1, -1 do
-    if self.list[i].record == record then table.remove(self.list, i) end
+    local job = self.list[i]
+    if job.record == record then
+      if job.wrote then job.unheard = true else table.remove(self.list, i) end
+    end
   end
   if #self.list == 0 then self.ctx.on_active(false) end
 end
@@ -82,7 +88,7 @@ function M:abort_all(code, message)
     if job.wrote then
       err = { code = "uncertain", message = job.wrote .. " stopped when " .. message:gsub(": ask again$", "") .. ": part of it may be in the song, look for it" }
     end
-    self.ctx.finish(job, false, err)
+    if not job.unheard then self.ctx.finish(job, false, err) end
   end
   if any then self.ctx.on_active(false) end
 end
@@ -101,9 +107,13 @@ function M:run(budget)
       local ok, value, ended
       if not job.started then
         -- A job is made when its request is handled and first runs on a later turn: what it names is checked before it reads.
+        -- (One whose change is written already runs on whatever the producer did meanwhile: ended here, it would answer as if
+        -- nothing was written.)
         job.started = true
-        ok, value = pcall(job.check)
-        ended = not ok
+        if not job.wrote then
+          ok, value = pcall(job.check)
+          ended = not ok
+        end
       end
       if not ended then
         ok, value = coroutine.resume(job.co, job)
@@ -120,7 +130,9 @@ function M:run(budget)
   end
   if #self.list > 1 and finished[1] == nil then table.insert(self.list, table.remove(self.list, 1)) end
   if #finished > 0 and #self.list == 0 then ctx.on_active(false) end
-  for _, done in ipairs(finished) do ctx.finish(done.job, done.ok, done.value) end
+  for _, done in ipairs(finished) do
+    if not done.job.unheard then ctx.finish(done.job, done.ok, done.value) end
+  end
 end
 
 return M

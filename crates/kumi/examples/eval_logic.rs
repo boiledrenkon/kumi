@@ -1333,6 +1333,8 @@ async fn run_case(model: &Counted, case: &Case) -> Result<Outcome, RuntimeError>
         }
     }
     .await;
+    // HISTORY as the answer left it: closing the session retires each row (Kumi's undo goes with its host).
+    let answered: Vec<ChangeRecord> = changes.borrow().clone();
     // The turn's own error comes first; a failure to close would hide it.
     let closed = session.close().await;
     library.close().await;
@@ -1371,8 +1373,9 @@ async fn run_case(model: &Counted, case: &Case) -> Result<Outcome, RuntimeError>
         .map(result_text)
         .collect();
     let asked = lab.script.asked();
-    let (changes, tools, heard, text) = (changes.borrow(), tools.borrow(), heard.borrow(), text.borrow());
-    let run = Run { script: &lab.script, asked: &asked, changes: &changes, tools: &tools, answer: &text, manual: &manual, heard: &heard };
+    let (tools, heard, text) = (tools.borrow(), heard.borrow(), text.borrow());
+    let changes = &answered;
+    let run = Run { script: &lab.script, asked: &asked, changes, tools: &tools, answer: &text, manual: &manual, heard: &heard };
     let why = (case.check)(&run);
     let named = |name: &str| {
         parts(&messages)

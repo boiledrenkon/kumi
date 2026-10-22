@@ -12,6 +12,7 @@ what the bridge's package may contain. The steps for cutting a release are in
 | --- | --- | --- |
 | Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json`, `SHA256SUMS` and the installers `install.sh` and `install.ps1`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
 | The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as a native bridge tarball and its prepared package | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
+| REAPER's extension and Renoise's tool | Inside each Kumi bundle, in `daws/`, with `daw-mcp-server` | `kumi --daw reaper bridge`, `kumi --daw renoise bridge` and `kumi update` ([delivery](DELIVERY.md#reapers-extension-and-renoises-tool)) |
 | Logic Pro's bridge (`logic-kumi` and its helper) | Inside the Apple Silicon Mac's Kumi bundle only, in `daws/logic/logic-kumi/` | `kumi --daw logic bridge`, which sets it up in Kumi's own folder ([delivery](DELIVERY.md#logic-pros-bridge)) |
 | The bridge on its own | No release of its own. Build it with `python3 scripts/build-native-release.py --bridge-only` ([build options](DEVELOPER_GUIDE.md#releasing)) | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 

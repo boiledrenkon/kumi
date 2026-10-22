@@ -190,3 +190,134 @@ fn file_keys_follow_javascript_nfkd_normalization() {
     assert_eq!(slug("Déjà vu"), "de-ja-vu");
     assert_eq!(slug("Ｆｕｌｌ １２３"), "full-123");
 }
+
+/// The recipe tools of another DAW over the same store, with a plan whose steps are that DAW's kinds.
+fn tools_in(
+    profile: kumi_runtime::core::daw::DawProfile,
+    store: Rc<FileRecipeStore>,
+    kinds: &'static [&'static str],
+) -> (Vec<Rc<dyn KernelTool>>, Rc<RefCell<Vec<JsonObject>>>) {
+    struct DawPlan(Rc<RefCell<Vec<JsonObject>>>, &'static [&'static str]);
+    #[async_trait(?Send)]
+    impl KernelTool for DawPlan {
+        fn name(&self) -> &str {
+            "make_changes"
+        }
+        fn description(&self) -> &str {
+            "plan"
+        }
+        fn input_schema(&self) -> JsonObject {
+            json!({"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"tool":{"type":"string","enum":self.1}}}}}}).as_object().unwrap().clone()
+        }
+        async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
+            self.0.borrow_mut().push(input);
+            Ok(ToolResult { text: "{\"done\":[]}".into(), reply: Some("Done.".into()), ..Default::default() })
+        }
+    }
+    let plans = Rc::new(RefCell::new(vec![]));
+    let plan: Rc<dyn KernelTool> = Rc::new(DawPlan(plans.clone(), kinds));
+    let tools =
+        recipe_tools_for(profile, RecipeToolsOptions { store, plan: Rc::new(move || Some(plan.clone())), on_event: Rc::new(|_| {}) });
+    (tools, plans)
+}
+
+async fn call(tools: &[Rc<dyn KernelTool>], name: &str, input: Value) -> ToolResult {
+    tools.iter().find(|t| t.name() == name).unwrap().execute(input.as_object().unwrap().clone(), abort::never()).await.unwrap()
+}
+
+#[tokio::test]
+async fn each_daw_keeps_its_own_recipes_and_never_offers_another_daws() {
+    use kumi_runtime::core::daw::{DawId, DawProfile};
+    let f = Fixture::new();
+    f.run("save_recipe", json!({"name":"Drum bus","about":"Glue on the drums","steps":[{"tool":"set_mixer","input":{"volume":0.5}}]}))
+        .await;
+    let (reaper, reaper_plans) = tools_in(DawProfile::REAPER, f.store.clone(), &["fx_add", "fx_params", "track_volume"]);
+    let (renoise, _) = tools_in(DawProfile::RENOISE, f.store.clone(), &["device_add", "track_volume"]);
+    // REAPER's recipe of the same name is another recipe, in a folder of REAPER's own: Live's stays where it was.
+    let saved = call(&reaper, "save_recipe", json!({"name":"Drum bus","about":"ReaComp on the drums","params":[{"name":"track","about":"the drums"}],"steps":[{"tool":"fx_add","input":{"ref":"$track","name":"ReaComp"}}]})).await;
+    assert!(!saved.is_error, "{}", saved.text);
+    assert!(f.dir.path().join("recipes/drum-bus.json").is_file());
+    assert!(f.dir.path().join("recipes/reaper/drum-bus.json").is_file());
+    let all = f.store.list().await.unwrap();
+    assert_eq!(
+        all.iter().map(|r| (r.name.as_str(), r.daw())).collect::<Vec<_>>(),
+        [("Drum bus", DawId::Reaper), ("Drum bus", DawId::Ableton)],
+        "newest first"
+    );
+    assert_eq!(f.store.get_in("drum bus", DawId::Reaper).await.unwrap().unwrap().about, "ReaComp on the drums");
+    assert_eq!(f.store.get_in("drum bus", DawId::Ableton).await.unwrap().unwrap().about, "Glue on the drums");
+    // Each DAW runs its own.
+    let ran = call(&reaper, "run_recipe", json!({"name":"drum bus","with":{"track":"track:2"}})).await;
+    assert!(!ran.is_error, "{}", ran.text);
+    assert_eq!(reaper_plans.borrow()[0]["steps"][0]["input"]["ref"], "track:2");
+    // Renoise has none of that name, and can't forget REAPER's.
+    let missing = call(&renoise, "run_recipe", json!({"name":"drum bus"})).await;
+    assert!(missing.is_error && missing.text.contains("There's no recipe called"), "{}", missing.text);
+    let kept = call(&renoise, "forget_recipe", json!({"name":"drum bus"})).await;
+    assert!(kept.is_error, "{}", kept.text);
+    // Forgetting REAPER's leaves Live's.
+    call(&reaper, "forget_recipe", json!({"name":"drum bus"})).await;
+    assert!(!f.dir.path().join("recipes/reaper/drum-bus.json").exists());
+    assert!(f.dir.path().join("recipes/drum-bus.json").is_file());
+}
+
+// Each DAW keeps its own MAX_RECIPES: REAPER's newer recipes never push Live's oldest out, nor fill the room Live's take.
+#[tokio::test]
+async fn each_daw_keeps_its_own_number_of_recipes() {
+    use kumi_runtime::core::daw::{DawId, DawProfile};
+    let f = Fixture::new();
+    let kept = |name: String, created: f64, daw: Option<DawId>| Recipe {
+        version: 1,
+        name,
+        about: "A kept recipe".into(),
+        params: vec![],
+        steps: vec![json!({"tool": "set_mixer", "input": {}}).as_object().unwrap().clone()],
+        created,
+        used: 0.0,
+        last_used: None,
+        daw,
+    };
+    for n in 0..MAX_RECIPES {
+        f.store.save(&kept(format!("Live {n}"), 1_000.0 + n as f64, None)).await.unwrap();
+    }
+    for n in 0..3 {
+        f.store.save(&kept(format!("Reaper {n}"), 9_000.0 + n as f64, Some(DawId::Reaper))).await.unwrap();
+    }
+    let all = f.store.list().await.unwrap();
+    let count = |daw: DawId| all.iter().filter(|recipe| recipe.daw() == daw).count();
+    assert_eq!((count(DawId::Ableton), count(DawId::Reaper)), (MAX_RECIPES, 3));
+    // REAPER saves another; Live, full, is asked to forget one first.
+    let (reaper, _) = tools_in(DawProfile::REAPER, f.store.clone(), &["fx_add"]);
+    let saved =
+        call(&reaper, "save_recipe", json!({"name":"Reaper 3","about":"one more","steps":[{"tool":"fx_add","input":{"name":"ReaEQ"}}]}))
+            .await;
+    assert!(!saved.is_error, "{}", saved.text);
+    let refused = f.run("save_recipe", json!({"name":"Live 500","about":"one more","steps":[{"tool":"set_mixer","input":{}}]})).await;
+    assert!(refused.is_error && refused.text.contains("recipes are kept"), "{}", refused.text);
+}
+
+#[tokio::test]
+async fn a_daws_recipe_kept_beside_lives_by_an_earlier_kumi_is_found_as_that_daws_and_moves_to_its_folder() {
+    use kumi_runtime::core::daw::{DawId, DawProfile};
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.dir.path().join("recipes")).unwrap();
+    // (as a Kumi before DAW folders wrote it: REAPER's tag, in Live's folder)
+    std::fs::write(
+        f.dir.path().join("recipes/vox-chain.json"),
+        json!({"version":1,"name":"Vox chain","about":"EQ then comp","params":[],"steps":[{"tool":"fx_add","input":{"name":"ReaEQ","ref":"$track"}}],"created":1,"used":0,"daw":"reaper"}).to_string(),
+    )
+    .unwrap();
+    assert!(f.store.get_in("vox chain", DawId::Ableton).await.unwrap().is_none(), "not Live's");
+    let missing = f.run("run_recipe", json!({"name":"vox chain"})).await;
+    assert!(missing.is_error, "Live never runs REAPER's");
+    assert_eq!(f.store.get_in("vox chain", DawId::Reaper).await.unwrap().unwrap().daw(), DawId::Reaper);
+    let (reaper, _) = tools_in(DawProfile::REAPER, f.store.clone(), &["fx_add"]);
+    call(
+        &reaper,
+        "save_recipe",
+        json!({"name":"Vox chain","about":"EQ, comp, de-ess","steps":[{"tool":"fx_add","input":{"name":"ReaEQ","ref":"@x"}}]}),
+    )
+    .await;
+    assert!(!f.dir.path().join("recipes/vox-chain.json").exists(), "moved out of Live's folder");
+    assert_eq!(f.store.get_in("vox chain", DawId::Reaper).await.unwrap().unwrap().about, "EQ, comp, de-ess");
+}

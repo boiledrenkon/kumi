@@ -1169,8 +1169,9 @@ pub struct UninstallOptions {
 /// What `kumi uninstall` takes out of Kumi's folder, by these exact names: Kumi and the one kept for a rollback, what
 /// updates and repairs leave behind (`app.replaced` is the Windows installer's), and what Kumi fetched and fetches
 /// again when needed (programs, models, videos; each only while it holds only Kumi's own). Never conversations, notes,
-/// recipes, sign-ins, the library or references; the bridge's files stay while Live uses them.
-pub const KUMI_S_OWN: [&str; 14] = [
+/// recipes, sign-ins, the library or references; the bridge's files stay while Live uses them. REAPER's and Renoise's
+/// bridge files (`bridges`) go by what's in them ([`BRIDGES_OWN`]).
+pub const KUMI_S_OWN: [&str; 13] = [
     "app",
     "app.previous",
     "app.previous.old",
@@ -1184,9 +1185,20 @@ pub const KUMI_S_OWN: [&str; 14] = [
     "models",
     "videos",
     "bridge",
-    // REAPER's and Renoise's bridges' receipts, secrets, logs and discovery (their DAWs load their own copies).
-    "bridges",
 ];
+/// In each DAW's folder in `bridges` (REAPER's and Renoise's bridge files; their DAWs load their own copies), what's
+/// Kumi's to take out: kept generations, discovery, logs, renders to listen to, the receipt, the secret, the lock and the
+/// journal, and a temporary file one of them left (`.<name>.tmp-…`). Catch-up's baselines (`snapshots`) are Kumi's data,
+/// gone only with --all; the copies of Kumi's bridge the producer had changed (`changed`), which the lifecycle kept for
+/// them, always stay.
+pub const BRIDGES_OWN: [&str; 8] =
+    ["generations", "discovery", "logs", "listening", "install-receipt.json", "bridge.secret", "lifecycle.lock", "lifecycle-journal.json"];
+/// What only Kumi's bridge lifecycle writes in a DAW's folder in `bridges`: in a folder the producer also uses, a DAW's
+/// folder is Kumi's only when it holds one of these.
+const BRIDGES_MARKS: [&str; 4] = ["install-receipt.json", "bridge.secret", "lifecycle.lock", "lifecycle-journal.json"];
+/// The data in a DAW's folder in `bridges`, and the copies kept for the producer there.
+const BRIDGES_DATA: &str = "snapshots";
+const BRIDGES_CHANGED: &str = "changed";
 /// What the producer keeps unless they say --all.
 const KEPT: &str = "conversations, notes, recipes, sign-ins, library and references";
 /// Why a folder isn't one of Kumi's own to uninstall from. In the home folder or at a disk's root, the names Kumi
@@ -1512,24 +1524,26 @@ struct Parts {
     alone: bool,
     /// Kumi's data that stays: without --all, or in a folder the producer also uses.
     data: Vec<String>,
+    /// The copies of Kumi's DAW bridges the producer had changed, which the lifecycle kept for them: they stay.
+    changed: Vec<String>,
     /// What else is in `home`, by names Kumi doesn't make: it stays, and the folder with it.
     others: Vec<String>,
 }
 impl Parts {
     /// Whether `home` is a folder of Kumi's alone with nothing of anyone else's in it: then it's Kumi's to name whole.
     fn clean(&self) -> bool {
-        self.alone && self.left.is_empty() && self.others.is_empty()
+        self.alone && self.only_kumis()
     }
     /// Whether all that's in `home` is Kumi's, whatever its name.
     fn only_kumis(&self) -> bool {
-        self.left.is_empty() && self.others.is_empty()
+        self.left.is_empty() && self.others.is_empty() && self.changed.is_empty()
     }
 }
 /// `kept`: the folders of DAWs' bridge files that stay, as their DAWs use them.
 fn own_parts(home: &str, all: bool, kept: &[&str]) -> Result<Parts, RuntimeError> {
     let names = names_in(home)?;
     let alone = kumis_alone(home);
-    let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![], others: vec![] };
+    let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![], changed: vec![], others: vec![] };
     for name in names {
         let path = join(home, &name);
         if kept.contains(&name.as_str()) {
@@ -1553,6 +1567,8 @@ fn own_parts(home: &str, all: bool, kept: &[&str]) -> Result<Parts, RuntimeError
                 parts.gone.extend(kumis.into_iter().filter(|(entry, _)| !litter(entry)).map(|(_, at)| at.display().to_string()));
                 parts.left.push(path);
             }
+        } else if name == "bridges" {
+            bridges_parts(&path, all && alone, &mut parts);
         } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) {
             parts.gone.push(path);
         } else if KUMI_S_DATA.contains(&name.as_str()) {
@@ -1570,6 +1586,82 @@ fn own_parts(home: &str, all: bool, kept: &[&str]) -> Result<Parts, RuntimeError
         }
     }
     Ok(parts)
+}
+/// What goes of `bridges`, a folder per DAW (`all`: --all, in a folder of Kumi's alone): Kumi's own entries; the
+/// baselines too with `all`; never the copies kept for the producer, or what Kumi doesn't make. A DAW's folder goes
+/// whole once all in it goes, and so does `bridges`; else their entries go one by one, and the folders stay. Only
+/// REAPER's and Renoise's folders are Kumi's, and in a folder the producer also uses only those its lifecycle wrote
+/// ([`BRIDGES_MARKS`]): a `bridges` there may be someone else's, and stays unless Kumi's folders were all it held.
+fn bridges_parts(bridges: &str, all: bool, parts: &mut Parts) {
+    let Ok(daws) = fs::read_dir(bridges) else {
+        // Not a folder: Kumi makes none by this name.
+        parts.others.push(bridges.to_string());
+        return;
+    };
+    let kumis = |name: &str| {
+        BRIDGES_OWN.contains(&name)
+            || name.strip_prefix('.').and_then(|rest| rest.split_once(".tmp-")).is_some_and(|(of, _)| BRIDGES_OWN.contains(&of))
+    };
+    let (mut whole, mut gone) = (true, vec![]);
+    for daw in daws.filter_map(Result::ok) {
+        let folder = daw.path().display().to_string();
+        let name = daw.file_name().to_string_lossy().into_owned();
+        let kumis_folder = daw_bridge::daw::Daw::from_id(&name).is_some()
+            && (parts.alone || BRIDGES_MARKS.iter().any(|mark| daw.path().join(mark).exists()));
+        let entries = fs::read_dir(daw.path()).ok().filter(|_| kumis_folder);
+        let Some(entries) = entries else {
+            if !litter(&name) {
+                parts.others.push(folder);
+                whole = false;
+            }
+            continue;
+        };
+        let (mut all_of_it, mut entries_gone) = (true, vec![]);
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let at = entry.path().display().to_string();
+            match name.as_str() {
+                _ if litter(&name) => {}
+                _ if kumis(&name) => entries_gone.push(at),
+                BRIDGES_DATA if all => entries_gone.push(at),
+                BRIDGES_DATA => {
+                    parts.data.push(at);
+                    all_of_it = false;
+                }
+                BRIDGES_CHANGED => {
+                    parts.changed.push(at);
+                    all_of_it = false;
+                }
+                _ => {
+                    parts.others.push(at);
+                    all_of_it = false;
+                }
+            }
+        }
+        if all_of_it {
+            gone.push(folder);
+        } else {
+            whole = false;
+            gone.extend(entries_gone);
+        }
+    }
+    if whole && (parts.alone || !gone.is_empty()) {
+        parts.gone.push(bridges.to_string());
+    } else if whole {
+        parts.others.push(bridges.to_string());
+    } else {
+        parts.gone.extend(gone);
+    }
+}
+/// What's said of the copies of Kumi's DAW bridges the producer had changed, which stay.
+fn changed_said(parts: &Parts, display: &dyn Fn(&str) -> String, would: bool) -> Option<String> {
+    let shown: Vec<String> = parts.changed.iter().map(|path| display(path)).collect();
+    let stay = match (would, shown.len()) {
+        (_, 0) => return None,
+        (true, _) => "would stay",
+        (false, _) => "stay",
+    };
+    Some(format!("The copies of Kumi's bridges you had changed {stay} in {}: delete them yourself if you don't need them.", listed(&shown)))
 }
 /// What's said of what stays in a folder of Kumi's alone by names Kumi doesn't make.
 fn others_said(home: &str, parts: &Parts, display: &dyn Fn(&str) -> String) -> Option<String> {
@@ -1667,6 +1759,9 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
     if let Some(said) = left_said(&parts.left, display) {
         say(said);
     }
+    if let Some(said) = changed_said(&parts, display, true) {
+        say(said);
+    }
     if let Some(said) = others_said(home, &parts, display) {
         say(said);
     }
@@ -1754,8 +1849,9 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         // One DAW's bridge that can't come out stays, said; the rest of Kumi still goes.
         let removed = match provider.remove_bridge(&io, run.clone()).await {
             Ok(removed) => removed,
+            // (whether its files stay is said below, for a DAW that still uses them)
             Err(why) => {
-                say(format!("{why}; its files stay."));
+                say(format!("Kumi couldn't take its bridge out of {}: {why}.", provider.profile().words.app));
                 RemovedBridge::Kept
             }
         };
@@ -1824,6 +1920,9 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         say(provider.files_stay(&display(&join(&home, provider.bridge_folder()))));
     }
     if let Some(said) = left_said(&parts.left, &display) {
+        say(said);
+    }
+    if let Some(said) = changed_said(&parts, &display, false) {
         say(said);
     }
     if let Some(said) = others_said(&home, &parts, &display) {

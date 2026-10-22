@@ -1,5 +1,7 @@
 -- The song as rows (contract §3). Everything here is addressed by index and looked up again where it is used: nothing
 -- keeps a Renoise object from one slice of a job to the next (the song can change between slices).
+-- Rows number things as Renoise shows them: lines, patterns, instruments and samples from 0 (a Lua index less one); tracks,
+-- phrases, sequence slots and places in a chain from 1, as their Lua index.
 
 local import = ...
 local json = import("json")
@@ -164,6 +166,49 @@ function M.song_settings(song, row)
   end
 end
 
+-- (m7) The producer's setup, read on each look: how long the song's patterns usually are, its groups and their colours,
+-- and the tools installed (Paketti's among them). The song row has the rest (BPM, LPB, TPL, edit step, octave).
+M.SETUP_SLOTS = 512
+M.SETUP_GROUPS = 32
+M.SETUP_TOOLS = 40
+local OWN_TOOL = "com.kumi.Bridge"
+function M.setup(song)
+  local counts, usual, most, lengths = {}, nil, 0, 0
+  local sequence = song.sequencer.pattern_sequence
+  for s = 1, math.min(#sequence, M.SETUP_SLOTS) do
+    local lines = song:pattern(sequence[s]).number_of_lines
+    if not counts[lines] then lengths = lengths + 1 end
+    counts[lines] = (counts[lines] or 0) + 1
+    -- (a tie goes to the length that got there first)
+    if counts[lines] > most then usual, most = lines, counts[lines] end
+  end
+  local groups = {}
+  for i = 1, song.sequencer_track_count do
+    local track = song:track(i)
+    if track.type == renoise.Track.TRACK_TYPE_GROUP and #groups < M.SETUP_GROUPS then
+      groups[#groups + 1] = { name = status.cap(track.name), color = hex(track.color), tracks = #track.members }
+    end
+  end
+  -- (Renoise lists each tool as a table of its manifest's fields: name, id, enabled…)
+  local tools, paketti = {}, false
+  for _, entry in pairs(renoise.app().installed_tools or {}) do
+    local tool = entry --[[@as table]]
+    if type(tool) == "table" and tool.id ~= OWN_TOOL and tool.enabled ~= false then
+      local id, name = tostring(tool.id or ""), tostring(tool.name or "")
+      if (id .. " " .. name):lower():find("paketti", 1, true) then paketti = true end
+      if #tools < M.SETUP_TOOLS then tools[#tools + 1] = status.cap(name ~= "" and name or id) end
+    end
+  end
+  table.sort(tools)
+  return {
+    patternLines = usual or json.null,
+    patternLinesVary = lengths > 1 or nil,
+    groups = array(groups),
+    tools = array(tools),
+    paketti = paketti,
+  }
+end
+
 -- The note columns of a track that are muted (their numbers) and the ones that are named ({"2": "Pad"}); nil for none.
 local function column_state(track)
   local muted, names
@@ -239,6 +284,7 @@ local function sequence_row(song, epoch, s, tracks)
   return {
     ref = refs.make(epoch, "seq", s),
     patternRef = refs.make(epoch, "pattern", sequencer:pattern(s)),
+    pattern = sequencer:pattern(s) - 1,
     section = sequencer:sequence_is_start_of_section(s) and sequencer:sequence_section_name(s) or json.null,
     mutedTracks = array(muted),
   }
@@ -250,13 +296,14 @@ local function pattern_row(song, epoch, p, tracks)
   for t = 1, tracks do
     local pattern_track = pattern:track(t)
     local alias = pattern_track.alias_pattern_index
-    if alias > 0 then aliases[tostring(t)] = alias end
+    if alias > 0 then aliases[tostring(t)] = alias - 1 end
     -- M4 (n-song): the slot colours of the pattern's tracks in the matrix
     local color = pattern_track.color
     if color then colors[tostring(t)] = hex(color) end
   end
   local row = {
     ref = refs.make(epoch, "pattern", p),
+    number = p - 1,
     name = pattern.name,
     lines = pattern.number_of_lines,
     aliases = next(aliases) and aliases or json.object(),
@@ -307,7 +354,7 @@ local function instrument_row(song, epoch, i)
   local trigger = instrument.trigger_options
   local row = {
     ref = refs.make(epoch, "instrument", i),
-    index = i,
+    index = i - 1,
     name = instrument.name,
     kind = kind,
     sampleCount = #instrument.samples,
@@ -355,7 +402,7 @@ local function sample_row(song, epoch, i, s)
   local mapping = sample.sample_mapping
   local row = {
     ref = refs.make(epoch, "sample", i, s),
-    index = s,
+    index = s - 1,
     name = sample.name,
     baseNote = mapping.base_note,
     noteRange = range(mapping.note_range),
@@ -412,8 +459,8 @@ local function phrase_row(song, epoch, i, p)
     -- n-instruments
     playback = PLAY_NAMES[phrase.playback_mode] or phrase.playback_mode,
     baseNote = phrase.base_note,
-    loopStart = phrase.loop_start,
-    loopEnd = phrase.loop_end,
+    loopStart = phrase.loop_start - 1,
+    loopEnd = phrase.loop_end - 1,
     shuffle = phrase.shuffle,
     autoseek = phrase.autoseek,
     noteColumns = phrase.visible_note_columns,
@@ -590,7 +637,7 @@ local function line_row(line, number, note_columns, effect_columns, scan_hidden)
 end
 
 -- M4 (n-song): the automation of a pattern's track, as the automation-write kind takes it: per automated parameter its ref,
--- names, play mode and points (time in lines from 1, value 0 to 1 of the parameter's range).
+-- names, play mode and points (time in lines from 0, value 0 to 1 of the parameter's range).
 local PLAYMODE_NAMES = { "points", "linear", "curves" }
 function M.envelopes(song, epoch, p, t)
   local track, pattern_track, out = song:track(t), song:pattern(p):track(t), {}
@@ -602,7 +649,7 @@ function M.envelopes(song, epoch, p, t)
         local automation = pattern_track:find_automation(parameter)
         if automation then
           local points = {}
-          for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+          for i, point in ipairs(automation.points) do points[i] = { time = point.time - 1, value = point.value, scaling = point.scaling } end
           table.sort(points, function(a, b) return a.time < b.time end)
           out[#out + 1] = {
             ref = refs.make(epoch, "param", t, d, k), device = device.display_name ~= "" and device.display_name or device.name,
@@ -623,6 +670,7 @@ M.hex = hex
 M.integer = integer
 M.array = array
 M.track_type = track_type
+M.db, M.mute_name = db, mute_name
 M.key_tracking_name = key_tracking_name
 M.group_parents = group_parents
 M.song_row = song_row

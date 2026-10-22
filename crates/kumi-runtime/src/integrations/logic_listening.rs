@@ -16,7 +16,7 @@
 //! and the track already (`master_chain` adds no level). What reacts to the level it's given (a compressor, a limiter,
 //! anything Kumi doesn't know as a neutral Gain, a meter or an analyzer) treats a track alone otherwise than within the
 //! mix, so masking isn't read through it.
-use super::own_listening::{ListenLink, OwnEars, OwnHearing, Refusal};
+use super::own_listen::{ListenLink, OwnEars, OwnHearing, Refusal};
 use crate::{
     core::{
         contracts::{AuditionCandidate, ChangeRecord, HearRequest, HeardTake, JsonObject, Render, MIX_CANDIDATE},
@@ -31,7 +31,7 @@ use crate::{
             bars_of, Audible, AuditionOptions, AuditionPass, AuditionRender, AuditionSource, Captured, ClipNotes, ListenFlag, Pass,
             Renderer, Window,
         },
-        tools::{ToolDef, AUDITION_TOOL, GROOVE_TOOL, JUDGE_TOOL, RENDER_TOOL},
+        tools::{ToolDef, AUDITION_TOOL, RENDER_TOOL},
     },
 };
 use async_trait::async_trait;
@@ -205,41 +205,6 @@ fn run_said(app: &str, answer: &Value) -> Vec<String> {
 }
 
 /// A capture's file, where the part starts in it (the lead before it) and how long the part is in it.
-/// What the shared judge and groove say of Live's clips, in Logic's words: a region, with its ref (groove's parameter
-/// keeps its name, clip), its notes changed through Logic's own changes. Each is said in one of the two tools.
-const REGION_WORDS: [(&str, &str); 9] = [
-    ("an audio file or clip whose", "an audio file or region whose"),
-    ("an audio clip's clipRef", "an audio region's ref"),
-    ("(the part, a MIDI clip)", "(the part, a MIDI region)"),
-    ("(a MIDI clip with the reference's notes)", "(a MIDI region with the reference's notes)"),
-    (
-        "give that MIDI clip as reference and the drum stem's clip as audio",
-        "give that MIDI region as reference and the drum stem's region as audio",
-    ),
-    ("(change_notes, transform_midi swing, quantize)", "(make_changes with notes_change or notes_quantize)"),
-    ("the part, a MIDI clip's clipRef", "the part, a MIDI region's ref"),
-    ("the reference's MIDI clip (its clipRef)", "the reference's MIDI region (its ref)"),
-    ("a Tracks area audio clip's clipRef", "an audio region's ref in the Tracks area"),
-];
-
-/// A shared listening tool as Logic says it: its regions where it says clips, in its description and its parameters'.
-fn in_regions(shared: ToolDef) -> ToolDef {
-    fn said(text: &str) -> String {
-        REGION_WORDS.iter().fold(text.to_owned(), |text, (live, logic)| text.replace(live, logic))
-    }
-    fn walk(value: &mut Value) {
-        match value {
-            Value::String(text) => *text = said(text),
-            Value::Array(items) => items.iter_mut().for_each(walk),
-            Value::Object(fields) => fields.values_mut().for_each(walk),
-            _ => {}
-        }
-    }
-    let mut schema = shared.schema;
-    schema.values_mut().for_each(walk);
-    ToolDef { description: said(&shared.description), schema }
-}
-
 fn render_of(answer: &Value) -> Option<Render> {
     let file = answer.get("file").and_then(Value::as_str).filter(|file| !file.is_empty())?.to_owned();
     let lead = answer.get("lead").and_then(Value::as_f64).filter(|lead| lead.is_finite()).unwrap_or(0.).max(0.);
@@ -898,8 +863,7 @@ impl OwnHearing for LogicEars {
         self.keep(tempo, signature);
     }
     /// The audition and the render as Logic does them: a pass per candidate, each soloed, from the Tracks area (no
-    /// clips); a render bounced offline with the track soloed, through its plug-ins and the Stereo Out's; judge and
-    /// groove with regions where they say clips.
+    /// clips); a render bounced offline with the track soloed, through its plug-ins and the Stereo Out's.
     fn describe(&self, tool: &str, shared: ToolDef) -> ToolDef {
         let app = self.words().words.app;
         match tool {
@@ -928,7 +892,7 @@ impl OwnHearing for LogicEars {
                     schema,
                 }
             }
-            JUDGE_TOOL | GROOVE_TOOL => in_regions(shared),
+            // (judge and groove say regions where Live's say clips, from Logic's profile)
             _ => shared,
         }
     }
@@ -944,6 +908,8 @@ mod tests {
 
     #[test]
     fn judge_and_groove_say_regions_where_live_says_clips() {
+        // (the shared tools say each DAW's words from its profile: a region with its ref, its notes changed through
+        // Logic's own changes)
         let shared = [judge_tool(&DawProfile::LOGIC), groove_tool(&DawProfile::LOGIC)];
         // What a tool says: its description and every text in its parameters (not their names).
         fn texts(value: &Value, into: &mut Vec<String>) {
@@ -959,27 +925,23 @@ mod tests {
             def.schema.values().for_each(|value| texts(value, &mut said));
             said.join(" ")
         };
-        for (live, _) in REGION_WORDS {
-            assert!(shared.iter().any(|def| all(def).contains(live)), "{live:?} is no longer in the shared tools");
-        }
-        for def in shared {
-            let said = all(&in_regions(def.clone()));
+        for def in &shared {
+            let said = all(def);
             // (groove's parameter keeps its name)
             let words = said.replace("Start a run with clip (", "");
             let clips: Vec<&str> =
                 words.split(|c: char| !c.is_alphanumeric()).filter(|word| word.to_lowercase().starts_with("clip")).collect();
             assert!(clips.is_empty(), "{clips:?} in {said}");
             assert!(!said.contains("transform_midi") && !said.contains("change_notes"), "Live's tools: {said}");
-            assert_eq!(in_regions(def.clone()).schema.keys().collect::<Vec<_>>(), def.schema.keys().collect::<Vec<_>>());
         }
-        let groove = in_regions(groove_tool(&DawProfile::LOGIC));
+        let groove = groove_tool(&DawProfile::LOGIC);
         assert!(groove.description.contains("Start a run with clip (the part, a MIDI region) and reference (a MIDI region with"));
         assert_eq!(groove.schema["properties"]["clip"]["description"], "Starts a run: the part, a MIDI region's ref");
         assert_eq!(
             groove.schema["properties"]["audio"]["description"],
             "The reference's drum stem (an audio region's ref in the Tracks area): its hits' onsets refine the reference's timing"
         );
-        let judge = in_regions(judge_tool(&DawProfile::LOGIC));
+        let judge = judge_tool(&DawProfile::LOGIC);
         assert!(judge.schema["properties"]["goal"]["properties"]["reference"]["description"]
             .as_str()
             .is_some_and(|said| said.ends_with("an audio file's path (~/…) or an audio region's ref")));

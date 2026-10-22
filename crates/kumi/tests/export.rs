@@ -29,7 +29,8 @@ fn zone() -> FixedOffset {
 
 /// Secrets by their shapes, each with what of it must not survive.
 const SHAPES: [(&str, &str); 14] = [
-    ("AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY", "9tSrke72PouQMnMX"),
+    // An example, not a key, and in pieces as the Stripe one below: whole, secret scanning takes it for a real key.
+    (concat!("AIza", "SyEXAMPLE-EXAMPLE-EXAMPLE-EXAMPLE-0"), "EXAMPLE-EXAMPLE-EXAMPLE"),
     ("ghp_16C7e42F292c6912E7710c838347Ae178B4a", "16C7e42F292c6912E77"),
     ("AKIAIOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
     ("aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "bPxRfiCYEXAMPLEKEY"),
@@ -448,13 +449,13 @@ async fn an_import_keeps_the_set_its_file_names_for_resume_and_another_export() 
 async fn kumi_export_says_the_daw_of_the_conversations_place() {
     use kumi::export::words_of;
     let id = "0123456789abcdef0123456789abcdef";
-    assert_eq!(words_of(id), ("Live", "Set"));
-    assert_eq!(words_of("imported"), ("Live", "Set"));
-    assert_eq!(words_of(&format!("logic-{id}")), ("Logic Pro", "project"));
-    assert_eq!(words_of("logic-unsaved"), ("Logic Pro", "project"));
-    assert_eq!(words_of(&format!("reaper-{id}")), ("REAPER", "project"));
-    assert_eq!(words_of(&format!("renoise-{id}")), ("Renoise", "song"));
-    assert_eq!(words_of("somewhere"), ("Live", "Set"));
+    assert_eq!(words_of(id).0, ("Live", "Set"));
+    assert_eq!(words_of("imported").0, ("Live", "Set"));
+    assert_eq!(words_of(&format!("logic-{id}")).0, ("Logic Pro", "project"));
+    assert_eq!(words_of("logic-unsaved").0, ("Logic Pro", "project"));
+    assert_eq!(words_of(&format!("reaper-{id}")).0, ("REAPER", "project"));
+    assert_eq!(words_of(&format!("renoise-{id}")).0, ("Renoise", "song"));
+    assert_eq!(words_of("somewhere").0, ("Live", "Set"));
     let home = tempfile::tempdir().unwrap();
     let env = Env::from([("KUMI_HOME".to_string(), home.path().join("kumi").display().to_string())]);
     let store = kumi_runtime::core::conversations::create_conversation_store_in(
@@ -523,4 +524,21 @@ async fn words_about_importing_name_the_command_kumi_runs_with() {
     assert_eq!(err.0.borrow().matches(how).count(), 2, "{}", err.0.borrow());
     let saved = kumi::export::saved_words(Format::Json, std::path::Path::new("k.json"), "cargo run -p kumi --");
     assert!(saved.contains("Another Kumi carries it on after: cargo run -p kumi -- import <this file>."), "{saved}");
+}
+
+/// `kumi export` of a REAPER or Renoise conversation speaks that DAW's words, whichever DAW Kumi was started for; a Live
+/// conversation's (and an imported one's) stay Live's.
+#[test]
+fn an_exported_conversation_speaks_the_words_of_the_daw_its_place_is_in() {
+    use kumi::export::{words_of, WORDS};
+    let id = "0123456789abcdef0123456789abcdef";
+    let (words, label) = words_of(&format!("reaper-{id}"));
+    assert_eq!(words, ("REAPER", "project"));
+    assert_eq!(label("reaper_read"), "looked at your project");
+    let (words, label) = words_of("renoise-unsaved");
+    assert_eq!(words, ("Renoise", "song"));
+    assert_eq!(label("renoise_read"), "looked at your song");
+    for place in [id, "unsaved", IMPORTED] {
+        assert_eq!(words_of(place).0, WORDS, "{place}");
+    }
 }

@@ -30,18 +30,9 @@ use crate::tui::tty::TtyOutput;
 
 /// The most `/export` copies through the terminal; a longer conversation is saved as a file instead.
 pub const COPY_MOST: usize = 64 * 1024;
-/// The DAW's words in what Kumi's commands export for a conversation Live's place holds (or an imported one): Live's.
+/// The DAW's words in what Kumi's commands export for a conversation of Live's (or one imported from a file).
 pub const WORDS: (&str, &str) = ("Live", "Set");
 
-/// The DAW's words for a kept conversation's place, as an export says them: what the producer calls the DAW and a place
-/// in it (Logic Pro's, REAPER's, Renoise's for theirs), as the session's own export takes them from its DAW; Live's for
-/// Live's places and imported conversations.
-pub fn words_of(place: &str) -> (&'static str, &'static str) {
-    kumi_runtime::core::place::Place::parse(place)
-        .and_then(|place| place.daw())
-        .and_then(kumi_runtime::integrations::profile)
-        .map_or(WORDS, |profile| profile.word_pair())
-}
 /// A picture's size on the page, in its own units: wide, as the terminal draws it.
 const WIDTH: f64 = 400.;
 const HEIGHT: f64 = 160.;
@@ -57,12 +48,25 @@ pub async fn redactor_for(env: &Env) -> Box<dyn Fn(&str) -> String> {
 /// A conversation in `format`, its dates told in `zone` ([`local_zone`]). `redact` is None only for a file the producer
 /// asked for as it is (`--raw`).
 pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn Fn(&str) -> String>, zone: FixedOffset, now: i64) -> String {
+    render_with(format, source, full, redact, zone, now, &step_label)
+}
+
+/// `render`, each step named by `label` (its DAW's words for its tool).
+fn render_with(
+    format: Format,
+    source: &Source,
+    full: bool,
+    redact: Option<&dyn Fn(&str) -> String>,
+    zone: FixedOffset,
+    now: i64,
+    label: &dyn Fn(&str) -> String,
+) -> String {
     let same = |text: &str| text.to_string();
     let options = Options {
         full,
         redact: redact.unwrap_or(&same),
         redacted: redact.is_some(),
-        label: &step_label,
+        label,
         picture: &picture_of,
         zone,
         now,
@@ -390,6 +394,21 @@ pub struct ExportRequest {
     pub raw: bool,
 }
 
+/// What a kept conversation's export calls the DAW and a place in it, and how it names each step, from the conversation's
+/// place: Logic Pro's, REAPER's and Renoise's places are theirs; Live's, and conversations imported from files, are
+/// Live's.
+pub fn words_of(place: &str) -> ((&'static str, &'static str), impl Fn(&str) -> String) {
+    use kumi_runtime::core::{daw::DawId, place::Place};
+    let daw = Place::parse(place).and_then(|place| place.daw()).filter(|daw| *daw != DawId::Ableton);
+    let own = daw.and_then(|daw| kumi_runtime::integrations::profile(daw).zip(kumi_runtime::integrations::presentation(daw)));
+    let words = own.map_or(WORDS, |(profile, _)| profile.word_pair());
+    let label = move |tool: &str| match own {
+        Some((profile, shown)) => kumi_runtime::core::presentation::step_label(shown, profile, tool),
+        None => step_label(tool),
+    };
+    (words, label)
+}
+
 /// The kept conversations, kept as the settings say.
 fn kept(env: &Env) -> Result<Rc<FileConversationStore>, RuntimeError> {
     let settings = read_settings(&load_settings_file(env)?);
@@ -448,15 +467,10 @@ pub async fn export_command(
     };
     let redact = if request.raw { None } else { Some(redactor_for(env).await) };
     let title = row.title();
-    let source = Source {
-        id: &row.id,
-        conversation: &conversation,
-        title: &title,
-        place: row.set.as_deref(),
-        words: words_of(&row.place),
-        created: row.created,
-    };
-    let text = render(request.format, &source, request.full, redact.as_deref(), local_zone(), now_ms());
+    // In the words of the DAW it was about (its place's), whichever DAW this Kumi was started for.
+    let (words, label) = words_of(&row.place);
+    let source = Source { id: &row.id, conversation: &conversation, title: &title, place: row.set.as_deref(), words, created: row.created };
+    let text = render_with(request.format, &source, request.full, redact.as_deref(), local_zone(), now_ms(), &label);
     // The file's name comes from its title, so it's redacted too.
     let name = file_name(&redact.as_deref().map_or_else(|| title.clone(), |redact| redact(&title)), &row.id, request.format);
     let path = match request.out.as_deref() {

@@ -36,11 +36,23 @@ pub struct CliIo {
     pub signals: bool,
     /// Opens Kumi again with these arguments, in place of starting the program (tests).
     pub reopen: Option<Rc<dyn Fn(Vec<String>) -> LocalBoxFuture<'static, i32>>>,
+    /// Which DAWs are on this computer, for /daw to offer (tests); else the DAWs' own detection says.
+    pub daws_here: Option<crate::daw::Here>,
     exit_after_reopen: Rc<Cell<bool>>,
 }
 impl CliIo {
     pub fn new(input: Rc<dyn TerminalInput>, out: Rc<dyn TtyOutput>, err: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { input, out, err, env, args: vec![], signals: false, reopen: None, exit_after_reopen: Rc::new(Cell::new(false)) }
+        Self {
+            input,
+            out,
+            err,
+            env,
+            args: vec![],
+            signals: false,
+            reopen: None,
+            daws_here: None,
+            exit_after_reopen: Rc::new(Cell::new(false)),
+        }
     }
     pub fn installed(&self) -> bool {
         self.env.get("KUMI_INSTALLED").is_some_and(|s| s == "1")
@@ -164,9 +176,14 @@ fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     let live = crate::daw::provider(kumi_runtime::core::daw::DawId::Ableton).expect("Live is registered");
     doctor.bundled_bridge_version = live.bundled_bridge_version();
     let env = io.env.clone();
+    let (own_factory, own_env) = (factory.clone(), env.clone());
     doctor.probe_live = Some(Rc::new(move |config| {
         let probe = live.probe(config, &factory, &env);
         async move { Ok(probe.await) }.boxed_local()
+    }));
+    doctor.probe_own = Some(Rc::new(move |daw| match crate::daw::provider(daw) {
+        Some(own) => own.probe(String::new(), &own_factory, &own_env),
+        None => async { crate::doctor::LiveProbe::default() }.boxed_local(),
     }));
     doctor
 }
@@ -547,5 +564,30 @@ mod doctor_io_tests {
         let _ = probe("/nowhere/bridge-config.json".into()).await;
         assert_eq!(probed.get(), 1, "Live's probe made Live's integration");
         crate::daw::work_with(DawId::Ableton);
+    }
+
+    /// Review K42: the doctor starts Kumi's host for REAPER or Renoise once (through the session's host factory), and
+    /// a host that won't start says why.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_doctor_starts_kumis_host_for_reaper_and_renoise() {
+        tokio::task::LocalSet::new().run_until(probe_own_hosts()).await;
+    }
+    async fn probe_own_hosts() {
+        let asked = Rc::new(std::cell::RefCell::new(vec![]));
+        let seen = asked.clone();
+        let factory = DawFactory {
+            ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration),
+            own_host: Some(Rc::new(move |daw| {
+                seen.borrow_mut().push(daw);
+                Rc::new(|_| async { Err(RuntimeError::plain("daw-mcp-server wasn't found")) }.boxed_local())
+            })),
+        };
+        let io = CliIo::new(Rc::new(Silent), Rc::new(Nowhere), Rc::new(Nowhere), Env::new());
+        let probe = doctor_io(&io, factory).probe_own.expect("the doctor probes Kumi's own hosts");
+        for daw in [DawId::Reaper, DawId::Renoise] {
+            let host = probe(daw).await;
+            assert!(!host.started && host.said.as_deref().is_some_and(|said| said.contains("daw-mcp-server wasn't found")), "{host:?}");
+        }
+        assert_eq!(*asked.borrow(), [DawId::Reaper, DawId::Renoise]);
     }
 }

@@ -143,10 +143,9 @@ fn stretch_plan(ctx: &Ctx, input: &Value, which: Which) -> Done<StretchPlan> {
             for spec in list(input, "markers")? {
                 let position = item_position(ctx, spec, &found)?
                     .ok_or_else(|| bad("every marker needs a position (seconds from the item's start) or positionBeats"))?;
-                // Where REAPER would put its source by itself: the take's offset plus the position at its rate.
-                let source = number(spec, "sourcePosition")?.unwrap_or_else(|| {
-                    reaper.take_value(found.take, "D_STARTOFFS") + position * reaper.take_value(found.take, "D_PLAYRATE")
-                });
+                // Not given, its source is left to REAPER, which pins the point that plays there now (the take's offset
+                // plus the position at its rate holds only while no marker is moved): what it wrote is read back.
+                let source = number(spec, "sourcePosition")?.unwrap_or(f64::NAN);
                 add.push(StretchMarker { position, source, slope: 0.0 });
             }
         }
@@ -234,7 +233,8 @@ fn write_stretch(reaper: &Reaper, take: Take, gone: &[StretchMarker], new: &[Str
         }
     }
     for marker in new {
-        let at = reaper.set_stretch_marker(take, -1, marker.position, Some(marker.source));
+        // (a source of NaN is REAPER's to find)
+        let at = reaper.set_stretch_marker(take, -1, marker.position, Some(marker.source).filter(|s| !s.is_nan()));
         ok &= at >= 0;
         if at >= 0 && marker.slope != 0.0 {
             ok &= reaper.set_stretch_slope(take, at, marker.slope);
@@ -289,7 +289,15 @@ pub fn stretch_apply(ctx: &Ctx, input: &Value, fence: &Value, which: Which) -> D
     let wrote = write_stretch(reaper, take, &removed, &plan.add);
     let after = reaper.stretch_markers(take);
     let (gone_now, added_now) = (stretch_difference(&plan.before, &after), stretch_difference(&after, &plan.before));
-    let whole = wrote && stretch_difference(&removed, &gone_now).is_empty() && stretch_difference(&plan.add, &added_now).is_empty();
+    // Each marker asked for is one REAPER made: at its place, with its source where one was given.
+    let mut made = added_now.clone();
+    let all_made = plan.add.iter().all(|wanted| {
+        let found = made.iter().position(|m| {
+            close(m.position, wanted.position) && close(m.slope, wanted.slope) && (wanted.source.is_nan() || close(m.source, wanted.source))
+        });
+        found.map(|at| made.remove(at)).is_some()
+    });
+    let whole = wrote && stretch_difference(&removed, &gone_now).is_empty() && all_made && made.is_empty();
     if !whole {
         // Half a change is none: the take's markers go back as they were.
         let back = write_stretch(reaper, take, &added_now, &gone_now) && stretch_fence(&reaper.stretch_markers(take)) == *fence;

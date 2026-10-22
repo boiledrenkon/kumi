@@ -5,6 +5,7 @@ use serde_json::json;
 use super::templates;
 use super::tests_lab::*;
 use crate::reaper::fake::{self, FakeTrack};
+use crate::reaper::Reaper;
 
 /// The fake REAPER's actions for these tests: insert track and mute mark a change of REAPER's own (an undo point); unselect
 /// all doesn't. Each records the tracks selected as it runs.
@@ -188,6 +189,38 @@ fn a_track_template_goes_in_at_its_place_and_its_undo_takes_those_tracks_away() 
 }
 
 #[test]
+fn a_templates_tracks_at_the_end_of_a_folder_in_a_folder_go_leaving_every_track_in_its_folder() {
+    let lab = Lab::new();
+    let _dir = templates();
+    drums_in_rhythm();
+    let (preview, made) = lab.make("track-template-insert", json!({"name": "Drums/Kit", "index": 4}), "Kumi: template (kt021)");
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Kit Bus", "Kit Kick", "Snare", "Reverb"]);
+    assert_eq!(folder_depths(), [1, 1, 0, 1, -1, -2, 0]);
+    lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kt022)").unwrap();
+    assert_eq!(names(), ["Rhythm", "Drums", "Kick", "Snare", "Reverb"]);
+    assert_eq!(folder_depths(), [1, 1, 0, -2, 0], "Snare still closes both folders, and Reverb is in neither");
+}
+
+#[test]
+fn a_template_goes_in_at_the_end_whichever_track_the_producer_touched_last() {
+    // REAPER puts a template's tracks after the last touched track, not at the end (accept-reaper lab, 7.82: with the
+    // producer's last touched track in the middle, Kumi's insert was refused "elsewhere than asked").
+    let lab = Lab::new();
+    let _dir = templates();
+    fake::select_tracks(&[1]);
+    let (preview, made) = lab.make("track-template-insert", json!({"name": "Drums/Kit"}), "Kumi: template (kt011)");
+    assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb", "Kit Bus", "Kit Kick"]);
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, true, false, false, false, false]);
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    assert_eq!(reaper.last_touched_track().map(|t| reaper.track_name(t)).as_deref(), Some("Kick"), "the producer's last touched");
+    lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kt012)").unwrap();
+    // At a place: moved there from the end.
+    lab.make("track-template-insert", json!({"name": "Drums/Kit", "index": 3}), "Kumi: template (kt013)");
+    assert_eq!(names(), ["Drums", "Kick", "Kit Bus", "Kit Kick", "Snare", "Reverb"]);
+}
+
+#[test]
 fn a_template_that_isnt_there_or_opens_a_folder_it_doesnt_close_is_refused_with_nothing_left() {
     let lab = Lab::new();
     let dir = templates();
@@ -333,7 +366,7 @@ fn tracks_are_saved_as_a_template_never_over_a_file_unless_told_and_the_selectio
     let dir = templates();
     fake::select_tracks(&[3]);
     let saved = lab.call("track_template_save", json!({"trackRefs": [KICK, SNARE], "name": "Mine/Two"})).unwrap();
-    let file = dir.path().join("TrackTemplates/Mine/Two.RTrackTemplate");
+    let file = dir.path().join("TrackTemplates").join("Mine").join("Two.RTrackTemplate");
     assert_eq!(saved["saved"].as_str(), Some(file.to_string_lossy().as_ref()));
     assert_eq!(saved["tracks"], json!(["Kick", "Snare"]));
     let text = std::fs::read_to_string(&file).unwrap();
@@ -342,7 +375,10 @@ fn tracks_are_saved_as_a_template_never_over_a_file_unless_told_and_the_selectio
     let (code, message) = lab.call("track_template_save", json!({"trackRefs": [KICK], "name": "Mine/Two"})).unwrap_err();
     assert_eq!(code, "bad-params");
     assert!(message.contains("replace: true"), "{message}");
+    // (where file times are coarser than two saves, as Windows' can be, the template written over keeps its time)
+    fake::extra(|e| e.coarse_file_times = true);
     lab.call("track_template_save", json!({"trackRefs": [KICK], "name": "Mine/Two", "replace": true})).unwrap();
+    fake::extra(|e| e.coarse_file_times = false);
     assert!(!std::fs::read_to_string(&file).unwrap().contains("Snare"));
     assert_eq!(fake::extra(|e| e.saved_as.last().map(|(_, options)| *options)), Some(1 | 4));
     for wrong in [

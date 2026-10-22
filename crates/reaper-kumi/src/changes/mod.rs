@@ -12,6 +12,8 @@ mod call;
 mod chunks;
 mod folders;
 mod fx;
+// (M6: the digest names FX as the titles do)
+pub(crate) use fx::short_name;
 mod glue;
 mod item_kinds;
 mod items;
@@ -46,8 +48,14 @@ mod groups;
 mod hwout;
 mod projectitems;
 mod templates;
+// M6 (m6-library): a sampler kit made from sample files.
+mod kits;
+// Review H4: a file in Kumi's own folder is copied into the project's media folder before REAPER plays it.
+pub(crate) mod kumi_files;
 mod trackprops;
 mod volatile;
+// M5 listening (m5-reaper): a scratch copy kept as the producer's track.
+mod scratch_keep;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -64,7 +72,8 @@ use crate::refs::Ref;
 pub type Fault = (String, String);
 pub type Done<T> = Result<T, Fault>;
 
-/// The step a plan holds open at most: a host that never ended it must not leave REAPER's undo history in a block.
+/// The longest a plan's step stays open with no change made in it: a host that never ends it, though its connection
+/// stays (a host that's gone has its step closed at once), must not leave REAPER's undo history in a block.
 const PLAN_MAX: Duration = Duration::from_secs(120);
 
 /// What a kind needs of the world it changes.
@@ -72,6 +81,9 @@ pub struct Ctx<'a, 'r> {
     pub reaper: &'a Reaper<'r>,
     pub reads: &'a Reads,
     pub proj: Project,
+    /// Set by an apply whose write isn't in REAPER's undo state, before or after (a parameter's modulation with no source
+    /// on, a ReaEQ band's type): REAPER's undo never takes it back, so a plan's point doesn't cover it.
+    pub unkept: std::cell::Cell<bool>,
 }
 
 /// What a change would do. `prior` is what undo puts back; `fence` what apply checks again before it writes.
@@ -127,6 +139,22 @@ impl Written for Restored {
     }
 }
 
+/// The undo block a change runs in, ended as it is dropped by a panic before its own end: as a write (flags -1), so
+/// REAPER's undo takes back whatever the change wrote before it stopped.
+struct OpenBlock<'c, 'a, 'r> {
+    ctx: &'c Ctx<'a, 'r>,
+    desc: &'c str,
+    armed: bool,
+}
+
+impl Drop for OpenBlock<'_, '_, '_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.ctx.reaper.undo_end(self.ctx.proj, self.desc, -1);
+        }
+    }
+}
+
 /// A kind of change.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -155,6 +183,8 @@ enum Kind {
     RunAction,
     /// (r-tracks) A track template inserted as tracks.
     TemplateInsert,
+    /// (m6-library) A sampler kit made from sample files, as tracks.
+    DrumKit,
     /// (r-tracks) The ruler lane a marker or region sits in, held by the lane's id.
     MarkerLane,
     TrackDelete,
@@ -167,6 +197,8 @@ enum Kind {
     TempoMarkerDelete,
     LoopRange,
     LoopRepeat,
+    /// (m6-places) The metronome, switched on or off.
+    Metronome,
     SendProp(&'static sends::Prop),
     MarkProp(&'static marks::Prop),
     MarkerAdd,
@@ -184,6 +216,8 @@ enum Kind {
     FxEnv(fxkinds::Kind),
     /// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
     Items(item_kinds::Which),
+    /// M5 listening (m5-reaper): a scratch copy made a track of the producer's.
+    ScratchKeep,
 }
 
 fn kind(name: &str) -> Option<Kind> {
@@ -223,6 +257,7 @@ fn kind(name: &str) -> Option<Kind> {
         "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
         "loop-range" => Some(Kind::LoopRange),
         "loop-repeat" => Some(Kind::LoopRepeat),
+        "metronome-switch" => Some(Kind::Metronome),
         "marker-add" => Some(Kind::MarkerAdd),
         "region-add" => Some(Kind::RegionAdd),
         "marker-delete" => Some(Kind::MarkerDelete),
@@ -243,6 +278,7 @@ fn kind(name: &str) -> Option<Kind> {
         "track-group-name" => Some(Kind::TrackGroupName),
         "run-action" => Some(Kind::RunAction),
         "track-template-insert" => Some(Kind::TemplateInsert),
+        "drum-kit" => Some(Kind::DrumKit),
         "marker-lane" => Some(Kind::MarkerLane),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
@@ -250,6 +286,8 @@ fn kind(name: &str) -> Option<Kind> {
         "fx-pins" => Some(Kind::FxPins),
         "run-lua" => Some(Kind::RunLua),
         "api-call" => Some(Kind::ApiCall),
+        // M5 listening (m5-reaper).
+        "scratch-keep" => Some(Kind::ScratchKeep),
         _ => None,
     }
 }
@@ -258,7 +296,9 @@ impl Kind {
     /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
     fn leaves_point(self) -> bool {
         match self {
-            Kind::LoopRepeat => false,
+            Kind::LoopRepeat | Kind::Metronome => false,
+            // (r-tracks lab 7.82: the project's notes, title and author, grid and timebase make no point either)
+            Kind::ProjectNotes | Kind::ProjectInfo | Kind::ProjectGrid | Kind::ProjectTimebase => false,
             // m4-r-fxenv
             Kind::FxEnv(kind) => kind.leaves_point(),
             _ => true,
@@ -291,6 +331,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_preview(ctx, input),
             Kind::RunAction => actions::preview(ctx, input),
             Kind::TemplateInsert => templates::preview(ctx, input),
+            Kind::DrumKit => kits::preview(ctx, input),
             Kind::MarkerLane => marks::lane_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
@@ -309,11 +350,13 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
             Kind::LoopRange => project::loop_preview(ctx, input),
             Kind::LoopRepeat => project::repeat_preview(ctx, input),
+            Kind::Metronome => project::metronome_preview(ctx, input),
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
             Kind::FxEnv(kind) => kind.preview(ctx, input),
             Kind::Items(which) => which.preview(ctx, input),
+            Kind::ScratchKeep => scratch_keep::preview(ctx, input),
         }
     }
 
@@ -337,6 +380,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
             Kind::RunAction => actions::apply(ctx, input, fence),
             Kind::TemplateInsert => templates::apply(ctx, input, fence),
+            Kind::DrumKit => kits::apply(ctx, input, fence),
             Kind::MarkerLane => marks::lane_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
@@ -355,11 +399,13 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
             Kind::LoopRange => project::loop_apply(ctx, input, fence),
             Kind::LoopRepeat => project::repeat_apply(ctx, input, fence),
+            Kind::Metronome => project::metronome_apply(ctx, input, fence),
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
             Kind::FxEnv(kind) => kind.apply(ctx, input, fence),
             Kind::Items(which) => which.apply(ctx, input, fence),
+            Kind::ScratchKeep => scratch_keep::apply(ctx, input, fence),
         }
     }
 
@@ -383,6 +429,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_restore(ctx, restore),
             Kind::RunAction => actions::restore(ctx, restore),
             Kind::TemplateInsert => templates::restore(ctx, restore),
+            Kind::DrumKit => kits::restore(ctx, restore),
             Kind::MarkerLane => marks::lane_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
@@ -400,11 +447,13 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),
             Kind::LoopRange => project::loop_restore(ctx, restore),
             Kind::LoopRepeat => project::repeat_restore(ctx, restore),
+            Kind::Metronome => project::metronome_restore(ctx, restore),
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
             Kind::FxEnv(kind) => kind.restore(ctx, restore),
             Kind::Items(which) => which.restore(ctx, restore),
+            Kind::ScratchKeep => scratch_keep::restore(ctx, restore),
         }
     }
 }
@@ -415,7 +464,8 @@ struct Plan {
     label: String,
     proj: Project,
     epoch: String,
-    started: Instant,
+    /// When it began, or last had a change made in it.
+    active: Instant,
 }
 
 #[derive(Default)]
@@ -464,7 +514,7 @@ impl Changes {
             return Err((daw_bridge::wire::code::BUSY.into(), format!("{}; nothing changed", busy.reason())));
         }
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
-        Ok(Ctx { reaper, reads, proj: info.ptr })
+        Ok(Ctx { reaper, reads, proj: info.ptr, unkept: Default::default() })
     }
 
     pub fn preview(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
@@ -529,7 +579,7 @@ impl Changes {
     ///
     /// `point` is whether a change of this kind leaves a point in REAPER's history at all. Inside a plan the answer says
     /// whether the plan's point takes the change back (`covered`): not a change that wrote nothing, nor one REAPER keeps no
-    /// history of (the repeat button).
+    /// history of (the repeat button, or a write its undo state doesn't hold: `Ctx::unkept`).
     fn in_block<T: Written>(
         &self,
         ctx: &Ctx,
@@ -538,16 +588,25 @@ impl Changes {
         marks: bool,
         write: impl FnOnce(&Ctx) -> Done<T>,
     ) -> Done<(T, Value)> {
-        let in_plan = self.plan.borrow().is_some();
+        let in_plan = match self.plan.borrow_mut().as_mut() {
+            Some(plan) => {
+                plan.active = Instant::now();
+                true
+            }
+            None => false,
+        };
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
+        // A panic inside (caught per request) would leave the block open, and every later edit of the producer's in it.
+        let mut open = OpenBlock { ctx, desc, armed: !in_plan };
         // (r-tracks) Where REAPER's history stood before an action: one that moved it itself (a script that undoes) is told.
         let history = (marks && !in_plan).then(|| (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
+        ctx.unkept.set(false);
         let result = write(ctx);
         if in_plan {
             return result.map(|done| {
-                let covered = point && !done.unwritten();
+                let covered = point && !done.unwritten() && !ctx.unkept.get();
                 (done, json!({"desc": desc, "entry": null, "stateCount": null, "inPlan": true, "covered": covered}))
             });
         }
@@ -558,6 +617,7 @@ impl Changes {
         // Inside the block REAPER's history doesn't move, but for an undo or redo the action ran: then the watch isn't told
         // the history is Kumi's own, and its next look tells HISTORY what was taken back or made again.
         let moved = history.is_some_and(|before| before != (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
+        open.armed = false;
         ctx.reaper.undo_end(ctx.proj, desc, if wrote && !marks { -1 } else { 0 });
         if moved {
             if wrote {
@@ -648,7 +708,7 @@ impl Changes {
         self.steps.set(self.steps.get() + 1);
         let id = format!("s{}", self.steps.get());
         *self.plan.borrow_mut() =
-            Some(Plan { id: id.clone(), label: label.to_string(), proj: info.ptr, epoch: reads.epoch(), started: Instant::now() });
+            Some(Plan { id: id.clone(), label: label.to_string(), proj: info.ptr, epoch: reads.epoch(), active: Instant::now() });
         Ok(json!({"stepId": id}))
     }
 
@@ -689,10 +749,12 @@ impl Changes {
         json!({"desc": plan.label, "entry": entry, "stateCount": count})
     }
 
-    /// Once a tick: a plan left open too long, or across a change of project, is closed (a block left open would swallow
-    /// every edit the producer makes after it); and the producer's own undo and redo of Kumi's points are noticed.
-    pub fn tick(&self, reaper: &Reaper, reads: &Reads, out: &dyn Outbox) {
-        let stale = self.plan.borrow().as_ref().is_some_and(|plan| plan.started.elapsed() > PLAN_MAX || plan.epoch != reads.epoch());
+    /// Once a tick: a plan left open with no change made in it too long, or across a change of project, is closed (a block
+    /// left open would swallow every edit the producer makes after it); and the producer's own undo and redo of Kumi's
+    /// points are noticed.
+    /// True when the producer's undo or redo moved the project in front since the last tick.
+    pub fn tick(&self, reaper: &Reaper, reads: &Reads, out: &dyn Outbox) -> bool {
+        let stale = self.plan.borrow().as_ref().is_some_and(|plan| plan.active.elapsed() > PLAN_MAX || plan.epoch != reads.epoch());
         if stale {
             if let Some(plan) = self.plan.borrow_mut().take() {
                 self.close(reaper, reads, plan);
@@ -700,12 +762,12 @@ impl Changes {
         }
         // (r-tracks, NIT-7) The FX Kumi looked at lately are looked at again for parameters that move by themselves.
         volatile::tick(reaper, reads);
-        let Some(info) = reaper.current_project() else { return };
+        let Some(info) = reaper.current_project() else { return false };
         // A plan's block is open: its points are not the producer's undo either.
         if self.plan.borrow().is_some() {
-            return;
+            return false;
         }
-        self.watch.borrow_mut().poll(reaper, info.ptr, &reads.epoch(), out);
+        self.watch.borrow_mut().poll(reaper, info.ptr, &reads.epoch(), out)
     }
 
     /// The hooks said REAPER ran an action: look at the history at once.
@@ -773,6 +835,8 @@ mod tests_takes;
 mod tests_actions;
 #[cfg(test)]
 mod tests_carried;
+#[cfg(test)]
+mod tests_kits;
 #[cfg(test)]
 mod tests_lab;
 #[cfg(test)]

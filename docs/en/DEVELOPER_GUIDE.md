@@ -10,23 +10,23 @@ How the repository fits together, how to work on each part, and how to release.
 | Folder | What's in it |
 | --- | --- |
 | `crates/kumi` | The native `kumi` command and terminal app (`src/tui/`), each DAW's setup, doctor and update steps (`src/daw/`), and opt-in checks against models, real Live or the real Logic Pro (`examples/`) |
-| `crates/kumi-runtime` | Agent loop, providers, sign-in, sessions, library, the DAW integrations (Live's, and Logic Pro's over Kumi's host), media tools and MCP client |
+| `crates/kumi-runtime` | Agent loop, providers, sign-in, sessions, library, the DAW integrations (Live's, and REAPER's, Renoise's and Logic Pro's over Kumi's host), media tools and MCP client |
 | `crates/kumi-common` | Shared runtime utilities and source-compatible value handling |
 | `crates/kumi-store` | Kumi's database: what it keeps between sessions, in SQLite |
 | `crates/kumi-genexpr` | A GenExpr interpreter for the tests of Kumi's Max for Live building blocks |
 | `crates/ableton-mcp-server` | Live's native MCP bridge, analysis worker, lifecycle, setup, migration and diagnostics |
-| `crates/daw-mcp-server` | Kumi's host for the DAWs whose bridge is Kumi's own: MCP over stdio for Kumi, `kumi-daw/1` to the bridge, the change journal, and the simulated Logic Pro, REAPER and Renoise the tests run against |
-| `crates/daw-bridge` | What Kumi's own bridges share: the `kumi-daw/1` wire with its handshake and authentication, discovery files, detection, the doctor's checks and the bridge files' lifecycle |
-| `crates/logic-kumi` | Kumi's Logic Pro bridge, a program beside Logic Pro, and its Accessibility helper (`helper/KumiLogicHands.swift`, built by `scripts/build-logic-hands.py`); see [the Logic contract](LOGIC_CONTRACT.md) |
-| `crates/reaper-kumi` | Kumi's REAPER extension, the bridge REAPER loads |
-| `daws/renoise` | Kumi's Renoise tool, the bridge Renoise loads |
 | `remote-script` | The bridge's Remote Script, which runs inside Live (`ableton_mcp_remote_script.py`, the `AbletonMcpBridge/` entry point, Python tests) |
 | `apps/live-extension` | Kumi's Live extension for Live 12.4 and later, on Live's Extensions SDK (TypeScript, with its own `package.json`) |
 | `protocol` | `ableton-live-v1.operations.json`, the operation registry the bridge and the Remote Script share |
 | `scripts` | Release builders, migration packaging, the Mac helper's build, the isolated test runners, and `native-kumi.mjs` behind `npm run kumi` and `npm run setup` |
+| `crates/daw-mcp-server` | Kumi's host for REAPER, Renoise and Logic Pro (`daw-mcp-server --daw reaper\|renoise\|logic`): MCP over stdio, the changes' journal and undo, listening jobs, catch-up, and the simulated REAPER, Renoise and Logic Pro the tests run against; also usable by other MCP clients |
+| `crates/reaper-kumi` | Kumi's REAPER extension (`reaper_kumi`), built against REAPER's SDK headers vendored in `sdk/` |
+| `crates/daw-bridge` | What the REAPER, Renoise and Logic Pro bridges share: the loopback wire (`kumi-daw/1`), its handshake and auth, discovery, finding the DAWs, the doctor's checks and the bridge files' lifecycle |
+| `daws/renoise` | Kumi's Renoise tool (`com.kumi.Bridge.xrnx`, Lua) and its tests against a mock of Renoise's API |
+| `crates/logic-kumi` | Kumi's Logic Pro bridge, a program beside Logic Pro, and its Accessibility helper (`helper/KumiLogicHands.swift`, built by `scripts/build-logic-hands.py`); see [the Logic contract](LOGIC_CONTRACT.md) |
 | `install.sh`, `install.ps1` | The installers |
 
-The ten crates share the root Cargo workspace; there's no npm workspace. Live's
+The crates share the root Cargo workspace; there's no npm workspace. Live's
 bridge also works without Kumi. The TypeScript implementation the crates were
 ported from stays at the git tag `v1.7.6`.
 
@@ -41,6 +41,14 @@ bridge (crates/ableton-mcp-server)
   ├──► Remote Script inside Live (remote-script/)
   │  local channel to the Extension Host
   └──► Kumi's Live extension (apps/live-extension), Live 12.4+
+
+kumi (crates/kumi, crates/kumi-runtime)
+  │  MCP over stdio: Kumi starts its host for REAPER or Renoise
+  ▼
+host (crates/daw-mcp-server --daw reaper|renoise)
+  │  kumi-daw/1: authenticated TCP on 127.0.0.1 (crates/daw-bridge)
+  ├──► Kumi's REAPER extension (crates/reaper-kumi), in REAPER's UserPlugins
+  └──► Kumi's Renoise tool (daws/renoise), in Renoise's Scripts/Tools
 ```
 
 - Kumi starts the bridge with the `full` deployment policy and an allow list of
@@ -363,6 +371,16 @@ python3 scripts/release.py --go     # the release
   `remote-script`, `protocol`, `apps/live-extension` or `vendor/willington`
   (tests and Markdown aside). When the host's dependencies in `Cargo.lock`
   change, the dry run says so; `--bridge` gives the bridge a new version then.
+- **REAPER's extension and Renoise's tool** get new versions the same way, each
+  when a pull request changes what its DAW loads: `crates/reaper-kumi` and
+  `crates/daw-bridge`, or `daws/renoise/com.kumi.Bridge.xrnx`. `--reaper` and
+  `--renoise` give one a new version anyway, `--no-reaper` and `--no-renoise`
+  keep it; `--no-bridge` is only Live's. A line written `Changelog (reaper):`
+  or `Changelog (renoise):` goes under its heading. With `--go` they move in
+  `crates/reaper-kumi/Cargo.toml` and `Cargo.lock`, and in the tool's
+  `payload/version.lua` and `manifest.xml`, and each one's ships-with line moves
+  on in the three `KUMI_GUIDE.md`. One the last release didn't have ships at its
+  version, and its line names this release already.
 - **The version** is the next patch; `--minor` or `--version X.Y.Z` choose
   another.
 - **With `--go`** it commits "Kumi X.Y.Z: the changelog, READMEs and versions"

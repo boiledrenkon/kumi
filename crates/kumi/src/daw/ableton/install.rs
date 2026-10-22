@@ -3,7 +3,9 @@
 //! Live when Kumi is removed.
 use super::{
     bridge_setup::{bridge_version, is_live_running, kept_generation, BridgeRollback},
-    live_extension::{extension_data_dir, live_extensions_dir, remove_extension, remove_former_extension, KUMI_EXTENSION_ID},
+    live_extension::{
+        extension_data_dir, former_extensions_dir, live_extensions_dir, remove_extension, remove_former_extension, KUMI_EXTENSION_ID,
+    },
 };
 use crate::daw::{BridgeRollbackStep, RemovedBridge};
 use crate::{
@@ -103,6 +105,9 @@ pub fn bridge_command(app: &str, home: &str) -> tokio::process::Command {
         .env("KUMI_BRIDGE_AFTER", "1")
         .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
         .env("KUMI_HOME", home)
+        // Live's bridge, whatever DAW the producer chose for sessions (a Kumi of before #361 ignores it; one of #361's
+        // took it).
+        .env_remove("KUMI_DAW")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -166,8 +171,23 @@ pub(crate) async fn remove_bridge(io: &InstalledIo, run: Run) -> Result<RemovedB
         say(format!("The bridge's uninstaller refused; remove {by_hand} by hand."));
         return Ok(RemovedBridge::Kept);
     }
-    let removed_extension = extensions.as_ref().map(|ext| remove_extension(ext)).transpose().map_err(error)?.unwrap_or(false);
-    let removed_former = remove_former_extension(&io.env, system::platform()).map_err(error)?;
+    // The bridge is out: an extension that won't come out is said with where it is, and the rest goes on.
+    let removed_extension = match extensions.as_ref().map(|ext| (ext, remove_extension(ext))) {
+        Some((_, Ok(removed))) => removed,
+        Some((ext, Err(why))) => {
+            say(format!(
+                "Kumi's extension couldn't be taken out of Live ({why}): delete {KUMI_EXTENSION_ID} from {ext} and from {} by hand.",
+                dirname(&extension_data_dir(ext))
+            ));
+            false
+        }
+        None => false,
+    };
+    let removed_former = remove_former_extension(&io.env, system::platform()).unwrap_or_else(|why| {
+        let folder = former_extensions_dir(&io.env, system::platform()).unwrap_or_default();
+        say(format!("Kumi's earlier extension couldn't be taken out of Live ({why}): delete {KUMI_EXTENSION_ID} from {folder} by hand."));
+        false
+    });
     say(if removed_extension || removed_former {
         "The bridge and Kumi's extension are out of Live."
     } else {
@@ -175,8 +195,12 @@ pub(crate) async fn remove_bridge(io: &InstalledIo, run: Run) -> Result<RemovedB
     }
     .into());
     let scripts = remote_scripts_dir(&io.env);
+    // An Ears device that won't come out is said with where it is, as the extension is: the bridge is out already.
     if basename(&scripts) == "Remote Scripts" {
-        remove(&join(&join(&dirname(&scripts), "Kumi"), &format!("{EARS_NAME}.amxd"))).map_err(error)?;
+        let ears = join(&join(&dirname(&scripts), "Kumi"), &format!("{EARS_NAME}.amxd"));
+        if let Err(why) = remove(&ears) {
+            say(format!("Kumi's Ears device couldn't be taken out of Live's User Library ({why}): delete {ears} by hand."));
+        }
     }
     Ok(RemovedBridge::Removed)
 }
@@ -404,6 +428,7 @@ pub async fn checkout_bridge(repo: &str) -> i32 {
     command
         .args(["bridge", "--yes"])
         .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
+        .env_remove("KUMI_DAW")
         .current_dir(repo)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

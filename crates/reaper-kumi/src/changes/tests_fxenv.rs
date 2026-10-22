@@ -46,6 +46,8 @@ impl Lab {
             "change_restore" => self.changes.restore(&reaper, &self.reads, &params),
             "read" => self.reads.read(&reaper, &params),
             "fx_chain_save" => self.changes.fx_chain_save(&reaper, &self.reads, &params),
+            "undo_step_begin" => self.changes.step_begin(&reaper, &self.reads, &params),
+            "undo_step_end" => self.changes.step_end(&reaper, &self.reads, &params),
             other => panic!("{other}"),
         }
     }
@@ -340,7 +342,11 @@ fn a_take_fxs_pins_are_mapped_and_put_back() {
     let (preview, applied) = lab.make("fx-pins", json!({"ref": fx_ref("{T-FX}"), "pins": [{"pin": 1, "channels": [3]}]}));
     assert_eq!(preview["display"]["title"], "Pins of “ReaDelay” on take “kick.wav”: in 1 ← 3");
     assert_eq!(state(|s| s.tracks[1].items[0].takes[0].fx[0].pins.get(&(false, 0)).copied()), Some(4));
-    lab.undo("fx-pins", &preview, &applied).unwrap();
+    // REAPER doesn't notice a pin mapping by itself: without the nudge no point is made, and REAPER's undo then takes the
+    // producer's step before it (accept-reaper lab, 7.82).
+    assert_eq!(applied["undo"]["entry"], true, "the pins' write keeps a point of REAPER's undo");
+    let undone = lab.undo("fx-pins", &preview, &applied).unwrap();
+    assert_eq!(undone["undo"]["entry"], true, "and so does their undo");
     assert_eq!(state(|s| s.tracks[1].items[0].takes[0].fx[0].pins.get(&(false, 0)).copied()), Some(1));
 }
 
@@ -529,7 +535,7 @@ fn a_preset_is_loaded_by_name_place_or_step_and_undo_puts_back_the_preset_and_ev
         // By place and by step.
         let (preview, applied) = lab.make("fx-preset", json!({"ref": fx_ref(guid), "index": 2}));
         assert_eq!(preset_name(guid), "Wide");
-        assert_eq!(applied["display"]["title"].as_str().unwrap().ends_with("preset “Wide”"), true);
+        assert!(applied["display"]["title"].as_str().unwrap().ends_with("preset “Wide”"));
         lab.undo("fx-preset", &preview, &applied).unwrap();
         assert_eq!((preset_name(guid), values(guid)), before);
         let (preview, applied) = lab.make("fx-preset", json!({"ref": fx_ref(guid), "step": 1}));
@@ -685,6 +691,99 @@ fn an_fx_is_copied_to_another_track_a_take_and_a_container_and_undo_takes_the_co
     assert_eq!(lab.apply("fx-copy", &input, &preview["fence"]).unwrap_err().0, "changed");
 }
 
+#[test]
+fn deleting_an_fx_says_the_links_and_macros_that_follow_it_and_its_undo_makes_them_again() {
+    let lab = chains_lab();
+    let _dir = resource();
+    // Kick: ReaComp, then a ReaEQ whose first parameter follows the ReaComp's second at half.
+    state(|s| {
+        let mut eq = plugin("{K-EQ}", "VST: ReaEQ (Cockos)");
+        for (key, value) in
+            [("mod.active", "1"), ("plink.active", "1"), ("plink.effect", "0"), ("plink.param", "1"), ("plink.scale", "0.5")]
+        {
+            eq.config.insert(format!("param.0.{key}"), value.into());
+        }
+        s.tracks[1].fx.push(eq);
+    });
+    let link =
+        |key: &str| state(|s| s.tracks[1].fx.iter().find(|f| f.guid == "{K-EQ}").unwrap().config.get(&format!("param.0.{key}")).cloned());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{K-MAIN}")}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 parameter link(s) of other FX follow it"), "{}", preview["display"]);
+    assert_eq!(link("plink.active").as_deref(), Some("0"), "REAPER clears the link with its source");
+    lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert_eq!(state(|s| guids(&s.tracks[1].fx)), ["{K-MAIN}", "{K-EQ}"]);
+    assert_eq!(
+        (link("plink.active"), link("plink.effect"), link("plink.param"), link("plink.scale")),
+        (Some("1".into()), Some("0".into()), Some("1".into()), Some("0.5".into())),
+        "the link follows the ReaComp again"
+    );
+    // A container's macro that maps the FX deleted from it is mapped again by the undo.
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let proj = reaper.current_project().unwrap().ptr;
+    let container = crate::reaper::Fx { owner: crate::reaper::FxOwner::Track(reaper.track_at(proj, 0).unwrap()), index: 1 };
+    reaper.fx_config(container, "container_map.add.0.1");
+    let mapped = || reaper.fx_config(container, "container_map.get.0.1").is_some();
+    assert!(mapped());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{FX-COMP}")}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 macro(s) of its container"), "{}", preview["display"]);
+    assert!(!mapped(), "the macro goes with it");
+    lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert!(mapped(), "mapped again");
+}
+
+#[test]
+fn undoing_an_fx_delete_leaves_a_link_the_producer_set_elsewhere_since() {
+    let lab = chains_lab();
+    let _dir = resource();
+    // Kick: ReaComp, a ReaEQ whose first parameter follows the ReaComp's second, and a ReaVerb.
+    state(|s| {
+        let mut eq = plugin("{K-EQ}", "VST: ReaEQ (Cockos)");
+        for (key, value) in [("mod.active", "1"), ("plink.active", "1"), ("plink.effect", "0"), ("plink.param", "1")] {
+            eq.config.insert(format!("param.0.{key}"), value.into());
+        }
+        s.tracks[1].fx.push(eq);
+        s.tracks[1].fx.push(plugin("{K-VERB}", "VST: ReaVerb (Cockos)"));
+    });
+    let link =
+        |key: &str| state(|s| s.tracks[1].fx.iter().find(|f| f.guid == "{K-EQ}").unwrap().config.get(&format!("param.0.{key}")).cloned());
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref("{K-MAIN}")}));
+    // The producer links that parameter to the ReaVerb instead (second in the chain now).
+    state(|s| {
+        let eq = s.tracks[1].fx.iter_mut().find(|f| f.guid == "{K-EQ}").unwrap();
+        eq.config.insert("param.0.plink.active".into(), "1".into());
+        eq.config.insert("param.0.plink.effect".into(), "1".into());
+        eq.config.insert("param.0.plink.param".into(), "3".into());
+    });
+    let undone = lab.undo("fx-delete", &preview, &applied).unwrap();
+    assert!(undone["display"]["note"].as_str().unwrap().contains("set otherwise in REAPER since"), "{}", undone["display"]);
+    // Their link stays theirs: still the ReaVerb (third now that the ReaComp is back), its fourth parameter.
+    assert_eq!((link("plink.effect"), link("plink.param")), (Some("2".into()), Some("3".into())));
+}
+
+#[test]
+fn a_copied_containers_undo_leaves_it_once_the_producer_changed_an_fx_inside_it() {
+    let lab = chains_lab();
+    let _dir = resource();
+    let (preview, applied) = lab.make("fx-copy", json!({"ref": fx_ref("{FX-C}"), "toRef": "r:track:{DDDD}", "index": 0}));
+    let inside = |s: &mut fake::State| s.tracks[3].fx[0].children.as_mut().unwrap().clone();
+    assert_eq!(state(|s| inside(s).len()), 2, "the copy holds what the container holds");
+    // A knob of the copied ReaComp inside it, then a plug-in dropped in beside it.
+    state(|s| s.tracks[3].fx[0].children.as_mut().unwrap()[0].params.push(FakeParam::new("Ratio", 0.3, "3:1")));
+    let (code, message) = lab.undo("fx-copy", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert!(message.contains("an FX inside it"), "{message}");
+    state(|s| {
+        let children = s.tracks[3].fx[0].children.as_mut().unwrap();
+        children[0].params.pop();
+        children.push(plugin("{THEIRS}", "VST: ReaVerb (Cockos)"));
+    });
+    assert_eq!(lab.undo("fx-copy", &preview, &applied).unwrap_err().0, "changed");
+    state(|s| s.tracks[3].fx[0].children.as_mut().unwrap().pop());
+    lab.undo("fx-copy", &preview, &applied).unwrap();
+    assert_eq!(state(|s| guids(&s.tracks[3].fx)), ["{FX-VERB}"]);
+}
+
 // ----- the guard against recording in touch, latch and write modes -----
 
 #[test]
@@ -700,6 +799,12 @@ fn a_parameter_written_on_a_track_in_touch_mode_records_nothing_and_the_override
     lab.make("fx-bypass", json!({"ref": fx_ref("{K-MAIN}"), "bypass": true}));
     lab.make("fx-wet", json!({"ref": fx_ref("{K-MAIN}"), "wet": 0.5}));
     assert_eq!(envelopes(), before);
+    // The wet nudge that makes REAPER keep a point of a pin map or a modulation is a write too (review R5).
+    let (pins_preview, pins) = lab.make("fx-pins", json!({"ref": fx_ref("{K-MAIN}"), "pins": [{"pin": 1, "channels": [2]}]}));
+    lab.undo("fx-pins", &pins_preview, &pins).unwrap();
+    lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    assert_eq!(envelopes(), before, "the nudge recorded nothing");
+    assert_eq!(state(|s| s.automation_override), -1);
     // A global override in latch mode is the producer's: it is put back as it was.
     state(|s| s.automation_override = 4);
     lab.make("fx-param", json!({"ref": fx_ref("{K-MAIN}"), "param": "Gain", "normalized": 0.2}));
@@ -1001,6 +1106,28 @@ fn what_reaper_clamps_is_read_back_and_said() {
 }
 
 #[test]
+fn in_a_plan_a_write_reapers_undo_state_doesnt_hold_isnt_covered_by_the_plans_point() {
+    let lab = chains_lab();
+    state(|s| {
+        s.tracks[1].fx.push(reaeq("{EQ}"));
+        s.state_count += 1;
+    });
+    let step = lab.call("undo_step_begin", json!({"label": "Kumi: a plan (kcov9)"})).unwrap();
+    // A baseline with no source on and a ReaEQ band's type: REAPER's undo never takes them back (accept-reaper lab: a plan
+    // of either alone made no point, and REAPER's undo took the producer's step before it).
+    let (_, baseline) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.3}));
+    assert_eq!(baseline["undo"]["covered"], false);
+    let (_, band) = lab.make("fx-eq-band", json!({"ref": fx_ref("{EQ}"), "band": 1, "type": "notch"}));
+    assert_eq!(band["undo"]["covered"], false);
+    // An LFO turned on is in REAPER's state, and so is a baseline once a source is on: the plan's point takes them back.
+    let (_, lfo) = lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    assert_eq!(lfo["undo"]["covered"], true);
+    let (_, again) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.6}));
+    assert_eq!(again["undo"]["covered"], true);
+    lab.call("undo_step_end", json!({"stepId": step["stepId"]})).unwrap();
+}
+
+#[test]
 fn a_link_follows_another_fxs_parameter_and_its_undo_finds_that_fx_wherever_it_moved() {
     let lab = chains_lab();
     lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}));
@@ -1090,11 +1217,15 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
     assert_eq!(count(), 0, "out of the track's list again");
     let again = lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(again["undo"]["entry"], false);
-    // The producer drew a point since: refused; discard puts it back hidden and empty.
+    // The producer drew a point since: refused, discard or not (the envelope's state from before would take their point).
     let (preview, applied) = lab.make("envelope-show", input.clone());
     state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().push(FakePoint::at(3.0, 0.5))));
     assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap_err().0, "changed");
-    lab.discard("envelope-show", &preview, &applied).unwrap();
+    let (code, why) = lab.discard("envelope-show", &preview, &applied).unwrap_err();
+    assert!(code == "changed" && why.contains("even with discard"), "{why}");
+    assert_eq!(count(), 1, "the producer's point stays");
+    state(|s| s.tracks[1].envelopes.iter_mut().find(|e| e.name == "Pan").map(|e| e.pts.as_mut().unwrap().pop()));
+    lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(count(), 0);
     // The fence: shown by the producer between the preview and the apply.
     let preview = lab.preview("envelope-show", input.clone()).unwrap();
@@ -1102,6 +1233,41 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
     assert_eq!(lab.apply("envelope-show", &input, &preview["fence"]).unwrap_err().0, "changed");
     assert_eq!(lab.preview("envelope-show", json!({"trackRef": KICK, "name": "loudness"})).unwrap_err().0, "bad-params");
     assert_eq!(lab.preview("envelope-show", json!({"trackRef": KICK, "takeRef": TAKE, "name": "pan"})).unwrap_err().0, "bad-params");
+}
+
+#[test]
+fn showing_an_envelope_isnt_undone_once_the_producer_moved_or_looped_its_automation_item() {
+    let lab = envelope_lab();
+    let item = FakeAutoItem {
+        pool: 1,
+        position: 4.0,
+        length: 1.0,
+        offset: 0.0,
+        rate: 1.0,
+        baseline: 0.5,
+        amplitude: 1.0,
+        looped: false,
+        mute: false,
+        selected: false,
+    };
+    state(|s| {
+        let volume = &mut s.tracks[1].envelopes[0];
+        volume.visible = false;
+        volume.items = vec![item.clone()];
+    });
+    let (preview, applied) = lab.make("envelope-show", json!({"ref": KICK_VOLUME}));
+    for (what, change) in
+        [("moved", FakeAutoItem { position: 6.0, ..item.clone() }), ("looped", FakeAutoItem { looped: true, ..item.clone() })]
+    {
+        state(|s| s.tracks[1].envelopes[0].items = vec![change.clone()]);
+        assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap_err().0, "changed", "{what}");
+        let (code, why) = lab.discard("envelope-show", &preview, &applied).unwrap_err();
+        assert!(code == "changed" && why.contains("even with discard"), "{what}: {why}");
+        assert!(state(|s| s.tracks[1].envelopes[0].items == vec![change.clone()]), "{what}: the producer's item stays");
+    }
+    state(|s| s.tracks[1].envelopes[0].items = vec![item.clone()]);
+    lab.undo("envelope-show", &preview, &applied).unwrap();
+    assert!(state(|s| !s.tracks[1].envelopes[0].visible));
 }
 
 #[test]
@@ -1226,7 +1392,7 @@ fn points_are_changed_deleted_and_cleared_from_a_range_and_each_undo_puts_the_la
     lab.undo("envelope-points-delete", &preview, &applied).unwrap();
     assert_eq!(kick_points(), before);
     let (preview, applied) = lab.make("envelope-range-clear", json!({"ref": KICK_VOLUME, "start": 0.5, "end": 2.5}));
-    assert_eq!(preview["display"]["title"], "Cleared “Kick”'s Volume envelope from 0.500 s to 2.500 s (2 points)");
+    assert_eq!(preview["display"]["title"], "Cleared “Kick”'s Volume envelope from bar 1 beat 2 to bar 2 beat 2 (2 points)");
     assert_eq!(kick_points().len(), 1);
     lab.undo("envelope-range-clear", &preview, &applied).unwrap();
     assert_eq!(kick_points(), before);
@@ -1275,6 +1441,21 @@ fn pan_mute_and_take_envelope_points_are_in_their_own_units_and_a_takes_times_co
 }
 
 #[test]
+fn an_added_automation_item_the_producer_moved_is_left_not_called_gone() {
+    let lab = envelope_lab();
+    let input = json!({"ref": KICK_VOLUME, "position": 4.0, "length": 1.0});
+    let (preview, applied) = lab.make("automation-item-add", input);
+    state(|s| s.tracks[1].envelopes[0].items[0].position = 6.0);
+    let (code, message) = lab.undo("automation-item-add", &preview, &applied).unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert_eq!(state(|s| s.tracks[1].envelopes[0].items.len()), 1, "it stays");
+    // Taken off by the producer, it is gone already.
+    state(|s| s.tracks[1].envelopes[0].items.clear());
+    let gone = lab.undo("automation-item-add", &preview, &applied).unwrap();
+    assert!(gone["display"]["title"].as_str().unwrap().contains("gone"), "{gone}");
+}
+
+#[test]
 fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_deleted_and_each_undo_puts_it_back() {
     let lab = envelope_lab();
     let before = kick_points();
@@ -1282,6 +1463,9 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     let input = json!({"ref": KICK_VOLUME, "position": 0.5, "length": 1.0, "points": [{"position": 0.75, "value": -20}]});
     let (preview, applied) = lab.make("automation-item-add", input.clone());
     assert!(preview["display"]["note"].as_str().unwrap().contains("go into the new item"));
+    // In bars and beats, as items and markers are (review U16).
+    assert_eq!(preview["display"]["title"], "Added an automation item to “Kick”'s Volume envelope from bar 1 beat 2 to bar 1 beat 4");
+    assert_eq!(applied["display"]["title"], "Added an automation item to “Kick”'s Volume envelope from bar 1 beat 2 to bar 1 beat 4");
     let item = applied["created"]["ref"].as_str().unwrap().to_string();
     assert!(item.starts_with("r:aitem:{BBBB}:{ENV-K-VOL}:1:0.5"), "{item}");
     assert_eq!(kick_points().len(), 2, "the point at 1 s went into the item");
@@ -1307,7 +1491,7 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     assert_eq!(lab.read(json!({"kind": "point", "parent": copy}))["items"][0]["position"], 8.5);
     // Changed: loop off, baseline, moved; undo finds it at its new place and puts it back.
     let (p2, a2) = lab.make("automation-item-set", json!({"ref": copy, "loop": false, "baseline": 0.25, "position": 10}));
-    assert_eq!(p2["display"]["title"], "The automation item at 8 s on “Kick”'s Volume envelope: loop off, baseline 0.25, moved to 10 s");
+    assert_eq!(p2["display"]["title"], "The automation item at bar 5 on “Kick”'s Volume envelope: loop off, baseline 0.25, moved to bar 6");
     assert_eq!(a2["display"]["ref"], copy.replace(":8", ":10"));
     lab.undo("automation-item-set", &p2, &a2).unwrap();
     let it = state(|s| s.tracks[1].envelopes[0].items[1].clone());
@@ -1798,3 +1982,34 @@ fn an_fx_whose_track_reaper_replaced_is_never_read_through_the_old_track() {
 // (read by the state test)
 #[allow(dead_code)]
 fn unused(_: Display, _: FakeItem, _: FakeTake, _: FakePoint, _: FakeAutoItem) {}
+
+// ----- what HISTORY draws (m4-tui) -----
+
+#[test]
+fn parameter_moves_and_a_lanes_points_are_told_to_history_in_reapers_words() {
+    let lab = chains_lab();
+    state(|s| s.tracks[1].fx.push(reaeq("{K-EQ}")));
+    let input = json!({"ref": fx_ref("{K-EQ}"), "values": [{"param": 0, "value": "120 Hz"}, {"param": 5, "normalized": 0.75}]});
+    let (_, applied) = lab.make("fx-params", input);
+    let values = applied["display"]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_eq!((values[0]["name"].as_str(), values[0]["toText"].as_str()), (Some("Freq-Band 1"), Some("120.0 Hz")));
+    assert_eq!((values[1]["from"].as_f64(), values[1]["to"].as_f64(), values[1]["max"].as_f64()), (Some(0.5), Some(0.75), Some(1.0)));
+    assert!(values[1]["fromText"].is_string(), "what it showed before, too");
+    let (_, applied) = lab.make("fx-param", json!({"ref": fx_ref("{K-IN}"), "param": "Gain", "value": "-6 dB"}));
+    let moved = &applied["display"]["values"][0];
+    assert_eq!((moved["name"].as_str(), moved["toText"].as_str()), (Some("Gain"), Some("-6.0 dB")));
+    assert_eq!(moved["from"], 0.5);
+
+    let lab = envelope_lab();
+    let input = json!({"ref": KICK_VOLUME, "points": [{"position": 0.5, "value": -12}]});
+    let (_, applied) = lab.make("envelope-points-add", input);
+    let curve = &applied["display"]["curve"];
+    assert_eq!((curve["parameter"].as_str(), curve["min"].as_f64(), curve["max"].as_f64()), (Some("Volume"), Some(-60.0), Some(12.0)));
+    let (before, after) = (curve["before"].as_array().unwrap(), curve["after"].as_array().unwrap());
+    assert_eq!(after.len(), before.len() + 1);
+    let added = after.iter().find(|point| point[0] == 0.5).expect("the new point, at its time");
+    assert!((added[1].as_f64().unwrap() + 12.0).abs() < 0.01, "in dB, as the producer asked it: {added}");
+    // (review U20) And in words, for a picture drawn as words: what the points move between, in dB, and where.
+    assert_eq!(curve["words"], "-12 to 0 dB over bars 1–2");
+}

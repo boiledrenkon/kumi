@@ -31,18 +31,21 @@ pub(super) struct Note {
     pub velocity: i32,
     pub muted: bool,
     pub selected: bool,
+    /// The note-off's velocity (how hard a recorded note was let go): kept through every rewrite.
+    pub off_velocity: i32,
 }
 
 /// What tells a note apart: everything but whether it is selected, to a thousandth of a tick.
-type Key = (i32, i32, i64, i64, i32, bool);
+type Key = (i32, i32, i64, i64, i32, bool, i32);
 
 impl Note {
     fn key(&self) -> Key {
-        (self.channel, self.pitch, (self.start * 1000.0).round() as i64, (self.end * 1000.0).round() as i64, self.velocity, self.muted)
+        let (start, end) = ((self.start * 1000.0).round() as i64, (self.end * 1000.0).round() as i64);
+        (self.channel, self.pitch, start, end, self.velocity, self.muted, self.off_velocity)
     }
 
     pub(super) fn json(&self) -> Value {
-        json!([self.channel, self.pitch, self.start, self.end, self.velocity, self.muted as u8, self.selected as u8])
+        json!([self.channel, self.pitch, self.start, self.end, self.velocity, self.muted as u8, self.selected as u8, self.off_velocity])
     }
 
     fn from_json(value: &Value) -> Option<Note> {
@@ -55,6 +58,8 @@ impl Note {
             velocity: at(4)?.as_i64()? as i32,
             muted: at(5)?.as_i64()? != 0,
             selected: at(6)?.as_i64()? != 0,
+            // (a record from before release velocities were kept has seven)
+            off_velocity: at(7).and_then(Value::as_i64).unwrap_or(0) as i32,
         })
     }
 
@@ -103,6 +108,7 @@ fn spec(note: &Note) -> crate::midi::NoteSpec {
         velocity: note.velocity as u8,
         muted: note.muted,
         selected: note.selected,
+        off_velocity: note.off_velocity.clamp(0, 127) as u8,
     }
 }
 
@@ -134,6 +140,7 @@ fn from_spec(note: &crate::midi::NoteSpec) -> Note {
         velocity: note.velocity as i32,
         muted: note.muted,
         selected: note.selected,
+        off_velocity: note.off_velocity as i32,
     }
 }
 
@@ -152,8 +159,8 @@ pub(super) fn take_back(ctx: &Ctx, take: Take, events: &[Event], was: &Value, me
 pub(super) fn fence_of(notes: &[Note]) -> Value {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for note in notes {
-        let (channel, pitch, start, end, velocity, muted) = note.key();
-        for word in [channel as i64, pitch as i64, start, end, velocity as i64, muted as i64] {
+        let (channel, pitch, start, end, velocity, muted, off_velocity) = note.key();
+        for word in [channel as i64, pitch as i64, start, end, velocity as i64, muted as i64, off_velocity as i64] {
             for byte in word.to_le_bytes() {
                 hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
             }
@@ -284,7 +291,21 @@ fn new_note(ctx: &Ctx, take: Take, item_qn: f64, spec: &Value) -> Done<Note> {
         velocity: whole(spec, "velocity", 1, 127)?.unwrap_or(100),
         muted: flag(spec, "muted")?.unwrap_or(false),
         selected: false,
+        off_velocity: 0,
     })
+}
+
+/// Inside the take's source: no note starts at or past the marker that ends it, or ends past it. REAPER would sort it
+/// after the marker: the source grows, and a looped item's period with it (the old end then plays mid-loop).
+pub(super) fn check_inside(ctx: &Ctx, take: Take, item_qn: f64, events: &[Event], add: &[Note]) -> Done<()> {
+    let Some(end) = super::midi_events::source_end(events) else { return Ok(()) };
+    if add.iter().any(|note| note.start.round() as i64 >= end || note.end.round() as i64 > end) {
+        let end_qn = ctx.reaper.ppq_to_quarter_notes(take, end as f64).map_or(0.0, |qn| qn - item_qn);
+        return Err(bad(format!(
+            "a note must start before the end of the take's source and end by it, {end_qn:.3} quarter notes from the item's start"
+        )));
+    }
+    Ok(())
 }
 
 fn changed_note(ctx: &Ctx, take: Take, item_qn: f64, was: &Note, spec: &Value) -> Done<Note> {
@@ -390,6 +411,7 @@ fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
         return Err(bad("a note is named twice"));
     }
     check_overlaps(&before, &remove, &add).map_err(bad)?;
+    check_inside(ctx, take, item_qn, &events, &add)?;
     Ok(Plan { take, item_qn, before, events, remove, add })
 }
 
@@ -467,8 +489,10 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let missing = added.len() - found.len();
     let to_bring_back = difference(&removed, &current);
     if missing > 0 && !restore.discard {
-        // None of them there and all that went there again: it is put back already.
-        if !(found.is_empty() && to_bring_back.is_empty()) {
+        // None of them there and all that went there again is back already only when the take's notes are as they were
+        // before the change (REAPER's own undo took it back): notes the producer edited since are no longer Kumi's to find.
+        let back = found.is_empty() && to_bring_back.is_empty() && restore.prior.get("fence") == Some(&was);
+        if !back {
             return Err(changed("the notes Kumi wrote in that take have been changed in REAPER since"));
         }
     }

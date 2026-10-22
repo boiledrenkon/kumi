@@ -85,6 +85,10 @@ pub struct TuiOptions {
     pub updates: Option<UpdateControl>,
     /// /daw <name>: Kumi closes and opens again with that DAW. None where the producer works with Live alone.
     pub switch_daw: Option<Rc<dyn Fn(kumi_runtime::core::daw::DawId)>>,
+    /// A first run on a computer with several DAWs and no bridge yet: the DAWs setup asks the producer to choose among,
+    /// and what it does with the one chosen (remembers it, and Kumi opens again with it when it isn't this run's).
+    pub ask_daw: Vec<kumi_runtime::core::daw::DawId>,
+    pub pick_daw: Option<Rc<dyn Fn(kumi_runtime::core::daw::DawId)>>,
     pub voice: Option<Rc<dyn VoiceController>>,
     /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
     pub connect_live: Option<ConnectDaw>,
@@ -160,6 +164,8 @@ impl TuiOptions {
             panel_tab: None,
             updates: None,
             switch_daw: None,
+            ask_daw: vec![],
+            pick_daw: None,
             voice: None,
             connect_live: None,
             willington: None,
@@ -235,6 +241,8 @@ struct Held {
 struct Pin {
     pin: PinnedNode,
     kind: IconKind,
+    /// The FOCUS row pinned, by its ref (the pin's own, or one FOCUS made up for a node the DAW names none for).
+    row: String,
 }
 struct Kept {
     key: String,

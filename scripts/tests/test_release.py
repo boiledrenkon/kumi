@@ -20,7 +20,7 @@ sys.modules[SPEC.name] = release  # dataclasses look their module up there
 SPEC.loader.exec_module(release)
 
 FILES = ["package.json", "Cargo.lock", "CHANGELOG.md", "README.md", "README.ja.md", "README.zh-CN.md",
-         "crates/kumi/Cargo.toml", "crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml",
+         "crates/kumi/Cargo.toml", "crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml", "crates/daw-mcp-server/Cargo.toml",
          "crates/kumi-runtime/src/version.rs", "crates/ableton-mcp-server/Cargo.toml",
          "docs/en/KUMI_CHANGES.md", "docs/ja/KUMI_CHANGES.md", "docs/zh-CN/KUMI_CHANGES.md",
          release.REAPER_CARGO, release.RENOISE_VERSION, release.RENOISE_MANIFEST, release.LOGIC_CARGO]
@@ -258,6 +258,12 @@ class DawSorting(unittest.TestCase):
                      "crates/reaper-kumi/examples/accept_reaper.rs", "crates/reaper-kumi/sdk/SOURCE.md",
                      "crates/daw-bridge/tests/vectors.rs", "crates/daw-mcp-server/src/host.rs", "daws/renoise/tests/test_changes.lua"):
             self.assertFalse(release.ships_reaper(path), path)
+        # daw-bridge's parts the extension doesn't link are Kumi's alone: a fix there is no new extension.
+        for path in ("crates/daw-bridge/src/lifecycle.rs", "crates/daw-bridge/src/detect.rs", "crates/daw-bridge/src/doctor.rs",
+                     "crates/daw-bridge/src/install.rs", "crates/daw-bridge/src/probe.rs"):
+            self.assertFalse(release.ships_reaper(path), path)
+        for path in ("crates/daw-bridge/src/handshake.rs", "crates/daw-bridge/src/owner.rs", "crates/daw-bridge/Cargo.toml"):
+            self.assertTrue(release.ships_reaper(path), path)
         for path in ("daws/renoise/com.kumi.Bridge.xrnx/payload/changes.lua", "daws/renoise/com.kumi.Bridge.xrnx/manifest.xml",
                      "daws/renoise/com.kumi.Bridge.xrnx/main.lua"):
             self.assertTrue(release.ships_renoise(path), path)
@@ -288,6 +294,9 @@ class DawSorting(unittest.TestCase):
                      "crates/logic-kumi/helper/KumiLogicHands.swift", "crates/logic-kumi/src/keys/names.json", "crates/daw-bridge/src/wire.rs"):
             self.assertTrue(release.ships_logic(path), path)
         # Its tests, examples, notes, the helper's tests and the script that writes the tables: none runs beside Logic Pro.
+        # daw-bridge's parts the bridge doesn't link are Kumi's alone, as for REAPER's extension.
+        for path in ("crates/daw-bridge/src/lifecycle.rs", "crates/daw-bridge/src/detect.rs", "crates/daw-bridge/src/doctor.rs"):
+            self.assertFalse(release.ships_logic(path), path)
         for path in ("crates/logic-kumi/tests/changes.rs", "crates/logic-kumi/src/changes/tests.rs", "crates/logic-kumi/examples/record_fixtures.rs",
                      "crates/logic-kumi/README.md", "crates/logic-kumi/helper/README.md", "crates/logic-kumi/helper/tests/test_protocol.py",
                      "crates/logic-kumi/keys/extract_names.py", "crates/reaper-kumi/src/lib.rs", "crates/kumi/src/daw/own.rs"):
@@ -479,7 +488,7 @@ class DawEdits(unittest.TestCase):
     def test_daw_bridges_as_they_were_say_nothing(self):
         plan, texts, changed, really = self.released()
         self.assertEqual(sorted(changed), really)
-        self.assertEqual(len(changed), 13)  # what a release changed before REAPER and Renoise
+        self.assertEqual(len(changed), 14)  # what a release changed before REAPER and Renoise, and the host for them
         new = entry(texts["CHANGELOG.md"], plan.new)
         self.assertNotIn("REAPER", new)
         self.assertNotIn("Renoise", new)

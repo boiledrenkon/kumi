@@ -1,6 +1,7 @@
 //! Where the producer's sounds, presets and Sets are: Live's User Library and Places (as Live's own
 //! preferences name them), the packs Live installed and its Core Library, Splice's folder, and folders
-//! the producer named. Only folders that exist; a folder inside another counts once.
+//! the producer named; and the libraries of the other DAWs Kumi works in (`daw_sources`). Only folders that exist; a
+//! folder inside another counts once, but a DAW's library stays a source of its own inside another folder.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -11,6 +12,8 @@ use std::time::UNIX_EPOCH;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::core::daw::DawId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
@@ -20,6 +23,10 @@ pub enum SourceKind {
     Core,
     Splice,
     Folder,
+    /// REAPER's resource folder: its FX chains, track and project templates, JSFX and FX preset banks.
+    Reaper,
+    /// One of Renoise's libraries (its own, the User Library): instruments, multi-samples, chains, presets, phrases, samples.
+    Renoise,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +35,29 @@ pub struct Source {
     /// What the producer calls it: "User Library", a Place's name, a pack's.
     pub label: String,
     pub kind: SourceKind,
+}
+
+impl Source {
+    /// The DAW whose own library this is: what's in it is offered only in that DAW. None for the producer's own folders
+    /// (Live's User Library and Places, Splice's, folders they named), whose sounds every DAW can use.
+    pub fn daw(&self) -> Option<DawId> {
+        match self.kind {
+            SourceKind::Pack | SourceKind::Core => Some(DawId::Ableton),
+            SourceKind::Reaper => Some(DawId::Reaper),
+            SourceKind::Renoise => Some(DawId::Renoise),
+            SourceKind::UserLibrary | SourceKind::Place | SourceKind::Splice | SourceKind::Folder => None,
+        }
+    }
+
+    /// Whether its sounds are offered in a session with this DAW (Live's when none is known, as before other DAWs).
+    pub fn offered_in(&self, daw: Option<DawId>) -> bool {
+        self.daw().is_none_or(|own| own == daw.unwrap_or(DawId::Ableton))
+    }
+
+    /// A DAW's own library, read by that DAW's layout rather than by file type alone.
+    pub fn is_daw_library(&self) -> bool {
+        matches!(self.kind, SourceKind::Reaper | SourceKind::Renoise)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -443,14 +473,14 @@ pub fn dirname(path: &str) -> String {
 // ---------------------------------------------------------------------------------------------------
 
 /// `readdirSync`: a folder's names (sorted, as Node lists them), or none.
-fn list(folder: &str) -> Vec<String> {
+pub(super) fn list(folder: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
     let mut names: Vec<String> = entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     names
 }
 
-fn is_folder(path: &str) -> bool {
+pub(super) fn is_folder(path: &str) -> bool {
     std::fs::metadata(path).map(|info| info.is_dir()).unwrap_or(false)
 }
 
@@ -489,16 +519,16 @@ pub fn expand_folder(value: &str, home: &str) -> Option<String> {
     }
 }
 
-fn platform_of(options: &SourceOptions) -> String {
+pub(super) fn platform_of(options: &SourceOptions) -> String {
     options.platform.clone().unwrap_or_else(|| current_platform().to_string())
 }
 
-fn home_of(options: &SourceOptions) -> String {
+pub(super) fn home_of(options: &SourceOptions) -> String {
     options.home.clone().unwrap_or_else(homedir)
 }
 
 /// `env.NAME`, from the injected environment or the process's.
-fn env_of(options: &SourceOptions, name: &str) -> Option<String> {
+pub(super) fn env_of(options: &SourceOptions, name: &str) -> Option<String> {
     match &options.env {
         Some(env) => env.get(name).cloned(),
         None => std::env::var(name).ok(),
@@ -719,7 +749,15 @@ pub fn library_sources(options: &SourceOptions) -> Vec<Source> {
         let core = core_libraries(options).into_iter().find(|folder| is_folder(folder));
         add(&mut found, core.as_deref(), "Core Library", SourceKind::Core);
     }
-    unique(found)
+    let mut unique = unique(found);
+    // A DAW's own library is read by its layout, even inside a folder the producer named (that folder's walk leaves it
+    // out); each once.
+    for source in super::daw_sources::daw_library_sources(options) {
+        if is_folder(&source.path) && !unique.iter().any(|kept| kept.path == source.path) {
+            unique.push(source);
+        }
+    }
+    unique
 }
 
 /// Each folder once, and not again inside another: the outer one is searched whole. Only folders that are there.

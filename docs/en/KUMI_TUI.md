@@ -74,6 +74,67 @@ Below 100 columns the Live pane folds into a two-line strip above the input box
 (where you are and what Kumi is doing, then the last change with its undo).
 Below 24×8 Kumi asks for a bigger window.
 
+## REAPER and Renoise
+
+The screen is the same in REAPER and Renoise
+([connecting](KUMI_GUIDE.md#connect-to-reaper-or-renoise)), in the DAW's own
+words and views.
+
+- **Header:** the project's or song's name and the DAW's connection
+  ("● REAPER", "REAPER busy" while a dialog or a render holds it). The beat
+  light follows the DAW's own time and shows its meter beside the tempo:
+  REAPER's time signature through its tempo map ("7/8"), Renoise's lines per
+  beat ("LPB 4").
+- **FOCUS in REAPER** follows what has REAPER's focus:
+  - the **arrange view**: the tracks around the selected one, indented by folder
+    (a collapsed folder hides its tracks), their items as bars, markers and
+    regions, the loop and the playhead;
+  - the **MIDI editor**: the take's notes as a small piano roll, with up to three
+    lanes under it (CC, pitch, program, channel pressure, poly aftertouch) and
+    "and n more lanes";
+  - an **FX chain**: the chain as a tree, input FX as a branch of their own,
+    containers open with their FX, and bypassed, offline and parallel FX marked;
+    a take's chain when its FX has the focus ("Kick · take “kick.wav”");
+  - a track's **routing** window: its sends, receives and hardware outputs with
+    their levels, and its MIDI hardware output;
+  - the **mixer** window, undocked (a docked mixer can't be told apart): the
+    master and the tracks around the selected one, with volume, pan, mute, solo,
+    arm and a peak meter.
+- **FOCUS in Renoise** follows its middle frame and panels (Renoise doesn't say
+  which has the keyboard, so FOCUS goes by what changes):
+  - the **Pattern Editor**: the lines around the cursor (or the playhead,
+    following playback while Follow Player is on), each track's note,
+    instrument, volume, panning, delay and effect columns in Renoise's notation,
+    track names in their colours;
+  - the **Pattern Matrix**, while it's shown: the sequence's slots with their
+    patterns, sections and muted tracks, and the current slot;
+  - the **Phrase Editor**: the same grid, with the phrase's LPB, key tracking and
+    looping;
+  - an **instrument** (the Instrument or Sample Editor): its keyzones as a map of
+    keys, each sample with its mute group and slices, its macros, phrases,
+    modulation sets and FX chains;
+  - **Track DSPs**, while that panel is open: the chain as a tree, a Doofer with
+    its devices, a Splitter with a branch per lane (Frequency Low and High, Mid
+    and Side, Parallel Lane 1 and 2), bypassed devices marked;
+  - the **Mixer**: each track's post-FX volume, panning, mute and solo (no
+    meters: Renoise's API has none).
+- **Pointing:** Tab and clicks work in the FX and DSP trees as in Live's device
+  tree.
+- **Pictures** in NOW and HISTORY, one per kind of change: a pattern's or
+  phrase's lines before and after, an envelope's or an automation's points, the
+  parameters that moved (named, with bars), a route's values (sends, receives,
+  hardware outputs), keyzones, items on their track, settings before and after,
+  and a track's devices after a chain loads. Keyzones and items are drawn (as
+  images where the terminal shows them); lines and routes are words.
+- **Setup** has two steps there, on Linux too: Sign in, and Connect to REAPER
+  (or Renoise). There's no Control Surface.
+- **Commands** speak the DAW's words: `/refresh` reads your REAPER project again,
+  and `/stop` stops REAPER's transport and recording, and what Kumi plays out
+  loud. `/willington` is Live's.
+- **Away from Kumi:** Kumi's line goes to Renoise's status bar. REAPER has no
+  status bar Kumi can write to, so a notification tells you; `/status` says
+  which.
+
 ## Commands in a terminal
 
 Run these as `kumi <command>`; from a copy of the repository, as
@@ -82,22 +143,24 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | Command | What it does |
 | --- | --- |
 | `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
+| `kumi --daw reaper`, `kumi --daw renoise` | Open Kumi on the REAPER project or Renoise song that's open; the first time, sign in and put Kumi's extension or tool in. `KUMI_DAW` does the same; `kumi --daw reaper doctor` (or `report`) speaks of that DAW |
+| `kumi --daw reaper bridge [--yes]` (or `renoise`) | Put Kumi's extension into REAPER, or its tool into Renoise, or bring it up to date; `--yes` answers its question beforehand |
+| `kumi --daw logic [<command>]` | Work with Logic Pro instead of Live (`--daw ableton` is Live), for a session or a command: `kumi --daw logic bridge [--yes]` sets Kumi's Logic Pro bridge up in Kumi's own folder, with Logic Pro open or not, and `kumi --daw logic doctor` checks Logic Pro's side ([Connect to Logic Pro](KUMI_GUIDE.md#connect-to-logic-pro)) |
 | `kumi -c` (or `--continue`) | Carry on the conversation you had last, in any Set |
 | `kumi -r [id or name]` (or `--resume`) | Carry on a kept conversation by its id (or its start) or name; alone, choose one. Both work with `--inference-only` |
 | `kumi export [id or name \| --last] [--md \| --html \| --json] [--full] [--raw] [-o path]` | Save a kept conversation as Markdown (the default), a web page or a file for Kumi; without an id (or with `--last`), your latest. `--full` adds each step's input and result; `--raw` leaves keys and paths in |
 | `kumi import <file>` | Keep a conversation saved with `kumi export --json`, to carry on with `kumi -r` |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
-| `kumi --daw logic [<command>]` | Work with Logic Pro instead of Live (`--daw ableton` is Live), for a session or a command: `kumi --daw logic bridge [--yes]` sets Kumi's Logic Pro bridge up in Kumi's own folder, with Logic Pro open or not, and `kumi --daw logic doctor` checks Logic Pro's side ([Connect to Logic Pro](KUMI_GUIDE.md#connect-to-logic-pro)) |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
 | `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH; `--browser` for the browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
 | `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
 | `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed (without a terminal, nothing changes without it); `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
-| `kumi doctor [--json]` | Check the installation (version, rollback, PATH, updates, free space, Live, its User Library, the bridge's ports, Developer Mode), sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run. `--json` prints it without keys or your home folder |
+| `kumi doctor [--json]` | Check the installation (version, rollback, PATH, updates, free space, Live, its User Library, the bridge's ports, Developer Mode), sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus, the terminal, and REAPER and Renoise where you use them; says what to run. `--json` prints it without keys or your home folder |
 | `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
-| `kumi update [--check \| --rollback \| --version <x.y.z>]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed; `--version` installs that release, newer or older (an installed Kumi only) |
+| `kumi update [--check \| --rollback \| --version <x.y.z>]` | Get the newest Kumi (and the bridge when it's older, and the copies of REAPER's extension and Renoise's tool it carries); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed; `--version` installs that release, newer or older (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
 | `kumi uninstall [--all] [--yes] [--dry-run]` | Remove an installed Kumi and what it fetched; `--all` also removes conversations, notes, recipes, sign-ins, library and references; `--yes` skips the first question; `--dry-run` says what would go |
 | `kumi --version` (or `-v`), `kumi --help` (or `-h`, `help`) | Version; help |
@@ -118,7 +181,7 @@ message, not a command.
 | `/export [copy \| md \| html \| json]` | This conversation as a file: copy it as Markdown, or save Markdown, a web page or a file for Kumi (`kumi import`); alone, choose. Over 64 KB, the copy is saved as a file instead |
 | `/share` | Save this conversation as a web page that opens anywhere (the same page again while nothing changed), then open it, show it in Finder (Explorer) or copy its path, until Done; over SSH, it says where the page is |
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
-| `/daw [name]` | Which DAW Kumi works with; `/daw logic` or `/daw live` closes Kumi and opens it again with that one, without the conversation (each DAW's projects keep their own). Offered once you work with more than Live |
+| `/daw [name]` | Which DAW Kumi works with; `/daw live`, `/daw reaper`, `/daw renoise` or `/daw logic` closes Kumi and opens it again with that one, without the conversation (each DAW's projects keep their own). Shown once you work in REAPER, Renoise or Logic Pro, or have Kumi's bridge for one |
 | `/undo` | Undo Kumi's latest change |
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
 | `/refresh` | Read the Set again without asking the model |
@@ -166,6 +229,13 @@ its undo. They're in English for now.
   can't tell for sure, goes to the model as you wrote it.
 - They run only while Kumi isn't answering; during an answer, Enter steers it as
   usual.
+- **In REAPER:** a project with tempo or time signature markers sends `tempo`
+  and `loop` to the model (which marker a tempo means, and how long a bar is,
+  depend on where). `loop 9-16` also turns repeat on.
+- **In Renoise:** `loop 9-16` loops the sequence slots that hold those bars; bars
+  that start or end inside a pattern go to the model. `arm` is refused: Renoise
+  records into the selected track's pattern while edit mode is on. The tempo
+  goes from 32 to 999 BPM.
 - `"instantPhrases": false` in `~/.kumi/settings.json` turns them off.
 
 ## Keys
@@ -232,7 +302,7 @@ stops it, `r` runs it again, `c` copies its report, and Esc closes them.
 instead, which suits screen readers and logs. It has `/help`, `/status`,
 `/undo`, `/stop`, `/refresh`, `/reconnect`, `/new [name]`, `/resume [n, id or name]`
 (and `/conversations`), `/rename <name>`, `/fork [name]`,
-`/export [md|html|json]`, `/share` (each saves a file and says where),
+`/export [md|html|json]`, `/share` (each saves a file and says where), `/daw [name]`,
 `/model [provider/model]`, `/effort [level|default]`, `/fast`, `/logout <provider>`,
 `/memory`, `/forget <id>`, `/note <id> <new words>`, `/pin <id>`, `/unpin <id>`,
 `/recipes`, `/willington`, `/update`, `/changelog` and `/quit`, but no `/btw`,
@@ -257,8 +327,9 @@ answer, or quits when idle.
     OSC 777; iTerm2: OSC 9; kitty: OSC 99), else macOS's (Terminal.app and
     others), `notify-send` on Linux, or the bell on Windows Terminal (it flashes
     the taskbar);
-  - one line in Live's status bar ("Kumi · done · the bass is darker"); never a
-    dialog, and never in HISTORY.
+  - one line in Live's status bar ("Kumi · done · the bass is darker"), or
+    Renoise's; never a dialog, and never in HISTORY. REAPER has no status bar
+    Kumi can write to.
   - At most one every 10 s (the newest waiting one goes then); none over a take
     Live is recording, until it stops; none once you're back.
   - A terminal that never says whether it's in front: on a Mac, Kumi asks the

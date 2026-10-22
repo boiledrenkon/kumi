@@ -55,11 +55,16 @@ if native is None:
 # A change under these, besides tests and Markdown, is a new bridge for Live to load. The host links kumi-common.
 BRIDGE = ("crates/ableton-mcp-server/", "crates/kumi-common/", "remote-script/", "protocol/", "apps/live-extension/",
           "vendor/willington/")
-# The same for REAPER's extension, which links daw-bridge, for Renoise's tool and for Logic Pro's bridge, which links
-# daw-bridge too and carries its helper (their tests and examples aside too).
-REAPER = (native.REAPER_CRATE + "/", "crates/daw-bridge/")
+# The parts of daw-bridge the bridges link (its own wire, handshake, auth, discovery and files: `rg daw_bridge::
+# crates/reaper-kumi/src crates/logic-kumi/src`, and what those use). The rest of daw-bridge (the lifecycle, detection,
+# the doctor, installing) is Kumi's alone.
+DAW_BRIDGE = ("crates/daw-bridge/Cargo.toml", *(f"crates/daw-bridge/src/{name}.rs" for name in (
+    "lib", "auth", "contract", "daw", "files", "frame", "handshake", "loopback", "owner", "paths", "wire")))
+# The same for REAPER's extension, which links those parts, for Renoise's tool and for Logic Pro's bridge, which links
+# them too and carries its helper (their tests and examples aside too).
+REAPER = (native.REAPER_CRATE + "/", *DAW_BRIDGE)
 RENOISE = (native.RENOISE_TOOL_SOURCE + "/",)
-LOGIC = (native.LOGIC_CRATE + "/", "crates/daw-bridge/")
+LOGIC = (native.LOGIC_CRATE + "/", *DAW_BRIDGE)
 # What writes the key command tables the bridge is built with (its src/keys): the tables count, the script doesn't.
 LOGIC_TOOLS = (native.LOGIC_CRATE + "/keys/",)
 REAPER_CARGO = native.REAPER_CRATE + "/Cargo.toml"
@@ -69,7 +74,8 @@ LOGIC_CARGO = native.LOGIC_CRATE + "/Cargo.toml"
 # Kumi's own, daw-bridge and its host for REAPER, Renoise and Logic Pro (daw-mcp-server) among them.
 KUMI = ("crates/kumi/", "crates/kumi-runtime/", "crates/kumi-common/", "crates/kumi-store/", "crates/daw-bridge/",
         "crates/daw-mcp-server/", "install.sh", "install.ps1")
-CRATES = ("kumi", "kumi-common", "kumi-runtime")
+# Kumi's own crates, at Kumi's version: Kumi, its runtime and common parts, and its host for REAPER and Renoise.
+CRATES = ("kumi", "kumi-common", "kumi-runtime", "daw-mcp-server")
 # The CHANGELOG's dates are New York's, as its earlier entries are.
 TIMEZONE = "America/New_York"
 WIDTH = 102

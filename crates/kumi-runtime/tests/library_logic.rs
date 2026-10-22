@@ -196,7 +196,7 @@ async fn learning_logics_library_counts_its_sounds_presets_and_projects_as_logic
                 library.tools_for(profile, LibraryToolsOptions::default()).iter().map(|tool| tool.name().to_string()).collect()
             };
             assert!(names(&DawProfile::LOGIC).contains(&"find_presets".to_string()), "Logic's presets are found");
-            assert!(!names(&DawProfile::REAPER).contains(&"find_presets".to_string()), "REAPER's as before");
+            assert!(names(&DawProfile::REAPER).contains(&"find_presets".to_string()), "REAPER's own presets, as before");
             let tools = library.tools_for(&DawProfile::LOGIC, LibraryToolsOptions::default());
             let tool = |name: &str| tools.iter().find(|tool| tool.name() == name).unwrap().clone();
             // In Logic's words: its regions, its sample load, its presets' kinds, its projects counted by their files.

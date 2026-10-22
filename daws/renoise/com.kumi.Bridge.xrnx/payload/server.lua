@@ -258,6 +258,8 @@ end
 -- Short methods that are answered at once, even behind a long read: the host matches answers by id, and the producer's
 -- FOCUS pane follows what they say.
 M.IMMEDIATE = { ping = true, status = true, focus = true }
+-- (M5 m5-renoise: a listening job's state, its cancel and an audition's stop)
+M.IMMEDIATE.listen_status, M.IMMEDIATE.listen_cancel, M.IMMEDIATE.audition_stop = true, true, true
 
 -- A read is running: what is short among the waiting requests is answered now, out of order; the rest waits for the job.
 function M:run_immediate(record)
@@ -308,7 +310,7 @@ function M:answer(record, request)
   -- A long read comes back as a job to be run a slice at a time; the connection's later requests wait behind it, so
   -- answers keep their order.
   if ok and type(result) == "table" and result.kumi_job then
-    record.job = self.ctx.start_job(record, request, result.kumi_job)
+    record.job = self.ctx.start_job(record, request, result.kumi_job, result.kumi_wrote)
     return
   end
   self:respond(record, request, ok, result)

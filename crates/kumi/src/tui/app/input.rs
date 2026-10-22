@@ -190,7 +190,11 @@ impl TuiApp {
         if name == "tab" && menu.is_empty() && !ctrl && !alt {
             let eligible = {
                 let state = self.0.state.borrow();
-                state.tree.as_ref().is_some_and(|t| state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&t.track_ref))
+                // (the chain FOCUS shows: a take's FX chain where one is open, else the track's)
+                state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|t| state.focus.as_ref().and_then(|f| f.chain_ref.as_ref().or(f.track_ref.as_ref())) == Some(&t.track_ref))
             };
             if eligible {
                 self.0.state.borrow_mut().tree_cursor = Some(0);
@@ -734,6 +738,20 @@ impl TuiApp {
                 ),
                 NoticeTone::Info,
             );
+            // Where Kumi's lines reach a producer working in the DAW (Live's say so in its own settings): its status bar, or
+            // none to write to.
+            let profile = crate::daw::profile();
+            if !matches!(profile.id, Some(kumi_runtime::core::daw::DawId::Ableton) | None) {
+                let app = profile.words.app;
+                self.notice(
+                    &if profile.caps.status_line {
+                        format!("While you work in {app}, Kumi's lines show in its status bar too.")
+                    } else {
+                        format!("{app} has no status bar Kumi can write to: while you work there, Kumi tells you by notification.")
+                    },
+                    NoticeTone::Info,
+                );
+            }
             if let Some(now) = controller.conversation_now().await {
                 self.notice(&conversation_line(&now, |text| self.clean(text, 60)), NoticeTone::Info);
             }
@@ -922,7 +940,8 @@ impl TuiApp {
         } else if command == "/reconnect" && controller.has_reconnect() {
             self.0.state.borrow_mut().activity = format!("connecting to {}", crate::daw::words().app);
             let result = controller.reconnect().await;
-            if result.is_ok() {
+            // REAPER's and Renoise's integrations retire their rows as they close, each in its DAW's words.
+            if result.is_ok() && crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
                 for change in self.0.state.borrow_mut().records.changes_mut() {
                     if matches!(change.state, ChangeState::Applied | ChangeState::Unsure) {
                         change.state = ChangeState::Expired;

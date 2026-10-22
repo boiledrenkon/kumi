@@ -28,6 +28,55 @@ fn route_text(from: &str, to: &str) -> String {
     format!("{} → {}", super::quoted(from), super::quoted(to))
 }
 
+/// A send as HISTORY draws it (for the display only: no undo reads it): its ends, whether Kumi made, removed or changed it,
+/// and each setting it moved (all of them for one made or removed), before and after, in REAPER's words.
+pub(super) fn drawn_route(from: &str, to: &str, before: Option<&Value>, after: Option<&Value>) -> Value {
+    let change = match (before, after) {
+        (None, _) => "made",
+        (_, None) => "removed",
+        _ => "changed",
+    };
+    let number = |state: Option<&Value>, key: &str| state.and_then(|state| state.get(key)).and_then(Value::as_f64);
+    let flag = |state: Option<&Value>, key: &str| match state.and_then(|state| state.get(key)) {
+        Some(Value::Bool(on)) => Some(*on),
+        Some(value) => value.as_f64().map(|n| n != 0.0),
+        None => None,
+    };
+    let moved = |key: &str| change != "changed" || before.and_then(|b| b.get(key)) != after.and_then(|a| a.get(key));
+    let mut values = vec![];
+    if moved("volume") {
+        let db = |state: Option<&Value>| number(state, "volume").map(rows::db);
+        let (from, to) = (db(before), db(after));
+        if from.is_some() || to.is_some() {
+            let text = |db: Option<f64>| db.map(|db| format!("{} dB", super::tracks::db_text(db)));
+            values.push(json!({"name": "Volume", "from": from.map(|db| db.max(-60.0)), "to": to.map(|db| db.max(-60.0)), "min": -60.0, "max": 12.0, "fromText": text(from), "toText": text(to)}));
+        }
+    }
+    if moved("pan") {
+        let (from, to) = (number(before, "pan"), number(after, "pan"));
+        if from.is_some() || to.is_some() {
+            values.push(json!({"name": "Pan", "from": from, "to": to, "min": -1.0, "max": 1.0, "fromText": from.map(super::tracks::pan_text), "toText": to.map(super::tracks::pan_text)}));
+        }
+    }
+    if moved("mode") {
+        let mode = |state: Option<&Value>| number(state, "mode").map(|mode| rows::send_mode_name(mode as i64));
+        if let Some(to) = mode(after).or_else(|| mode(before)) {
+            values.push(json!({"name": "Taps", "fromText": mode(before).filter(|_| after.is_some()), "toText": to}));
+        }
+    }
+    for (key, name, on, off) in
+        [("mute", "Mute", "muted", "playing"), ("phase", "Phase", "inverted", "normal"), ("mono", "Mono", "mono", "stereo")]
+    {
+        let words = |state: Option<&Value>| flag(state, key).map(|set| if set { on } else { off });
+        if moved(key) && (change == "changed" || flag(after.or(before), key) == Some(true)) {
+            if let Some(to) = words(after).or_else(|| words(before)) {
+                values.push(json!({"name": name, "fromText": words(before).filter(|_| after.is_some()), "toText": to}));
+            }
+        }
+    }
+    json!({"from": from, "to": to, "change": change, "values": values})
+}
+
 fn name_of(reaper: &Reaper, track: Track) -> String {
     let name = rows::clip(&reaper.track_name(track));
     if name.is_empty() {
@@ -128,6 +177,17 @@ fn note_written(reaper: &Reaper, owner: Track, receiver: Track, before: String) 
             writes.remove(0);
         }
     });
+}
+
+/// Runs a write Kumi makes to send `index` of `owner` elsewhere (its automation mode, its envelopes shown or hidden) and
+/// notes what it did to the sends between the two tracks, as this module's own writes are: a ref to one of several
+/// sends between them, read before, still names its send after.
+pub(super) fn noting_writes<T>(reaper: &Reaper, owner: Track, index: i32, write: impl FnOnce() -> T) -> T {
+    let Some(receiver) = reaper.send_peer(owner, 0, index) else { return write() };
+    let before = pair_seen(reaper, owner, receiver);
+    let done = write();
+    note_written(reaper, owner, receiver, before);
+    done
 }
 
 /// Whether a ref to one of the sends from `owner` to `receiver` still names the send it was read as: those sends are as the ref
@@ -671,6 +731,15 @@ fn channels_text(state: &Value) -> String {
 
 /// Whether the tracks at both ends have the channels the wanted state uses: a send can't take from or give to channels a
 /// track doesn't have (REAPER keeps them, unheard).
+/// The fields asked for over the send's own: a change of one end is checked with the other end it has.
+fn over(now: &Value, wanted: &Value) -> Value {
+    let mut merged = now.clone();
+    for (key, value) in wanted.as_object().into_iter().flatten() {
+        merged[key] = value.clone();
+    }
+    merged
+}
+
 fn fits(reaper: &Reaper, from: Track, to: Track, wanted: &Value) -> Done<()> {
     let channels = |track: Track| reaper.track_value(track, "I_NCHAN").max(2.0) as i64;
     let src = wanted["srcChan"].as_i64();
@@ -704,7 +773,7 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let route = route_text(&found.from, &found.to);
     let mut display = json!({"title": (prop.title)(&route, &wanted), "before": now, "after": wanted});
@@ -724,7 +793,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
     }
     let wanted = (prop.wanted)(input)?;
     if let Some(check) = prop.check {
-        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+        check(ctx.reaper, found.track, found.receiver, &over(&now, &wanted))?;
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !(prop.same)(&now, &wanted) && !(prop.write)(ctx.reaper, found.track, found.index, &wanted) {
@@ -757,7 +826,12 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         applied,
         created: None,
         material: None,
-        display: json!({"title": (prop.title)(&route, &after), "before": now, "after": after}),
+        display: json!({
+            "title": (prop.title)(&route, &after),
+            "before": now,
+            "after": after,
+            "route": drawn_route(&found.from, &found.to, Some(&now), Some(&after)),
+        }),
         unwritten: (prop.same)(&now, &wanted),
     })
 }
@@ -955,12 +1029,16 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created["stamp"] = stamp.into();
     }
     let mut applied = send_state(reaper, plan.from, index);
+    let drawn = drawn_route(&found.from, &found.to, None, Some(&applied));
     applied["send"] = seal(reaper, &found);
     Ok(Applied {
         applied,
         created: Some(created),
         material: None,
-        display: json!({"title": format!("Added send {route}{}", sidechain_text(&plan))}),
+        display: json!({
+            "title": format!("Added send {route}{}", sidechain_text(&plan)),
+            "route": drawn,
+        }),
         ..Default::default()
     })
 }
@@ -972,6 +1050,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = send_state(ctx.reaper, found.track, found.index);
     if !restore.discard && !same_state(&now, restore.applied) {
         return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
+    }
+    // Its volume, pan and mute envelopes go with it, and nothing brings them back: drawn since, they are the producer's.
+    let drawn = drawn_envelopes(ctx.reaper, found.track, found.index);
+    if !restore.discard && drawn > 0 {
+        return Err(changed(format!(
+            "the send {} has {drawn} envelope(s) the producer added since Kumi made it, which would go with it",
+            route_text(&found.from, &found.to)
+        )));
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     if !ctx.reaper.remove_send(found.track, 0, found.index) {
@@ -1015,7 +1101,7 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, reference, true)?;
     let now = send_state(ctx.reaper, found.track, found.index);
     let mut display = json!({"title": format!("Removed send {}", route_text(&found.from, &found.to)), "before": now});
-    let envelopes = active_envelopes(ctx.reaper, found.track, found.index);
+    let envelopes = drawn_envelopes(ctx.reaper, found.track, found.index);
     if envelopes > 0 {
         display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
     }
@@ -1023,11 +1109,13 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     Ok(Preview { target: target(reference), prior: now, fence, display })
 }
 
-fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
+/// The send's volume, pan and mute envelopes that are on or hold points (one bypassed is still drawn): REAPER takes them
+/// with the send, and nothing brings them back.
+fn drawn_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
     ["<VOLENV", "<PANENV", "<MUTEENV"]
         .into_iter()
         .filter_map(|chunk| reaper.send_envelope(track, index, chunk))
-        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE") || reaper.envelope_point_count(*envelope) > 0)
         .count()
 }
 
@@ -1043,7 +1131,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         .send_peer(found.track, 0, found.index)
         .map(|t| reaper.track_guid(t))
         .ok_or_else(|| failed("that send has no receiving track"))?;
-    let lost = active_envelopes(reaper, found.track, found.index);
+    let lost = drawn_envelopes(reaper, found.track, found.index);
     let (stamp, together) = (stamp_of(reaper, found.track, found.index), pair_count(reaper, found.track, found.receiver));
     let before = pair_seen(reaper, found.track, found.receiver);
     if !reaper.remove_send(found.track, 0, found.index) {
@@ -1055,7 +1143,10 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"removed": true}),
         created: None,
         material: Some(material),
-        display: json!({"title": format!("Removed send {}", route_text(&found.from, &found.to))}),
+        display: json!({
+            "title": format!("Removed send {}", route_text(&found.from, &found.to)),
+            "route": drawn_route(&found.from, &found.to, Some(&now), None),
+        }),
         ..Default::default()
     })
 }

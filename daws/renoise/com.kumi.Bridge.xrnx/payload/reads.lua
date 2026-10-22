@@ -5,6 +5,8 @@ local json = import("json")
 local refs = import("refs")
 local rows = import("rows")
 local wire = import("wire")
+-- (M5 m5-renoise: spans, grid)
+local reads_listening = import("reads_listening")
 
 local fail, the_song, track_count, integer, array = rows.fail, rows.the_song, rows.track_count, rows.integer, rows.array
 local group_parents, song_row, track_row, sequence_row, pattern_row = rows.group_parents, rows.song_row, rows.track_row,
@@ -169,7 +171,7 @@ local function one(params, epoch)
     row = track_row(song, epoch, n[1], group_parents(song))
   elseif kind == "seq" then
     need(n[1] <= #song.sequencer.pattern_sequence)
-    row = sequence_row(song, epoch, n[1], track_count(song))
+    row = reads_listening.slot_beats()(sequence_row(song, epoch, n[1], track_count(song)), n[1])
   elseif kind == "pattern" then
     need(n[1] <= #song.patterns)
     row = pattern_row(song, epoch, n[1], track_count(song))
@@ -207,6 +209,8 @@ local function one(params, epoch)
     need(n[1] <= track_count(song) and n[2] <= #song:track(n[1]).devices
       and n[3] <= #song:track(n[1]):device(n[2]).parameters)
     row = param_row(song, epoch, n[1], n[2], n[3])
+    local with_grid = reads_listening.grid_of(params)
+    if with_grid then row = with_grid(row, song:track(n[1]):device(n[2]):parameter(n[3])) end
   end
   return { items = array({ row }), epoch = epoch }
 end
@@ -216,6 +220,7 @@ function M.read(job, params, epoch)
   if type(params) ~= "table" then fail("bad-params", "read needs a kind") end
   if params.ref ~= nil then return one(params, epoch) end
   local kind = params.kind
+  if params.grid ~= nil then reads_listening.check_kind(kind) end
   local song = the_song()
   if kind == "song" then
     return { items = array({ song_row(song) }), epoch = epoch }
@@ -225,10 +230,89 @@ function M.read(job, params, epoch)
     return page(job, epoch, params, count, function(i) return track_row(the_song(), epoch, i, parents) end)
   elseif kind == "sequence" then
     local tracks = track_count(song)
-    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return sequence_row(the_song(), epoch, s, tracks) end)
+    local beats = reads_listening.slot_beats()
+    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return beats(sequence_row(the_song(), epoch, s, tracks), s) end)
   elseif kind == "pattern" then
     local tracks = track_count(song)
     return page(job, epoch, params, #song.patterns, function(p) return pattern_row(the_song(), epoch, p, tracks) end)
+  elseif kind == "where" then
+    -- M7 (variations): where what Kumi keeps by its place is now, and the place of what a ref names now, for Kumi to find it
+    -- again after the producer's edits: a pattern of the pool ({pattern = {n, mark}} or a pattern or slot ref: its ref, number,
+    -- the slots that play it, a place), an instrument or a phrase ({instrument|phrase = place or ref}: its ref, index, name, a
+    -- place), and a track by its ref ({track = ref}: carried through the shifts since the request's layout, as every request's
+    -- refs are).
+    local env, items = M.places, params.items
+    if type(items) ~= "table" or #items > M.MAX_LIMIT then fail("bad-params", "items: up to " .. M.MAX_LIMIT .. " places") end
+    if not env then fail("busy", "the tool isn't watching the song yet") end
+    local instruments_ = import("instruments")
+    local function missing(why) return { [why == "gone" and "gone" or "unknown"] = true } end
+    local out = {}
+    for k, item in ipairs(items) do
+      local row
+      if type(item) ~= "table" then fail("bad-params", "each item is {pattern}, {instrument}, {phrase} or {track}") end
+      if item.pattern ~= nil then
+        local p, why
+        if type(item.pattern) == "string" then
+          local ref = refs.parse(item.pattern)
+          if ref and ref.kind == "seq" then
+            local s = refs.expect(item.pattern, "seq", 1, epoch)[1]
+            p = song.sequencer.pattern_sequence[s]
+            why = "gone"
+          else
+            p = refs.expect(item.pattern, "pattern", 1, epoch)[1]
+            why = "gone"
+          end
+        elseif type(item.pattern) == "table" then
+          p, why = env.pattern_at(item.pattern.n, item.pattern.mark)
+        end
+        if p and p <= #song.patterns then
+          local slots = {}
+          for s, value in ipairs(song.sequencer.pattern_sequence) do
+            if value == p then slots[#slots + 1] = s end
+          end
+          row = { ref = refs.make(epoch, "pattern", p), number = p - 1, name = song:pattern(p).name, lines = song:pattern(p).number_of_lines,
+            slots = array(slots), seqRef = slots[1] and refs.make(epoch, "seq", slots[1]) or nil, place = { n = p, mark = env.pattern_mark() } }
+        else
+          row = missing(why)
+        end
+      elseif item.phrase ~= nil or item.instrument ~= nil then
+        local of = item.phrase ~= nil and "phrase" or "instrument"
+        local given = item[of]
+        local n, why
+        if type(given) == "string" then
+          n = refs.expect(given, of, #instruments_.SHAPES[of].lists, epoch)
+        else
+          n, why = instruments_.follow(env, given)
+        end
+        local ok_, objects = pcall(instruments_.resolve, song, of, n or { 0, 0 })
+        if n and ok_ then
+          row = { ref = refs.make(epoch, of, unpack(n)), index = n[#n], place = instruments_.place_of(env, of, n) }
+          if of == "phrase" then
+            row.name, row.lines, row.lpb = objects.phrase.name, objects.phrase.number_of_lines, objects.phrase.lpb
+          else
+            row.name, row.phrases = objects.instrument.name, #objects.instrument.phrases
+          end
+        else
+          row = missing(n and "gone" or why)
+        end
+      elseif type(item.track) == "string" then
+        local t = refs.expect(item.track, "track", 1, epoch)[1]
+        if t > track_count(song) then row = { gone = true } else row = { ref = refs.make(epoch, "track", t), index = t, name = song:track(t).name } end
+      else
+        fail("bad-params", "each item is {pattern}, {instrument}, {phrase} or {track}")
+      end
+      out[k] = row
+    end
+    return { items = array(out), epoch = epoch }
+  elseif kind == "line" and refs.parse(params.parent) and refs.parse(params.parent).kind == "phrase" then
+    -- M7 (variations): a phrase's lines, as a pattern track's are read (its instrument values are the instrument's samples)
+    local at = refs.expect(params.parent, "phrase", 2, epoch)
+    if at[1] > #song.instruments or at[2] > #song:instrument(at[1]).phrases then fail("bad-params", "no such phrase") end
+    local phrase = song:instrument(at[1]):phrase(at[2])
+    local note_columns, effect_columns = phrase.visible_note_columns, phrase.visible_effect_columns
+    return page(job, epoch, params, phrase.number_of_lines, function(i)
+      return line_row(the_song():instrument(at[1]):phrase(at[2]):line(i), i - 1, note_columns, effect_columns, params.hidden == true)
+    end, true, { lines = phrase.number_of_lines, lpb = phrase.lpb })
   elseif kind == "line" then
     local pattern_at = need_parent(params, "pattern", 1, epoch)[1]
     if pattern_at > #song.patterns then fail("bad-params", "no pattern " .. pattern_at) end
@@ -238,10 +322,11 @@ function M.read(job, params, epoch)
     local total = song:pattern(pattern_at).number_of_lines
     -- An alias shows the lines of another pattern: they are that pattern's, and a write to them changes it.
     local alias = song:pattern(pattern_at):track(track_at).alias_pattern_index
-    local extra = alias > 0 and { aliasOf = alias, aliasRef = refs.make(epoch, "pattern", alias) } or {}
+    local extra = alias > 0 and { aliasOf = alias - 1, aliasRef = refs.make(epoch, "pattern", alias) } or {}
     extra.mutedColumns = rows.column_state(track)
+    -- (each line by Renoise's number, from 0)
     return page(job, epoch, params, total, function(i)
-      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns, params.hidden == true)
+      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i - 1, note_columns, effect_columns, params.hidden == true)
     end, true, extra)
   elseif kind == "automation" then
     -- M4 (n-song): the automation of one pattern's track, an envelope a row
@@ -287,7 +372,14 @@ function M.read(job, params, epoch)
     local at = need_parent(params, "device", 2, epoch)
     local t, d = at[1], at[2]
     if t > track_count(song) or d > #song:track(t).devices then fail("bad-params", "no such device") end
-    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k) return param_row(the_song(), epoch, t, d, k) end)
+    local with_grid = reads_listening.grid_of(params)
+    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k)
+      local live = the_song()
+      local row = param_row(live, epoch, t, d, k)
+      return with_grid and with_grid(row, live:track(t):device(d):parameter(k)) or row
+    end)
+  elseif kind == "spans" then
+    return reads_listening.spans(job, params, epoch, page)
   elseif kind == "modset" or kind == "chain" then
     -- n-instruments: an instrument's modulation sets or sample FX chains
     local at = need_parent(params, "instrument", 1, epoch)[1]

@@ -206,11 +206,14 @@ async fn logics_first_request_carries_its_pack_in_its_words_and_stays_smaller_th
             if std::env::var_os("KUMI_PRINT_SYSTEM").is_some() {
                 println!("{system}");
             }
-            // The pack first (Kumi's persona, the general rules, then Logic's words and ways), the change set's
-            // instructions after it, then what the session adds (memory, techniques, gaps, jobs).
+            // The pack first (Kumi's persona, the general rules, then Logic's words and ways), the rules every DAW of
+            // Kumi's own bridge shares, in Logic's words, the change set's instructions after them, then what the session
+            // adds (memory, techniques, gaps, jobs).
             let pack = kumi_runtime::integrations::logic::DAW.instructions;
+            let shared = kumi_runtime::integrations::own_bridge::own_rules(&kumi_runtime::integrations::logic::DAW);
             assert!(system.starts_with("You are Kumi, a concise, practical producer collaborator."), "{system}");
-            assert!(system.starts_with(&format!("{pack} Change Logic Pro with your change tools")), "{system}");
+            assert!(system.starts_with(&format!("{pack} {shared} Change Logic Pro with your change tools")), "{system}");
+            assert_eq!(system.matches("If the observation has sinceLastTime").count(), 1, "{system}");
             assert!(system.contains("ask logic_manual: it answers from Apple's Logic Pro User Guide"), "{system}");
             assert!(fixed < live_fixed, "{fixed} bytes, Live's {live_fixed}");
             assert!(system.len() < live_system, "{} bytes of system text, Live's {live_system}", system.len());

@@ -17,7 +17,13 @@ local config = import("config")
 local discovery = import("discovery")
 local log = import("log")
 local VERSION = import("version")
+-- (M5 m5-renoise: listening)
+local listening = import("listening")
+local audition = import("audition")
+local reads_listening = import("reads_listening")
+local scratch = import("scratch")
 local actions = import("actions")
+local digest = import("digest")
 
 local M = {}
 
@@ -128,6 +134,9 @@ local function layout_now()
   return b.layout
 end
 
+-- How often the journal reads again what no notifier tells (a container's contents), and how many of those at most each time.
+M.POLL_MS, M.POLL_MOST = 1000, 8
+
 -- How many shifts of the track list the tool keeps to carry refs through.
 -- (a restore that puts a track back into a big group makes two swaps per member itself: 1024 covers groups of 500)
 M.SHIFT_HISTORY = 1024
@@ -138,15 +147,28 @@ function M.log_error(where, err)
   log.write("error", where .. ": " .. tostring(err))
 end
 
+-- How deep in the tool's notifiers the code running now is: a run-lua chunk's time limit (a count hook) stops the chunk only
+-- outside them, so every notifier runs whole (setting the hook aside instead would restart its count at each notifier).
+local guarded = 0
+-- The guards themselves, by identity: a stop must not land in one either, before its count goes up or after it goes down
+-- (raised there, it would reach Renoise's notifier dispatch, which disables the notifier behind an error dialog).
+local guards = setmetatable({}, { __mode = "k" })
+
+-- A notifier, run whole and never raising. One that failed may have left the song half watched: it is watched anew.
 local function guard(where, fn)
-  return function(...)
+  local function guarded_fn(...)
+    guarded = guarded + 1
     local ok, result = xpcall(fn, debug.traceback, ...)
+    guarded = guarded - 1
     if not ok then
       M.log_error(where, result)
+      if b then b.reattach = true end
       return nil
     end
     return result
   end
+  guards[guarded_fn] = true
+  return guarded_fn
 end
 
 local function show_status(message)
@@ -269,6 +291,22 @@ local TRANSPORT_OBSERVABLES = {
   "playing_observable", "bpm_observable", "lpb_observable", "tpl_observable", "edit_mode_observable",
   "follow_player_observable", "loop_pattern_observable",
 }
+-- (what Renoise's undo doesn't keep, measured in 3.5.4: no step, and Renoise's redo stays as it was)
+local UNKEPT = {}
+for name in ([[playing_observable edit_mode_observable follow_player_observable loop_pattern_observable metronome_enabled_observable
+  metronome_precount_enabled_observable metronome_precount_bars_observable edit_step_observable octave_observable
+  record_quantize_enabled_observable record_quantize_lines_observable wrapped_pattern_edit_observable
+  single_track_edit_mode_observable keyboard_velocity_enabled_observable keyboard_velocity_observable
+  record_parameter_mode_observable mute_state_observable solo_state_observable active_tab_observable]]):gmatch("%S+") do UNKEPT[name] = true end
+-- (the tempo, LPB and TPL also move as the player or a render meets a ZT, ZL or ZK command: no step either)
+local function playing_or_rendering()
+  local ok, moving = pcall(function()
+    local song = renoise.song()
+    return song ~= nil and (song.transport.playing or song.rendering)
+  end)
+  return ok and moving == true
+end
+for _, name in ipairs({ "bpm_observable", "lpb_observable", "tpl_observable" }) do UNKEPT[name] = playing_or_rendering end
 -- M4 (n-song): the song's settings Kumi changes (the groove, the metronome, the editing settings, the headroom), counted, and
 -- asked on the producer's undo.
 local SETTING_OBSERVABLES = {
@@ -306,12 +344,12 @@ local function watch_track(song, i)
   token.devices = {}
   -- (the track's devices' log: a new one for every watch, so a place from before the track was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.dlog = places.new("d" .. b.ids)
+  token.dlog = places.new(b.run .. "d" .. b.ids)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
-    observers:watch_changes(track.mute_state_observable)
-    observers:watch_changes(track.solo_state_observable)
+    observers:watch_changes(track.mute_state_observable, UNKEPT.mute_state_observable)
+    observers:watch_changes(track.solo_state_observable, UNKEPT.solo_state_observable)
     observers:watch_changes(track.visible_note_columns_observable)
     observers:watch_changes(track.visible_effect_columns_observable)
     for c = 1, track.max_note_columns do
@@ -348,7 +386,7 @@ local function watch_pattern(song, p, tracks)
   local token = b.groups.patterns[p]
   -- (the count of its changed lines, under an id of this watch: a mark from before the pattern was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.pid, token.touches = "p" .. b.ids, 0
+  token.pid, token.touches = b.run .. "p" .. b.ids, 0
   observers:owned(token, nil, function()
     observers:watch_lines(pattern)
     observers:watch_changes(pattern.name_observable)
@@ -376,7 +414,7 @@ local function watch_phrase(phrase, token, instrument_token)
   -- (n-instruments: the count of its changed lines, under an id of this watch, as a pattern's: a phrase change's undo goes
   -- through only if none came since its step)
   b.ids = (b.ids or 0) + 1
-  token.pid, token.touches = "ph" .. b.ids, 0
+  token.pid, token.touches = b.run .. "ph" .. b.ids, 0
   observers:owned(token, instrument_token, function()
     observers:watch_lines(phrase, token)
     observers:watch_changes(phrase.name_observable)
@@ -394,7 +432,7 @@ end
 -- for every watch, as a track's devices have).
 local function watch_modset(set, token, instrument_token)
   b.ids = (b.ids or 0) + 1
-  token.log, token.parent, token.devices = places.new("m" .. b.ids), instrument_token, {}
+  token.log, token.parent, token.devices = places.new(b.run .. "m" .. b.ids), instrument_token, {}
   for d = 1, #set.devices do token.devices[d] = group() end
   observers:owned(token, instrument_token, function()
     observers:watch_changes(set.name_observable)
@@ -404,7 +442,7 @@ end
 
 local function watch_chain(chain, token, instrument_token)
   b.ids = (b.ids or 0) + 1
-  token.log, token.parent, token.devices = places.new("c" .. b.ids), instrument_token, {}
+  token.log, token.parent, token.devices = places.new(b.run .. "c" .. b.ids), instrument_token, {}
   for d = 1, #chain.devices do token.devices[d] = group() end
   observers:owned(token, instrument_token, function()
     observers:watch_changes(chain.name_observable)
@@ -419,8 +457,8 @@ local function watch_instrument(song, i)
   token.samples, token.phrases = {}, {}
   -- n-instruments: the logs of its lists, new for every watch (a place from before the instrument was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
-  token.slog, token.phlog = places.new("s" .. b.ids), places.new("ph" .. b.ids)
-  token.mlog, token.clog = places.new("ms" .. b.ids), places.new("cs" .. b.ids)
+  token.slog, token.phlog = places.new(b.run .. "s" .. b.ids), places.new(b.run .. "ph" .. b.ids)
+  token.mlog, token.clog = places.new(b.run .. "ms" .. b.ids), places.new(b.run .. "cs" .. b.ids)
   token.modsets, token.chains = {}, {}
   observers:owned(token, nil, function()
     observers:watch_changes(instrument.name_observable)
@@ -433,7 +471,7 @@ local function watch_instrument(song, i)
     observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument, token)
     -- n-instruments
     for _, name in ipairs({ "volume", "transpose", "sample_mapping_overlap_mode", "phrase_playback_mode", "phrase_program", "active_tab" }) do
-      observers:watch_changes(instrument[name .. "_observable"])
+      observers:watch_changes(instrument[name .. "_observable"], UNKEPT[name .. "_observable"])
     end
     observers:watch_changes(instrument.phrase_mappings_observable)
     observers:watch_structural(instrument.sample_modulation_sets_observable, "an instrument's modulation sets changed", "modsets", instrument, token)
@@ -468,10 +506,10 @@ local function attach(song)
   for t = 1, tracks do b.groups.tracks[t] = group() end
   for p = 1, #song.patterns do b.groups.patterns[p] = group() end
   for i = 1, #song.instruments do b.groups.instruments[i] = group() end
-  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
-  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
+  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection", true) end
+  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport", UNKEPT[name]) end
   observers:watch(song.name_observable, "project")
-  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name]) end
+  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name], UNKEPT[name]) end
   observers:watch_changes(song.artist_observable)
   observers:watch_changes(song.comments_observable)
   observers:watch_tracks(song.tracks_observable)
@@ -611,6 +649,37 @@ recount = function(kind, token, owner, list, count)
   log.write("info", "the " .. kind .. " list was out of step: watched anew on its own")
 end
 
+-- What the journal links Renoise's redo of a change that made something back to its undo with (changes_base `structural`): a
+-- list's place log, or the track shifts.
+local function linker(log)
+  if not log then return nil end
+  return {
+    mark = function() return places.mark(log) end,
+    back = function(mark, at) places.back(log, mark, at) end,
+  }
+end
+local track_linker = {
+  mark = function() return b.layout end,
+  back = function(mark, at) refs.back(b.shifts, mark, at) end,
+}
+
+-- Renoise's undo or redo of a load that replaced an instrument in place (an .xrni load: Kumi's, the producer's) tells an
+-- insert next to it, then the other one's remove: insert@i, remove@i+1 undone; insert@i+1, remove@i redone (lab 2026-10-20).
+-- For what keeps an instrument's place (the places log, the journal) the slot keeps its instrument, as in Kumi's own load:
+-- the pair's remove is taken as the inserted one's. (The list of watched instruments takes the operations as told.)
+local function in_place(op)
+  local held = b.held_insert
+  b.held_insert = nil
+  local song = renoise.song()
+  if not (op and type(op.index) == "number" and song and song:is_undo_redoing()) then return op end
+  if op.type == "insert" then
+    b.held_insert = op.index
+  elseif op.type == "remove" and held and math.abs(op.index - held) == 1 then
+    return { type = "remove", index = held }
+  end
+  return op
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
@@ -626,6 +695,7 @@ local function on_structural(reason, kind, op, owner, token)
     end
   end
   bump_epoch(reason, true, BREAKS[kind])
+  local placed = op
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
   if kind == "devices" and token and token.dlog then
     places.note(token.dlog, op)
@@ -644,7 +714,8 @@ local function on_structural(reason, kind, op, owner, token)
       end
       if not r.insert and not r.remove then b.replacing = nil end
     end
-    if not own then places.note(b.ilog, op) end
+    placed = in_place(op)
+    if not own then places.note(b.ilog, placed) end
   elseif token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]] then
     places.note(token[INSTRUMENT_LOGS[kind]], op) -- (n-instruments)
   end
@@ -658,7 +729,10 @@ local function on_structural(reason, kind, op, owner, token)
   -- (n-instruments: the journal's places of instruments and what is in them move with the list's operations)
   if op and INSTRUMENT_JOURNAL[kind] then
     local scope = instrument_scope(kind, token)
-    if scope then changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, op.type, op.index, op.index2, song:is_undo_redoing()) end
+    if scope then
+      changes.journal_list_event(b.journal, INSTRUMENT_JOURNAL[kind], scope, placed.type, placed.index, placed.index2, song:is_undo_redoing(),
+        linker(kind == "instruments" and b.ilog or (token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]])))
+    end
   end
   if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
@@ -667,7 +741,7 @@ local function on_structural(reason, kind, op, owner, token)
     -- (the journal's places are device places: they move, and a change that made or removed a device is told on the producer's undo)
     for track_index, candidate in ipairs(b.groups.tracks) do
       if candidate == token then
-        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing())
+        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing(), linker(token.dlog))
       end
     end
   end
@@ -742,7 +816,7 @@ local function on_tracks(op)
   b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
   local listed = true
-  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing())
+  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing(), nil, track_linker)
   if op.type == "insert" then
     listed = remember(b.groups.tracks, op.index)
     if type(op.index) == "number" and op.index >= 1 then
@@ -765,10 +839,16 @@ local function on_tracks(op)
 end
 
 local function flush_events()
+  b.held_insert = nil -- (an undo or redo is over by the next callback: its pairs with it)
   if not observers:attached() then return end
   local song = renoise.song()
   if not song then return end
   local dirty = observers:take_dirty()
+  if dirty.transport and listening.active() then
+    -- (M5 m5-renoise: Renoise reads as playing while it renders; Kumi's render isn't the producer's transport, told once it ends)
+    observers.dirty.transport = true
+    dirty.transport = nil
+  end
   if dirty.selection then
     local value = selection(song)
     if observers:changed("selection", value) then conns:event("selection", value) end
@@ -781,6 +861,12 @@ local function flush_events()
   if b.undone then
     b.undone = false
     changes.journal_check(b.journal)
+  end
+  -- (what Renoise's undo changes inside a Doofer, a Splitter or a Notepad no notifier tells: read again about once a second)
+  local now_ms = M.now_ms()
+  if changes.journal_active(b.journal) and now_ms - (b.polled_ms or 0) >= M.POLL_MS then
+    b.polled_ms = now_ms
+    changes.journal_poll(b.journal, M.POLL_MOST)
   end
   for _, event in ipairs(changes.journal_take(b.journal)) do
     conns:event("undone_in_daw", { descs = json.array(event.descs), how = event.how, epoch = epoch() })
@@ -827,8 +913,20 @@ function handlers.snapshot()
   return as_job(function(job) return stamped(focus.snapshot(job, job.epoch, b.changed or 0), job.layout) end)
 end
 
+-- M6: the song as records for catch-up and watch_me (digest.lua), with the song's id and identity as the project row.
+function handlers.digest(params)
+  return as_job(function(job)
+    local project = status.project(b.memory)
+    if type(project) == "table" and renoise.song() then project.identity = rows.song_extra(renoise.song()).identity end
+    return digest.digest(job, params, job.epoch, { project = project, changed = b.content or 0 })
+  end)
+end
+
 function handlers.focus()
-  return stamped(focus.focus(epoch(), b.changed or 0), b.layout)
+  local answer = focus.focus(epoch(), b.changed or 0)
+  -- (while Kumi renders, bodies are refused: the focus says Renoise is busy, so Kumi keeps what it showed)
+  if listening.active() then answer.busy = "rendering" end
+  return stamped(answer, b.layout)
 end
 
 function handlers.focus_body(params)
@@ -886,6 +984,8 @@ M.DIALOG_MS = 400
 
 local function busy()
   local song = renoise.song()
+  local listening_reason = listening.busy_reason()
+  if listening_reason then return listening_reason end
   if song and song.rendering then return "Renoise is rendering the song" end
   -- (What a socket callback does itself before it asks, decoding a big request, is its own time, not a dialog's: from its start.)
   if b.alive_ms and (b.work_ms or M.now_ms()) - b.alive_ms >= M.DIALOG_MS then return "a Renoise dialog is open (its timers aren't running)" end
@@ -946,6 +1046,41 @@ local function phrase_token(i, ph)
   return token and token.phrases and token.phrases[ph] or nil
 end
 
+-- A pattern's or phrase's count of changed lines as a change kept it ("p12=40"), as the journal moved it on: Renoise's redo
+-- wrote that change's lines again (changes_base `journal_check`), so its count starts again from after the redo.
+local function counted_from(mark)
+  return type(mark) == "string" and b.retouch and b.retouch[mark] or mark
+end
+
+-- The journal's: a pattern a change made, made again by Renoise's redo at `p`: the change's count for it (`mark`) goes on from
+-- that pattern's own.
+local function retouched_at(mark, p)
+  local token = type(mark) == "string" and type(p) == "number" and b.groups and b.groups.patterns[p] or nil
+  if not (token and token.pid) then return end
+  b.retouch = b.retouch or {}
+  b.retouch[mark] = token.pid .. "=" .. token.touches
+end
+
+-- The journal's: a change Renoise's redo put back holds what Kumi wrote again; its counts (`touch`, and a copy's source's) now
+-- start from here.
+local function retouched(applied)
+  b.retouch = b.retouch or {}
+  for _, mark in ipairs({ applied.touch, type(applied.source) == "table" and applied.source.touch or nil }) do
+    local pid = type(mark) == "string" and mark:match("^(.*)=%d+$") or nil
+    local token
+    for _, candidate in ipairs(pid and b.groups and b.groups.patterns or {}) do
+      if candidate.pid == pid then token = candidate break end
+    end
+    for _, instrument in ipairs(pid and not token and b.groups and b.groups.instruments or {}) do
+      for _, phrase in ipairs(instrument.phrases or {}) do
+        if phrase.pid == pid then token = phrase break end
+      end
+      if token then break end
+    end
+    if token then b.retouch[mark] = pid .. "=" .. token.touches end
+  end
+end
+
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -977,6 +1112,7 @@ local place_env = {
   pattern_touched_since = function(p, mark)
     local token = b.groups and b.groups.patterns[p]
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1069,6 +1205,7 @@ local place_env = {
   phrase_touched_since = function(i, ph, mark)
     local token = phrase_token(i, ph)
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1084,6 +1221,8 @@ local function change_env()
     watch_undo = watch_undo, -- (n-instruments)
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
+    in_notifier = function() return guarded > 0 end,
+    is_guard = function(fn) return guards[fn] == true end,
     -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
     -- instrument file into slot i that the places log doesn't take for a delete.
     work_dir = function()
@@ -1091,6 +1230,8 @@ local function change_env()
       return dir and (dir:gsub("[/\\][^/\\]*[/\\]?$", "") .. "/work") or nil
     end,
     replacing_instrument = function(i, fn)
+      -- (the instrument loaded in its place takes on the logs it had, so the places Kumi's records keep inside it follow)
+      local kept = place_env.logs_of("instrument", { i })
       b.replacing = { i = i, insert = true, remove = true }
       local ok, err = pcall(fn)
       -- (told now or on a later pass: kept for those two ops for a moment)
@@ -1099,6 +1240,7 @@ local function change_env()
         b.replacing = nil
         error(err, 0)
       end
+      if kept then place_env.adopt("instrument", { i }, kept) end
     end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end
@@ -1179,7 +1321,7 @@ function handlers.transport_stop()
 end
 
 -- Play: from where the pattern is (no arguments), or from a line of a sequence slot, or of the pattern being edited when only
--- `line` is given. Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
+-- `line` is given (Renoise's number, from 0). Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
 -- may name the epoch it was read in.
 function handlers.transport_play(params)
   local song = rows.the_song()
@@ -1198,11 +1340,11 @@ function handlers.transport_play(params)
       bad(string.format("sequence is a sequence slot from 1 to %d", slots))
     end
     local pattern = sequence and song:pattern(song.sequencer:pattern(sequence)) or song:pattern(song.selected_pattern_index)
-    if line == nil then line = 1 end
-    if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > pattern.number_of_lines then
-      bad(string.format("line is a line of that pattern, from 1 to %d", pattern.number_of_lines))
+    if line == nil then line = 0 end
+    if type(line) ~= "number" or line ~= math.floor(line) or line < 0 or line >= pattern.number_of_lines then
+      bad(string.format("line is a line of that pattern, from 0 to %d", pattern.number_of_lines - 1))
     end
-    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line)) else transport:start_at(line) end
+    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line + 1)) else transport:start_at(line + 1) end
     started = true
   elseif not transport.playing then
     transport:start(renoise.Transport.PLAYMODE_CONTINUE_PATTERN)
@@ -1211,7 +1353,7 @@ function handlers.transport_play(params)
   local position = transport.playback_pos
   return {
     epoch = epoch(), layout = layout_now(), started = started, playing = transport.playing,
-    sequence = sequence or position.sequence, line = sequence and line or (line or position.line),
+    sequence = sequence or position.sequence, line = sequence and line or (line or position.line - 1),
   }
 end
 
@@ -1228,9 +1370,64 @@ function handlers.project_save(params)
   return actions.project_save(params, change_env())
 end
 
+-- A line in Renoise's status bar (never a dialog), for a producer working there while Kumi finishes or needs them: one
+-- line of text, control characters as spaces. Not a change.
+function handlers.show_status(params)
+  local text = type(params) == "table" and params.text or nil
+  if type(text) ~= "string" or text == "" or #text > 512 then error({ code = "bad-params", message = "text: one line to show, at most 512 bytes" }, 0) end
+  renoise.app():show_status((text:gsub("%c", " ")))
+  return { shown = true }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
+end
+
+-- (M5 m5-renoise) Listening: renders as jobs, the audio behind a ref, a render played out loud, scratch copies. See listening.lua,
+-- audition.lua. Kumi's own solo, mute and loop writes for them are quiet: the song's notifiers don't count them as edits.
+local function quiet(fn)
+  b.quiet = (b.quiet or 0) + 1
+  local ok, err = pcall(fn)
+  b.quiet = b.quiet - 1
+  if not ok then error(err, 0) end
+end
+
+local function listen_env()
+  local env = change_env()
+  env.document = function() return b.document end
+  env.cfg = function() return b.cfg end
+  env.quiet = quiet
+  env.pattern_mark = place_env.pattern_touch_mark
+  env.song_id = function() return status.song_id(b.memory, rows.the_song()) end
+  env.unix_ms = unix_ms
+  -- (a render stops playback: an audition playing ends first)
+  env.before_render = function() audition.halt(env, "a render") end
+  return env
+end
+
+-- Answered at once while Kumi's render runs (contract §3); anything else waits, refused busy with nothing written.
+local LISTEN_FREE = { ping = true, status = true, focus = true, listen_status = true, listen_cancel = true, audition_stop = true }
+
+function handlers.render_start(params) return listening.render_start(params, listen_env()) end
+function handlers.listen_status(params) return listening.status(params, listen_env()) end
+function handlers.listen_cancel(params) return listening.cancel(params, listen_env()) end
+function handlers.audio_file(params) return listening.audio_file(params, listen_env()) end
+function handlers.audition(params) return audition.play(params, listen_env()) end
+function handlers.audition_stop(params) return audition.stop(params, listen_env()) end
+function handlers.scratch(params) return scratch.handle(params, listen_env()) end
+
+-- Copies a crash left in this song are swept on the first tick after the bridge loads or a song opens (a song is changed in a
+-- callback of the tool's own, not inside Renoise's document notifiers); Kumi is told, now or when it next connects.
+local function sweep_scratch()
+  if not b.scratch_sweep_due or not b.cfg then return end
+  local song = renoise.song()
+  if not song or listening.active() or busy() then return end
+  b.scratch_sweep_due = false
+  local swept = scratch.sweep(song, listen_env())
+  if swept then
+    if conns:authenticated_count() > 0 then conns:event("scratch_swept", swept) else b.scratch_swept = swept end
+  end
 end
 
 -- (Exposed for the tests, which add methods of their own.)
@@ -1266,6 +1463,8 @@ local CARRIED = { read = true, focus_body = true, change_preview = true, change_
   instrument_save = true,
   -- (M4 n-devices)
   preset_read = true, instrument_export = true, macro_read = true, device_editor = true, preset_save = true }
+-- (M5 m5-renoise: the listening requests that name refs)
+CARRIED.render_start, CARRIED.audio_file, CARRIED.scratch = true, true, true
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
@@ -1286,6 +1485,11 @@ end
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end
+  -- (M5 m5-renoise: while Kumi's render runs, only the requests that read its state are answered)
+  if not LISTEN_FREE[request.method] then
+    listening.check(listen_env())
+    if listening.active() then error({ code = "busy", message = "Renoise is rendering for Kumi; nothing changed" }, 0) end
+  end
   local params = request.params
   local from
   if CARRIED[request.method] then
@@ -1316,7 +1520,8 @@ function M.handle(_, request)
       params, left = refs.relabel_surviving(params, epoch(), survives)
       -- (n-instruments: a restore that finds what it changed by its places, not by its refs, goes ahead in the same song though
       -- its refs went stale; it reads none of them, and any ref read still goes through refs.expect)
-      local by_place = request.method == "change_restore" and changes.restores_by_place(params.kind)
+      local by_place = request.method == "change_restore"
+        and (changes.restores_by_place(params.kind) or changes.redone_entry(b.journal, params.of) ~= nil)
       if type(from) == "string" and from ~= epoch() and (by_place or not left[from]) and survives(from, "song") then
         local copy = {}
         for k, v in pairs(params) do copy[k] = v end
@@ -1352,6 +1557,8 @@ function M.start(h, reloading)
   b = st.bridge
   b.journal = b.journal or changes.journal_new()
   b.journal.edits = function() return b.edits or 0 end
+  b.journal.retouched = retouched
+  b.journal.retouched_at = retouched_at
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,
@@ -1364,21 +1571,31 @@ function M.start(h, reloading)
     end,
     identity = identity,
     on_request = M.handle,
-    start_job = function(record, request, work) return jobs:add(record, request, work) end,
+    start_job = function(record, request, work, wrote) return jobs:add(record, request, work, wrote) end,
     cancel_jobs = function(record) jobs:cancel(record) end,
     on_authenticated = function(record)
       log.write("info", "Kumi connected from " .. record.key)
       show_status("Kumi connected")
+      -- (M5 m5-renoise: copies swept while no Kumi was there)
+      if b.scratch_swept then
+        local swept = b.scratch_swept
+        b.scratch_swept = nil
+        conns:event("scratch_swept", swept)
+      end
     end,
     log = log.write,
     on_too_many_open = function(open)
       b.remake = "too many connections held open after being refused (" .. open .. ")"
     end,
   })
-  b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
+  -- (a random start, 44 bits wide: two Renoise running at once, or one started again, never count through the same epochs, so
+  -- a ref or a change from one is refused as stale by the other; and the place logs carry this run's own name, so a mark kept
+  -- in one run never resolves in another's logs)
+  b.epoch_n = b.epoch_n or wire.random28() * 65536
+  b.run = b.run or string.sub(wire.nonce(), 1, 8)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.ids = b.ids or 0
-  b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")
+  b.plog, b.ilog = b.plog or places.new(b.run .. "p"), b.ilog or places.new(b.run .. "i")
   b.cat, b.snap = b.cat or {}, b.snap or {}
   if not b.snap[b.epoch_n] then
     local snapshot = {}
@@ -1387,6 +1604,18 @@ function M.start(h, reloading)
   end
   b.changed = b.changed or 0
   b.document = b.document or 1
+  -- (M5 m5-renoise: the listening state, kept across reloads)
+  listening.init(b)
+  audition.init(b)
+  status.listening = function() return listening.flags(b.cfg) end
+  status.kumi_busy = function() return listening.busy_reason() end
+  focus.rendering = function() return listening.active() ~= nil end
+  reads_listening.pattern_mark = place_env.pattern_touch_mark
+  -- (M7: where what Kumi keeps by place is now, for `read {kind: "where"}`)
+  reads.places = place_env
+  scratch.init(b)
+  scratch.cfg = function() return b.cfg end
+  if not reloading then b.scratch_sweep_due = true end
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
     -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
@@ -1445,6 +1674,14 @@ function M.start(h, reloading)
 end
 
 function M.stop(_, reloading)
+  -- (M5 m5-renoise: an audition ends; a render job puts back what it changed and lets go of its files)
+  if b and host then
+    pcall(function()
+      local env = listen_env()
+      audition.halt(env, "the tool stopped")
+      listening.abort(env, "the tool was stopped or reloaded during the render: ask again")
+    end)
+  end
   if observers then observers:detach() end
   pcall(actions.tick, M.now_ms(), true)
   if jobs then jobs:abort_all("reloading", "the tool was stopped or reloaded: ask again") end
@@ -1481,6 +1718,14 @@ function M.tick()
   -- One failing step mustn't skip the others: connections still need their tick.
   local ok, err = xpcall(flush_events, debug.traceback)
   if not ok then M.log_error("events", err) end
+  -- (M5 m5-renoise: a render that ended with no callback, an audition's end)
+  ok, err = xpcall(function()
+    local env = listen_env()
+    listening.check(env)
+    audition.tick(env)
+    sweep_scratch()
+  end, debug.traceback)
+  if not ok then M.log_error("listening", err) end
   jobs:run()
   conns:tick()
   -- (the auditions whose time is up end: a note never hangs on)
@@ -1526,6 +1771,9 @@ function M.tick_jobs()
   if jobs and jobs:pending() > 0 then jobs:run() end
 end
 
+-- M6: the digest's module, whose budgets the tests set small.
+M.digest = digest
+
 -- How many things the song is watched through (the tests count them to see that only what is new gets watched).
 function M.watching()
   return observers and #observers.entries or 0
@@ -1533,7 +1781,14 @@ end
 
 function M.on_new_document()
   b.quitting = false
+  -- (M5 m5-renoise: what a job or an audition had of the song that went is nothing to put back)
+  pcall(function()
+    local env = listen_env()
+    listening.song_closed(env)
+    audition.halt(env, "another song")
+  end)
   b.document = b.document + 1
+  b.scratch_sweep_due = true
   -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
   -- without releasing the first, so the empty song's id would otherwise stay with the file.)
   b.memory.song_id, b.memory.born_unsaved = nil, nil
@@ -1545,6 +1800,11 @@ end
 
 function M.on_release_document()
   b.quitting = true
+  pcall(function()
+    local env = listen_env()
+    listening.song_closed(env)
+    audition.halt(env, "the song closed")
+  end)
   observers:detach()
   b.memory.song_id, b.memory.born_unsaved = nil, nil
   conns:event("project", json.null)

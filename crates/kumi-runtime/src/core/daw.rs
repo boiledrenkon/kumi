@@ -95,9 +95,12 @@ pub struct PromptVocab {
     pub eq: &'static str,
     /// The octave the DAW names middle C (MIDI 60) in: Live calls it C3.
     pub middle_c_octave: i8,
+    /// Notes named as a tracker writes them, three characters with a dash for a natural ("C-5", "C#5"): Renoise's.
+    pub tracker_notes: bool,
     /// For each gap no knob closes, the structural change that closes it, with the DAW's own devices.
     pub structure_moves: &'static [(crate::audio::matching::StructuralKind, &'static str)],
-    /// The DAW's own places for sounds, as find_sounds names them: "Live's User Library and Places".
+    /// Where the producer's sounds are, as find_sounds names them: "Live's User Library and Places, Splice, packs, folders
+    /// they named".
     pub library_places: &'static str,
     /// What presets the producer has, as find_presets names them.
     pub preset_sources: &'static str,
@@ -132,6 +135,46 @@ pub struct PromptVocab {
     pub drum_stem_steps: &'static str,
     /// A clip in the DAW's launcher, which Kumi plays from the timeline to render: "a Session clip".
     pub launcher_clip: &'static str,
+    /// What holds a part on the timeline, as the listening tools name it: "clip" (REAPER's item, Renoise's pattern).
+    pub clip: &'static str,
+    /// More than one: "clips".
+    pub clips: &'static str,
+    /// The field such a thing's reference is in, as reads give it: "clipRef".
+    pub clip_ref: &'static str,
+    /// What has audio of its own that Kumi can hear by its reference: "an audio clip".
+    pub audio_clip: &'static str,
+    /// What holds a part's notes, for groove: "a MIDI clip".
+    pub midi_clip: &'static str,
+    /// The schema key a listening tool takes such a thing by (an audition candidate's, groove's part): "clip".
+    pub clip_field: &'static str,
+    /// What else tune's fit sets on the DAW's EQ so its bands land as calculated (Live: EQ Eight's Adaptive Q and Scale).
+    pub eq_fit_settings: &'static str,
+    /// How groove takes its part: "a MIDI clip's clipRef".
+    pub part_ref: &'static str,
+    /// How groove takes the reference's notes: "the reference's MIDI clip (its clipRef)".
+    pub reference_part: &'static str,
+    /// How groove takes a reference's drum stem: "an Arrangement audio clip's clipRef".
+    pub stem_audio: &'static str,
+    /// What groove's audio is, in its description: "the drum stem's clip".
+    pub stem_as_audio: &'static str,
+    /// The tools that change a part's notes, as groove names them: "change_notes, transform_midi swing, quantize".
+    pub note_tools: &'static str,
+    /// The tool that moves notes: "change_notes".
+    pub move_notes_tool: &'static str,
+    /// What swings a part: "transform_midi swing".
+    pub swing_tool: &'static str,
+    /// What to do with a MIDI file given as groove's reference: "put it on a MIDI track in Live (drag it in) and give that
+    /// clip as reference".
+    pub midi_file_import: &'static str,
+    /// The tools a found sound's path goes to, as find_sounds' results name them: "load_sample and the other sample tools".
+    pub sample_tools: &'static str,
+    /// How a found preset is loaded, by its kind, for a DAW whose presets aren't Browser items, after find_presets'
+    /// results ("" for Live's, which load by their Browser items).
+    pub preset_loading: &'static str,
+    /// The kinds of the DAW's own presets find_presets names, as the model asks for them.
+    pub preset_kinds: &'static [&'static str],
+    /// The preset files the DAW loads, by the format the library keeps; a format no DAW names is Live's.
+    pub preset_formats: &'static [&'static str],
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -236,7 +279,7 @@ macro_rules! live_word {
         "EQ Eight"
     };
     (library_places) => {
-        "Live's User Library and Places"
+        "Live's User Library and Places, Splice, packs, folders they named"
     };
     (preset_sources) => {
         "Live's presets and racks (in the User Library, Places and packs, and Live's own), Max for Live devices, and plug-ins' own presets"
@@ -285,6 +328,54 @@ macro_rules! live_word {
     };
     (launcher_clip) => {
         "a Session clip"
+    };
+    (clip) => {
+        "clip"
+    };
+    (clips) => {
+        "clips"
+    };
+    (clip_ref) => {
+        "clipRef"
+    };
+    (audio_clip) => {
+        "an audio clip"
+    };
+    (midi_clip) => {
+        "a MIDI clip"
+    };
+    (clip_field) => {
+        "clip"
+    };
+        (eq_fit_settings) => {
+        ", and turns Adaptive Q off and Scale to 100% so they land as calculated"
+    };
+    (part_ref) => {
+        "a MIDI clip's clipRef"
+    };
+    (reference_part) => {
+        "the reference's MIDI clip (its clipRef)"
+    };
+    (stem_audio) => {
+        "an Arrangement audio clip's clipRef"
+    };
+    (stem_as_audio) => {
+        "the drum stem's clip"
+    };
+    (note_tools) => {
+        "change_notes, transform_midi swing, quantize"
+    };
+    (move_notes_tool) => {
+        "change_notes"
+    };
+    (swing_tool) => {
+        "transform_midi swing"
+    };
+    (midi_file_import) => {
+        "put it on a MIDI track in Live (drag it in) and give that clip as reference"
+    };
+    (preset_kinds) => {
+        &["instrument", "audio effect", "midi effect", "drum rack", "plug-in"]
     };
 }
 
@@ -418,6 +509,51 @@ macro_rules! daw_word {
     ($profile:expr, launcher_clip) => {
         $profile.vocab.launcher_clip
     };
+    ($profile:expr, clip) => {
+        $profile.vocab.clip
+    };
+    ($profile:expr, clips) => {
+        $profile.vocab.clips
+    };
+    ($profile:expr, clip_ref) => {
+        $profile.vocab.clip_ref
+    };
+    ($profile:expr, audio_clip) => {
+        $profile.vocab.audio_clip
+    };
+    ($profile:expr, midi_clip) => {
+        $profile.vocab.midi_clip
+    };
+    ($profile:expr, clip_field) => {
+        $profile.vocab.clip_field
+    };
+    ($profile:expr, eq_fit_settings) => {
+        $profile.vocab.eq_fit_settings
+    };
+    ($profile:expr, part_ref) => {
+        $profile.vocab.part_ref
+    };
+    ($profile:expr, reference_part) => {
+        $profile.vocab.reference_part
+    };
+    ($profile:expr, stem_audio) => {
+        $profile.vocab.stem_audio
+    };
+    ($profile:expr, stem_as_audio) => {
+        $profile.vocab.stem_as_audio
+    };
+    ($profile:expr, note_tools) => {
+        $profile.vocab.note_tools
+    };
+    ($profile:expr, move_notes_tool) => {
+        $profile.vocab.move_notes_tool
+    };
+    ($profile:expr, swing_tool) => {
+        $profile.vocab.swing_tool
+    };
+    ($profile:expr, midi_file_import) => {
+        $profile.vocab.midi_file_import
+    };
 }
 
 /// (M5) What Kumi says it can't do in a DAW it is connected to, which doesn't do that through Kumi yet: "Kumi can't
@@ -537,6 +673,15 @@ pub struct Capabilities {
     pub browser_items: bool,
     /// Plug-in parameters the DAW exposes only once configured.
     pub configured_plugin_params: bool,
+    /// The DAW's own presets, found and loaded (find_presets): Live's Browser items and preset files, REAPER's and
+    /// Renoise's library files.
+    pub presets: bool,
+    /// Listens render the part offline (faster than it plays) and play it out loud after, rather than hearing it as
+    /// it plays: REAPER's and Renoise's bridges.
+    pub renders_to_listen: bool,
+    /// (M7) The variations tool: numbered takes of a source, kept, changed or dropped by number (core's, with the DAW's backend):
+    /// Renoise's patterns and phrases.
+    pub variations: bool,
 }
 
 /// One DAW as Kumi knows it: its id (None when no DAW is known), its words and what it can do.
@@ -577,8 +722,9 @@ impl DawProfile {
             write_notes_tool: "the tool that writes notes",
             eq: "an EQ",
             middle_c_octave: 4,
+            tracker_notes: false,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "the DAW's own library",
+            library_places: "Splice, folders they named and the DAW's own library",
             preset_sources: "the DAW's own presets and device chains, and plug-ins' own presets",
             preset_examples: "(\"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The device it's for: \"Serum\", \"Pro-Q 3\"",
@@ -595,6 +741,25 @@ impl DawProfile {
             drum_kit: "a drum-kit device",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "a clip",
+            clip: crate::live_word!(clip),
+            clips: crate::live_word!(clips),
+            clip_ref: crate::live_word!(clip_ref),
+            audio_clip: crate::live_word!(audio_clip),
+            midi_clip: crate::live_word!(midi_clip),
+            clip_field: crate::live_word!(clip_field),
+            eq_fit_settings: crate::live_word!(eq_fit_settings),
+            part_ref: crate::live_word!(part_ref),
+            reference_part: crate::live_word!(reference_part),
+            stem_audio: "a timeline audio clip's clipRef",
+            stem_as_audio: crate::live_word!(stem_as_audio),
+            note_tools: "the tools that change notes",
+            move_notes_tool: "the tool that moves notes",
+            swing_tool: "the tool that swings notes",
+            midi_file_import: "put it on a MIDI track in the DAW (drag it in) and give that clip as reference",
+            sample_tools: "the sample tools",
+            preset_loading: "",
+            preset_kinds: &[],
+            preset_formats: &[],
         },
     };
 
@@ -639,6 +804,10 @@ impl DawProfile {
             manual: true,
             browser_items: true,
             configured_plugin_params: true,
+            presets: true,
+            // (Live hears as it plays, through Kumi Ears or a recording)
+            renders_to_listen: false,
+            variations: false,
         },
         vocab: PromptVocab {
             plan_tool: crate::live_word!(plan_tool),
@@ -663,6 +832,7 @@ impl DawProfile {
             write_notes_tool: crate::live_word!(write_notes_tool),
             eq: crate::live_word!(eq),
             middle_c_octave: 3,
+            tracker_notes: false,
             structure_moves: crate::audio::matching::STRUCTURE_MOVES,
             library_places: crate::live_word!(library_places),
             preset_sources: crate::live_word!(preset_sources),
@@ -681,6 +851,27 @@ impl DawProfile {
             drum_kit: crate::live_word!(drum_kit),
             drum_stem_steps: crate::live_word!(drum_stem_steps),
             launcher_clip: crate::live_word!(launcher_clip),
+            clip: crate::live_word!(clip),
+            clips: crate::live_word!(clips),
+            clip_ref: crate::live_word!(clip_ref),
+            audio_clip: crate::live_word!(audio_clip),
+            midi_clip: crate::live_word!(midi_clip),
+            clip_field: crate::live_word!(clip_field),
+            eq_fit_settings: crate::live_word!(eq_fit_settings),
+            part_ref: crate::live_word!(part_ref),
+            reference_part: crate::live_word!(reference_part),
+            stem_audio: crate::live_word!(stem_audio),
+            stem_as_audio: crate::live_word!(stem_as_audio),
+            note_tools: crate::live_word!(note_tools),
+            move_notes_tool: crate::live_word!(move_notes_tool),
+            swing_tool: crate::live_word!(swing_tool),
+            midi_file_import: crate::live_word!(midi_file_import),
+            sample_tools: "load_sample and the other sample tools",
+            preset_loading: "",
+            preset_kinds: crate::live_word!(preset_kinds),
+            // (and every format no other DAW names: its .adv, .adg and .amxd files, plug-ins' own presets; an Audio Unit's
+            // preset is Logic Pro's too)
+            preset_formats: &["vstpreset", "aupreset"],
         },
     };
 
@@ -689,12 +880,30 @@ impl DawProfile {
         id: Some(DawId::Reaper),
         words: DawWords { app: "REAPER", place: "project", places: "projects", master: "the master track", timeline: "arrange view" },
         // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read.
+        // It listens (M5): parts rendered offline and played out loud after, what it plays heard live, a goal's rig, an
+        // item's audio.
+        // The fixed phrases are its changes, and it says whether it records (M6); it has no status line. What changed while
+        // Kumi wasn't running is told (M6).
         caps: Capabilities {
+            // (its own undo, /stop, Lua and an id kept in the saved project are the extension's)
+            undo: true,
+            stop_transport: true,
+            scripting: Some(ScriptKind::Lua),
+            durable_project_id: true,
+            instant: true,
+            recording_state: true,
             device_tree: true,
             note_view: true,
             timeline_strip: true,
             focus_stream: true,
             transport_stream: true,
+            catch_up: true,
+            hear: true,
+            audition: true,
+            goal_rig: true,
+            audio_file: true,
+            renders_to_listen: true,
+            presets: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -714,21 +923,23 @@ impl DawProfile {
             cant_reach: "Kumi can't reach REAPER. Is it open, with Kumi's extension installed (kumi --daw reaper bridge)?",
             crash_note: "If it crashed, your unsaved changes may be lost.",
             goal_needs: "Goals need REAPER connected, with Kumi's extension.",
-            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the project by hand.",
+            render_leftovers: "Kumi couldn't remove its scratch copies; delete the “Kumi · try” tracks by hand.",
             safety_limiter: "a limiter",
-            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            listen_method: "Kumi renders the part offline to hear it (from_beat and beats, or the loop or the playhead's part), then plays it out loud for you; a render stops REAPER's playback. While REAPER plays, a listen with no from_beat hears the master output as it plays (seconds, 8 by default) and stops nothing.",
             write_notes_tool: "the tool that writes MIDI notes",
             eq: "ReaEQ",
             middle_c_octave: 4,
+            tracker_notes: false,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "REAPER's resource folder (FX chains, track and project templates)",
-            preset_sources: "REAPER's FX presets and chains, and plug-ins' own presets",
+            library_places: "Splice, folders they named and their sample folders in other DAWs",
+            preset_sources: "REAPER's FX chains, track and project templates, JSFX and FX preset banks (its resource folder), and VST3 presets",
             preset_examples: "(\"ReaEQ\", \"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The FX it's for: \"ReaComp\", \"Serum\"",
             voice_project: "REAPER project",
             voice_devices: "ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth and ReaSamplOmatic5000",
             tutorial_words: "REAPER tutorial: ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth, ReaSamplOmatic5000, JSFX, FX chain, FX container, routing, sidechain, automation item, take, lane, region, marker, Serum, Vital.",
-            own_undo: "REAPER's own undo (Cmd-Z in REAPER)",
+            // (the key this computer undoes with: Cmd-Z on macOS, Ctrl-Z on Windows and Linux)
+            own_undo: if cfg!(target_os = "macos") { "REAPER's own undo (Cmd-Z in REAPER)" } else { "REAPER's own undo (Ctrl-Z in REAPER)" },
             refs_retired: "REAPER may have changed the tracks, so Kumi's references are retired: read them again before using any.",
             structure: "tracks",
             gain_stage: "the track's last limiter, else a gain FX it adds",
@@ -738,6 +949,26 @@ impl DawProfile {
             drum_kit: "a sampler kit (one ReaSamplOmatic5000 per pad)",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "an item",
+            clip: "item",
+            clips: "items",
+            clip_ref: "ref",
+            audio_clip: "an audio item",
+            midi_clip: "a MIDI item",
+            clip_field: "item",
+            eq_fit_settings: "",
+            part_ref: "a MIDI item's ref",
+            reference_part: "the reference's MIDI item (its ref)",
+            stem_audio: "an audio item's ref",
+            stem_as_audio: "the drum stem's item",
+            note_tools: "notes_change",
+            move_notes_tool: "notes_change",
+            swing_tool: "notes_change (the off-beat notes later)",
+            midi_file_import: "put it on a track in REAPER (drag it in) and give that item as reference",
+            sample_tools: "item_import, drum_kit and the other sample steps",
+            preset_loading: ". Load one by its kind: an fx chain with fx_chain_load (file: its path); a track template with track_template_insert (path); a jsfx with fx_add (name: its add, \"JS: midi/midi_choke\"); fx presets are one plug-in's presets (in presets): add that FX, then fx_preset by one's name; a plug-in preset with fx_preset on that plug-in (preset: its path); a project template is a whole project to start from, opened in REAPER",
+            preset_kinds: &["fx chain", "track template", "project template", "jsfx", "fx presets", "plug-in"],
+            // (a VST3 preset's path goes to fx_preset)
+            preset_formats: &["vstpreset", "rfxchain", "rtracktemplate", "rpp", "jsfx", "ini"],
         },
     };
 
@@ -745,8 +976,33 @@ impl DawProfile {
     pub const RENOISE: DawProfile = DawProfile {
         id: Some(DawId::Renoise),
         words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
-        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read.
-        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, ..Capabilities::NONE },
+        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read. It listens (M5): parts rendered
+        // offline and played out loud after (its scripts can't hear what it plays), a goal's rig, a sample's audio.
+        // (its status bar takes Kumi's line: the tool's show_status; REAPER's API has no status bar to write to)
+        // The fixed phrases are its changes and it says whether it records (M6); what changed while Kumi wasn't running is
+        // told (M6).
+        caps: Capabilities {
+            // (its own undo, /stop, Lua and an id kept in the saved song are the tool's)
+            undo: true,
+            stop_transport: true,
+            scripting: Some(ScriptKind::Lua),
+            durable_project_id: true,
+            instant: true,
+            recording_state: true,
+            device_tree: true,
+            focus_stream: true,
+            transport_stream: true,
+            hear: true,
+            audition: true,
+            goal_rig: true,
+            audio_file: true,
+            renders_to_listen: true,
+            status_line: true,
+            catch_up: true,
+            presets: true,
+            variations: true,
+            ..Capabilities::NONE
+        },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",
@@ -764,21 +1020,22 @@ impl DawProfile {
             cant_reach: "Kumi can't reach Renoise. Is it open, with Kumi's tool installed (kumi --daw renoise bridge)?",
             crash_note: "If it crashed, your unsaved changes may be lost.",
             goal_needs: "Goals need Renoise connected, with Kumi's tool.",
-            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the song by hand.",
+            render_leftovers: "Kumi couldn't remove its scratch copies; delete the “Kumi · try” tracks from the song by hand.",
             safety_limiter: "a Maximizer",
-            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            listen_method: "Kumi renders the part offline to hear it (from_beat and beats, or the loop or the playhead's part), then plays it out loud for you; a render stops Renoise's playback. Renoise's scripts can't hear what it plays, so while it plays a listen needs from_beat and beats.",
             write_notes_tool: "the tool that writes pattern lines",
             eq: "EQ 10",
             middle_c_octave: 5,
+            tracker_notes: true,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "Renoise's Library folders (instruments, multi-samples, chains, presets, phrases)",
-            preset_sources: "Renoise's device presets, chains and instruments, and plug-ins' own presets",
+            library_places: "the samples of Renoise's Library and User Library, Splice, folders they named and their sample folders in other DAWs",
+            preset_sources: "Renoise's instruments, multi-samples, effect chains and presets, phrases, phrase scripts and modulation sets (its Library and User Library)",
             preset_examples: "(\"Compressor\", \"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The device it's for: \"Compressor\", \"Serum\"",
             voice_project: "Renoise song",
             voice_devices: "Compressor, EQ 10, Maximizer, Delay, Reverb, Distortion, Doofer, Splitter and sample instruments",
             tutorial_words: "Renoise tutorial: pattern editor, pattern matrix, phrase editor, keyzones, effect commands, Doofer, Splitter, instrument macros, modulation, Compressor, EQ 10, Maximizer, Reverb, Delay, sidechain, LFO, envelope, Serum, Vital.",
-            own_undo: "Renoise's own undo (Cmd-Z in Renoise)",
+            own_undo: if cfg!(target_os = "macos") { "Renoise's own undo (Cmd-Z in Renoise)" } else { "Renoise's own undo (Ctrl-Z in Renoise)" },
             refs_retired: "Renoise may have moved the tracks, so Kumi's references are retired: read them again before using any.",
             structure: "tracks",
             gain_stage: "the track's last Maximizer, else a Gainer it adds",
@@ -788,6 +1045,25 @@ impl DawProfile {
             drum_kit: "a drum-kit instrument (a sample per keyzone)",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "a pattern",
+            clip: "pattern",
+            clips: "patterns",
+            clip_ref: "ref",
+            audio_clip: "a sample",
+            midi_clip: "a pattern track",
+            clip_field: "pattern",
+            eq_fit_settings: "",
+            part_ref: "a pattern track: its pattern's (or a sequence slot's) ref and its track's, as \"pattern:2 track:5\"",
+            reference_part: "the reference's pattern track (its pattern's and its track's refs, as for pattern)",
+            stem_audio: "the track that plays it: its ref",
+            stem_as_audio: "the track that plays the drum stem",
+            note_tools: "notes_write",
+            move_notes_tool: "notes_write: their lines and delays",
+            swing_tool: "notes_write (the off-beat lines' delays)",
+            midi_file_import: "import it into Renoise (drag it in) and give the pattern track it lands on as reference",
+            sample_tools: "sample_load, instrument_kit and the other sample steps",
+            preset_loading: ". Load one by its kind, with its path: an instrument or a multi-sample with instrument_load; an effect preset is for one device (device): add that device with device_add, then device_preset_data (ref: the new device, path); an effect chain onto a track with device_chain_load (trackRef, path; a track that has devices needs replace: true, and they are replaced); a phrase into an instrument with phrase_load (ref, path); a modulation set into an instrument with modset_load (ref, path); a phrase script into a phrase with phrase_script (ref: the phrase, path), after phrase_add when the instrument needs a new one",
+            preset_kinds: &["instrument", "multi-sample", "effect chain", "effect preset", "phrase", "phrase script", "modulation set"],
+            preset_formats: &["xrni", "xrnt", "xrdp", "xrnz", "xrno", "lua", "sfz"],
         },
     };
 
@@ -863,6 +1139,31 @@ impl DawProfile {
             drum_kit: "a Drum Kit Designer or Drum Machine Designer kit (a pad per sound)",
             drum_stem_steps: "separate its stems (Stem Splitter), convert the drum stem to MIDI",
             launcher_clip: "a grid cell",
+            tracker_notes: false,
+            // (M5) A region where Live has a clip, with its ref; groove's parameter keeps its name (clip), and a part's
+            // notes change through Logic's own changes.
+            clip: "region",
+            clips: "regions",
+            clip_ref: "ref",
+            audio_clip: "an audio region",
+            midi_clip: "a MIDI region",
+            clip_field: "clip",
+            part_ref: "a MIDI region's ref",
+            reference_part: "the reference's MIDI region (its ref)",
+            stem_audio: "an audio region's ref in the Tracks area",
+            stem_as_audio: "the drum stem's region",
+            note_tools: "make_changes with notes_change or notes_quantize",
+            move_notes_tool: "make_changes with notes_change",
+            swing_tool: "make_changes with notes_change (the off-beat notes later)",
+            midi_file_import: "import it with make_changes' midi_import and give the region it makes as reference",
+            // (Channel EQ's bands land as tune calculates them: nothing else to set)
+            eq_fit_settings: "",
+            // (M6) The library's words for samples and presets are Live's too, which Logic's library says its way
+            // (`logic_library::tool_words`); its presets are its own files, by their kinds.
+            sample_tools: "load_sample and the other sample tools",
+            preset_loading: "",
+            preset_kinds: &["instrument", "plug-in"],
+            preset_formats: &["patch", "cst", "pst", "exs", "aupreset"],
         },
     };
 
@@ -896,7 +1197,9 @@ impl DawProfile {
             return crate::notation::pitch_name(midi);
         }
         const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-        format!("{}{}", NAMES[midi as usize % 12], midi as i32 / 12 - 5 + self.vocab.middle_c_octave as i32)
+        const TRACKER: [&str; 12] = ["C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"];
+        let names = if self.vocab.tracker_notes { TRACKER } else { NAMES };
+        format!("{}{}", names[midi as usize % 12], midi as i32 / 12 - 5 + self.vocab.middle_c_octave as i32)
     }
 
     /// `(app, place)`, as `Integration::words` answered before profiles.
@@ -937,6 +1240,9 @@ impl Capabilities {
         manual: false,
         browser_items: false,
         configured_plugin_params: false,
+        presets: false,
+        renders_to_listen: false,
+        variations: false,
     };
 }
 
@@ -1025,6 +1331,14 @@ mod tests {
         assert_eq!(Capabilities::default(), Capabilities::NONE);
     }
 
+    #[test]
+    fn each_daw_names_notes_as_it_writes_them() {
+        // (review U10) Renoise writes a natural with a dash, C-5 for MIDI 60.
+        let names = |profile: &DawProfile| [60, 61, 0, 119].map(|midi| profile.note_name(midi));
+        assert_eq!(names(&DawProfile::RENOISE), ["C-5", "C#5", "C-0", "B-9"]);
+        assert_eq!(names(&DawProfile::REAPER), ["C4", "C#4", "C-1", "B8"]);
+    }
+
     crate::daw_text!(
         /// A text for the test below.
         SAID, said: "Save the ", place, " in ", app, (if max_for_live_devices: ", or make a device"), "."
@@ -1063,15 +1377,25 @@ mod tests {
         assert!(DawProfile::LOGIC.caps.device_tree && DawProfile::LOGIC.caps.note_view && DawProfile::LOGIC.caps.timeline_strip);
         assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && DawProfile::LOGIC.caps.undo);
         // (M5) Kumi hears Logic and auditions in it; a region's file and a goal's rig wait (REAPER and Renoise hear
-        // nothing yet). Its words say how it hears and where a judged run turns the level.
+        // through their hosts' listening jobs). Its words say how it hears and where a judged run turns the level.
         let caps = DawProfile::LOGIC.caps;
         assert_eq!((caps.hear, caps.audition, caps.audio_file, caps.goal_rig), (true, true, false, false));
-        assert!(!DawProfile::REAPER.caps.hear && !DawProfile::RENOISE.caps.hear && !DawProfile::REAPER.caps.audition);
+        assert!(DawProfile::REAPER.caps.hear && DawProfile::RENOISE.caps.hear && DawProfile::REAPER.caps.audition);
         assert!(DawProfile::LOGIC.vocab.listen_method.contains("captures what it outputs after the Stereo Out"));
         assert!(DawProfile::LOGIC.vocab.gain_stage.contains("Adaptive Limiter or Limiter, else its last Gain plug-in"));
         assert_eq!(cant_yet(&DawProfile::LOGIC, "pursue a goal"), "Kumi can't pursue a goal in Logic Pro yet.");
         // (M7) Logic's manual is read as Live's is; REAPER's and Renoise's aren't.
         assert!(DawProfile::LOGIC.caps.manual && !DawProfile::REAPER.caps.manual && !DawProfile::RENOISE.caps.manual);
+    }
+
+    /// HISTORY names the key this computer undoes with in REAPER and Renoise: Cmd-Z on macOS, Ctrl-Z on Windows and Linux
+    /// (review U14). Live's words are as they always were.
+    #[test]
+    fn reaper_and_renoise_name_this_computers_undo_key() {
+        let key = if cfg!(target_os = "macos") { "Cmd-Z" } else { "Ctrl-Z" };
+        assert_eq!(DawProfile::REAPER.vocab.own_undo, format!("REAPER's own undo ({key} in REAPER)"));
+        assert_eq!(DawProfile::RENOISE.vocab.own_undo, format!("Renoise's own undo ({key} in Renoise)"));
+        assert_eq!(DawProfile::ABLETON.vocab.own_undo, "Live's own undo (Cmd-Z in Live)");
     }
 
     #[test]
