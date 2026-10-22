@@ -23,6 +23,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 | 必要なもの | 用途 |
 | --- | --- |
 | Rust と Cargo | クレートと移行テスト |
+| cargo-nextest（`cargo install cargo-nextest --locked`） | Rust のテスト（一つずつ別のプロセスで実行） |
 | PATH 上の Node.js（CI は 24 を使用） | 一部の Rust テスト、Live 拡張機能のテスト、移行テスト |
 | PATH 上の Python 3.11 以降（`python3`、Windows では `python.exe`） | Remote Script のテスト、リリーススクリプトのテスト、Python を実行する Rust テスト |
 | `vendor/` にローカルで用意した Extensions SDK | Live 拡張機能のビルドや型チェック（そのテストには不要） |
@@ -35,12 +36,12 @@ Windows では、いくつかのテストがシンボリックリンクを作成
 
 | コマンド | 内容 |
 | --- | --- |
-| `sh scripts/test-isolated.sh`（Windows では `./scripts/test-isolated.ps1`） | テスト専用のホームで `cargo test --workspace --locked` を実行します。引数は `cargo test` に渡します |
-| `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 一つのクレートの、一つのテストファイルだけを実行します |
+| `sh scripts/test-isolated.sh`（Windows では `./scripts/test-isolated.ps1`） | テスト専用のホームで、すべてのテストを cargo-nextest で一つずつ別のプロセスで実行します。引数は `cargo nextest run` に渡します（`KUMI_NEXTEST=0` では `cargo test`。クレートのテストが一つのプロセスで動きます） |
+| `sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'` | 一つのクレートの、一つのテストファイルだけを実行します。クレートのテストは一つのバイナリ（`tests/it/`、ファイルごとに一つのモジュール）です |
 | `cargo fmt --all --check` | CI と同じようにフォーマットを確認します |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint。CI では今のところ参考扱いです |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | await をまたいで保持される `RefCell` の借用。Lint の CI ジョブを失敗させます |
-| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | `Rust / Linux` の各パートが実行するテストを cargo-nextest で実行します（一つのパートのものは `-p <crate>` か `--exclude <crate>`、`--profile ci-os`：macOS と Windows が実行するもの、`--profile extended`：すべてのテスト） |
+| `sh scripts/test-isolated.sh --profile ci` | `Rust / Linux` の各パートが実行するテストを cargo-nextest で実行します（一つのパートのものは `-p <crate>` か `--exclude <crate>`、`--profile ci-os`：macOS と Windows が実行するもの、`--profile extended`：すべてのテスト） |
 | `python3 scripts/dev.py check` | このブランチが `origin/main` から変えたものについて、Required CI のチェックを実行します（別の起点は `--base`）：変更の空白、すべてのファイルがクレートかエリアに属すること、続いて影響を受けるクレートの `cargo fmt --check`、`RefCell` の lint、`ci` テスト（cargo-nextest）、さらに変更があれば Remote Script、Live の拡張機能、Renoise のツールのテスト、そしてリリーススクリプトのテスト。`--dry-run` は何を実行するかだけを示します |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | ブリッジの性能の基準。[開発者ガイド](DEVELOPER_GUIDE.md#ビルドテスト計測)を参照してください |
 

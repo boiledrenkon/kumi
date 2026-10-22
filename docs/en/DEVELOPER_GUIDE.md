@@ -82,14 +82,14 @@ elevated shell, tests that create symlinks skip or fail; CI's runners can.
 
 ## Build, test and measure
 
-Run native checks from the repository root. The isolated runner invokes
-`cargo test --workspace --locked` with a temporary home:
+Run native checks from the repository root. The isolated runner runs every test
+with cargo-nextest, each in a process of its own, with a temporary home:
 
 ```sh
 npm ci --prefix crates/kumi-runtime/tests/support   # once: the official SDKs some tests run
 cargo build --locked --workspace --all-targets
 sh scripts/test-isolated.sh                 # PowerShell: ./scripts/test-isolated.ps1
-sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport
+sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'
 python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 ```
 
