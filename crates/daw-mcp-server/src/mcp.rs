@@ -26,6 +26,10 @@ pub fn tools(host: &Host) -> Value {
 
 fn tool_list(daw: Daw) -> Value {
     let kinds = kinds(daw);
+    let resource = match daw {
+        Daw::Logic => "The Logic Pro to use, by its bundle id (com.apple.logic10) from discover, when several run.".to_string(),
+        daw => format!("The {daw} resource or preferences folder to use, from discover, when several run."),
+    };
     // Each DAW's own words: what it opens, what a read's parent holds, what a view is about.
     let (place, inside, parent, about) = match daw {
         Daw::Renoise => (
@@ -34,6 +38,12 @@ fn tool_list(daw: Daw) -> Value {
             "The ref of what the rows are in: a track for its devices, a device for its parameters, an instrument for its samples or phrases, a pattern (with track) for its lines.",
             "the track, pattern or instrument it is about",
         ),
+        Daw::Logic => (
+            "project",
+            "a track's regions, plug-ins, sends, Smart Controls or automation, or a plug-in's parameters",
+            "The ref of what the rows are in: a track for its regions, plug-ins, sends, Smart Controls or automation; an output strip (the Stereo Out is <epoch>:output:1) for its plug-ins; a plug-in for its parameters; a region for its notes. Notes, parameters, Smart Controls and automation need theirs.",
+            "the track or region it is about",
+        ),
         _ => (
             "project",
             "a track's items or an FX's parameters",
@@ -41,17 +51,20 @@ fn tool_list(daw: Daw) -> Value {
             "the take or track it is about",
         ),
     };
-    // Renoise plays from a slot and line; REAPER from where it is (cursor_set moves it).
+    // Renoise plays from a slot and line; REAPER and Logic Pro from where they are (cursor_set moves them).
     let play = match daw {
         Daw::Renoise => (
             "Starts Renoise's playback from where it is, or from sequence (a slot, from 1) and line (from 0, as Renoise numbers lines).",
             json!({"sequence": {"type": "integer", "minimum": 1}, "line": {"type": "integer", "minimum": 0}, "epoch": {"type": "string"}}),
         ),
+        Daw::Logic => {
+            ("Starts Logic Pro's playback from where the playhead is (cursor_set moves it first).", json!({"epoch": {"type": "string"}}))
+        }
         _ => ("Starts REAPER's playback from where it is (cursor_set moves it first).", json!({"epoch": {"type": "string"}})),
     };
     let pick = json!({
         "pid": {"type": "integer", "minimum": 1, "description": format!("The {daw} process to use, from discover, when several run.")},
-        "resource": {"type": "string", "description": format!("The {daw} resource or preferences folder to use, from discover, when several run.")},
+        "resource": {"type": "string", "description": resource},
     });
     let mut list = json!([
         {
@@ -195,9 +208,10 @@ fn tool_list(daw: Daw) -> Value {
         },
     ]);
     // (r-tracks) Saving the project, in either DAW: a file written, nothing in the project changed, so no change and no
-    // undo. The bridge's `project_save`; Renoise refuses `version`.
+    // undo. The bridge's `project_save`; Renoise and Logic refuse `version`.
     let (save_title, save) = match daw {
         Daw::Reaper => ("Save the REAPER project", "Saves the open REAPER project where it is, or as its next version (version: true). A project never saved is saved only under path, a .rpp inside the folder REAPER saves projects in, and never over a file."),
+        Daw::Logic => ("Save the Logic Pro project", "Saves the open Logic Pro project where it is (File > Save), or as path (a whole path to a .logicx package that isn't there yet; the project is that file from then on). A project never saved is saved only under path, and never over a file. (version is REAPER's: Logic Pro refuses it.)"),
         _ => ("Save the Renoise song", "Saves the open Renoise song where it is, or as path (a whole path to a .xrns file that isn't there yet; the song is that file from then on). A song never saved is saved only under path, and never over a file. (version is REAPER's: Renoise refuses it.)"),
     };
     if let Some(tools) = list.as_array_mut() {
@@ -212,7 +226,11 @@ fn tool_list(daw: Daw) -> Value {
             })), "required": ["epoch"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         }));
-        tools.extend(listening_tools(daw, &pick));
+        // (Logic's listening is its own: hear, audition and render below, a pass played in real time and answered
+        // when it is done, not jobs.)
+        if daw != Daw::Logic {
+            tools.extend(listening_tools(daw, &pick));
+        }
     }
     if daw == Daw::Reaper {
         // REAPER's refs are GUIDs, which a copy of the project in another tab shares: the epoch says which project they came from.
@@ -384,39 +402,102 @@ fn tool_list(daw: Daw) -> Value {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
         }));
     }
-    // M6: what changed in the project while Kumi wasn't looking, and what the producer did while it watched.
-    let catchup = json!([
-        {
-            "name": "catch_up",
-            "title": format!("What changed in {daw}"),
-            "description": format!("What changed in the open {daw} project since this host last kept its snapshot (edits made while Kumi was closed, or while {daw} was restarted): {{place, name, lastSeenAt, project: [details], changes: [added | removed | changed], more?, same?}}, or first: true when there is no snapshot yet. The snapshot is kept again afterwards."),
-            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
-            "annotations": {"readOnlyHint": false, "idempotentHint": false, "openWorldHint": false},
-        },
-        {
-            "name": "baseline_save",
-            "title": format!("Keep the {daw} project's snapshot"),
-            "description": format!("Keeps the open {daw} project's snapshot again, so the next catch_up tells only what changes after now. Refused (saved: false) until catch_up has compared this project, so what changed while Kumi was away is never lost."),
-            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
-            "annotations": {"readOnlyHint": false, "idempotentHint": true, "openWorldHint": false},
-        },
-        {
-            "name": "watch_start",
-            "title": format!("Watch {daw}"),
-            "description": format!("Starts watching the producer work in {daw}: the project as it is now is kept, and what they add is looked at as it comes. Nothing in {daw} changes."),
-            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
-            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
-        },
-        {
-            "name": "watch_stop",
-            "title": format!("Stop watching {daw}"),
-            "description": format!("Stops watching and says what the producer did since watch_start: {{watched, changes (with each value before and after, what an added thing is made of, the parameters they moved by name), project, selected (the tracks they selected)}}."),
-            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
-            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
-        }
-    ]);
-    list.as_array_mut().expect("a list").extend(catchup.as_array().cloned().unwrap_or_default());
+    if daw == Daw::Logic {
+        // (a parameter's text across its range is REAPER's and Renoise's read: Logic's param rows say their min and max)
+        unset(&mut list, "read", "grid");
+        // Logic's refs are positions with an epoch (`1:track:2`), as Renoise's: a track or region change moves the epoch,
+        // and refs from before are refused as stale. What each kind sits in, and what each view is about.
+        property(
+            &mut list,
+            "read",
+            "parent",
+            json!({
+                "type": "string",
+                "description": "The ref of what the rows are in: a track for its regions, plug-ins or sends; a region for its notes (required for notes).",
+            }),
+        );
+        property(
+            &mut list,
+            "focus_body",
+            "ref",
+            json!({
+                "type": "string",
+                "description": "The ref of what the view is about: a track for tree and routing, a region for notes (the selected one when left out).",
+            }),
+        );
+        property(
+            &mut list,
+            "focus_body",
+            "around",
+            json!({
+                "type": "string",
+                "description": "The ref of a track to centre the first page of the timeline's lanes on: the page starts half a page above it, and says where in `from`.",
+            }),
+        );
+        property(
+            &mut list,
+            "focus_body",
+            "window",
+            json!({
+                "type": "object",
+                "properties": {"from": {"type": "number"}, "to": {"type": "number"}},
+                "required": ["from", "to"],
+                "additionalProperties": false,
+                "description": "The range of the timeline to show, in beats from the project's start.",
+            }),
+        );
+    }
+    // M6: what changed in the project while Kumi wasn't looking, and what the producer did while it watched (REAPER's
+    // and Renoise's through the bridge's digest; Logic's catch-up and watch_me are Kumi's own, over the bridge's reads).
+    if daw != Daw::Logic {
+        let catchup = json!([
+            {
+                "name": "catch_up",
+                "title": format!("What changed in {daw}"),
+                "description": format!("What changed in the open {daw} project since this host last kept its snapshot (edits made while Kumi was closed, or while {daw} was restarted): {{place, name, lastSeenAt, project: [details], changes: [added | removed | changed], more?, same?}}, or first: true when there is no snapshot yet. The snapshot is kept again afterwards."),
+                "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "idempotentHint": false, "openWorldHint": false},
+            },
+            {
+                "name": "baseline_save",
+                "title": format!("Keep the {daw} project's snapshot"),
+                "description": format!("Keeps the open {daw} project's snapshot again, so the next catch_up tells only what changes after now. Refused (saved: false) until catch_up has compared this project, so what changed while Kumi was away is never lost."),
+                "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "idempotentHint": true, "openWorldHint": false},
+            },
+            {
+                "name": "watch_start",
+                "title": format!("Watch {daw}"),
+                "description": format!("Starts watching the producer work in {daw}: the project as it is now is kept, and what they add is looked at as it comes. Nothing in {daw} changes."),
+                "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+                "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+            },
+            {
+                "name": "watch_stop",
+                "title": format!("Stop watching {daw}"),
+                "description": format!("Stops watching and says what the producer did since watch_start: {{watched, changes (with each value before and after, what an added thing is made of, the parameters they moved by name), project, selected (the tracks they selected)}}."),
+                "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+                "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+            }
+        ]);
+        list.as_array_mut().expect("a list").extend(catchup.as_array().cloned().unwrap_or_default());
+    }
     list
+}
+
+/// Takes one property out of a tool's input schema, the tool found by its name: one another DAW's bridge takes and
+/// this one's doesn't.
+fn unset(list: &mut Value, tool: &str, name: &str) {
+    let tools = list.as_array_mut().expect("a list of tools");
+    let tool = tools.iter_mut().find(|candidate| candidate["name"] == tool).unwrap_or_else(|| panic!("no tool {tool}"));
+    tool["inputSchema"]["properties"].as_object_mut().expect("its properties").remove(name);
+}
+
+/// Sets one property of a tool's input schema, the tool found by its name.
+fn property(list: &mut Value, tool: &str, name: &str, schema: Value) {
+    let tools = list.as_array_mut().expect("a list of tools");
+    let tool = tools.iter_mut().find(|candidate| candidate["name"] == tool).unwrap_or_else(|| panic!("no tool {tool}"));
+    tool["inputSchema"]["properties"][name] = schema;
 }
 
 /// The listening tools (M5): renders and captures as jobs, playing a file out loud, the audio behind a ref, scratch
@@ -616,7 +697,7 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     };
                     result(id, tool_result(answer, is_error))
                 }
-                "catch_up" | "baseline_save" | "watch_start" | "watch_stop" => {
+                "catch_up" | "baseline_save" | "watch_start" | "watch_stop" if host.daw() != Daw::Logic => {
                     let (answer, is_error) = match name {
                         "catch_up" => host.catch_up(&arguments).await,
                         "baseline_save" => host.baseline_save(&arguments).await,
@@ -625,7 +706,9 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     };
                     result(id, tool_result(answer, is_error))
                 }
-                "render" | "hear" | "listen_job" | "listen_cancel" | "audition" | "audition_stop" | "audio_file" | "scratch" => {
+                "render" | "hear" | "listen_job" | "listen_cancel" | "audition" | "audition_stop" | "audio_file" | "scratch"
+                    if host.daw() != Daw::Logic =>
+                {
                     let (answer, is_error) = match name {
                         "render" => host.render(&arguments).await,
                         "hear" => host.hear(&arguments).await,

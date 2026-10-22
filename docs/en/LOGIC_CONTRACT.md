@@ -20,8 +20,8 @@ Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-
 
 - `pid`: Logic's; `resource`: Logic's bundle identifier (`com.apple.logic10`, or `com.apple.mobilelogic` for the Creator Studio build).
 - `project.id`: no UUID exists in every project, so the id is the 32-hex SHA-256 prefix of the saved package path; unsaved projects carry an `identity` from the window title.
-- `status.busy`: `modal` when `AXMainWindow` is an `AXDialog` or a sheet is open; `away` when Logic's windows are not on the current Space; `loading` while the window title is empty.
-- `status.permission`: `accessibility` missing when `AXIsProcessTrusted` is false; reads then answer `failed`, never `busy`.
+- `status` is flat, as REAPER's: `{project, busy, permission}`. `busy` is `false` when free, else `modal` (the main or focused window is a dialog or a sheet is open), `away` (Logic reports no window, its Space not being the current one) or `loading` (the project window has no title and no document yet); the last project is kept through those.
+- `status.permission`: `null`, or `"accessibility"` while the helper is not trusted; reads then answer `failed`, never `busy`. The identity (daw, bridge, dawVersion, pid, resource, project) is in the welcome, as for every own bridge; the discovery file is `logic-<pid>-<key>.json` with the same fields.
 
 ## Rows (`read`)
 
@@ -54,40 +54,49 @@ selected state).
 
 The bridge runs the helper as a child and speaks JSON lines on its stdin and stdout: one request
 per line, one reply per line, events in between. A request is `{"id": n, "op": "…", …}`; the
-reply is `{"id": n, "ok": true, …}` or `{"id": n, "ok": false, "error": "…"}`; an event is
-`{"event": "…", …}` with no id. One request at a time; a reply within 2 s or an error; the helper
-logs to stderr only and never activates an app unless asked.
+reply is `{"id": n, "ok": true, "ms": n, …}` or `{"id": n, "ok": false, "error": "<code>", …}`;
+an event is `{"event": "…", …}` with no id. One request at a time: the helper answers within 2 s
+or with `timeout` (the work had started) or `busy` (the previous request still runs); it logs to
+stderr only and never activates an app unless asked. The helper's README
+(`crates/logic-kumi/helper/README.md`) is the exact reference; this table is the summary.
 
 | Op | Parameters | Reply |
 | --- | --- | --- |
 | `trusted` | `prompt` (bool, default false) | `trusted` |
-| `apps` | `bundles` (ids) | `apps: [{bundle, pid, name, active, hidden}]` |
-| `processes` | `contains` (a substring of the executable path) | `pids` |
+| `apps` | `bundles` (ids) | `apps: [{bundle, pid, name, active, hidden}]`, then `app` events for those bundles |
+| `processes` | `contains` (a substring of the executable path) | `pids` (ascending) |
 | `activate` | `pid` | `active` |
-| `windows` | `pid` | `windows: [{title, role, subrole, main, focused, document, minimized, fullscreen, modal}]`, `listed` (the Window menu's window titles) |
-| `tree` | `pid`, `root`, `path`, `depth`, `children`, `attrs`, `popups` | `node` |
-| `get` | `pid`, `root`, `path`, `attrs` | `attrs` |
-| `set` | `pid`, `root`, `path`, `attr`, `value` | `result`, `before`, `after` |
-| `action` | `pid`, `root`, `path`, `name` | `result`, `before`, `after` |
-| `menu` | `pid`, `titles` (from the menu bar down) | `result` |
-| `keys` | `pid`, `key`, `mods` (`cmd`, `shift`, `opt`, `ctrl`) | `posted` |
-| `type` | `pid`, `text` | `posted` |
-| `midi.open` | `name`, `uid` | `opened` |
+| `windows` | `pid`, `menu` (the Window menu's title, default "Window") | `windows: [{title, role, subrole, main, focused, document, minimized, fullscreen, modal}]`, `listed` (titles after the Window menu's last separator; can include items that are not windows) |
+| `tree` | `pid`, `root`, `path`, `depth` (1), `children` (100), `attrs` (all but `set` and `act`), `popups` (false) | `node`, `truncated` |
+| `get` | `pid`, `root`, `path`, `attrs`, `popups` | `attrs: {"AXName": value}`, `truncated` |
+| `set` | `pid`, `root`, `path`, `attr`, `value`, `settleMs` (50), `popups` | `result`, `before`, `after`; an AX failure is `ok: false` with the AXError name as `error` and those three fields kept |
+| `action` | `pid`, `root`, `path`, `name`, `settleMs`, `popups` | as `set` |
+| `menu` | `pid`, `titles` (from the menu bar down) | `result`, `title`, `active`; `no-menu-item` names the first title not found |
+| `keys` | `pid`, `key`, `mods` (`cmd`, `shift`, `opt`, `ctrl`) | `posted`, `active` |
+| `type` | `pid`, `text` (at most 200 characters) | `posted`, `active` |
+| `midi.open` | `name`, `uid` (int, or a string hashed to one) | `opened`, `source`, `destination`; `midi-open` while open |
 | `midi.send` | `hex` | `sent` |
-| `midi.close` | | `closed` |
-| `tap.start`, `tap.stop` | reserved for M5 | |
-| `quit` | | |
+| `midi.close` | | `closed` (idempotent) |
+| `tap.start`, `tap.stop` | reserved for M5 | `reserved` |
+| `quit` | | `ok` then exit |
+
+Error codes: `malformed`, `unknown-op`, `bad-request`, `untrusted`, `no-process`, `no-app`,
+`timeout`, `busy`, `popup`, `unknown-attr`, `no-menubar`, `no-menu-item`, `disabled`,
+`unknown-key`, `unknown-mod`, `too-long`, `bad-hex`, `midi-closed`, `midi-open`, `reserved`, and
+an AXError's name for a failed read, write or action.
 
 `root` is `"app"`, `"main"` (`AXMainWindow`), `"focused"` (`AXFocusedWindow`), `"menubar"` or
 `{"title": "substring"}`; `path` is child indexes joined by dots from that root. `depth` and
-`children` bound a `tree`; `attrs` names the attributes wanted (`"all"` for every one);
-`popups` is false by default, and a false value never reads a pop-up button's children.
+`children` bound a `tree`; `attrs` names the attributes wanted (`"all"` for every one, by node
+field or AX name); `popups` false never reads a pop-up button's children, and a path through one
+is refused with `popup`.
 
 A node is `{i, role, subrole, title, desc, value, valueDesc, help, id, enabled, selected, pos:
 {x, y}, size: {w, h}, set: [attributes], act: [actions], c: [nodes], more: n}`; fields that are
-empty are left out; `more` counts children beyond `children`. Values are JSON (numbers, strings,
-booleans), points and sizes are objects, other elements are `{"ref": "role title"}`.
+empty are left out; `more` counts children beyond `children`, or all of them at the depth limit.
+Values are JSON (numbers, strings, booleans), points, sizes, rectangles and ranges are objects,
+other elements are `{"ref": "role title"}`.
 
-Events: `{"event": "midi", "hex": "…", "ms": n}` for bytes from the MIDI destination;
-`{"event": "app", "state": "launched" | "terminated" | "activated" | "deactivated", "pid": n,
-"bundle": "…"}` for the apps named in the last `apps` request.
+Events: `{"event": "midi", "hex": "…", "ms": n}` for bytes from the MIDI destination (a long
+SysEx may come in several); `{"event": "app", "state": "launched" | "terminated" | "activated" |
+"deactivated", "pid": n, "bundle": "…"}` for the apps named in the last `apps` request.

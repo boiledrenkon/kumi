@@ -1,7 +1,7 @@
-//! REAPER's and Renoise's sessions made the way the app makes them (`kumi::cli::run`, as main() does, with
-//! `--daw reaper|renoise`), Kumi's host in process in front of a simulated bridge: the session speaks the DAW's words
-//! (its profile is the DAW's), and says so when the DAW is busy, opens another project in the same tab, or goes away;
-//! none of it in Live's words.
+//! REAPER's, Renoise's and Logic's sessions made the way the app makes them (`kumi::cli::run`, as main() does, with
+//! `--daw reaper|renoise|logic`), Kumi's host in process in front of a simulated bridge: the session speaks the DAW's
+//! words (its profile is the DAW's), and says so when the DAW is busy, opens another project in the same tab, lacks a
+//! permission, or goes away; none of it in Live's words.
 #[path = "support/live_words.rs"]
 mod live_words;
 #[path = "support/vt.rs"]
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
 use daw_mcp_server::{
     host::Host,
-    simulator::{reaper::ReaperScript, renoise::RenoiseScript, Simulator, SimulatorConfig},
+    simulator::{logic::LogicScript, reaper::ReaperScript, renoise::RenoiseScript, Simulator, SimulatorConfig},
 };
 use futures::FutureExt;
 use kumi::{
@@ -417,7 +417,9 @@ async fn daw_in_a_reaper_session(here: fn(DawId) -> bool) -> String {
 case!(daw_in_a_reaper_session_says_which_daw_and_opens_kumi_again_with_another, async {
     let offered = daw_in_a_reaper_session(|_| true).await;
     assert!(
-        offered.contains("[daw] Kumi works with REAPER. /daw live or /daw renoise opens Kumi again with Live or Renoise."),
+        offered.contains(
+            "[daw] Kumi works with REAPER. /daw live, /daw renoise or /daw logic opens Kumi again with Live, Renoise or Logic Pro."
+        ),
         "{offered}"
     );
 });
@@ -489,4 +491,48 @@ case!(renoise_loading_its_file_during_kumis_first_look_keeps_the_conversation_an
     input.write("/quit\n");
     input.end();
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+});
+
+// Logic's session: while its helper lacks Accessibility the look says what to allow (and Logic stays connected);
+// granted, the project reads; busy is said in Logic's words (a dialog, another desktop); gone is gone. Nothing of it
+// in Live's words. (Logic's bridge is the host's to start: with none installed in this home, Logic going away stays
+// away.)
+case!(a_logic_session_made_as_the_app_makes_it_waits_for_accessibility_then_speaks_logics_words, async {
+    let script = LogicScript::new();
+    let lab = AppLab::new(DawId::Logic, Daw::Logic, move |secret| script.config(secret, "com.apple.logic10")).await;
+    let simulator = lab.simulator.clone();
+    simulator.set_permission(Some("accessibility"));
+    let (input, out, task) = lab.start(false);
+    wait_for("the refusal", &out, |text| text.contains("couldn't look just now: Kumi's helper needs Accessibility to read Logic Pro"))
+        .await;
+    let said = out.0.borrow().clone();
+    assert!(
+        !said.contains("busy (") && said.contains("MCP/Logic Pro: connected"),
+        "lacking a permission is neither busy nor gone:\n{said}"
+    );
+    simulator.set_permission(None);
+    wait_for("the project, once allowed", &out, |text| text.contains("[observation] Logic Pro — Scratch")).await;
+    simulator.set_busy(Some("modal"));
+    wait_for("a dialog", &out, |text| text.contains(": busy (Logic Pro is showing a dialog)")).await;
+    let status = command(&input, &out, "/status").await;
+    assert!(status.contains("busy (Logic Pro is showing a dialog)"), "{status}");
+    simulator.set_busy(None);
+    wait_for("not busy", &out, |text| text.contains(": answering again")).await;
+    simulator.set_busy(Some("away"));
+    wait_for("another desktop", &out, |text| text.contains(": busy (Logic Pro's window is on another desktop)")).await;
+    simulator.set_busy(None);
+    let before = out.0.borrow().len();
+    wait_for("answering again", &out, |text| text[before..].contains(": answering again")).await;
+    simulator.stop();
+    let before = out.0.borrow().len();
+    wait_for("Logic gone", &out, |text| text[before..].contains(": disconnected")).await;
+    input.write("/quit\n");
+    input.end();
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+    let said = out.0.borrow().clone();
+    let leaks = live_words::leaks(&said);
+    assert!(leaks.is_empty(), "Live's words:\n{}\n\nin:\n{said}", leaks.join("\n"));
+    for want in ["MCP/Logic Pro", "Logic Pro closed", "Each project's conversation continues next time"] {
+        assert!(said.contains(want), "no {want:?} in:\n{said}");
+    }
 });

@@ -1,6 +1,6 @@
-//! The DAWs whose bridges are Kumi's own (REAPER's extension, Renoise's tool), through Kumi's host, `daw-mcp-server`:
-//! one integration over the host's tools (`status`, `snapshot`, `read`, `focus`, `focus_body`), each DAW giving its
-//! words, its refs and its instructions.
+//! The DAWs whose bridges are Kumi's own (REAPER's extension, Renoise's tool, the bridge beside Logic Pro), through
+//! Kumi's host, `daw-mcp-server`: one integration over the host's tools (`status`, `snapshot`, `read`, `focus`,
+//! `focus_body`), each DAW giving its words, its refs and its instructions.
 use crate::{
     core::{
         context::IntegrationContext,
@@ -58,7 +58,7 @@ const MOST_ROWS: u64 = 200;
 pub struct OwnDaw {
     pub profile: &'static DawProfile,
     pub descriptor: BridgeDescriptor,
-    /// What `daw-mcp-server --daw` takes: "reaper", "renoise".
+    /// What `daw-mcp-server --daw` takes: "reaper", "renoise", "logic".
     pub host_flag: &'static str,
     pub instructions: &'static str,
     /// What a clear mechanical mistake looks like in this DAW, for the shared rules (`own_rules`): examples, in its words.
@@ -75,12 +75,19 @@ pub struct OwnDaw {
     pub bodies: &'static [BodyKind],
     pub body_request: fn(&BodyRequest) -> Option<JsonObject>,
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
+    /// Why the DAW answers late, from its bridge's `busy` code (`modal`, `loading`…), in the DAW's words.
+    pub busy_words: fn(&str) -> String,
+    /// What the bridge lacks, from its status's `permission` (Logic's `accessibility`), in words that say how to grant
+    /// it: a look fails for it, and never counts as busy.
+    pub permission_words: fn(&str) -> String,
     /// What Kumi can change in it, and how.
     pub changes: &'static super::own_changes::OwnChangeSet,
-    /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe.
-    pub catch_up: &'static CatchUpWords,
-    /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call.
-    pub phrases: &'static super::own_phrases::OwnPhrases,
+    /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe; None for a
+    /// DAW without them (Logic's).
+    pub catch_up: Option<&'static CatchUpWords>,
+    /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call; None for a DAW without them
+    /// (Logic's).
+    pub phrases: Option<&'static super::own_phrases::OwnPhrases>,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -433,8 +440,8 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     Ok(value)
 }
 
-/// Why the DAW may answer late, in words: REAPER's `busy` code.
-fn busy_words(code: &str, profile: &DawProfile) -> String {
+/// Why the DAW may answer late, in words, for a DAW whose `busy` codes are REAPER's (`modal`, `loading`, `rendering`).
+pub fn busy_words(code: &str, profile: &DawProfile) -> String {
     match code {
         "modal" => "a dialog is open".into(),
         "loading" => format!("a {} is loading", profile.words.place),
@@ -442,6 +449,11 @@ fn busy_words(code: &str, profile: &DawProfile) -> String {
         "working" => "it's still running a long request (a plug-in loading, or a dialog that request opened)".into(),
         other => other.into(),
     }
+}
+
+/// What a permission the bridge lacks means, for a DAW whose bridge runs inside it and lacks none.
+pub fn permission_words(permission: &str, profile: &DawProfile) -> String {
+    format!("Kumi's bridge in {} lacks the {permission} permission", profile.words.app)
 }
 
 impl<S: RefScheme + 'static> OwnIntegration<S> {
@@ -769,7 +781,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 if last.as_ref() != Some(&seen) {
                     if let Some(on_focus) = &on_focus {
                         let mut filled = (daw.fill_focus)(&focus);
-                        filled.busy = focus.get("busy").and_then(Value::as_str).map(|code| busy_words(code, daw.profile));
+                        filled.busy = focus.get("busy").and_then(Value::as_str).map(|code| (daw.busy_words)(code));
                         on_focus(Some(filled));
                     }
                     last = Some(seen);
@@ -833,6 +845,21 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         observation
     }
 
+    /// A look that failed while the DAW is there: for what its bridge lacks (Logic's Accessibility), said in words that
+    /// say how to grant it, else for the reason the bridge gave.
+    async fn unread_for(&self, refused: Refused, signal: &Signal) -> Observation {
+        let lacking = if refused.busy { None } else { self.lacking(signal).await };
+        self.unread(lacking.as_deref().unwrap_or(&refused.why), refused.busy)
+    }
+
+    /// What the bridge lacks, as its status says (`permission`: Logic's `accessibility`), in the DAW's words; None when
+    /// it lacks nothing, or the status can't be read.
+    async fn lacking(&self, signal: &Signal) -> Option<String> {
+        let status = self.call("status", json!({}), signal.clone()).await.ok()?.ok()?;
+        let permission = status.get("permission").and_then(Value::as_str).filter(|permission| !permission.is_empty())?;
+        Some((self.daw.permission_words)(permission))
+    }
+
     /// Asks the session for another look a second from now (a few times at most since the last good one).
     fn look_again_later(&self) {
         let Some(look_again) = self.options.context.on_look_again.clone() else { return };
@@ -851,7 +878,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
 
     /// M6: keeps the project's snapshot again as the edits settle (`Remembered::due`), while the integration lasts.
     fn keep_snapshots(&self) {
-        if self.keeping.replace(true) {
+        if self.daw.catch_up.is_none() || self.keeping.replace(true) {
             return;
         }
         let (remembered, endpoint, closed) = (self.remembered.clone(), self.endpoint.clone(), self.closed.clone());
@@ -874,20 +901,14 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     /// M6, after a look at the project: catch-up for one it hasn't run for (another project, or the DAW back after it
     /// went away), else the snapshot kept again when the last one is old.
     fn remember_look(&self, identity: Option<&str>, name: &str) {
+        let Some(words) = self.daw.catch_up else { return };
         let Some(identity) = identity.filter(|identity| !identity.is_empty()) else { return };
         let Some(host) = self.endpoint.borrow().clone() else { return };
         let remembered = self.remembered.clone();
         let signal = abort::any([self.lifetime.clone(), abort::timeout(60_000)]);
         if remembered.should_catch_up(identity) {
             let on_catch_up = self.options.context.on_catch_up.clone();
-            tokio::task::spawn_local(remembered.catch_up(
-                host,
-                identity.to_owned(),
-                name.to_owned(),
-                self.daw.catch_up,
-                on_catch_up,
-                signal,
-            ));
+            tokio::task::spawn_local(remembered.catch_up(host, identity.to_owned(), name.to_owned(), words, on_catch_up, signal));
         } else if remembered.stale() {
             tokio::task::spawn_local(remembered.save(host, signal));
         }
@@ -898,12 +919,14 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let mut tools = vec![self.read_tool()];
         tools.extend(self.changes.tools());
         // M6: learning a routine the producer does by hand, for a recipe.
-        tools.push(Rc::new(WatchTool {
-            endpoint: self.endpoint.clone(),
-            words: self.daw.catch_up,
-            app: self.daw.profile.words.app,
-            on_watch: self.options.context.on_watch.clone(),
-        }));
+        if let Some(words) = self.daw.catch_up {
+            tools.push(Rc::new(WatchTool {
+                endpoint: self.endpoint.clone(),
+                words,
+                app: self.daw.profile.words.app,
+                on_watch: self.options.context.on_watch.clone(),
+            }));
+        }
         tools.extend(self.listening.tools());
         // M7: the variations loop, where the DAW offers it.
         if let Some(variations) = &self.variations {
@@ -1039,7 +1062,20 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         let profile = self.daw.profile;
         let project = snapshot.get("project").cloned().unwrap_or(Value::Null);
-        let name = project.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("untitled").to_owned();
+        // The project's name: as the bridge says it, else its file's (Logic's row names the package's path), else the
+        // identity an unsaved one carries (Logic's window title).
+        let name = project
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let path = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty())?;
+                let file = path.rsplit(['/', '\\']).next()?;
+                Some(file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned()).filter(|stem| !stem.is_empty())
+            })
+            .or_else(|| project.get("identity").and_then(Value::as_str).filter(|identity| !identity.is_empty()).map(str::to_owned))
+            .unwrap_or_else(|| "untitled".to_owned());
         let path = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty());
         // Saved: a file and an id (Renoise names an unsaved song by an id of its own until its first save keeps it), as
         // the host's snapshots are kept. Every unsaved project of the DAW shares its unsaved place, as Live's Sets do.
@@ -1320,15 +1356,16 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     }
     /// A fixed phrase as the DAW's change, in the project the session's look just read: one plan, so it lands in HISTORY
     /// with Kumi's undo and Kumi says what changed. A phrase the DAW has no such thing for is refused in its words; one
-    /// that can't run as asked here goes to the model.
+    /// that can't run as asked here goes to the model. None for a DAW without them (Logic's).
     async fn instant(&self, intent: &Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let Some(phrases) = self.daw.phrases else { return Ok(None) };
         if self.closed.get() || !self.connected.get() {
             return Ok(None);
         }
         let Some(snapshot) = self.looked.borrow().clone() else { return Ok(None) };
         let Some(rows) = self.every_track(&snapshot, &signal).await? else { return Ok(None) };
         let slots = match intent {
-            Intent::Loop { .. } if self.daw.phrases.loops_by_slot => match self.slots(&snapshot, &signal).await? {
+            Intent::Loop { .. } if phrases.loops_by_slot => match self.slots(&snapshot, &signal).await? {
                 Some(slots) => Some(slots),
                 None => return Ok(None),
             },
@@ -1355,7 +1392,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
             transport: snapshot.get("transport").unwrap_or(&none),
             slots: slots.as_deref(),
         };
-        match (self.daw.phrases.plan)(intent, &look) {
+        match (phrases.plan)(intent, &look) {
             Phrased::Model => Ok(None),
             Phrased::Refused(text) => Ok(Some(InstantOutcome { text, is_error: true })),
             Phrased::Steps(steps) => {
@@ -1443,13 +1480,14 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 }
                 match self.look(&signal).await {
                     Ok(Ok(snapshot)) => Ok(self.observation(&snapshot, pinned)),
-                    Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
+                    Ok(Err(refused)) if refused.there => Ok(self.unread_for(refused, &signal).await),
                     Ok(Err(refused)) => Ok(self.no_access(Some(&refused.why))),
                     Err(error) if error.is_aborted() => Err(error),
                     Err(_) => Ok(self.no_access(None)),
                 }
             }
-            Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
+            // Still there, but the look failed: for what the bridge lacks (a permission), or the DAW's own change.
+            Ok(Err(refused)) if refused.there => Ok(self.unread_for(refused, &signal).await),
             Ok(Err(refused)) => {
                 if self.connected.replace(false) {
                     (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
@@ -1469,7 +1507,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     async fn close(&self) -> Result<(), RuntimeError> {
         // The project as Kumi leaves it: what changes after is what the next catch-up tells (bounded, as Live's).
         let host = self.endpoint.borrow().clone();
-        if let Some(host) = host.filter(|_| self.connected.get() && !self.closed.get()) {
+        if let Some(host) = host.filter(|_| self.daw.catch_up.is_some() && self.connected.get() && !self.closed.get()) {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(CLOSE_MS),
                 self.remembered.clone().save(host, abort::timeout(CLOSE_MS)),
@@ -1632,12 +1670,15 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
 /// The instructions a DAW's turns carry: its own, the rules every DAW shares, its changes', and what catch-up's summary is.
 pub fn instructions_of(daw: &OwnDaw) -> String {
     let place = daw.profile.words.place;
-    format!(
-        "{} {} {} If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters.",
-        daw.instructions,
-        own_rules(daw),
-        daw.changes.instructions
-    )
+    let since = format!(
+        "If the observation has sinceLastTime, the {place} changed while Kumi wasn't running (a short, possibly incomplete summary); take it into account and mention it briefly when it matters."
+    );
+    // (a part that says nothing leaves no gap)
+    [daw.instructions.to_string(), own_rules(daw), daw.changes.instructions.to_string(), since]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The rules Kumi works by in every DAW whose bridge is its own (core's, the same everywhere), in the DAW's words; the DAW

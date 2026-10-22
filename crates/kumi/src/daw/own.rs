@@ -1,6 +1,8 @@
-//! REAPER and Renoise as the app works with them: Kumi's own bridge in each (REAPER's extension, Renoise's tool),
-//! found, installed, checked and taken out through the shared lifecycle (daw-bridge), and the session's integration
-//! through Kumi's host. One provider serves both; each DAW gives its words and its integration.
+//! REAPER, Renoise and Logic Pro as the app works with them: Kumi's own bridge for each (REAPER's extension, Renoise's
+//! tool, the bridge beside Logic Pro), found, installed, checked and taken out through the shared lifecycle
+//! (daw-bridge), and the session's integration through Kumi's host. One provider serves the three; each DAW gives its
+//! words and its integration. REAPER and Renoise load their bridge from their own folder when they start; Logic loads
+//! nothing, so its bridge lives in Kumi's own folder and the host starts it beside Logic when a session begins.
 use crate::daw::provider::{
     BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, RemovedBridge, Toggle,
     ToggleWords, WatchWords,
@@ -16,8 +18,8 @@ use daw_bridge::{
     doctor::{self, Bundled, Level},
     files,
     install::{
-        min_version, reaper_extension_name, reaper_install, reaper_target, renoise_target, renoise_targets, unloadable, TargetError,
-        RENOISE_TOOL_FOLDER,
+        self, min_version, reaper_extension_name, reaper_install, reaper_target, renoise_target, renoise_targets, unloadable, TargetError,
+        LOGIC_BINARY, LOGIC_BRIDGE_FOLDER, LOGIC_HELPER_PREFIX, LOGIC_VERSION_FILE, RENOISE_TOOL_FOLDER,
     },
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
@@ -45,7 +47,7 @@ use std::{
 pub struct Own {
     pub id: DawId,
     pub daw: Daw,
-    /// The bridge, as the producer knows it: "Kumi's extension", "Kumi's tool".
+    /// The bridge, as the producer knows it: "Kumi's extension", "Kumi's tool", "Kumi's Logic Pro bridge".
     pub bridge: &'static str,
     pub create: fn(OwnOptions) -> Rc<dyn Integration>,
     /// What chatting without the DAW says it is.
@@ -67,6 +69,18 @@ pub static RENOISE: Own = Own {
     create: kumi_runtime::integrations::renoise::create_renoise_integration,
     instructions: "Renoise isn't connected, so Kumi can't see your song: answer from what you know, and say so.",
 };
+
+pub static LOGIC: Own = Own {
+    id: DawId::Logic,
+    daw: Daw::Logic,
+    bridge: "Kumi's Logic Pro bridge",
+    create: kumi_runtime::integrations::logic::create_logic_integration,
+    instructions: "Logic Pro isn't connected, so Kumi can't see your project: answer from what you know, and say so.",
+};
+
+/// Names a folder laid out as a release lays Logic's bridge out (`logic-kumi`, a `kumi-logic-hands-*` helper and
+/// `version`) to set the bridge up from, instead of the one beside Kumi or this checkout's build.
+pub const LOGIC_BRIDGE_SOURCE_VAR: &str = "KUMI_LOGIC_BRIDGE_SOURCE";
 
 fn kumi_home(env: &Env) -> PathBuf {
     PathBuf::from(crate::config::kumi_dir(env))
@@ -92,6 +106,12 @@ fn home(env: &Env) -> PathBuf {
 fn detected<T>(env: &Env, read: impl FnOnce(&detect::Env) -> T) -> T {
     let var = |name: &str| env.get(name).cloned();
     read(&detect::Env { os: Os::current(), home: home(env), var: &var, root: None })
+}
+
+/// The newest Logic Pro on this Mac, by version (the usual one when none says).
+fn best_logic(env: &Env) -> Option<detect::LogicInstall> {
+    let installs = detected(env, detect::detect_logic);
+    installs.iter().max_by_key(|install| install.version).cloned().or_else(|| installs.into_iter().next())
 }
 
 impl Own {
@@ -126,8 +146,8 @@ impl Own {
         match self.daw {
             Daw::Reaper => reaper_target(reaper_install(&self.reapers(env))?, Os::current()).map_err(Some),
             Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
-            // Logic's bridge is placed by Kumi, beside Kumi; its target comes with that bridge.
-            Daw::Logic => Err(None),
+            // Logic loads nothing: its bridge goes in Kumi's own folder, which waits on nothing.
+            Daw::Logic => Ok(install::logic_target(&BridgePaths::new(&kumi_home(env), self.daw))),
         }
     }
 
@@ -144,7 +164,7 @@ impl Own {
             daw: self.daw,
             dir: target.parent().map(Path::to_path_buf).unwrap_or_default(),
             name: target.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
-            folder: self.daw == Daw::Renoise,
+            folder: self.is_folder(),
             reference: PathBuf::from(&receipt.reference),
         }
     }
@@ -188,12 +208,13 @@ impl Own {
         let path = match self.daw {
             Daw::Reaper => app.join("daws").join("reaper").join(reaper_extension_name(Os::current())),
             Daw::Renoise => app.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
-            Daw::Logic => app.join("daws").join("logic").join("logic-kumi"),
+            Daw::Logic => app.join("daws").join("logic").join(LOGIC_BRIDGE_FOLDER),
         };
         path.exists().then_some(path)
     }
 
-    /// The bridge this Kumi brings: beside Kumi in a release, or this checkout's own build.
+    /// The bridge this Kumi brings: beside Kumi in a release, or this checkout's own build (Logic's, once staged by
+    /// `logic_source`).
     fn bundled_source(&self) -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let beside = exe.parent()?.to_path_buf();
@@ -204,13 +225,13 @@ impl Own {
                 beside.join(if cfg!(windows) { name.to_string() } else { format!("lib{name}") })
             }
             Daw::Renoise => checkout.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
-            Daw::Logic => beside.join("logic-kumi"),
+            Daw::Logic => logic_staging(&checkout),
         };
         self.carried_by(&beside).or_else(|| built.exists().then_some(built))
     }
 
     /// The bundled bridge's version, where it says one (Renoise's tool does; REAPER's build gets a version file with
-    /// the release pipeline).
+    /// the release pipeline; Logic's folder carries one).
     fn bundled_version(&self) -> Option<String> {
         self.bundled_source().and_then(|source| self.version_of(&source))
     }
@@ -219,17 +240,39 @@ impl Own {
         let text = match self.daw {
             Daw::Renoise => std::fs::read_to_string(source.join("payload").join("version.lua")).ok()?,
             Daw::Reaper => std::fs::read_to_string(source.with_extension("version")).ok()?,
-            Daw::Logic => std::fs::read_to_string(source.join("version")).ok()?,
+            Daw::Logic => std::fs::read_to_string(source.join(LOGIC_VERSION_FILE)).ok()?,
         };
         let quoted = text.split('"').nth(1).unwrap_or(text.trim());
         detect::Version::parse(quoted).map(|_| quoted.to_string())
     }
 
-    /// Puts the bridge this Kumi brings in the DAW, where detection finds it, or what stopped it, in words.
+    /// The folder Logic's bridge is set up from: the one beside Kumi in a release, the one `KUMI_LOGIC_BRIDGE_SOURCE`
+    /// names, else this checkout's own build, staged as a release lays it out (its helper built when it isn't yet).
+    fn logic_source(&self, env: &Env) -> Result<PathBuf, String> {
+        let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+        if let Some(carried) = beside.as_deref().and_then(|beside| self.carried_by(beside)) {
+            return Ok(carried);
+        }
+        if let Some(named) = env.get(LOGIC_BRIDGE_SOURCE_VAR).filter(|named| !named.is_empty()) {
+            let source = PathBuf::from(named);
+            return if source.join(LOGIC_BINARY).is_file() {
+                Ok(source)
+            } else {
+                Err(format!("{LOGIC_BRIDGE_SOURCE_VAR} names {named}, which holds no {LOGIC_BINARY}"))
+            };
+        }
+        stage_logic_bridge(beside.as_deref())
+    }
+
+    /// Puts the bridge this Kumi brings in the DAW (Logic's in Kumi's own folder), where detection finds it, or what
+    /// stopped it, in words.
     fn install(&self, env: &Env) -> Result<Put, String> {
-        let source = self
-            .bundled_source()
-            .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?;
+        let source = match self.daw {
+            Daw::Logic => self.logic_source(env)?,
+            _ => self
+                .bundled_source()
+                .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?,
+        };
         let target = self.target(env)?;
         // A REAPER that can't load it (a 32-bit one, say) is said, and nothing goes in.
         if self.daw == Daw::Reaper {
@@ -256,26 +299,39 @@ impl Own {
     fn kept_words(&self, put: &Put) -> String {
         put.kept
             .as_ref()
-            .map(|kept| format!("The copy that was in {} had changed since Kumi put it there: it's kept in {kept}.\n", self.name()))
+            .map(|kept| format!("The copy that was in {} had changed since Kumi put it there: it's kept in {kept}.\n", self.place_words()))
             .unwrap_or_default()
     }
 
-    /// What to tell the producer when the Kumi in `app` (`version`) doesn't bring this DAW's bridge: it stays in the DAW,
-    /// and that Kumi neither uses nor removes it.
+    /// Whether the bridge is a folder (Renoise's tool, Logic's bridge with its helper) rather than one file.
+    fn is_folder(&self) -> bool {
+        matches!(self.daw, Daw::Renoise | Daw::Logic)
+    }
+
+    /// Where the bridge sits, as the producer knows it: in the DAW, or (Logic's) in Kumi's own folder.
+    fn place_words(&self) -> String {
+        match self.daw {
+            Daw::Logic => "Kumi's own folder".into(),
+            _ => self.name().into(),
+        }
+    }
+
+    /// What to tell the producer when the Kumi in `app` (`version`) doesn't bring this DAW's bridge: it stays where it
+    /// is, and that Kumi neither uses nor removes it.
     fn left_behind(&self, env: &Env, app: &Path, version: &str) -> Option<String> {
         let receipt = self.receipt(env).filter(|_| self.carried_by(app).is_none())?;
         Some(format!(
             "{} stays in {} ({}): Kumi {version} doesn't know {}, so it won't use it or remove it. Delete that {} to take it out.\n",
             self.bridge,
-            self.name(),
+            self.place_words(),
             receipt.target,
             self.name(),
-            if self.daw == Daw::Renoise { "folder" } else { "file" },
+            if self.is_folder() { "folder" } else { "file" },
         ))
     }
 
-    /// Whether this user has used the DAW (it has made its own folder: REAPER's resource folder, Renoise's preferences)
-    /// or Kumi's bridge for it is installed: else the doctor has nothing to say of it.
+    /// Whether this user has the DAW (it has made its own folder: REAPER's resource folder, Renoise's preferences;
+    /// Logic Pro is installed) or Kumi's bridge for it is installed: else the doctor has nothing to say of it.
     fn present(&self, env: &Env) -> bool {
         if self.receipt(env).is_some() {
             return true;
@@ -283,13 +339,125 @@ impl Own {
         match self.daw {
             Daw::Reaper => self.reapers(env).iter().any(|install| install.opened),
             Daw::Renoise => !detected(env, detect::detect_renoise).prefs.is_empty(),
-            Daw::Logic => false,
+            Daw::Logic => !detected(env, detect::detect_logic).is_empty(),
+        }
+    }
+
+    /// The bridge isn't there: in the DAW, or (Logic's) set up at all.
+    fn not_in_words(&self) -> String {
+        match self.daw {
+            Daw::Logic => format!("{} isn't set up", self.bridge),
+            _ => format!("{} isn't in {}", self.bridge, self.name()),
         }
     }
 
     fn missing_words(&self) -> String {
-        format!("{} isn't in {} yet, so Kumi can't see your {}", self.bridge, self.name(), self.profile().words.place)
+        format!("{} yet, so Kumi can't see your {}", self.not_in_words(), self.profile().words.place)
     }
+
+    /// What `kumi --daw <daw> bridge` does, as a verb: puts the bridge in the DAW, or sets Logic's up.
+    fn setup_verb(&self) -> &'static str {
+        match self.daw {
+            Daw::Logic => "set it up",
+            _ => "put it in",
+        }
+    }
+
+    /// The same, as the doctor says it of the command: "puts it in", "sets it up".
+    fn setup_verb_does(&self) -> &'static str {
+        match self.daw {
+            Daw::Logic => "sets it up",
+            _ => "puts it in",
+        }
+    }
+}
+
+/// Where this checkout stages Logic's bridge as a release lays it out.
+fn logic_staging(checkout: &Path) -> PathBuf {
+    checkout.join("target").join("logic-bridge").join(LOGIC_BRIDGE_FOLDER)
+}
+
+/// The Accessibility helper in `dir`: the newest `kumi-logic-hands-*` file there.
+fn helper_in(dir: &Path) -> Option<PathBuf> {
+    let mut helpers: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(LOGIC_HELPER_PREFIX)))
+        .collect();
+    helpers.sort_by_key(|path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok());
+    helpers.pop()
+}
+
+/// The bridge's version, as its binary says it (`logic-kumi 0.1.0`).
+fn bridge_version(binary: &Path) -> Option<String> {
+    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace().rev().find_map(|word| detect::Version::parse(word).map(|_| word.to_string()))
+}
+
+/// This checkout's build of Logic's bridge, staged as a release lays it out, in `target/logic-bridge/logic-kumi/`: the
+/// bridge binary (`cargo build -p logic-kumi`, beside this Kumi or in the checkout's target), the Accessibility helper
+/// (`scripts/build-logic-hands.py` builds it when it isn't there yet) and the version file. Staged afresh each time, so
+/// what's installed is the build of now.
+fn stage_logic_bridge(beside: Option<&Path>) -> Result<PathBuf, String> {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = checkout.join("target");
+    let binary = beside
+        .map(|beside| beside.join(LOGIC_BINARY))
+        .into_iter()
+        .chain([target.join("release").join(LOGIC_BINARY), target.join("debug").join(LOGIC_BINARY)])
+        .find(|path| path.is_file())
+        .ok_or_else(|| "this checkout hasn't built Kumi's Logic Pro bridge: run cargo build -p logic-kumi first".to_string())?;
+    let hands = target.join("logic-hands");
+    let helper = match helper_in(&hands) {
+        Some(helper) => helper,
+        None => {
+            build_logic_helper(&checkout)?;
+            helper_in(&hands)
+                .ok_or_else(|| format!("scripts/build-logic-hands.py left no {LOGIC_HELPER_PREFIX}* in {}", hands.display()))?
+        }
+    };
+    let version = bridge_version(&binary).unwrap_or_else(|| "dev".into());
+    let staging = logic_staging(&checkout);
+    let failed = |what: &str, error: std::io::Error| format!("couldn't stage Logic Pro's bridge ({what}): {error}");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|error| failed("the staging folder", error))?;
+    std::fs::copy(&binary, staging.join(LOGIC_BINARY)).map_err(|error| failed("the bridge", error))?;
+    let helper_name = helper.file_name().map(|name| name.to_os_string()).unwrap_or_default();
+    std::fs::copy(&helper, staging.join(helper_name)).map_err(|error| failed("the helper", error))?;
+    std::fs::write(staging.join(LOGIC_VERSION_FILE), format!("{version}\n")).map_err(|error| failed("the version", error))?;
+    Ok(staging)
+}
+
+/// Builds the Accessibility helper with the checkout's script (a universal, ad-hoc signed Swift binary).
+fn build_logic_helper(checkout: &Path) -> Result<(), String> {
+    let script = checkout.join("scripts").join("build-logic-hands.py");
+    let status = std::process::Command::new("python3")
+        .arg(&script)
+        .current_dir(checkout)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|error| format!("couldn't run python3 {} to build Kumi's helper for Logic Pro: {error}", script.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("scripts/build-logic-hands.py failed ({status}); build Kumi's helper for Logic Pro by hand, then try again"))
+    }
+}
+
+/// Whether Logic's bridge has Accessibility, as the running bridge's status says (`permission` null): None when no
+/// bridge answers (it isn't started yet, or the secret can't be read). A bridge that answers busy is taken as granted.
+fn logic_accessibility(home: &Path) -> Option<bool> {
+    let paths = BridgePaths::new(home, Daw::Logic);
+    let secret = files::read_secret(&paths.secret()).ok()?;
+    files::scan_discovery(&paths.discovery(), Daw::Logic).into_iter().filter(|found| found.alive).find_map(|found| {
+        let discovery = found.discovery.ok()?;
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], discovery.port));
+        let probe = daw_bridge::probe::probe(address, &secret, "kumi", Duration::from_secs(2)).ok()?;
+        Some(probe.status.as_ref().is_none_or(|status| status.get("permission").is_none_or(serde_json::Value::is_null)))
+    })
 }
 
 impl DawProvider for Own {
@@ -312,6 +480,10 @@ impl DawProvider for Own {
         let home = kumi_home(env);
         async move {
             tokio::task::spawn_blocking(move || {
+                // Logic's bridge is the host's to start: a running Logic is what answers.
+                if daw == Daw::Logic {
+                    return !detect::running(daw).is_empty();
+                }
                 let paths = BridgePaths::new(&home, daw);
                 let Ok(secret) = files::read_secret(&paths.secret()) else { return false };
                 files::scan_discovery(&paths.discovery(), daw).into_iter().filter(|found| found.alive).any(|found| {
@@ -332,7 +504,7 @@ impl DawProvider for Own {
                 let found = detected(env, detect::detect_renoise);
                 !found.apps.is_empty() || !found.prefs.is_empty()
             }
-            Daw::Logic => false,
+            Daw::Logic => !detected(env, detect::detect_logic).is_empty(),
         }
     }
     fn running_now(&self) -> bool {
@@ -362,7 +534,17 @@ impl DawProvider for Own {
         }
     }
     fn enable_step(&self) -> Option<EnableStep> {
-        None
+        match self.daw {
+            // Logic is read through Accessibility, which the producer grants once, in System Settings.
+            Daw::Logic => Some(EnableStep {
+                label: "Accessibility",
+                say: "Allow Kumi's helper under System Settings > Privacy & Security > Accessibility: macOS asks the first time Kumi starts it, and lists the app Kumi runs in (your terminal).",
+                waiting: "waiting for Accessibility",
+                later: "when Accessibility is allowed",
+                put_off: "Kumi reads Logic Pro by itself once Accessibility is allowed: in System Settings, open Privacy & Security > Accessibility and turn on the app Kumi runs in.",
+            }),
+            _ => None,
+        }
     }
     fn min_version(&self) -> &'static str {
         min_version(self.daw)
@@ -401,7 +583,11 @@ impl DawProvider for Own {
         }
         let missing = self.missing_words();
         BridgeState {
-            notice: Some(format!("{missing}; chatting without it. Run {command} --daw {} bridge to put it in.", self.id.as_str())),
+            notice: Some(format!(
+                "{missing}; chatting without it. Run {command} --daw {} bridge to {}.",
+                self.id.as_str(),
+                self.setup_verb()
+            )),
             why: Some(format!("{missing}.")),
         }
     }
@@ -421,8 +607,14 @@ impl DawProvider for Own {
         // The DAW is here, but Kumi's bridge was never put in: a note, nothing to fix.
         if self.receipt(&io.env).is_none() {
             let note = Check::note(
-                format!("{} isn't in {}", self.bridge, self.name()),
-                Some(format!("{} --daw {} bridge puts it in, if you want Kumi in {}", *kumi_runtime::KUMI, self.id.as_str(), self.name())),
+                self.not_in_words(),
+                Some(format!(
+                    "{} --daw {} bridge {}, if you want Kumi in {}",
+                    *kumi_runtime::KUMI,
+                    self.id.as_str(),
+                    self.setup_verb_does(),
+                    self.name()
+                )),
             );
             return async move { vec![note] }.boxed_local();
         }
@@ -526,7 +718,8 @@ impl DawProvider for Own {
             if self.receipt(&io.env).is_none() {
                 return 0;
             }
-            // The bridge the new Kumi brings, from its app folder: the running Kumi may already be the old one's.
+            // The bridge the new Kumi brings, from its app folder: the running Kumi may already be the old one's. (Logic's
+            // bridge is a process the host starts for each session, so nothing of Logic's needs closing for this.)
             let Some(source) = self.carried_by(Path::new(app)) else {
                 if let Some(said) = back_to.and_then(|version| self.left_behind(&io.env, Path::new(app), version)) {
                     io.out.write(&said);
@@ -671,10 +864,14 @@ impl DawProvider for Own {
             // Asked before anything is written into the DAW's folder (--yes answers beforehand). Without a place yet,
             // the install below says why.
             if let (false, Ok(target)) = (command.yes, own.target(&env)) {
-                let question = format!("Put {} in {} ({})?", own.bridge, own.name(), target.path().display());
+                let question = match own.daw {
+                    Daw::Logic => format!("Set up {} in Kumi's own folder ({})?", own.bridge, target.path().display()),
+                    _ => format!("Put {} in {} ({})?", own.bridge, own.name(), target.path().display()),
+                };
                 if !crate::process::ask_yes_no(command.input.clone(), out.clone(), &question, Some("add --yes")).await {
                     out.write(&format!(
-                        "Nothing was changed. To put it in later: {} --daw {} bridge\n",
+                        "Nothing was changed. To {} later: {} --daw {} bridge\n",
+                        own.setup_verb(),
                         *kumi_runtime::KUMI,
                         own.id.as_str()
                     ));
@@ -684,18 +881,36 @@ impl DawProvider for Own {
             let (code, said) = match own.install(&env) {
                 Ok(put) if put.changed => (
                     0,
-                    format!(
-                        "{} {} is in {}. {} loads it when it starts: restart {} if it's open.\n{}",
-                        own.bridge,
-                        put.version,
-                        own.name(),
-                        own.name(),
-                        own.name(),
-                        own.kept_words(&put)
-                    ),
+                    match own.daw {
+                        // Logic loads nothing: Kumi starts the bridge beside it, so Logic stays as it is.
+                        Daw::Logic => format!(
+                            "{} {} is in Kumi's own folder. Kumi starts it beside {} when a session begins: open {}, then run {} --daw logic. The first time, macOS asks to allow Kumi's helper under Accessibility.\n{}",
+                            own.bridge,
+                            put.version,
+                            own.name(),
+                            own.name(),
+                            *kumi_runtime::KUMI,
+                            own.kept_words(&put)
+                        ),
+                        _ => format!(
+                            "{} {} is in {}. {} loads it when it starts: restart {} if it's open.\n{}",
+                            own.bridge,
+                            put.version,
+                            own.name(),
+                            own.name(),
+                            own.name(),
+                            own.kept_words(&put)
+                        ),
+                    },
                 ),
-                Ok(put) => (0, format!("{} {} is in {} already.\n", own.bridge, put.version, own.name())),
-                Err(why) => (1, format!("{} couldn't go in {}: {why}.\n", own.bridge, own.name())),
+                Ok(put) => (0, format!("{} {} is in {} already.\n", own.bridge, put.version, own.place_words())),
+                Err(why) => (
+                    1,
+                    match own.daw {
+                        Daw::Logic => format!("{} couldn't be set up: {why}.\n", own.bridge),
+                        _ => format!("{} couldn't go in {}: {why}.\n", own.bridge, own.name()),
+                    },
+                ),
             };
             out.write(&said);
             Ok(code)
@@ -713,7 +928,8 @@ impl DawProvider for Own {
         }
     }
     fn bridge_files_in_use(&self, _folder: &str, _env: &Env) -> bool {
-        // The DAW loads its copy from its own folder, not Kumi's.
+        // REAPER and Renoise load their copy from their own folder, not Kumi's; Logic's bridge runs only while a
+        // session of Kumi's does.
         false
     }
     fn remove_bridge<'a>(&'a self, io: &'a InstalledIo, _run: Run) -> LocalBoxFuture<'a, Result<RemovedBridge, RuntimeError>> {
@@ -745,7 +961,11 @@ impl DawProvider for Own {
                     Ok(RemovedBridge::Removed)
                 }
                 Err(why) => {
-                    io.out.write(&format!("{} couldn't be taken out of {} ({why}): delete {path} by hand.\n", self.bridge, self.name()));
+                    io.out.write(&format!(
+                        "{} couldn't be taken out of {} ({why}): delete {path} by hand.\n",
+                        self.bridge,
+                        self.place_words()
+                    ));
                     Ok(RemovedBridge::Kept)
                 }
             }
@@ -832,11 +1052,14 @@ impl BridgeRollbackStep for OwnRollback {
 fn own_of(id: DawId) -> &'static Own {
     match id {
         DawId::Reaper => &REAPER,
+        DawId::Logic => &LOGIC,
         _ => &RENOISE,
     }
 }
 
-/// Setup's DAW side for REAPER and Renoise: the bridge goes in with the DAW closed, and the DAW loads it when it opens.
+/// Setup's DAW side for REAPER, Renoise and Logic Pro: REAPER's and Renoise's bridge goes in with the DAW closed, and
+/// the DAW loads it when it opens; Logic's goes into Kumi's own folder while Logic stays open, and the session starts
+/// it beside Logic when it connects.
 struct OwnSetup {
     own: DawId,
     env: Env,
@@ -852,7 +1075,7 @@ impl OwnSetup {
     fn own(&self) -> &'static Own {
         own_of(self.own)
     }
-    /// The app setup opens: the REAPER Kumi's extension goes in, the newest Renoise.
+    /// The app setup opens: the REAPER Kumi's extension goes in, the newest Renoise, the Logic Pro Kumi works with.
     fn app(&self) -> Option<PathBuf> {
         match self.own().daw {
             Daw::Reaper => {
@@ -865,7 +1088,7 @@ impl OwnSetup {
                 .into_iter()
                 .max_by_key(|app| app.version.as_deref().and_then(detect::Version::of_app))
                 .map(|app| app.path),
-            Daw::Logic => None,
+            Daw::Logic => best_logic(&self.env).map(|install| install.app),
         }
     }
 }
@@ -921,6 +1144,10 @@ impl DawSetup for OwnSetup {
     fn can_ask_to_quit(&self) -> bool {
         false
     }
+    fn needs_restart(&self) -> bool {
+        // Logic loads nothing: its bridge is a process the session starts beside it.
+        self.own().daw != Daw::Logic
+    }
     async fn closed(&self, stop: &Signal) -> bool {
         let daw = self.own().daw;
         loop {
@@ -934,15 +1161,17 @@ impl DawSetup for OwnSetup {
         }
     }
     async fn install(&self) -> Result<String, String> {
-        self.own().install(&self.env).map(|put| put.version)
+        // Off the app's thread: Logic's bridge may be staged (its helper built) on the way.
+        let (own, env) = (self.own(), self.env.clone());
+        tokio::task::spawn_blocking(move || own.install(&env).map(|put| put.version)).await.unwrap_or_else(|error| Err(error.to_string()))
     }
     async fn start(&self, app: Option<String>, _set: Option<String>) -> bool {
         // An app setup didn't find ("") is looked for again.
         let Some(app) = app.filter(|app| !app.is_empty()).map(PathBuf::from).or_else(|| self.app()) else { return false };
         tokio::task::spawn_blocking(move || open_app(&app)).await.unwrap_or(false)
     }
-    /// The bridge is in and the DAW is opening: the session takes the bridge and reconnects (as Live's setup does); one
-    /// still starting is asked again shortly.
+    /// The bridge is in and the DAW is opening (Logic Pro's bridge the host starts beside Logic as the session connects):
+    /// the session takes the bridge and reconnects (as Live's setup does); one still starting is asked again shortly.
     async fn connect(&self) {
         if !self.given {
             if let Some(found) = self.own().bridge_config(&self.env) {
@@ -973,10 +1202,28 @@ impl DawSetup for OwnSetup {
             Daw::Renoise => {
                 detected(&self.env, detect::detect_renoise).apps.into_iter().filter(|found| is(&found.path)).find_map(|found| found.version)
             }
-            Daw::Logic => None,
+            Daw::Logic => match app.as_deref() {
+                // (the Logic Pro Kumi works with, as setup chose it)
+                None => best_logic(&self.env).and_then(|install| install.version),
+                Some(_) => detected(&self.env, detect::detect_logic)
+                    .into_iter()
+                    .filter(|install| is(&install.app))
+                    .find_map(|install| install.version),
+            }
+            .map(|version| version.to_string()),
         }
     }
     async fn installed(&self) -> Installed {
+        if self.own().daw == Daw::Logic {
+            // Logic needs no first run: the bridge goes in Kumi's folder. Only Logic Pro 12 is served.
+            return match best_logic(&self.env) {
+                None => Installed::Missing,
+                Some(install) => match install.version {
+                    Some(version) if version < detect::LOGIC_MIN => Installed::Older(version.to_string()),
+                    _ => Installed::Ready,
+                },
+            };
+        }
         match self.own().placed(&self.env) {
             Ok(_) => Installed::Ready,
             Err(Some(TargetError::Older(_, version))) => Installed::Older(version),
@@ -987,11 +1234,42 @@ impl DawSetup for OwnSetup {
             Err(None) => Installed::Missing,
         }
     }
+    async fn enabled(&self) -> Option<bool> {
+        if self.own().daw != Daw::Logic {
+            return None;
+        }
+        // What the running bridge says of Accessibility; none answering yet counts as not granted, so the step waits.
+        let home = kumi_home(&self.env);
+        Some(tokio::task::spawn_blocking(move || logic_accessibility(&home)).await.ok().flatten().unwrap_or(false))
+    }
+    fn settings_menu(&self) -> Option<String> {
+        (self.own().daw == Daw::Logic).then(|| {
+            "Accessibility is under System Settings > Privacy & Security: turn on the app Kumi runs in, and Kumi reads Logic Pro from then on.".into()
+        })
+    }
+    fn surface_wait(&self) -> Duration {
+        Duration::from_secs(10)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The staged folder takes the newest helper beside the bridge; its place is the checkout's target.
+    #[test]
+    fn the_newest_helper_in_a_folder_is_the_one_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(helper_in(dir.path()), None);
+        std::fs::write(dir.path().join("kumi-logic-hands-aaaa"), b"old").unwrap();
+        std::fs::write(dir.path().join("not-a-helper"), b"x").unwrap();
+        let newer = dir.path().join("kumi-logic-hands-bbbb");
+        std::fs::write(&newer, b"new").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&newer).unwrap().set_modified(later).unwrap();
+        assert_eq!(helper_in(dir.path()), Some(newer));
+        assert_eq!(logic_staging(Path::new("/checkout")), PathBuf::from("/checkout/target/logic-bridge/logic-kumi"));
+    }
 
     /// Review K19: an app that won't open (`open -a` answers it can't find it) says so, rather than leave setup
     /// waiting for a DAW that never comes.

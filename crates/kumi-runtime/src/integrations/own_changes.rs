@@ -666,6 +666,10 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// and undo_change.
     pub fn tools(self: &Rc<Self>) -> Vec<Rc<dyn KernelTool>> {
         let set = self.link().daw.changes;
+        if set.kinds.is_empty() && set.actions.is_empty() {
+            // A DAW Kumi only reads so far (Logic, until M3): no change tools at all, not an empty plan.
+            return Vec::new();
+        }
         let mut tools: Vec<Rc<dyn KernelTool>> = Vec::new();
         let mut lines = Vec::new();
         // Every kind and action is a tool: the core ones go with every request, the others wait behind find_tools (which
@@ -1597,7 +1601,7 @@ mod tests {
 
     #[test]
     fn the_host_knows_the_kinds_each_daws_undo_never_takes_back_as_kumi_does() {
-        for ((app, set), daw) in sets().into_iter().zip([daw_bridge::Daw::Reaper, daw_bridge::Daw::Renoise]) {
+        for ((app, set), daw) in sets().into_iter().zip([daw_bridge::Daw::Reaper, daw_bridge::Daw::Renoise, daw_bridge::Daw::Logic]) {
             let ours: BTreeSet<&str> = set.kinds.iter().filter(|kind| kind.skipped_by_daw_undo).map(|kind| kind.kind).collect();
             let host: BTreeSet<&str> = daw_mcp_server::tools::kinds(daw).outside_undo.iter().copied().collect();
             assert_eq!(ours, host, "{app}");

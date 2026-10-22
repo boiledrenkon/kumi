@@ -1,10 +1,11 @@
-//! REAPER's and Renoise's integrations end to end: Kumi's host (daw-mcp-server's own code, in process) in front of a
-//! bridge that answers like REAPER's extension, or replays what Renoise's tool answered. What the host answers is what
-//! the integration reads: the observation, the model's read, the focus and FOCUS's bodies.
+//! REAPER's, Renoise's and Logic's integrations end to end: Kumi's host (daw-mcp-server's own code, in process) in
+//! front of a bridge that answers like REAPER's extension, replays what Renoise's tool answered, or answers as Kumi's
+//! own bridge beside Logic does. What the host answers is what the integration reads: the observation, the model's
+//! read, the focus and FOCUS's bodies.
 use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
 use daw_mcp_server::{
     host::Host,
-    simulator::{reaper::ReaperScript, renoise::RenoiseScript, Simulator},
+    simulator::{logic::LogicScript, reaper::ReaperScript, renoise::RenoiseScript, Simulator},
 };
 use futures::FutureExt;
 use kumi_common::abort::Signal;
@@ -12,9 +13,10 @@ use kumi_runtime::core::{
     context::IntegrationContext,
     contracts::*,
     errors::RuntimeError,
-    view::{BodyKind, BodyRequest, DawFocus, FocusBody},
+    view::{BodyKind, BodyRequest, DawFocus, FocusBody, RouteKind},
 };
 use kumi_runtime::integrations::{
+    logic::create_logic_integration,
     own_bridge::{Connect, OwnOptions},
     reaper::create_reaper_integration,
     renoise::create_renoise_integration,
@@ -300,6 +302,127 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 .unwrap();
             assert!(stale.is_error, "{}", stale.text);
             renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// Logic's bridge beside it, as the host finds it through its discovery file: the status, a read of the tracks and of
+/// a region's notes through logic_read (in short refs, passed back long), the focus, and each body in Logic's own
+/// shape; a track or region change moves the epoch, which retires this turn's refs.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let seen: Rc<RefCell<Vec<Option<DawFocus>>>> = Rc::default();
+            let into = seen.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
+            context.focus_interval_ms = Some(50);
+            let logic = create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+
+            logic.start(Signal::new()).await.unwrap();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(observed.label, "Logic Pro — Scratch");
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            assert_eq!((context["daw"].as_str(), context["project"]["tempo"].as_f64()), (Some("Logic Pro"), Some(160.0)), "{context}");
+            assert_eq!(context["project"]["file"], "Scratch.logicx");
+            let tracks = context["tracks"].as_array().unwrap();
+            assert_eq!(tracks.iter().map(|track| track["ref"].as_str().unwrap()).collect::<Vec<_>>(), ["track:1", "track:2"]);
+            assert_eq!((tracks[0]["name"].as_str(), tracks[1]["kind"].as_str()), (Some("Vocal"), Some("instrument")));
+            assert_eq!(
+                (context["selection"]["trackRef"].as_str(), context["selection"]["regionRef"].as_str()),
+                (Some("track:1"), Some("region:1"))
+            );
+            assert_eq!(context["markers"][0]["name"], "Chorus");
+            assert!(!observed.context.contains("1:track:") && !observed.context.contains("1:region:"), "{}", observed.context);
+            assert!(observed.project.as_ref().is_some_and(|project| project.id.starts_with("logic-")), "a saved project is its place");
+
+            // The model reads the tracks, and a region's notes (which need the region as parent), in short refs.
+            let read = observed.tools[0].clone();
+            assert_eq!(read.name(), "logic_read");
+            let page = read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(!page.is_error && page.text.contains("Keys") && page.text.contains("\"track:2\""), "{}", page.text);
+            assert!(!page.text.contains("1:track:"), "{}", page.text);
+            let input = json!({"kind": "note", "parent": "region:1"}).as_object().unwrap().clone();
+            within_schema(&read.input_schema(), &input);
+            let notes = read.execute(input, Signal::new()).await.unwrap();
+            assert!(!notes.is_error && notes.text.contains("\"pitch\":60") && notes.text.contains("note:"), "{}", notes.text);
+            assert_eq!(
+                script.asked().last().unwrap().1,
+                json!({"kind": "note", "parent": "1:region:1"}),
+                "the region's long ref, no layout"
+            );
+            for words in ["note under a region", "bar, beat, division", "Stereo Out"] {
+                assert!(read.description().contains(words), "{words}: {}", read.description());
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let focus = seen.borrow().iter().flatten().next().cloned().expect("the focus, as the host reads it");
+            assert_eq!(focus.track_ref.as_deref(), Some("1:track:1"));
+            assert_eq!(focus.item.as_ref().and_then(|item| item.item_ref.as_deref()), Some("1:region:1"));
+            assert_eq!(focus.main_view.as_ref().map(|v| v.label.as_str()), Some("Tracks"));
+            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("Piano Roll"));
+            assert!(logic.can_show(BodyKind::Tree) && logic.can_show(BodyKind::Notes) && logic.can_show(BodyKind::Timeline));
+            assert!(logic.can_show(BodyKind::Routing) && !logic.can_show(BodyKind::Tracker) && !logic.can_show(BodyKind::Grid));
+
+            // Each body, in Logic's own shape: the selected strip's inserts, the region's notes, the Tracks area, the routing.
+            let Some(FocusBody::Tree(tree)) =
+                logic.focus_body(&BodyRequest::Tree { track_ref: "1:track:1".into() }, Signal::new()).await.unwrap()
+            else {
+                panic!("the channel strip")
+            };
+            assert_eq!(tree.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Channel EQ"]);
+            let Some(FocusBody::Notes(clip)) =
+                logic.focus_body(&BodyRequest::Notes { item_ref: "1:region:1".into() }, Signal::new()).await.unwrap()
+            else {
+                panic!("the region's notes")
+            };
+            assert_eq!((clip.length, clip.notes.len()), (16.0, 4));
+            assert_eq!((clip.notes[0].note.pitch, clip.notes[0].note.start, clip.notes[0].note.duration), (60.0, 0.0, 0.25));
+            assert_eq!((clip.notes[3].note.pitch, clip.notes[3].note.start, clip.notes[3].note.duration), (72.0, 3.0, 0.5));
+            let Some(FocusBody::Timeline(strip)) = logic.focus_body(&BodyRequest::Timeline, Signal::new()).await.unwrap() else {
+                panic!("the Tracks area")
+            };
+            let lanes = strip.lanes.as_ref().unwrap();
+            assert_eq!(lanes.iter().map(|lane| (lane.name.as_str(), lane.items.len())).collect::<Vec<_>>(), [("Vocal", 0), ("Keys", 1)]);
+            assert_eq!((lanes[1].items[0].start, lanes[1].items[0].length), (0.0, 16.0));
+            let timeline =
+                script.asked().into_iter().rev().find(|(method, params)| method == "focus_body" && params["kind"] == "timeline").unwrap();
+            assert_eq!(timeline.1["around"].as_str(), Some("1:track:1"), "the page is centred on the selected track");
+            let Some(FocusBody::Routing(routing)) =
+                logic.focus_body(&BodyRequest::Routing { track_ref: "1:track:1".into() }, Signal::new()).await.unwrap()
+            else {
+                panic!("the routing")
+            };
+            assert_eq!(
+                routing.routes.iter().map(|route| (route.kind, route.other.as_str())).collect::<Vec<_>>(),
+                [(RouteKind::Receive, "Input 1"), (RouteKind::Send, "Bus 1"), (RouteKind::Hardware, "Stereo Out")]
+            );
+
+            // A track or region changed: the epoch moves, so this turn's refs retire and the next look names afresh.
+            script.change_tracks();
+            let next = logic.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&next.context).unwrap();
+            assert_ne!(context["tracks"][0]["ref"], "track:1", "the tracks get names never used before: {context}");
+            let stale = next.tools[0]
+                .execute(json!({"kind": "region", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert!(stale.is_error && stale.text.contains("isn't one of this turn's refs"), "{}", stale.text);
+            logic.close().await.unwrap();
             simulator.stop();
         })
         .await;

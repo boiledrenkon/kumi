@@ -81,6 +81,8 @@ const FAKE: DawProfile = DawProfile {
     },
 };
 const INSTRUCTIONS: &str = "You work in Fakeloop: read the song with fake_read before changing it.";
+/// Logic Pro, by its real profile: what its bridge gives a session in M1 (the same fake tools stand in for its read).
+const LOGIC_INSTRUCTIONS: &str = "You work in Logic Pro: read the project with fake_read before you describe it.";
 
 fn finish(unified: FinishReasonUnified) -> StreamPart {
     let raw = serde_json::to_value(unified).unwrap().as_str().unwrap().to_string();
@@ -210,23 +212,25 @@ impl KernelTool for FakeTool {
     }
 }
 
-/// The fake DAW as the session sees it.
+/// The fake DAW as the session sees it: by `profile` (the fake's, or a real DAW's).
 struct FakeIntegration {
     listener: ConnectionListener,
     listeners: Rc<RefCell<Vec<ConnectionListener>>>,
     started: Rc<Cell<bool>>,
     /// The DAW won't start: the session carries on without it.
     away: bool,
+    profile: DawProfile,
+    instructions: &'static str,
 }
 #[async_trait(?Send)]
 impl Integration for FakeIntegration {
     fn profile(&self) -> &DawProfile {
-        &FAKE
+        &self.profile
     }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         signal.check()?;
         if self.away {
-            return Err(KumiError::new(FailureKind::Daw, FAKE.vocab.cant_reach).into());
+            return Err(KumiError::new(FailureKind::Daw, self.profile.vocab.cant_reach).into());
         }
         self.listeners.borrow_mut().push(self.listener.clone());
         (self.listener)(ConnectionState::Connecting, None);
@@ -239,13 +243,14 @@ impl Integration for FakeIntegration {
             Rc::new(FakeTool { name: "fake_read", started: self.started.clone() }),
             Rc::new(FakeTool { name: "fake_wait", started: self.started.clone() }),
         ];
+        let mut context = json!({"tempo":120,"tracks":[{"ref":"track:1","name":"Kick"},{"ref":"track:2","name":"Bass"}]});
+        context[self.profile.words.place] = json!("Beat");
         Ok(Observation {
             key: "song:beat".into(),
             revision: None,
-            label: "Fakeloop — Beat".into(),
-            context: json!({"song":"Beat","tempo":120,"tracks":[{"ref":"track:1","name":"Kick"},{"ref":"track:2","name":"Bass"}]})
-                .to_string(),
-            instructions: INSTRUCTIONS.into(),
+            label: format!("{} — Beat", self.profile.words.app),
+            context: context.to_string(),
+            instructions: self.instructions.into(),
             tools,
             project: Some(ProjectRef { id: "0123456789abcdef0123456789abcdef".into(), name: "Beat".into() }),
             set: Some("identity:beat".into()),
@@ -271,12 +276,14 @@ impl Integration for FakeIntegration {
     }
 }
 
-/// A session with every option on, over the fake DAW (or, `away`, without it).
+/// A session with every option on, over the fake DAW by `profile` (or, `away`, without it).
 fn open(
     main: &Rc<Recorded>,
     worker: &Rc<Recorded>,
     dir: &std::path::Path,
     away: bool,
+    profile: DawProfile,
+    instructions: &'static str,
 ) -> (Session, Rc<RefCell<Vec<SessionEvent>>>, Rc<RefCell<Vec<ConnectionListener>>>, Rc<Cell<bool>>) {
     let events = Rc::new(RefCell::new(vec![]));
     let out = events.clone();
@@ -285,18 +292,18 @@ fn open(
     let (held, waiting) = (listeners.clone(), started.clone());
     let integration: IntegrationFactory = Box::new(move |listener: ConnectionListener| {
         let fallback = listener.clone();
-        let primary = Rc::new(FakeIntegration { listener, listeners: held.clone(), started: waiting.clone(), away });
+        let primary = Rc::new(FakeIntegration { listener, listeners: held.clone(), started: waiting.clone(), away, profile, instructions });
         with_fallback(
             primary,
             Rc::new(move || {
                 let on_connection = fallback.clone();
-                create_no_daw_integration(FAKE, INSTRUCTIONS, Rc::new(move |state| on_connection(state, None)))
+                create_no_daw_integration(profile, instructions, Rc::new(move |state| on_connection(state, None)))
             }),
             Rc::new(|_| {}),
         )
     });
     let mut options = SessionOptions::new(recording(main.clone(), None), integration, Rc::new(move |event| out.borrow_mut().push(event)));
-    options.profile = FAKE;
+    options.profile = profile;
     options.timeout_ms = Some(20_000);
     options.close_timeout_ms = Some(5_000);
     options.cancel_grace_ms = Some(10);
@@ -344,11 +351,11 @@ fn step(make: impl Fn(&Recorded) -> Vec<StreamPart> + 'static) -> Step {
     Box::new(make)
 }
 
-/// Everything core said over the fake DAW, in one session and in one without it.
-async fn everything_said() -> Vec<String> {
+/// Everything core said over the DAW of `profile`, in one session and in one without it.
+async fn everything_said(profile: DawProfile, instructions: &'static str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
-    let (session, events, listeners, started) = open(&main, &worker, dir.path(), false);
+    let (session, events, listeners, started) = open(&main, &worker, dir.path(), false, profile, instructions);
     session.start().await.unwrap();
 
     // A turn that remembers, saves a recipe, starts a job, finds every deferred tool, and reads the song.
@@ -384,7 +391,7 @@ async fn everything_said() -> Vec<String> {
         let listener = listeners.borrow().last().unwrap().clone();
         listener(ConnectionState::Disconnected, cause);
         for _ in 0..1000 {
-            if notices(&events).iter().any(|notice| notice == FAKE.vocab.cant_reach) {
+            if notices(&events).iter().any(|notice| notice == profile.vocab.cant_reach) {
                 break;
             }
             delay(2).await;
@@ -441,7 +448,7 @@ async fn everything_said() -> Vec<String> {
     // Without the DAW: the fallback's own words.
     let dir = tempfile::tempdir().unwrap();
     let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
-    let (session, events, _, _) = open(&main, &worker, dir.path(), true);
+    let (session, events, _, _) = open(&main, &worker, dir.path(), true, profile, instructions);
     session.start().await.unwrap();
     session.submit("Make the kick punchier.", None).await.unwrap();
     let _ = session.undo(None).await;
@@ -455,10 +462,24 @@ async fn everything_said() -> Vec<String> {
 async fn a_whole_session_over_another_daw_says_nothing_in_lives_words() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let said = everything_said().await;
+            let said = everything_said(FAKE, INSTRUCTIONS).await;
             for (at, phrase, why) in ALLOWED {
                 assert!(said.iter().any(|text| text.contains(phrase)), "{at} no longer says {phrase} ({why}): take it off the list");
             }
+            assert_no_live_words(&said);
+        })
+        .await;
+}
+
+/// Logic Pro's own profile (its words, its capabilities) through the same whole session: nothing the model or the
+/// producer gets is in Live's words.
+#[tokio::test(flavor = "current_thread")]
+async fn a_whole_session_over_logic_pro_says_nothing_in_lives_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let said = everything_said(DawProfile::LOGIC, LOGIC_INSTRUCTIONS).await;
+            assert!(said.iter().any(|text| text.contains("Logic Pro")), "Logic's words reach the model");
+            assert!(said.iter().any(|text| text.contains(DawProfile::LOGIC.vocab.cant_reach)), "and the producer, when it's away");
             assert_no_live_words(&said);
         })
         .await;
@@ -705,7 +726,7 @@ async fn the_session_offers_another_daws_own_focus_bodies() {
             use kumi_runtime::core::view::{BodyKind, BodyRequest, FocusBody};
             let dir = tempfile::tempdir().unwrap();
             let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
-            let (session, _, _, _) = open(&main, &worker, dir.path(), false);
+            let (session, _, _, _) = open(&main, &worker, dir.path(), false, FAKE, INSTRUCTIONS);
             session.start().await.unwrap();
             assert!(session.can_show(BodyKind::Matrix), "the DAW's own body");
             assert!(!session.can_show(BodyKind::Tracker), "one the DAW doesn't draw");
