@@ -807,7 +807,9 @@ async fn logics_bridge_goes_in_kumis_own_folder_is_found_and_chosen_and_comes_ou
     let (dir, env) = logic_home();
     let logic: &dyn DawProvider = &own::LOGIC;
     assert!(!logic.bridge_installed(&env));
-    assert_eq!(chosen(None, &env).0.id(), DawId::Ableton, "nothing installed: Live's words");
+    // (with none installed, a DAW on this computer is chosen for setup: here none is, whatever the runner has)
+    let nowhere = kumi::daw::chosen_among(None, &env, &|_| false, &|_| false);
+    assert_eq!(nowhere.0.id(), DawId::Ableton, "nothing installed, nothing here: Live's words");
 
     // Asked first: with nobody to answer (no --yes, no terminal), nothing is set up.
     let out = Rc::new(Out::default());
