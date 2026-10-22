@@ -20,8 +20,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 const PROJECT_ID: &str = "0123456789abcdef0123456789abcdef";

@@ -62,8 +62,7 @@ use std::{
     time::Instant,
 };
 
-#[path = "../../../kumi-runtime/tests/support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 mod guard;

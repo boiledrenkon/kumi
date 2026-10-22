@@ -1,7 +1,6 @@
 #[path = "support/change_pictures.rs"]
 mod change_pictures;
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{

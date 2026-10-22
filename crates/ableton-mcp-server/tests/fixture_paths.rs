@@ -1,5 +1,4 @@
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use fixture_paths::{map_strings, native_path, normalize_root};
 use serde_json::json;
 use std::path::Path;

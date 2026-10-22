@@ -1,6 +1,5 @@
 //! Expand recorded library paths after JSON decoding, using the runner's separator.
-#[path = "../../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use serde_json::Value;
 use std::path::Path;
 

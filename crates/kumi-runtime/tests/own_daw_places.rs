@@ -39,8 +39,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 
 /// Live's words, whole: none may reach the producer or the model over another DAW.
 static LIVE_WORDS: LazyLock<Regex> = LazyLock::new(|| {

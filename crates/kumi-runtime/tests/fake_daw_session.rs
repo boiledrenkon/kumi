@@ -27,8 +27,7 @@ use kumi_runtime::{
 };
 use regex::Regex;
 use serde_json::{json, Value};
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,

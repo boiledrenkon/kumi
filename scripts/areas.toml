@@ -62,11 +62,6 @@ paths = ["crates/reaper-kumi/**", "scripts/build-native-release.py"]
 paths = ["max-standard/**", "plugin-formats/**"]
 feeds = ["kumi-runtime"]
 
-# Test helpers several crates include.
-[test-support]
-paths = ["tests/**"]
-feeds = ["ableton-mcp-server", "kumi-runtime"]
-
 # The eval's fixtures: Live's own device parameters, which the runtime's listening tests read too.
 [eval-fixtures]
 paths = ["crates/kumi/examples/fixtures/**"]

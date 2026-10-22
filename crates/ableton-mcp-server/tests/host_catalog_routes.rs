@@ -1,6 +1,4 @@
 //! Every catalog entry crosses the public protocol boundary, including capability gates and sync refusals.
-#[path = "../../../tests/support/chunks.rs"]
-mod chunks;
 use ableton_mcp_server::{
     host::{helpers::canonical_mutation_identity, McpHost, McpHostOptions},
     live::*,
@@ -134,7 +132,7 @@ fn source_oracle_covers_complete_catalog() {
 }
 /// The oracle's cases, every tool's, in 16 tests that nextest runs side by side.
 mod every_catalog_tool_matches_source_at_the_public_boundary {
-    crate::chunks::chunked!(super::check_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4, part_05 = 5,
+    kumi_testkit::chunked!(super::check_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4, part_05 = 5,
         part_06 = 6, part_07 = 7, part_08 = 8, part_09 = 9, part_10 = 10, part_11 = 11, part_12 = 12, part_13 = 13, part_14 = 14,
         part_15 = 15);
 }
