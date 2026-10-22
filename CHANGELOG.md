@@ -3,6 +3,34 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.21.0 — 2026-10-22
+
+Ships with bridge 1.0.93, as 1.20.0 did. Ships with REAPER extension 0.1.1 and Renoise tool 1.0.1,
+which REAPER and Renoise load when they restart; `kumi update` puts them in.
+
+- In REAPER, game-audio delivery (regions from your items, named in your project's convention, a dry
+  run first, rendered where REAPER renders), a routing doctor and builder (lints, sidechains, parallel
+  buses and stems), and variations of SFX and MIDI items as numbered takes you keep, change or drop.
+- In Renoise, sample maps (a folder of samples laid across the keys by their names, pitch and
+  loudness, with layers and round robins), chops at real hits, jam clean-up after catch-up, and
+  layering (each layer lined up with the main break by offset, polarity and level, then glued).
+- In REAPER and Renoise, delivery to a spec (ACX, streaming, podcast, broadcast), stems by Kumi's own
+  splitter (drums, bass and other), audio to MIDI (drums, melody and harmony), and scripts for a chore
+  you repeat, kept to run by name and as a REAPER action or a Tools > Kumi entry.
+- In Live, variations of a Session MIDI clip as numbered takes, each in an empty scene below it (a
+  scene added when none is free).
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
+### REAPER extension 0.1.1
+
+- Delivery renders, scripts kept as REAPER actions, and variations' takes of SFX and MIDI items.
+
+### Renoise tool 1.0.1
+
+- Sample maps, chops at real hits, jam clean-up, layering, and chores kept in Tools > Kumi.
+
 ## 1.20.0 — 2026-10-21
 
 Ships with bridge 1.0.93, as 1.19.3 did. Brings REAPER extension 0.1.0 and Renoise tool 1.0.0: `kumi
