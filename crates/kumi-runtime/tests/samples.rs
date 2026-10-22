@@ -1,5 +1,4 @@
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use kumi_common::{abort::Signal, js::string::locale_compare_numeric_base};
 use kumi_runtime::{
     integrations::ableton::{change_context::SampleBank, changes::NoSample, samples::*},

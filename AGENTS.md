@@ -16,7 +16,8 @@ It's one Cargo workspace. Each DAW is reached through a bridge that runs inside 
 - `crates/reaper-kumi`: REAPER's extension. `daws/renoise/com.kumi.Bridge.xrnx`: Renoise's tool (Lua).
 - `crates/kumi-store` (SQLite), `kumi-common` (shared utilities), `kumi-genexpr` (gen~ test interpreter).
 - `max-standard/` (Max patch rules) and `plugin-formats/` (plug-in preset formats): data Kumi builds in.
-- `tests/support/`: test helpers that several crates include with `#[path]`.
+- `crates/kumi-testkit`: what tests share (a dev-dependency only): `workspace_path`, `chunked!`, `fixture_paths!`,
+  `in_process!`. It depends on nothing: support that needs Kumi's crates is a macro the test's crate expands.
 - `scripts/`: release and packaging (Python), the isolated test runners, and `dev.py` with `areas.toml` (what a change
   affects, which CI picks its jobs by). `install.sh` and `install.ps1`: the installers.
 - `.config/nextest.toml`: CI's test sets (`ci`, `ci-os`, `extended`). `.github/workflows/`: CI.

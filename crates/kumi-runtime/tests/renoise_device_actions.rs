@@ -20,8 +20,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 fn tool(observed: &Observation, name: &str) -> Rc<dyn KernelTool> {

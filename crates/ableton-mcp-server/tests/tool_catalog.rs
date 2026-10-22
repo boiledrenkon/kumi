@@ -1,5 +1,3 @@
-#[path = "../../../tests/support/chunks.rs"]
-mod chunks;
 use ableton_mcp_server::{live::LiveStatus, tool_catalog::*};
 use kumi_common::js::json::stringify;
 use serde_json::{json, Value};
@@ -23,7 +21,7 @@ fn catalog_has_one_rule_and_class_for_each_unique_tool() {
 
 /// The oracle's cases in 12 tests that nextest runs side by side.
 mod exact_visibility_and_descriptors_match_typescript_for_every_capability_operation_and_profile {
-    crate::chunks::chunked!(super::check_visibility_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4,
+    kumi_testkit::chunked!(super::check_visibility_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4,
         part_05 = 5, part_06 = 6, part_07 = 7, part_08 = 8, part_09 = 9, part_10 = 10, part_11 = 11);
 }
 

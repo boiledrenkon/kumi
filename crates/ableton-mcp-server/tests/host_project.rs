@@ -1,5 +1,4 @@
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use ableton_mcp_server::{
     host::{McpHost, McpHostOptions, ToolCall},
     live::*,

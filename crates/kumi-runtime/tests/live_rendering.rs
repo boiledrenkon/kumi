@@ -1,9 +1,6 @@
 #[path = "support/change_pictures.rs"]
 mod change_pictures;
-#[path = "../../../tests/support/chunks.rs"]
-mod chunks;
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{
@@ -184,7 +181,7 @@ fn wav(folder: &Path, kind: &str) {
 }
 /// The oracle's cases in 16 tests that nextest runs side by side.
 mod source_audition_goal_passes_and_failure_cleanup_match {
-    crate::chunks::chunked!(super::replay_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4, part_05 = 5,
+    kumi_testkit::chunked!(super::replay_cases; part_00 = 0, part_01 = 1, part_02 = 2, part_03 = 3, part_04 = 4, part_05 = 5,
         part_06 = 6, part_07 = 7, part_08 = 8, part_09 = 9, part_10 = 10, part_11 = 11, part_12 = 12, part_13 = 13, part_14 = 14,
         part_15 = 15);
 }

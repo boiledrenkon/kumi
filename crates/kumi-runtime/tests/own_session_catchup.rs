@@ -25,8 +25,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, collections::VecDeque, path::Path, rc::Rc, sync::Arc};
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 /// Live's words, whole: none may reach the producer or the model in another DAW.

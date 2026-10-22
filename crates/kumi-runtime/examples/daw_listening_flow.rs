@@ -22,8 +22,7 @@ use kumi_runtime::mcp::client::McpEndpoint;
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
-#[path = "../tests/support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 fn input(value: Value) -> JsonObject {

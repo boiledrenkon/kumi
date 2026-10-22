@@ -23,8 +23,7 @@ use kumi_runtime::mcp::client::McpEndpoint;
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc};
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 /// Every key of `input` is one the tool's schema offers (it takes no others), and what it requires is there.

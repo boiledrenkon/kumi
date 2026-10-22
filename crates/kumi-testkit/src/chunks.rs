@@ -5,6 +5,7 @@
 /// `chunked!(check; part_00 = 0, part_01 = 1, …)` makes a test of each name, calling `check(k, n)`: check the cases
 /// at index `k`, `k + n`, `k + 2n`, …, `n` being the number of names. `chunks_cover_every_case` makes sure the `k`s
 /// are numbered 0, 1, 2, … in order, so no case is left out.
+#[macro_export]
 macro_rules! chunked {
     ($check:path; $($name:ident = $k:literal),+ $(,)?) => {
         const CHUNKS: &[usize] = &[$($k),+];
@@ -20,4 +21,3 @@ macro_rules! chunked {
         }
     };
 }
-pub(crate) use chunked;

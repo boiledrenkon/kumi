@@ -31,8 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc, time::Duration, time::Instant};
 
-#[path = "../tests/support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 // ----------------------------------------------------------------------------------------------------------------------

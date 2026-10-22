@@ -21,8 +21,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, path::Path, rc::Rc, sync::Arc, sync::LazyLock};
 
-#[path = "support/in_process.rs"]
-mod in_process;
+kumi_testkit::in_process!();
 use in_process::InProcess;
 
 /// Live's words, whole, and a clip: none may reach the producer or the model over REAPER or Renoise.
