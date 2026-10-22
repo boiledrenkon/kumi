@@ -1,6 +1,6 @@
 //! REAPER, through Kumi's extension and host: its refs (REAPER's GUIDs, which hold across reloads), its read tool and
 //! its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
-use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
+use super::own_bridge::{self, create_own_integration, OwnDaw, OwnOptions};
 use super::own_catchup::{as_read, CatchUpWords, Mixer, RecipeKinds};
 use super::own_phrases::{bar_span, track, OwnPhrases, PhraseLook, Phrased};
 use super::own_views::{self, body_args, focus_track, selected, view};
@@ -47,9 +47,16 @@ pub const DAW: OwnDaw = OwnDaw {
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing, BodyKind::Mixer],
     body_request,
     to_body,
+    busy_words: |code| own_bridge::busy_words(code, &DawProfile::REAPER),
+    permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::REAPER),
     changes: &super::reaper_changes::CHANGES,
-    catch_up: &CATCH_UP,
-    phrases: &PHRASES,
+    open_project: None,
+    listening: None,
+    project: None,
+    instant: None,
+    curves: None,
+    catch_up: Some(&CATCH_UP),
+    phrases: Some(&PHRASES),
 };
 
 /// What changed in a REAPER project, in REAPER's words: catch-up's lines, watch_me's changes and its draft recipe.
