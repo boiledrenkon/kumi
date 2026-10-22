@@ -311,7 +311,7 @@ async fn the_judges_listener_follows_the_slot_from_its_next_listen() {
             }
             // Off in its slot when it's looked up, it's off, and it follows the slot back on.
             let fresh = tempfile::tempdir().unwrap();
-            let elsewhere = crate::context(fresh.path(), &[]);
+            let elsewhere = crate::slots::context(fresh.path(), &[]);
             let mut slots_there = Slots::default();
             slots_there.switch(Job::Listening, Choice::Off);
             slots_there.save(&elsewhere.file).unwrap();

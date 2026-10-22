@@ -193,7 +193,7 @@ local_test!(child_environment_excludes_inference_credentials_and_stderr_is_drain
     // Run this test in its own process before setting the parent's fixture credentials.
     if std::env::var_os("KUMI_TEST_ENV_PROBE").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "child_environment_excludes_inference_credentials_and_stderr_is_drained_without_retaining_payloads"])
+            .args(["--exact", "mcp::child_environment_excludes_inference_credentials_and_stderr_is_drained_without_retaining_payloads"])
             .env("KUMI_TEST_ENV_PROBE", "1")
             .env("AI_GATEWAY_API_KEY", "fixture-secret-never-copy")
             .env("ANTHROPIC_API_KEY", "fixture-secret-never-copy")

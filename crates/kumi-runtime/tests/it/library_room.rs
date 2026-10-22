@@ -1,6 +1,5 @@
 //! A learner with no room to convert sounds. Its own binary: the measuring worker is named by an environment variable.
-#![cfg(unix)]
-#[path = "support/library.rs"]
+#[path = "../support/library.rs"]
 mod fixture;
 use fixture::Studio;
 use kumi_common::abort::Signal;

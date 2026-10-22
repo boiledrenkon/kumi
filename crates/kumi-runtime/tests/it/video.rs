@@ -69,7 +69,7 @@ fn youtube_addresses_name_the_video_and_stream_addresses_must_be_public() {
 }
 #[test]
 fn captions_transcripts_and_selected_moments_match_source_results() {
-    let reference: Value = serde_json::from_str(include_str!("support/video/reference.json")).unwrap();
+    let reference: Value = serde_json::from_str(include_str!("../support/video/reference.json")).unwrap();
     for c in reference["captions"].as_array().unwrap() {
         assert_eq!(
             stringify(&serde_json::to_value(parse_captions(c["text"].as_str().unwrap(), c["format"].as_str().unwrap())).unwrap()),
@@ -1226,7 +1226,7 @@ fn youtube_uses_the_retained_installer_runtime_with_a_restricted_path() {
     fs::write(&ytdlp, "#!/bin/sh\nprintf '2025.11.12\\n'\n").unwrap();
     fs::set_permissions(&ytdlp, fs::Permissions::from_mode(0o755)).unwrap();
     let result = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "youtube_javascript_runtime_child", "--nocapture"])
+        .args(["--exact", "video::youtube_javascript_runtime_child", "--nocapture"])
         .env("KUMI_TEST_YTDLP", &ytdlp)
         .env("KUMI_HOME", &kumi)
         .env("PATH", "/nonexistent")

@@ -10,7 +10,7 @@ use std::{
     process::{Command, Stdio},
 };
 fn oracle() -> Value {
-    serde_json::from_str(include_str!("support/ableton-values-oracle.json")).unwrap()
+    serde_json::from_str(include_str!("../support/ableton-values-oracle.json")).unwrap()
 }
 fn hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -112,7 +112,7 @@ fn script(case: &Value) -> String {
 fn scripts_execute_in_python_with_atomic_rollback_deleted_devices_and_safe_undo() {
     let data = oracle();
     let codes: Vec<_> = data["scripts"].as_array().unwrap().iter().map(script).collect();
-    let source = format!("CODES = {}\n{}", stringify(&Value::String(stringify(&json!(codes)))), include_str!("support/fast-live.py"));
+    let source = format!("CODES = {}\n{}", stringify(&Value::String(stringify(&json!(codes)))), include_str!("../support/fast-live.py"));
     let mut child = Command::new("python3").arg("-").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();

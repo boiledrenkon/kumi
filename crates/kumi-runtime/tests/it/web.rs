@@ -3,7 +3,7 @@ use kumi_runtime::web::html::{html_to_text, read_html};
 use serde_json::Value;
 #[test]
 fn a_page_becomes_text_with_structure_code_formulas_links_and_no_furniture() {
-    for source in [include_str!("support/web/html-reference.json"), include_str!("support/web/html-fastpaths.json")] {
+    for source in [include_str!("../support/web/html-reference.json"), include_str!("../support/web/html-fastpaths.json")] {
         let fixtures: Vec<Value> = serde_json::from_str(source).unwrap();
         for f in fixtures {
             let html = f["html"].as_str().unwrap();
@@ -168,7 +168,7 @@ async fn perform(action: &Value, web: Rc<RecordedWeb>, services: Rc<FreeServices
     }
 }
 async fn run_scenario(index: usize) {
-    let scenarios: Vec<Value> = serde_json::from_str(include_str!("support/web/reference.json")).unwrap();
+    let scenarios: Vec<Value> = serde_json::from_str(include_str!("../support/web/reference.json")).unwrap();
     let scenario = &scenarios[index];
     let web = Rc::new(RecordedWeb { requests: RefCell::new(serde_json::from_value(scenario["requests"].clone()).unwrap()) });
     let clock = Rc::new(Cell::new(0.0));

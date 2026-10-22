@@ -1,4 +1,4 @@
-#[path = "support/library.rs"]
+#[path = "../support/library.rs"]
 mod fixture;
 use fixture::Studio;
 use kumi_runtime::library::{

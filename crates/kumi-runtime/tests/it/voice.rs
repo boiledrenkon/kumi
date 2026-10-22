@@ -68,7 +68,7 @@ fn meter_distinguishes_digital_silence_room_voice_and_clicks() {
 }
 #[test]
 fn source_meter_states_words_and_prompts_match() {
-    let fixture: Value = serde_json::from_str(include_str!("support/voice/reference.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("../support/voice/reference.json")).unwrap();
     for c in fixture["clean"].as_array().unwrap() {
         assert_eq!(clean_words(c["input"].as_str().unwrap()), c["expected"].as_str().unwrap());
     }

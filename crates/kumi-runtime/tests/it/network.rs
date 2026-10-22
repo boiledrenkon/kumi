@@ -173,7 +173,7 @@ async fn get(client: reqwest::ClientBuilder, url: &str) -> Result<String, String
 /// proxy and certificate variables), and says how it went.
 fn child(name: &str, env: &[(&str, String)]) -> std::process::Output {
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", name, "--ignored", "--nocapture", "--test-threads=1"]);
+    command.args(["--exact", &format!("network::{name}"), "--ignored", "--nocapture", "--test-threads=1"]);
     for variable in
         ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE"]
     {

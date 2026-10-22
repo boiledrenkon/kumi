@@ -1,4 +1,4 @@
-#[path = "support/library.rs"]
+#[path = "../support/library.rs"]
 mod fixture;
 use fixture::{put, Studio};
 use kumi_common::abort::Signal;

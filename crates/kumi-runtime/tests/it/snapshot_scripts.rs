@@ -11,8 +11,8 @@ use std::{
 
 #[test]
 fn clips_are_captured_and_made_again_in_a_fake_live() {
-    let body = include_str!("../src/integrations/ableton/assets/snapshots.py");
-    let source = format!("BODY = {}\n{}", serde_json::to_string(body).unwrap(), include_str!("support/snapshot-live.py"));
+    let body = include_str!("../../src/integrations/ableton/assets/snapshots.py");
+    let source = format!("BODY = {}\n{}", serde_json::to_string(body).unwrap(), include_str!("../support/snapshot-live.py"));
     let mut child = Command::new("python3").arg("-").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();
@@ -30,7 +30,7 @@ fn the_script_carries_its_args_as_live_python_reads_them() {
     let code = kumi_runtime::integrations::ableton::snapshots::script(&args);
     assert!(code.starts_with("# kumi:snapshots\nimport json\nARGS = json.loads("), "{}", &code[..80]);
     assert!(code.contains(r#"\"op\":\"capture\""#));
-    assert!(code.ends_with(include_str!("../src/integrations/ableton/assets/snapshots.py")));
+    assert!(code.ends_with(include_str!("../../src/integrations/ableton/assets/snapshots.py")));
     // Within what python.run takes, with room for notes.
     assert!(code.len() < 28 * 1024, "{}", code.len());
 }

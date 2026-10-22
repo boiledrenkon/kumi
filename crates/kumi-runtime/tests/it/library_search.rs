@@ -1,4 +1,4 @@
-#[path = "support/library_fixture_paths.rs"]
+#[path = "../support/library_fixture_paths.rs"]
 mod library_fixture_paths;
 use kumi_runtime::library::{
     classify::{ClassFrom, SoundClass, SoundKind},
@@ -21,7 +21,7 @@ fn normalized(value: impl Serialize) -> Value {
 async fn rankings_explanations_float32_similarity_and_rows_match_typescript() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("Nested")).unwrap();
-    let fixture = library_fixture_paths::load(include_str!("support/library-search-oracle.json"), root.path());
+    let fixture = library_fixture_paths::load(include_str!("../support/library-search-oracle.json"), root.path());
     let entries: Vec<SoundEntry> = serde_json::from_value(fixture["entries"].clone()).unwrap();
     let sources: Vec<Source> = serde_json::from_value(fixture["sources"].clone()).unwrap();
     let index = SoundIndex::new(entries.clone(), &sources);

@@ -21,7 +21,7 @@ fn known_signal() -> Vec<f32> {
 
 #[test]
 fn clap_features_match_its_feature_extractor() {
-    let fixture: Value = serde_json::from_str(include_str!("support/clap-fixture.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("../support/clap-fixture.json")).unwrap();
     let features = clap_features(&known_signal());
     let mean = features.iter().map(|value| *value as f64).sum::<f64>() / features.len() as f64;
     assert!((mean - fixture["mean"].as_f64().unwrap()).abs() < 1e-3, "{mean}");
@@ -58,7 +58,7 @@ async fn a_known_signal_embeds_as_the_converted_model_did() {
         eprintln!("skipped: set KUMI_TEST_MODELS to a folder named models holding onnxruntime-1.23.2/ and clap-music-audio.onnx to run it");
         return;
     };
-    let fixture: Value = serde_json::from_str(include_str!("support/clap-fixture.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("../support/clap-fixture.json")).unwrap();
     let expected: Vec<f32> = fixture["embedding"].as_array().unwrap().iter().map(|value| value.as_f64().unwrap() as f32).collect();
     // A WAV of the known signal, embedded the way Kumi embeds what it hears.
     let dir = tempfile::tempdir().unwrap();
@@ -91,7 +91,7 @@ async fn a_known_signals_effects_embed_as_the_converted_model_did() {
         eprintln!("skipped: set KUMI_TEST_MODELS to a folder named models holding onnxruntime-1.23.2/ and afx-rep.onnx to run it");
         return;
     };
-    let fixture: Value = serde_json::from_str(include_str!("support/afx-fixture.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!("../support/afx-fixture.json")).unwrap();
     let unit = |key: &str| {
         let values: Vec<f32> = fixture[key].as_array().unwrap().iter().map(|value| value.as_f64().unwrap() as f32).collect();
         kumi_runtime::listening::embed::normalized(values)

@@ -1230,7 +1230,7 @@ async fn a_song_length_file_is_analyzed_quickly_part_by_part() {
 #[tokio::test]
 async fn native_analysis_and_matching_match_the_typescript_reference_for_seeded_signals() {
     use kumi_runtime::audio::matching::closeness;
-    let reference: serde_json::Value = serde_json::from_str(include_str!("support/media/analysis-reference.json")).unwrap();
+    let reference: serde_json::Value = serde_json::from_str(include_str!("../support/media/analysis-reference.json")).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let bright = analyze_samples(dir.path(), "bright.wav", saw(3.0, 110.0, 20000.0), "sound").await;
     let dark = analyze_samples(dir.path(), "dark.wav", saw(3.0, 110.0, 700.0), "sound").await;

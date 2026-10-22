@@ -1,6 +1,6 @@
 //! REAPER's and Renoise's own libraries: found where their Kumi bridges are, learned by each DAW's layout, and offered
 //! only in that DAW (its presets in find_presets, its sounds in find_sounds). Every folder is a temporary one.
-#[path = "support/library.rs"]
+#[path = "../support/library.rs"]
 mod fixture;
 use async_trait::async_trait;
 use fixture::{put, wav};

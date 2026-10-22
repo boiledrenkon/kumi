@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 fn oracle() -> Value {
-    serde_json::from_str(include_str!("support/focus-stream-oracle.json")).unwrap()
+    serde_json::from_str(include_str!("../support/focus-stream-oracle.json")).unwrap()
 }
 #[test]
 fn focus_fields_and_incremental_step_delivery_match_source_outputs() {
