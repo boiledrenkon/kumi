@@ -303,8 +303,9 @@ Clipboard pictures are kept in `~/.kumi/attachments` for a week.
 ## Background jobs
 
 Kumi does slow work that doesn't change the Set in the background, so you can
-keep working with it: research on the web, a tutorial video, Live's manual, your
-library or earlier conversations, or a Max for Live device's file.
+keep working with it: research on the web, a tutorial video, Live's manual (or
+Logic Pro's guide), your library or earlier conversations, or a Max for Live
+device's file.
 
 - **Starting:** Kumi says what's running in a line and is free for your next
   message. Ask for one ("look into this in the background") or let Kumi decide.
@@ -842,8 +843,8 @@ technique.
 - **Reading** covers pages, PDFs, text and code files, GitHub repositories, Max
   patches and Max for Live devices, and pictures, which the model sees.
 - **Searches and reads** that don't touch Live (the web, sounds, presets, your
-  Sets, the Live manual, earlier conversations) run at the same time, up to four
-  at once. Changes to Live still run one after another.
+  Sets, the Live manual or Logic Pro's guide, earlier conversations) run at the
+  same time, up to four at once. Changes to Live still run one after another.
 
 What Kumi looked up shows above its answer, a line each. It reads only public
 addresses, never your computer or your network, and treats what a page says as
@@ -870,7 +871,9 @@ reference", "my usual vocal chain" or "the bass from my Night Drive Set".
 - **Finding things.** By words, class, tempo, key, length, or how close a sound is
   to a file, a clip or a rendered track; presets by device and kind; your Sets by
   tempo and key. "How do I… in Live?" is answered from Ableton's Live 12 manual,
-  citing the section.
+  citing the section, and "How do I… in Logic Pro?" from Apple's Logic Pro User
+  Guide, citing the topic by its title. Logic Pro's guide is read a topic at a
+  time, the first time an answer needs it, and kept beside the library.
 - **From your Sets.** Kumi learns how you work: tempos and keys, each kind of
   track's instruments and usual chain, the plug-ins you reach for, your returns
   and main chain, how you name and colour tracks. `/memory` lists it under "From
@@ -1251,8 +1254,9 @@ says which need which.
   a known test tone.
 - **Your voice** is written down on your computer, and the recording deleted as
   soon as it is; only the words leave, when you send them.
-- **Your library** is learned on your computer; only the manual's pages come from
-  ableton.com.
+- **Your library** is learned on your computer; only the manuals' pages come
+  from outside: Live's from ableton.com, and Logic Pro's guide from
+  support.apple.com.
 
 Track, clip and device names, tool results and web pages are data for Kumi,
 never instructions. Kumi keeps its files in `~/.kumi`, readable only by you;
@@ -1339,9 +1343,10 @@ Environment variables (paths must be absolute):
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | A Gemini API key for the listening model (Gemini's newest Flash model, from its own list) |
 | `KUMI_FAST=0` | Set device parameters through the bridge's preview and apply, the slower way ([how a change works](KUMI_CHANGES.md#how-a-change-works)) |
 | `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER`, `KUMI_WHISPER_MODEL` | Your own yt-dlp, ffmpeg, whisper.cpp (`whisper-cli`) or speech model (`ggml-*.bin`), by path |
-| `KUMI_DAW` | `reaper` or `renoise` to work in that DAW (`ableton` for Live), as `--daw` does |
+| `KUMI_DAW` | `reaper`, `renoise` or `logic` to work in that DAW (`ableton` for Live), as `--daw` does |
 | `KUMI_REAPER_RESOURCE_DIR` | REAPER's resource folder, the only one Kumi then uses, when it isn't where REAPER keeps it by default |
 | `KUMI_RENOISE_PREFS_DIR` | Renoise's preferences: a `V<x.y.z>` folder, or the folder that holds them |
+| `KUMI_LOGIC_APP` | The Logic Pro app, when Kumi doesn't find it in `/Applications` or `~/Applications` |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, when Kumi doesn't find it |
 | `KUMI_LIVE_EXTENSIONS_DIR` | Where `kumi bridge` puts Kumi's extension and `kumi doctor` looks for it, when Kumi doesn't find Live's Extensions folder |
 | `KUMI_BRIDGE_WAIT_SECONDS` | How long `kumi bridge` waits for Live to connect; `0` doesn't wait |

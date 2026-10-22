@@ -242,6 +242,56 @@ and migration checks do not replace a new real-Live acceptance run.
   ratio, knee and make-up), from one read of the plug-in's Controls View once
   its changes settle. That read opens the plug-in's window in Logic for a
   moment, as a change of it does.
+- **Logic Pro's manual (M7):** `logic_manual` answers from Apple's Logic Pro
+  User Guide for Mac as `live_manual` does from Live's, the two sharing what
+  every manual does (`integrations/shared/manual.rs`: the kept copy read again
+  after 45 days, the stems and BM25, the passages). The guide's welcome page
+  (`support.apple.com/guide/logicpro/welcome/mac`) lists its contents whole,
+  some two thousand topics in parts and chapters; a topic is a page of its own
+  (`…/guide/logicpro/<its title's slug>-<id>/mac`), read without the site
+  around it with `?displayMode=headless`, and a task or subhead in it is
+  addressed by the id of the `div` that holds its heading. Reading every topic
+  would take two thousand requests, so Kumi reads the contents once and a topic
+  the first time an answer needs it (the six whose titles and places best match
+  the question), keeps both in the library folder (`logic-pro-guide.json`), and
+  cites a topic by the guide's title for it ("Logic Pro User Guide, Quantize
+  regions"). A question is matched against the topics' titles and places
+  first, so words no title uses ("sidechain", which the guide writes "side
+  chain") may miss a topic that only its text names; `topic` reads one whole
+  by its title or address. The parser and the tool are tested over a synthetic
+  site laid out as Apple's (`crates/kumi-runtime/tests/logic_manual.rs`); the
+  guide's structure was read from a dozen of Apple's pages while developing.
+- **Logic Pro's instruction pack (M7):** Logic's turns carry Kumi's persona and
+  the general rules Live's pack carries, said for Logic in its words
+  (`integrations/logic_instructions.txt`: doing what's asked without asking
+  first, being resourceful and quick, listening before and after a change,
+  matching a sound by search, learning a routine and following a video,
+  looking things up and asking Apple's guide how Logic works, what is untrusted
+  and what is current, refs and pages, the project as the target), then
+  Logic's own words and ways (M4b) and its change set's instructions. Live's
+  own ways (Python in Live, tunings, resampling, Max for Live devices, Live's
+  menus, its device containers and launcher, its note notation) are left out.
+  With every option on, the first request over the simulated Logic is 56,698
+  bytes (16,398 of system text) against Live's 73,204 (25,945); before the
+  pack it was 47,656 (7,356). With Logic Pro away, the conversation's one line
+  says so and points at Apple's guide.
+- **Logic Pro's eval (M7):** `crates/kumi/examples/eval_logic.rs` asks the
+  configured model 23 things over the simulated Logic, each a session of its
+  own with Logic's instruction pack, changes and listening, and Apple's guide
+  read from a fixture of its topics (never the network): ten knowledge probes
+  of Logic's terms and ways (a region, the Stereo Out, Track Stacks, the
+  Marker, Tempo and Signature Lists, key commands on the selection, what
+  Logic's undo keeps no step of, the Controls View, quantize as a region
+  parameter, an import's own track, Smart Controls), seven change requests over
+  Scratch (a fader, a rename, a marker, a tempo change, a Gain on the Stereo
+  Out, a send, a plan of several), five limits (a track moved or coloured, a
+  send's mode, a plug-in moved, Quick Sampler) and a listen. Each check is
+  code: Logic's words and none of Live's, the guide asked and cited by a topic
+  it gave where a question is about Logic's features, nothing changed for a
+  question, the changes Logic applied and HISTORY's rows, a limit refused
+  saying why, the mix heard. Its dry run, every check on a canned answer, runs
+  in CI (`crates/kumi/tests/eval_logic_dry.rs`); it hasn't been run with a
+  model yet.
 
 ## Evidence
 
@@ -334,10 +384,10 @@ bridge, the version given is the one in the commit that added it.
 
 - REAPER and Renoise on Windows and Linux, and REAPER for Windows on Arm, with
   the real DAWs.
-- Logic Pro: M7 (the manual,
-  the instruction pack, knowledge probes and evals) and M8 (the release); the
-  goal search over Logic (a `GoalRig`); a region's notes past the rows the
-  Event List shows on its screen.
+- Logic Pro: M8 (the release); the goal search over Logic (a `GoalRig`); a
+  region's notes past the rows the Event List shows on its screen; a guard in
+  code against ending a way round with `final: true`, which the eval shows
+  words only nudge (`docs/evidence/logic-m7-evals-2026-10-21.md`).
 - Logic Pro, M6: catching up on a saved project as it opens or is switched to,
   and `watch_me`, run over the simulated Logic (the snapshot is kept in the
   project store under the project's place, `logic-<id>`, beside its

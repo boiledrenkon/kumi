@@ -81,8 +81,8 @@ const FAKE: DawProfile = DawProfile {
     },
 };
 const INSTRUCTIONS: &str = "You work in Fakeloop: read the song with fake_read before changing it.";
-/// Logic Pro, by its real profile: what its bridge gives a session in M1 (the same fake tools stand in for its read).
-const LOGIC_INSTRUCTIONS: &str = "You work in Logic Pro: read the project with fake_read before you describe it.";
+/// Logic Pro, by its real profile and (M7) its instruction pack (the same fake tools stand in for its read).
+const LOGIC_INSTRUCTIONS: &str = kumi_runtime::integrations::logic::DAW.instructions;
 
 fn finish(unified: FinishReasonUnified) -> StreamPart {
     let raw = serde_json::to_value(unified).unwrap().as_str().unwrap().to_string();

@@ -63,6 +63,10 @@ pub struct PromptVocab {
     /// What may lack a capability, as the gap tool says it, with its example: "Kumi's tools or Live's API lack it (a
     /// device setting scripts can't reach, an operation no tool offers)".
     pub gap_lack: &'static str,
+    /// A way round a gap that Kumi builds itself, for the gap guidance: "a device you make".
+    pub gap_way: &'static str,
+    /// What the DAW's processors are called where a text names them, plural: "devices".
+    pub devices: &'static str,
     /// Base instruments a sound-matching search tries apart: "Operator, Wavetable, Drift, Collision or a Simpler sample".
     pub goal_instruments: &'static str,
     /// Topologies to try apart: "serial chains against parallel racks".
@@ -228,6 +232,12 @@ macro_rules! live_word {
     };
     (gap_lack) => {
         "Kumi's tools or Live's API lack it (a device setting scripts can't reach, an operation no tool offers)"
+    };
+    (gap_way) => {
+        "a device you make"
+    };
+    (devices) => {
+        "devices"
     };
     (goal_instruments) => {
         "Operator, Wavetable, Drift, Collision or a Simpler sample"
@@ -405,6 +415,9 @@ macro_rules! daw_word {
     };
     ($profile:expr, gap_lack) => {
         $profile.vocab.gap_lack
+    };
+    ($profile:expr, gap_way) => {
+        $profile.vocab.gap_way
     };
     ($profile:expr, goal_instruments) => {
         $profile.vocab.goal_instruments
@@ -693,6 +706,8 @@ impl DawProfile {
             missing_example: "setting a synth's voice count",
             gap_offer: "Kumi's tools or the DAW's scripting",
             gap_lack: "Kumi's tools or the DAW's API lack it (a device setting scripts can't reach, an operation no tool offers)",
+            gap_way: "a device you make",
+            devices: "devices",
             goal_instruments: "different synths or a sampler",
             serial_parallel: "serial chains against parallel ones",
             build_chains: "add parallel chains, load devices into them",
@@ -801,6 +816,8 @@ impl DawProfile {
             missing_example: crate::live_word!(missing_example),
             gap_offer: crate::live_word!(gap_offer),
             gap_lack: crate::live_word!(gap_lack),
+            gap_way: crate::live_word!(gap_way),
+            devices: crate::live_word!(devices),
             goal_instruments: crate::live_word!(goal_instruments),
             serial_parallel: crate::live_word!(serial_parallel),
             build_chains: crate::live_word!(build_chains),
@@ -896,6 +913,8 @@ impl DawProfile {
             missing_example: "setting a plug-in's oversampling",
             gap_offer: "Kumi's tools or REAPER's scripting",
             gap_lack: "Kumi's tools or REAPER's API lack it (a device setting scripts can't reach, an operation no tool offers)",
+            gap_way: "a device you make",
+            devices: "devices",
             goal_instruments: "ReaSynth, a ReaSamplOmatic5000 sample or a plug-in synth",
             serial_parallel: "serial FX chains against parallel containers",
             build_chains: "add an FX container with parallel chains, load FX into them",
@@ -991,6 +1010,8 @@ impl DawProfile {
             missing_example: "setting a plug-in's oversampling",
             gap_offer: "Kumi's tools or Renoise's scripting",
             gap_lack: "Kumi's tools or Renoise's API lack it (a device setting scripts can't reach, an operation no tool offers)",
+            gap_way: "a device you make",
+            devices: "devices",
             goal_instruments: "a sample instrument with keyzones, a plug-in synth or a Doofer of layers",
             serial_parallel: "serial device chains against a Splitter's parallel branches",
             build_chains: "add a Splitter, load devices into its branches",
@@ -1072,6 +1093,8 @@ impl DawProfile {
             open_project: true,
             ui_hands: true,
             catch_up: true,
+            // (M7) Its manual is Apple's Logic Pro User Guide, searched by a tool as Live's manual is.
+            manual: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -1082,6 +1105,8 @@ impl DawProfile {
             // Logic has no scripting of its own that Kumi reaches: its bridge works Logic's windows for Kumi's tools.
             gap_offer: "Kumi's tools",
             gap_lack: "Kumi's tools lack it (a plug-in setting Kumi's bridge can't reach, an operation no tool offers)",
+            gap_way: "a plug-in you add",
+            devices: "plug-ins",
             goal_instruments: "Alchemy, Retro Synth, Sampler, Quick Sampler or an Audio Unit synth",
             serial_parallel: "serial insert chains against parallel auxes fed by sends",
             build_chains: "add aux tracks fed by sends, insert plug-ins on them",
@@ -1359,6 +1384,8 @@ mod tests {
         assert!(DawProfile::LOGIC.vocab.listen_method.contains("captures what it outputs after the Stereo Out"));
         assert!(DawProfile::LOGIC.vocab.gain_stage.contains("Adaptive Limiter or Limiter, else its last Gain plug-in"));
         assert_eq!(cant_yet(&DawProfile::LOGIC, "pursue a goal"), "Kumi can't pursue a goal in Logic Pro yet.");
+        // (M7) Logic's manual is read as Live's is; REAPER's and Renoise's aren't.
+        assert!(DawProfile::LOGIC.caps.manual && !DawProfile::REAPER.caps.manual && !DawProfile::RENOISE.caps.manual);
     }
 
     /// HISTORY names the key this computer undoes with in REAPER and Renoise: Cmd-Z on macOS, Ctrl-Z on Windows and Linux

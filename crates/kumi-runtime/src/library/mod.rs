@@ -574,13 +574,14 @@ impl Library {
     pub fn tools(self: &Rc<Self>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
         self.tools_for(&DawProfile::ABLETON, options)
     }
-    /// The library's tools in the DAW's words; the DAW's manual only for a DAW whose manual Kumi reads (Live's).
+    /// The library's tools in the DAW's words; the DAW's manual only for a DAW whose manual Kumi reads (Live's, and
+    /// Apple's guide to Logic Pro).
     pub fn tools_for(self: &Rc<Self>, profile: &DawProfile, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = tools::library_tools_for(profile, self.clone(), options.clone());
         if let Some(daw) = profile.id.filter(|_| profile.caps.manual) {
             let manual = crate::integrations::manual_tool(
                 daw,
-                manual::ManualOptions {
+                crate::integrations::shared::manual::ManualOptions {
                     dir: self.dir.clone(),
                     client: self.options.web.as_ref().map(|w| w.client.clone()),
                     base: self.options.web.as_ref().and_then(|w| w.base.clone()),

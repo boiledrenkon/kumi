@@ -75,7 +75,7 @@ pub static LOGIC: Own = Own {
     daw: Daw::Logic,
     bridge: "Kumi's Logic Pro bridge",
     create: kumi_runtime::integrations::logic::create_logic_integration,
-    instructions: "Logic Pro isn't connected, so Kumi can't see your project: answer from what you know, and say so.",
+    instructions: "You are Kumi, a concise, practical producer collaborator. Logic Pro isn't connected, so Kumi can't see your project: answer from what you know and from Apple's Logic Pro User Guide (logic_manual), and say so.",
 };
 
 /// Names a folder laid out as a release lays Logic's bridge out (`logic-kumi`, a `kumi-logic-hands-*` helper and
@@ -1273,6 +1273,20 @@ mod tests {
         std::fs::File::options().write(true).open(&newer).unwrap().set_modified(later).unwrap();
         assert_eq!(helper_in(dir.path()), Some(newer));
         assert_eq!(logic_staging(Path::new("/checkout")), PathBuf::from("/checkout/target/logic-bridge/logic-kumi"));
+    }
+
+    /// (M7) Without Logic Pro, its conversation keeps Kumi's persona and Apple's guide, in a line of Logic's words;
+    /// REAPER's and Renoise's say what they said.
+    #[test]
+    fn without_logic_pro_kumi_answers_from_what_it_knows_and_apples_guide_in_one_line() {
+        let said = LOGIC.instructions;
+        assert!(!said.contains('\n'), "{said}");
+        assert!(said.starts_with("You are Kumi, a concise, practical producer collaborator. Logic Pro isn't connected"), "{said}");
+        assert!(said.contains("from Apple's Logic Pro User Guide (logic_manual)"), "{said}");
+        let live = regex::Regex::new(r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Main|[Rr]acks?|[Cc]lips?|[Ss]cenes?)\b").unwrap();
+        assert!(!live.is_match(said), "{said}");
+        assert_eq!(REAPER.instructions, "REAPER isn't connected, so Kumi can't see your project: answer from what you know, and say so.");
+        assert_eq!(RENOISE.instructions, "Renoise isn't connected, so Kumi can't see your song: answer from what you know, and say so.");
     }
 
     /// Review K19: an app that won't open (`open -a` answers it can't find it) says so, rather than leave setup
