@@ -127,7 +127,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 - 只有修改安装相关部分的变更，Installer 才会在每个系统的一台机器上构建并安装：安装程序、安装、更新、发布、Willington 的文件、Mac 辅助程序、Kumi 使用的 `tar` 和 PowerShell、下载方式（HTTP 客户端和网络设置）和路径的拼接、Kumi 把扩展放进 Live 的方式、REAPER 和 Renoise 桥接的构建与装入方式，以及 Installer 的工作流（不包括它们的测试）。其他拉取请求什么都不构建，合并后由 `main` 的运行来检查。全部六个、从 GitHub 版本的更新、edges 和迁移在 `full-tests` 标签下运行。
 - 在拉取请求和推送到 `main` 时，Installer 的发行包用 `ci-release` 配置构建，它省去 release 配置的全程序优化，优化程度也更低。标签用 `release` 构建。
 
-每次推送到 `main` 运行与修改安装的拉取请求相同的内容，每个标签运行 Installer 的全部内容。Extended 工作流每周运行全部测试。Installer 每晚会用 `release` 配置构建全部六个发行包（失败时会开一个 issue：“The nightly Installer build failed”），从而为下一个标签保持该配置的构建缓存。
+每次推送到 `main` 运行与修改安装的拉取请求相同的内容，每个标签运行 Installer 的全部内容。Extended 工作流每周运行全部测试。Installer 每晚会用 `release` 配置构建全部六个发行包（失败时会开一个 issue：“The nightly Installer build failed”），从而为下一个标签保持该配置的构建缓存。Caches 工作流每天删除 Rust 构建缓存中除每类最新一份以外的所有缓存，这样旧的锁文件世代就不会把拉取请求要恢复的缓存挤出仓库的 10 GB 空间。
 
 要合并到 `main`，`Required CI` 和 `Willington files` 必须通过。Installer 不是必需的。其余规则见[发布与分发](DISTRIBUTION_POLICY.md#合并门禁)。
 

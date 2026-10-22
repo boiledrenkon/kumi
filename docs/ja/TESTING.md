@@ -127,7 +127,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 - Installer が各システムの 1 台でビルドしてインストールするのは、インストールに関わる部分を変える変更の場合だけです：インストーラー、インストール、更新、リリース、Willington のファイル、Mac のヘルパー、Kumi が使う `tar` と PowerShell、ダウンロードの方法（HTTP クライアントとネットワークの設定）とパスの組み立て、Kumi の拡張機能を Live に入れる処理、REAPER と Renoise のブリッジのビルドと配置、そして Installer のワークフロー（それぞれのテストは含まない）。それ以外のプルリクエストでは何もビルドせず、マージ後の `main` の実行で確認します。6 つすべて、GitHub のリリースからの更新、edges、移行は `full-tests` ラベルで実行されます。
 - プルリクエストと `main` へのプッシュでは、Installer のバンドルを `ci-release` プロファイルでビルドします。これはリリースプロファイルのプログラム全体の最適化を省き、最適化も控えめにします。タグは `release` でビルドします。
 
-`main` へのプッシュでは、インストールを変えるプルリクエストと同じものが実行され、タグでは Installer のすべてが実行されます。Extended ワークフローは毎週すべてのテストを実行します。Installer は毎晩 `release` プロファイルで 6 つのバンドルをすべてビルドし（失敗すると issue「The nightly Installer build failed」を開きます）、次のタグのためにそのプロファイルのビルドキャッシュを温めておきます。
+`main` へのプッシュでは、インストールを変えるプルリクエストと同じものが実行され、タグでは Installer のすべてが実行されます。Extended ワークフローは毎週すべてのテストを実行します。Installer は毎晩 `release` プロファイルで 6 つのバンドルをすべてビルドし（失敗すると issue「The nightly Installer build failed」を開きます）、次のタグのためにそのプロファイルのビルドキャッシュを温めておきます。Caches ワークフローは毎日、Rust のビルドキャッシュを種類ごとに最新のものだけ残して削除します。古いロックファイルの世代が、プルリクエストの復元するキャッシュをリポジトリの 10 GB から押し出さないようにするためです。
 
 `main` にマージするには、`Required CI` と `Willington files` がパスする必要があります。Installer は必須ではありません。残りのルールは[リリースと配布](DISTRIBUTION_POLICY.md#マージゲート)にあります。
 
