@@ -1,7 +1,8 @@
-//! The loopback server, on its own threads: the handshake and framing come from daw-bridge; `ping` and `status` are
-//! answered here from the last look at Logic ([`Model`]), so they answer while the helper is busy or gone; events and
-//! heartbeats come from the run loop through the [`Hub`]. Copied from the REAPER extension's server without its queue
-//! to REAPER's main thread (Logic's work goes to the helper instead): what the two share could move into daw-bridge.
+//! The loopback server, on its own threads: the handshake and framing come from daw-bridge; `ping`, `status` and
+//! `focus` are answered here from the last look at Logic ([`Model`] and the focus cache), so they answer while the
+//! helper is busy or gone; `read`, `snapshot` and `focus_body` go to the run loop through the [`Queue`], since the
+//! helper is the run loop's alone; events and heartbeats come from the run loop through the [`Hub`]. Copied from the
+//! REAPER extension's server: what the two share could move into daw-bridge.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -19,8 +20,10 @@ use daw_bridge::wire::{self, code, Event, Frame, Identity, Project, Request, MAX
 use daw_bridge::{loopback, Daw};
 use serde_json::{json, Value};
 
+use crate::focus::Focus;
 use crate::log;
 use crate::logic::Model;
+use crate::queue::{Outcome, Queue};
 use crate::BRIDGE_VERSION;
 
 /// Frames queued for one connection before it counts as stuck and is closed.
@@ -42,9 +45,19 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// a sender nobody dropped, and stopping must not wait for that.
 const WRITER_POLL: Duration = Duration::from_millis(50);
 
-/// The methods served in M1, both answered from the last look and never waiting for Logic; and the events sent.
-pub const METHODS: [&str; 2] = ["ping", "status"];
-pub const EVENTS: [&str; 1] = [wire::event::PROJECT];
+/// The methods served: `ping`, `status` and `focus` answered from the last look and never waiting for Logic, the rest
+/// read through the helper on the run loop; and the events sent.
+pub const METHODS: [&str; 6] = ["ping", "status", "focus", "read", "snapshot", "focus_body"];
+pub const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION];
+/// The methods the run loop answers.
+const QUEUED_METHODS: [&str; 3] = ["read", "snapshot", "focus_body"];
+/// How long a queued request waits for the run loop without a deadline of its own, and the most it may ask for.
+const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+const MAX_WAIT: Duration = Duration::from_secs(60);
+const CLOSING: &str = "the Logic Pro bridge is closing; nothing changed";
+/// What a read answers while the helper lacks the Accessibility grant: `failed`, never `busy`, with the status's
+/// `permission` naming what to grant.
+pub const UNTRUSTED: &str = "Kumi's helper isn't allowed under Accessibility, so nothing of Logic Pro can be read";
 
 /// The connections, shared by the socket threads and the run loop.
 #[derive(Clone, Default)]
@@ -206,14 +219,35 @@ fn wait_until(done: impl Fn() -> bool) {
     }
 }
 
+/// What the run loop shares with the server: the last look at Logic, the focus cache and the queue of work.
+#[derive(Clone)]
+pub struct Shared2 {
+    pub model: Arc<Mutex<Model>>,
+    pub focus: Arc<Mutex<Focus>>,
+    pub queue: Queue,
+}
+
+impl Shared2 {
+    pub fn new(model: Arc<Mutex<Model>>) -> Shared2 {
+        Shared2 { model, focus: Arc::new(Mutex::new(Focus::default())), queue: Queue::default() }
+    }
+}
+
 impl Server {
-    pub fn start(listener: TcpListener, config: Config, hub: Hub, model: Arc<Mutex<Model>>) -> io::Result<Server> {
+    pub fn start(listener: TcpListener, config: Config, hub: Hub, state: Shared2) -> io::Result<Server> {
         let port = listener.local_addr()?.port();
         let stopping = Arc::new(AtomicBool::new(false));
         let flushed = Arc::new(AtomicBool::new(false));
         let threads = Arc::new(Mutex::new(Vec::new()));
-        let shared =
-            Arc::new(Shared { config: config.clone(), hub: hub.clone(), model, stopping: stopping.clone(), flushed: flushed.clone() });
+        let shared = Arc::new(Shared {
+            config: config.clone(),
+            hub: hub.clone(),
+            model: state.model,
+            focus: state.focus,
+            queue: state.queue,
+            stopping: stopping.clone(),
+            flushed: flushed.clone(),
+        });
         let accept = {
             let threads = threads.clone();
             thread::Builder::new()
@@ -336,6 +370,8 @@ struct Shared {
     config: Config,
     hub: Hub,
     model: Arc<Mutex<Model>>,
+    focus: Arc<Mutex<Focus>>,
+    queue: Queue,
     stopping: Arc<AtomicBool>,
     flushed: Arc<AtomicBool>,
 }
@@ -348,12 +384,67 @@ impl Shared {
         (identity, Offer { methods, events, ..Offer::default() })
     }
 
+    /// `focus`: the cache, with how old it is and why Logic is busy if it is. Answered here, so it never waits.
+    fn focus(&self, id: u64) -> Frame {
+        let (busy, permission) = {
+            let model = lock(&self.model);
+            (model.busy, model.permission)
+        };
+        if permission.is_some() {
+            return Frame::error(id, code::FAILED, UNTRUSTED);
+        }
+        let focus = lock(&self.focus).clone();
+        if focus.refreshed.is_none() {
+            return match busy {
+                Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
+                None => Frame::error(id, code::FAILED, "Logic Pro hasn't been read yet"),
+            };
+        }
+        let mut answer = focus.to_json();
+        if let Some(busy) = busy {
+            answer["busy"] = busy.code().into();
+        }
+        Frame::ok(id, answer)
+    }
+
     fn answer(&self, request: Request) -> Frame {
         let id = request.id;
         match request.method.as_str() {
-            "ping" => Frame::ok(id, json!({})),
-            "status" => Frame::ok(id, lock(&self.model).status()),
-            other => Frame::error(id, code::UNKNOWN_METHOD, format!("the Logic Pro bridge has no method {other:?}")),
+            "ping" => return Frame::ok(id, json!({})),
+            "status" => return Frame::ok(id, lock(&self.model).status()),
+            "focus" => return self.focus(id),
+            _ => {}
+        }
+        if !QUEUED_METHODS.contains(&request.method.as_str()) {
+            return Frame::error(id, code::UNKNOWN_METHOD, format!("the Logic Pro bridge has no method {:?}", request.method));
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return Frame::error(id, code::FAILED, CLOSING);
+        }
+        if lock(&self.model).permission.is_some() {
+            return Frame::error(id, code::FAILED, UNTRUSTED);
+        }
+        let now = unix_ms();
+        let wait = match request.deadline_ms {
+            Some(deadline) if deadline <= now => {
+                return Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed")
+            }
+            Some(deadline) => Duration::from_millis(deadline - now),
+            None => DEFAULT_WAIT,
+        };
+        let waiter = self.queue.submit(&request.method, request.params);
+        match waiter.wait(wait.min(MAX_WAIT), &self.stopping) {
+            Outcome::Answered(Ok(result)) => Frame::ok(id, result),
+            Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
+            Outcome::Cancelled => match lock(&self.model).busy {
+                Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
+                None if request.deadline_ms.is_some() => {
+                    Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed")
+                }
+                None => Frame::error(id, code::BUSY, "the bridge didn't get to it in time; nothing changed"),
+            },
+            Outcome::Uncertain => Frame::error(id, code::UNCERTAIN, "the bridge started this but didn't finish in time"),
+            Outcome::Closed => Frame::error(id, code::FAILED, CLOSING),
         }
     }
 }
@@ -593,6 +684,8 @@ mod tests {
         server: Option<Server>,
         hub: Hub,
         model: Arc<Mutex<Model>>,
+        focus: Arc<Mutex<Focus>>,
+        queue: Queue,
     }
 
     impl Lab {
@@ -611,8 +704,11 @@ mod tests {
             let model = Arc::new(Mutex::new(model()));
             let hub = Hub::default();
             let listener = TcpListener::bind((loopback::BIND_ADDRESS, 0)).unwrap();
-            let server = Server::start(listener, config, hub.clone(), model.clone()).unwrap();
-            Lab { dir, server: Some(server), hub, model }
+            let state = Shared2::new(model.clone());
+            let focus = state.focus.clone();
+            let queue = state.queue.clone();
+            let server = Server::start(listener, config, hub.clone(), state).unwrap();
+            Lab { dir, server: Some(server), hub, model, focus, queue }
         }
 
         fn server(&mut self) -> &mut Server {
@@ -837,8 +933,8 @@ mod tests {
         assert_eq!(welcome["resource"], "com.apple.logic10");
         assert_eq!(welcome["dawVersion"], "12.3.1");
         assert_eq!(welcome["project"], json!({"id": "a".repeat(32), "name": "Song", "path": "/m/Song.logicx"}));
-        assert_eq!(welcome["methods"], json!(["ping", "status"]));
-        assert_eq!(welcome["events"], json!(["project"]));
+        assert_eq!(welcome["methods"], json!(["ping", "status", "focus", "read", "snapshot", "focus_body"]));
+        assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection"]));
         assert_eq!(welcome.get("creditBytes"), None);
 
         assert_eq!(request(&mut stream, &mut reader, 1, "ping")["result"], json!({}));
@@ -854,9 +950,44 @@ mod tests {
         }
         let status = request(&mut stream, &mut reader, 3, "status")["result"].clone();
         assert_eq!((&status["busy"], &status["permission"]), (&json!("modal"), &json!("accessibility")));
-        // Methods that come with M2 are refused by name, not queued.
-        let refused = request(&mut stream, &mut reader, 4, "read");
+        // A method the bridge doesn't have is refused by name, not queued.
+        let refused = request(&mut stream, &mut reader, 4, "change_apply");
         assert_eq!(refused["error"]["code"], code::UNKNOWN_METHOD);
+        // Without the Accessibility grant a read fails, in words, and is never busy; so does the focus.
+        let refused = request(&mut stream, &mut reader, 5, "read");
+        assert_eq!((refused["error"]["code"].as_str(), refused["error"]["message"].as_str()), (Some(code::FAILED), Some(UNTRUSTED)));
+        assert_eq!(request(&mut stream, &mut reader, 6, "focus")["error"]["code"], code::FAILED);
+        lock(&lab.model).permission = None;
+        // Granted, but nothing read yet while Logic is busy: the focus says so; a read waits for the run loop, which
+        // answers it through the queue.
+        assert_eq!(request(&mut stream, &mut reader, 7, "focus")["error"]["code"], code::BUSY);
+        lock(&lab.model).busy = None;
+        assert_eq!(request(&mut stream, &mut reader, 8, "focus")["error"]["message"], "Logic Pro hasn't been read yet");
+        let queue = lab.queue.clone();
+        let answerer = thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(job) = queue.take() {
+                    assert_eq!((job.method.as_str(), &job.params), ("read", &json!({})));
+                    job.answer(Ok(json!({"items": [], "epoch": "1"})));
+                    return;
+                }
+                assert!(Instant::now() < until, "no job came");
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        assert_eq!(request(&mut stream, &mut reader, 9, "read")["result"]["epoch"], "1");
+        answerer.join().unwrap();
+        {
+            let mut focus = lock(&lab.focus);
+            focus.update(crate::focus::Look { epoch: 3, view: "tracks", ..Default::default() });
+        }
+        let focus = request(&mut stream, &mut reader, 10, "focus")["result"].clone();
+        assert_eq!((focus["epoch"].as_str(), focus["view"].as_str()), (Some("3"), Some("tracks")));
+        assert!(focus.get("busy").is_none());
+        lock(&lab.model).busy = Some(Busy::Modal);
+        assert_eq!(request(&mut stream, &mut reader, 11, "focus")["result"]["busy"], "modal");
+        lock(&lab.model).busy = None;
 
         lab.hub.event("project", json!({"name": "Other"}));
         lab.hub.event("project", Value::Null);

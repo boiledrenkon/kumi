@@ -1,27 +1,33 @@
 //! A scripted Logic Pro project for the host's tests: what Kumi's own bridge beside Logic (`logic-kumi`) answers to
-//! `read`, `snapshot`, `focus` and `focus_body`, from a table of the contract's rows (docs/en/LOGIC_CONTRACT.md): one
-//! project, two tracks, one MIDI region of four notes, a Channel EQ and a send on track 1, one marker. Pages by limit
-//! and cursor; refs are positions with an epoch (`1:track:2`; children under their parent's position: `1:note:1.3`),
-//! and the epoch moves when a track or region changes, after which refs and cursors from before are refused as stale.
-//! Small on purpose: the host's tests are about the plumbing; what Logic holds is the bridge's own tests' concern.
+//! `read`, `snapshot`, `focus` and `focus_body` (the M2 contract, docs/en/LOGIC_CONTRACT.md), replayed verbatim.
+//!
+//! What the bridge answers to the fixed request set of M2's brief over the Scratch project is kept in
+//! tests/vectors/logic-reads.json, which the bridge's own tests write from the real Logic over its AX fixtures
+//! (KUMI_BLESS=1 in crates/logic-kumi/tests/reads.rs; until they do, the file holds what the hand-written rows of the
+//! same project answered). This replays those answers, so the simulator cannot drift from the bridge. The project can be
+//! changed, as a track or region added, removed or moved changes it in Logic: the epoch moves, refs and cursors from
+//! before are refused as `stale`, and the answers carry the new epoch. Another project can be opened: the epoch moves
+//! and the project's id, identity, name and path are another's. A page of the Tracks area nobody recorded (FOCUS asks
+//! for a screenful of lanes around the selected track) is cut from the recorded one, as the bridge pages it.
+use super::replay::{epoch_of, find, load_cases, retag, Case, RECORDED_EPOCH};
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
+use daw_bridge::wire::Project;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
-const DEFAULT_LIMIT: usize = 50;
-const MAX_LIMIT: usize = 200;
+const VECTORS: &str = include_str!("../../tests/vectors/logic-reads.json");
+const VECTORS_NAME: &str = "tests/vectors/logic-reads.json";
 /// The timeline body's page, in tracks.
 const MAX_LANES: usize = 500;
-const KINDS: [&str; 8] = ["project", "track", "region", "note", "plugin", "send", "marker", "tempo"];
-const BODIES: [&str; 4] = ["tree", "notes", "timeline", "routing"];
 const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
-/// The project's id: the SHA-256 prefix of its package path, as the contract has it.
-pub const PROJECT_ID: &str = "3f9c2a7b1d4e5f60718293a4b5c6d7e8";
 
 struct State {
+    /// The epoch the project is in now (the vectors were recorded in [`RECORDED_EPOCH`]).
     epoch: u32,
-    changed: u64,
+    /// Which project is open: 0 the recorded one, else another copy of it, with an id and a name of its own.
+    project: u32,
+    cases: Vec<Case>,
     /// What the simulator was asked, in order: method and params.
     asked: Vec<(String, Value)>,
 }
@@ -32,122 +38,146 @@ pub struct LogicScript {
     state: Arc<Mutex<State>>,
 }
 
-/// The epoch a ref (`<epoch>:<kind>:<n>`) or a cursor (`<epoch>.<n>`) names, if the text is one.
-fn epoch_of(text: &str) -> Option<u32> {
-    let end = text.find([':', '.'])?;
-    let digits = &text[..end];
-    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| digits.parse().ok()).flatten()
-}
-
-fn position(bar: u32, beat: u32, division: u32, tick: u32) -> Value {
-    json!({"bar": bar, "beat": beat, "division": division, "tick": tick})
-}
-
-/// The project's rows of one kind, with this epoch's refs.
-fn rows(epoch: u32, kind: &str) -> Vec<Value> {
-    let r = |kind: &str, n: &str| format!("{epoch}:{kind}:{n}");
-    match kind {
-        "project" => vec![json!({
-            "id": PROJECT_ID,
-            "identity": "Scratch",
-            "path": "/lab/Scratch.logicx",
-            "tempo": 160.0,
-            "timeSignature": "4/4",
-            "keySignature": "C major",
-            "sampleRate": 48000,
-            "trackCount": 2,
-        })],
-        "track" => vec![
-            json!({"ref": r("track", "1"), "index": 1, "name": "Vocal", "kind": "audio", "mute": false, "solo": false, "armed": false, "monitoring": false, "volumeDb": 0.0, "pan": 0, "color": "#5b8def", "output": "Stereo Out", "inputs": ["Input 1"], "selected": true}),
-            json!({"ref": r("track", "2"), "index": 2, "name": "Keys", "kind": "instrument", "mute": false, "solo": false, "armed": false, "monitoring": false, "volumeDb": -3.0, "pan": 0, "color": null, "output": "Stereo Out", "inputs": [], "selected": false}),
-        ],
-        "region" => vec![json!({
-            "ref": r("region", "1"),
-            "trackRef": r("track", "2"),
-            "name": "Keys",
-            "startBeats": 0.0,
-            "endBeats": 16.0,
-            "kind": "midi",
-            "selected": true,
-            "looped": false,
-        })],
-        "note" => [(1, 60, 100, 240), (2, 64, 96, 240), (3, 67, 92, 240), (4, 72, 110, 480)]
-            .iter()
-            .map(|(beat, pitch, velocity, length)| {
-                json!({
-                    "ref": r("note", &format!("1.{beat}")),
-                    "regionRef": r("region", "1"),
-                    "position": position(1, *beat, 1, 1),
-                    "pitch": pitch,
-                    "velocity": velocity,
-                    "lengthTicks": length,
-                    "channel": 1,
-                })
-            })
-            .collect(),
-        "plugin" => vec![json!({
-            "ref": r("plugin", "1.1"),
-            "trackRef": r("track", "1"),
-            "slot": 1,
-            "name": "Channel EQ",
-            "bypassed": false,
-            "kind": "effect",
-        })],
-        "send" => vec![json!({"ref": r("send", "1.1"), "trackRef": r("track", "1"), "slot": 1, "destination": "Bus 1", "level": -6.0})],
-        "marker" => vec![json!({"ref": r("marker", "1"), "position": position(9, 1, 1, 1), "name": "Chorus", "length": 8.0, "text": ""})],
-        "tempo" => vec![json!({"bpm": 160.0, "signatures": [{"position": position(1, 1, 1, 1), "time": "4/4", "key": "C major"}]})],
-        _ => vec![],
-    }
-}
-
-/// The key a kind's rows name their parent by.
-fn parent_key(kind: &str) -> Option<&'static str> {
-    match kind {
-        "region" | "plugin" | "send" => Some("trackRef"),
-        "note" => Some("regionRef"),
-        _ => None,
-    }
-}
-
-fn selection(epoch: u32) -> Value {
-    json!({"trackRef": format!("{epoch}:track:1"), "regionRef": format!("{epoch}:region:1")})
-}
-
-fn transport() -> Value {
-    json!({"playing": false, "recording": false, "cycle": false, "playhead": {"bar": 1, "beat": 1}, "tempo": 160.0, "timeSignature": "4/4"})
-}
-
 type Answer = Result<Value, (String, String)>;
 
-fn bad(message: impl Into<String>) -> (String, String) {
-    ("bad-params".to_string(), message.into())
+/// The project the vectors were recorded over, as the bridge's `status` named it: what the welcome and the discovery
+/// file carry.
+pub fn project() -> Project {
+    let cases = load_cases(VECTORS, VECTORS_NAME);
+    find(&cases, "status", &json!({}))
+        .and_then(|case| case.response.as_ref().ok())
+        .and_then(|status| serde_json::from_value(status["project"].clone()).ok())
+        .unwrap_or_else(|| Project { name: Some("Scratch".into()), ..Project::default() })
 }
 
-fn limit_of(params: &Value, most: usize) -> usize {
-    params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_LIMIT.min(most), |n| (n as usize).clamp(1, most))
+/// The project row of `value`, if it holds one (an `id` of 32 hex digits beside a path or an identity), made the
+/// `n`th copy of the recorded project: another id, identity, name and path.
+fn another_project(value: &Value, n: u32) -> Value {
+    if n == 0 {
+        return value.clone();
+    }
+    match value {
+        Value::Object(map) => {
+            let is_project = map.get("id").and_then(Value::as_str).is_some_and(|id| id.len() == 32)
+                && (map.contains_key("path") || map.contains_key("identity"));
+            Value::Object(
+                map.iter()
+                    .map(|(key, field)| {
+                        let field = match (is_project, key.as_str(), field.as_str()) {
+                            (true, "id", Some(id)) => Value::String(format!("{}{n:02x}", &id[..30])),
+                            (true, "identity" | "name", Some(text)) if !text.is_empty() => Value::String(format!("{text} {n}")),
+                            (true, "path", Some(path)) if !path.is_empty() => {
+                                let (stem, extension) = path.rsplit_once('.').unwrap_or((path, ""));
+                                Value::String(if extension.is_empty() { format!("{stem} {n}") } else { format!("{stem} {n}.{extension}") })
+                            }
+                            _ => another_project(field, n),
+                        };
+                        (key.clone(), field)
+                    })
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(|item| another_project(item, n)).collect()),
+        other => other.clone(),
+    }
 }
 
-/// Where a page starts: the position a cursor (`<epoch>.<n>`, this epoch's) names, or 0.
+/// A ref or cursor in `params` from another epoch than `epoch`: the bridge refuses it, whatever it was for.
+fn stale_in(params: &Value, epoch: u32) -> Option<(String, String)> {
+    for key in ["ref", "parent", "around", "cursor"] {
+        let Some(from) = params.get(key).and_then(Value::as_str).and_then(epoch_of).filter(|from| *from != epoch) else { continue };
+        let (what, then) = if key == "cursor" { ("cursor", "read again from the start") } else { ("ref", "read again") };
+        return Some(("stale".into(), format!("that {what} is from an earlier epoch ({from}; now {epoch}): {then}")));
+    }
+    None
+}
+
+/// Where a page starts: the position a cursor (`<epoch>.<n>`) names, or 0.
 fn start_of(params: &Value) -> Result<usize, (String, String)> {
     match params.get("cursor").and_then(Value::as_str) {
         None => Ok(0),
         Some(cursor) => cursor
             .split_once('.')
             .and_then(|(_, n)| n.parse::<usize>().ok())
-            .ok_or_else(|| bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
+            .ok_or_else(|| ("bad-params".to_string(), "cursor: pass the nextCursor an earlier read gave, unchanged".to_string())),
     }
 }
 
+/// A page of the recorded Tracks area, as the bridge pages it: `limit` lanes from a cursor, or centred on the `around`
+/// track (half a page above it), each lane's regions kept to the `window` asked for (the recorded one otherwise).
+fn timeline_page(whole: &Value, params: &Value) -> Answer {
+    let lanes = whole["lanes"].as_array().cloned().unwrap_or_default();
+    let limit = params.get("limit").and_then(Value::as_u64).map_or(MAX_LANES, |n| (n as usize).clamp(1, MAX_LANES));
+    let start = match params.get("around").and_then(Value::as_str) {
+        Some(around) => {
+            let place = lanes
+                .iter()
+                .position(|lane| lane["trackRef"] == around)
+                .ok_or_else(|| ("failed".to_string(), format!("{around} isn't in the project (deleted, or another project)")))?;
+            place.saturating_sub(limit / 2).min(lanes.len().saturating_sub(limit))
+        }
+        None => start_of(params)?,
+    };
+    let window = params.get("window").cloned().unwrap_or_else(|| whole["window"].clone());
+    let (from, to) = (window["from"].as_f64().unwrap_or(0.0), window["to"].as_f64().unwrap_or(f64::MAX));
+    let page: Vec<Value> = lanes
+        .iter()
+        .skip(start)
+        .take(limit)
+        .map(|lane| {
+            let mut lane = lane.clone();
+            if let Some(regions) = lane["regions"].as_array_mut() {
+                regions.retain(|region| {
+                    region["startBeats"].as_f64().unwrap_or(0.0) < to && region["endBeats"].as_f64().unwrap_or(0.0) > from
+                });
+            }
+            lane
+        })
+        .collect();
+    let mut body = whole.clone();
+    body["window"] = window;
+    body["lanes"] = Value::Array(page);
+    body["from"] = start.into();
+    if let Some(map) = body.as_object_mut() {
+        map.remove("nextCursor");
+    }
+    if start + limit < lanes.len() {
+        body["nextCursor"] = format!("{RECORDED_EPOCH}.{}", start + limit).into();
+    }
+    Ok(body)
+}
+
 impl LogicScript {
+    /// The project of the vectors: what the bridge answers for Scratch.
     pub fn new() -> Self {
-        LogicScript { state: Arc::new(Mutex::new(State { epoch: 1, changed: 7, asked: vec![] })) }
+        LogicScript {
+            state: Arc::new(Mutex::new(State {
+                epoch: RECORDED_EPOCH,
+                project: 0,
+                cases: load_cases(VECTORS, VECTORS_NAME),
+                asked: vec![],
+            })),
+        }
     }
 
     /// A track or region was added, removed or moved: the epoch moves, so refs and cursors from before are stale.
     pub fn change_tracks(&self) {
+        self.state.lock().unwrap().epoch += 1;
+    }
+
+    /// Another project is open: the `n`th copy of the recorded one (0 is the recorded one itself), with an id, an
+    /// identity, a name and a path of its own and the same rows, as a copy saved under another name has. The epoch
+    /// moves with it.
+    pub fn open_project(&self, n: u32) {
         let mut state = self.state.lock().unwrap();
         state.epoch += 1;
-        state.changed += 1;
+        state.project = n;
+    }
+
+    /// The project open now, as the bridge's `status` would name it: the recorded one, or the copy `open_project` opened.
+    pub fn project(&self) -> Project {
+        let n = self.state.lock().unwrap().project;
+        serde_json::from_value(another_project(&serde_json::to_value(project()).unwrap(), n)).unwrap()
     }
 
     /// Every request the simulator answered, in order.
@@ -171,185 +201,95 @@ impl LogicScript {
         }
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
-        let epoch = state.epoch;
-        // A ref or cursor from before the epoch moved is refused, whatever it was for.
-        for key in ["ref", "parent", "around", "cursor"] {
-            let Some(from) = params.get(key).and_then(Value::as_str).and_then(epoch_of).filter(|from| *from != epoch) else { continue };
-            let (what, then) = if key == "cursor" { ("cursor", "read again from the start") } else { ("ref", "read again") };
-            return Some(Err(("stale".into(), format!("that {what} is from an earlier epoch ({from}; now {epoch}): {then}"))));
-        }
-        Some(match method {
-            "read" => Self::read(epoch, params),
-            "snapshot" => Ok(json!({
-                "epoch": epoch.to_string(),
-                "project": rows(epoch, "project").remove(0),
-                "transport": transport(),
-                "tracks": rows(epoch, "track"),
-                "selection": selection(epoch),
-                "markers": rows(epoch, "marker"),
-            })),
-            "focus" => Ok(json!({
-                "epoch": epoch.to_string(),
-                "view": "tracks",
-                "editor": "pianoRoll",
-                "selection": selection(epoch),
-                "playhead": {"bar": 1, "beat": 1},
-                "transport": {"playing": false, "recording": false, "cycle": false},
-                "changed": state.changed,
-                "ageMs": 12,
-            })),
-            "focus_body" => Self::body(epoch, params),
-            _ => return None,
-        })
-    }
-
-    fn read(epoch: u32, params: &Value) -> Answer {
-        if let Some(wanted) = params.get("ref").and_then(Value::as_str) {
-            let row = KINDS.iter().flat_map(|kind| rows(epoch, kind)).find(|row| row["ref"] == wanted);
-            return match row {
-                Some(row) => Ok(json!({"items": [row], "epoch": epoch.to_string()})),
-                None => Err(("failed".into(), format!("{wanted} isn't in the project (deleted, or another project)"))),
-            };
-        }
-        let kind = params.get("kind").and_then(Value::as_str).ok_or_else(|| bad("kind: one of the kinds"))?;
-        if !KINDS.contains(&kind) {
-            return Err(bad(format!("Logic Pro has no kind {kind:?} to read")));
-        }
-        let all: Vec<Value> = match (parent_key(kind), params.get("parent").and_then(Value::as_str)) {
-            (Some("regionRef"), None) => return Err(bad(format!("{kind}: pass the parent region"))),
-            (Some(key), Some(parent)) => rows(epoch, kind).into_iter().filter(|row| row[key] == parent).collect(),
-            _ => rows(epoch, kind),
-        };
-        let (limit, start) = (limit_of(params, MAX_LIMIT), start_of(params)?);
-        let items: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
-        let mut page = json!({"items": items, "total": all.len(), "epoch": epoch.to_string()});
-        if start + limit < all.len() {
-            page["nextCursor"] = format!("{epoch}.{}", start + limit).into();
-        }
-        Ok(page)
-    }
-
-    /// One row by its ref, or the selected one of its kind (track 1, region 1) when none is named.
-    fn one(epoch: u32, kind: &str, wanted: Option<&str>) -> Answer {
-        let wanted = wanted.map(str::to_string).unwrap_or_else(|| format!("{epoch}:{kind}:1"));
-        rows(epoch, kind)
-            .into_iter()
-            .find(|row| row["ref"] == wanted)
-            .ok_or_else(|| ("failed".to_string(), format!("{wanted} isn't in the project (deleted, or another project)")))
-    }
-
-    fn sends_of(epoch: u32, track_ref: &Value) -> Vec<Value> {
-        rows(epoch, "send")
-            .into_iter()
-            .filter(|send| send["trackRef"] == *track_ref)
-            .map(|send| json!({"slot": send["slot"], "destination": send["destination"], "level": send["level"], "sendRef": send["ref"]}))
-            .collect()
-    }
-
-    fn body(epoch: u32, params: &Value) -> Answer {
-        let e = epoch.to_string();
-        let wanted = params.get("ref").and_then(Value::as_str);
-        match params.get("kind").and_then(Value::as_str).unwrap_or("") {
-            "tree" => {
-                let track = Self::one(epoch, "track", wanted)?;
-                let inserts: Vec<Value> = rows(epoch, "plugin")
-                    .into_iter()
-                    .filter(|plugin| plugin["trackRef"] == track["ref"])
-                    .map(|plugin| json!({"slot": plugin["slot"], "name": plugin["name"], "bypassed": plugin["bypassed"], "pluginRef": plugin["ref"]}))
-                    .collect();
-                Ok(json!({
-                    "kind": "tree",
-                    "epoch": e,
-                    "trackRef": track["ref"],
-                    "strip": {
-                        "name": track["name"], "kind": track["kind"], "volumeDb": track["volumeDb"], "pan": track["pan"],
-                        "mute": track["mute"], "solo": track["solo"], "armed": track["armed"],
-                        "inputs": track["inputs"], "output": track["output"],
-                        "inserts": inserts, "sends": Self::sends_of(epoch, &track["ref"]),
-                    },
-                }))
+        let (epoch, project) = (state.epoch, state.project);
+        // Past the recorded epoch, a ref or cursor from an earlier one is refused before anything is looked up, as the
+        // bridge refuses it whatever it was for; in the recorded epoch the refusals recorded answer.
+        if epoch != RECORDED_EPOCH {
+            if let Some(stale) = stale_in(params, epoch) {
+                return Some(Err(stale));
             }
-            "notes" => {
-                let region = Self::one(epoch, "region", wanted)?;
-                let notes: Vec<Value> = rows(epoch, "note").into_iter().filter(|note| note["regionRef"] == region["ref"]).collect();
-                let (limit, start) = (limit_of(params, MAX_LIMIT), start_of(params)?);
-                let page: Vec<Value> = notes.iter().skip(start).take(limit).cloned().collect();
-                let mut body = json!({
-                    "kind": "notes",
-                    "epoch": e,
-                    "regionRef": region["ref"],
-                    "startBeats": region["startBeats"],
-                    "endBeats": region["endBeats"],
-                    "notes": page,
-                    "total": notes.len(),
-                });
-                if start + limit < notes.len() {
-                    body["nextCursor"] = format!("{epoch}.{}", start + limit).into();
-                }
-                Ok(body)
-            }
-            "timeline" => {
-                let window = params.get("window").cloned().unwrap_or(json!({"from": 0.0, "to": 16.0}));
-                let (from, to) = (window["from"].as_f64().unwrap_or(0.0), window["to"].as_f64().unwrap_or(16.0));
-                let tracks = rows(epoch, "track");
-                let limit = params.get("limit").and_then(Value::as_u64).map_or(MAX_LANES, |n| (n as usize).clamp(1, MAX_LANES));
-                let start = match params.get("around").and_then(Value::as_str) {
-                    Some(around) => {
-                        let place = tracks.iter().position(|track| track["ref"] == around).ok_or_else(|| {
-                            ("failed".to_string(), format!("{around} isn't in the project (deleted, or another project)"))
-                        })?;
-                        place.saturating_sub(limit / 2).min(tracks.len().saturating_sub(limit))
-                    }
-                    None => start_of(params)?,
-                };
-                let lanes: Vec<Value> = tracks
-                    .iter()
-                    .skip(start)
-                    .take(limit)
-                    .map(|track| {
-                        let regions: Vec<Value> = rows(epoch, "region")
-                            .into_iter()
-                            .filter(|region| {
-                                region["trackRef"] == track["ref"]
-                                    && region["startBeats"].as_f64().unwrap_or(0.0) < to
-                                    && region["endBeats"].as_f64().unwrap_or(0.0) > from
-                            })
-                            .map(|region| json!({"ref": region["ref"], "name": region["name"], "startBeats": region["startBeats"], "endBeats": region["endBeats"], "kind": region["kind"]}))
-                            .collect();
-                        json!({"trackRef": track["ref"], "name": track["name"], "kind": track["kind"], "regions": regions})
-                    })
-                    .collect();
-                let mut body = json!({
-                    "kind": "timeline",
-                    "epoch": e,
-                    "window": {"from": from, "to": to},
-                    "lanes": lanes,
-                    "trackCount": tracks.len(),
-                    "from": start,
-                });
-                if start + limit < tracks.len() {
-                    body["nextCursor"] = format!("{epoch}.{}", start + limit).into();
-                }
-                Ok(body)
-            }
-            "routing" => {
-                let track = Self::one(epoch, "track", wanted)?;
-                Ok(json!({
-                    "kind": "routing",
-                    "epoch": e,
-                    "trackRef": track["ref"],
-                    "inputs": track["inputs"],
-                    "output": track["output"],
-                    "sends": Self::sends_of(epoch, &track["ref"]),
-                }))
-            }
-            _ => Err(bad(format!("Logic Pro has no body of that kind: use one of {}", BODIES.join(", ")))),
         }
+        let answered = |result: &Value| another_project(&retag(result, RECORDED_EPOCH, epoch), project);
+        let asked = retag(params, epoch, RECORDED_EPOCH);
+        if let Some(case) = find(&state.cases, method, &asked) {
+            return Some(case.response.clone().map(|result| answered(&result)));
+        }
+        // A page of the Tracks area nobody recorded: cut from the recorded one.
+        if method == "focus_body" && asked["kind"] == "timeline" {
+            let whole = find(&state.cases, "focus_body", &json!({"kind": "timeline"})).and_then(|case| case.response.as_ref().ok());
+            if let Some(whole) = whole {
+                return Some(timeline_page(whole, &asked).map(|page| answered(&page)));
+            }
+        }
+        if let Some(stale) = stale_in(params, epoch) {
+            return Some(Err(stale));
+        }
+        Some(Err(("bad-params".into(), format!("the simulator has no answer scripted for {method} {params}"))))
     }
 }
 
 impl Default for LogicScript {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_recorded_set_answers_verbatim_and_follows_the_epoch() {
+        let script = LogicScript::new();
+        let answer = |method: &str, params: Value| script.answer(method, &params).expect("a method the simulator has");
+        let tracks = answer("read", json!({"kind": "track"})).unwrap();
+        assert_eq!((tracks["epoch"].as_str(), tracks["items"][0]["ref"].as_str()), (Some("1"), Some("1:track:1")));
+        assert_eq!(answer("read", json!({"kind": "note"})).unwrap_err().0, "bad-params", "the recorded refusal");
+        assert_eq!(answer("read", json!({"kind": "region", "parent": "0:track:2"})).unwrap_err().0, "stale");
+        assert_eq!(answer("read", json!({"kind": "track", "limit": 1.0})).unwrap()["nextCursor"], "1.1", "whole numbers alike");
+        assert!(answer("read", json!({"kind": "note", "parent": "1:region:1", "limit": 3})).unwrap_err().1.contains("no answer scripted"));
+        // The epoch moves: refs from before are stale, and the same questions answer in the new epoch.
+        script.change_tracks();
+        assert_eq!(answer("read", json!({"ref": "1:track:2"})).unwrap_err().0, "stale");
+        assert_eq!(
+            answer("read", json!({"kind": "track", "cursor": "1.1"})).unwrap_err().1,
+            "that cursor is from an earlier epoch (1; now 2): read again from the start"
+        );
+        let again = answer("read", json!({"kind": "track", "limit": 1})).unwrap();
+        assert_eq!(
+            (again["epoch"].as_str(), again["items"][0]["ref"].as_str(), again["nextCursor"].as_str()),
+            (Some("2"), Some("2:track:1"), Some("2.1"))
+        );
+        let project = answer("read", json!({"kind": "project"})).unwrap();
+        assert_eq!(project["items"][0]["id"], json!(super::project().id), "the same project: its id stays");
+        assert_eq!(answer("focus", json!({})).unwrap()["selection"]["trackRef"], "2:track:1");
+        // Another project: another id, identity and path, the same rows.
+        script.open_project(1);
+        let other = answer("snapshot", json!({})).unwrap();
+        assert_eq!((other["epoch"].as_str(), other["tracks"][0]["ref"].as_str()), (Some("3"), Some("3:track:1")));
+        assert_ne!(other["project"]["id"], json!(super::project().id));
+        let copy = super::project().path.map(|path| path.replace(".logicx", " 1.logicx")).expect("the recorded project has a path");
+        assert_eq!(other["project"]["path"], json!(copy));
+        assert_eq!(script.project().path.as_deref(), Some(copy.as_str()));
+        script.open_project(0);
+        assert_eq!(answer("snapshot", json!({})).unwrap()["project"]["id"], json!(super::project().id));
+    }
+
+    #[test]
+    fn a_page_of_the_tracks_area_is_cut_from_the_recorded_one() {
+        let script = LogicScript::new();
+        let answer = |params: Value| script.answer("focus_body", &params).unwrap();
+        let page = answer(json!({"kind": "timeline", "limit": 24, "around": "1:track:1"})).unwrap();
+        assert_eq!((page["from"].as_u64(), page["lanes"].as_array().map(Vec::len), page.get("nextCursor")), (Some(0), Some(2), None));
+        let one = answer(json!({"kind": "timeline", "limit": 1})).unwrap();
+        assert_eq!((one["lanes"][0]["name"].as_str(), one["nextCursor"].as_str()), (Some("Vocal"), Some("1.1")));
+        let rest = answer(json!({"kind": "timeline", "limit": 1, "cursor": "1.1"})).unwrap();
+        assert_eq!((rest["lanes"][0]["name"].as_str(), rest["from"].as_u64()), (Some("Keys"), Some(1)));
+        let later = answer(json!({"kind": "timeline", "window": {"from": 32.0, "to": 48.0}})).unwrap();
+        assert!(later["lanes"][1]["regions"].as_array().unwrap().is_empty(), "the region ends before the window: {later}");
+        assert_eq!(answer(json!({"kind": "timeline", "around": "1:track:7"})).unwrap_err().0, "failed");
+        // The recorded page itself, when the request is the recorded one.
+        let recorded = answer(json!({"kind": "timeline", "around": "1:track:2", "window": {"from": 0.0, "to": 16.0}, "limit": 1})).unwrap();
+        assert_eq!((recorded["from"].as_u64(), recorded["lanes"][0]["name"].as_str()), (Some(1), Some("Keys")));
     }
 }

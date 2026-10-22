@@ -25,6 +25,7 @@ says which Kumi ships with which.
 | MCP protocol eras | `2025-11-25` and `2026-07-28` |
 | Runtime | Native Rust app and standalone bridge; fresh installs require no Node |
 | Older installs (Kumi 1.7.5 and earlier) | Node 22/24; retained Node also supports rollback and optional YouTube challenges ([details](SUPPORT_MATRIX.md)) |
+| Logic Pro bridge (`logic-kumi`, beside Logic) | 0.1.0, on the `kumi-daw/1` wire; its shapes are in [the Logic contract](LOGIC_CONTRACT.md) |
 
 ## What has been tested where
 
@@ -53,14 +54,28 @@ and migration checks do not replace a new real-Live acceptance run.
   - The limits are in [known limits](KUMI_CHANGES.md#known-limits). There's no
     record file for these yet. REAPER and Renoise on Windows and Linux are
     untested.
+- **Real Logic Pro on macOS** (Apple silicon, Logic Pro 12.3.1): the lab of what
+  macOS gives Kumi to read and change Logic, a go or no-go per channel (M0), and
+  the bridge beside Logic attaching through its Accessibility helper and
+  answering `ping` and `status`, set up by `kumi --daw logic bridge`, found by
+  the doctor and started by Kumi's host from a session (M1). M2, observation,
+  is in progress: the host replays what the bridge records of the real Logic in
+  `crates/daw-mcp-server/tests/vectors/logic-reads.json` (the rows, the refs,
+  the focus and FOCUS's bodies), the runtime reads them, opens a kept
+  conversation's project again and tells whether Logic records, and
+  `crates/kumi/examples/accept_logic.rs` is the opt-in run against the real
+  Logic for the gate; the bridge's reads over the real Logic and that run are
+  not recorded yet. Nothing in Logic changes before M3.
 
 ## Evidence
 
 The records in [`docs/evidence`](../evidence/). Where a record doesn't name its
 bridge, the version given is the one in the commit that added it.
 
-| Record | Date | Live | Bridge | What it shows |
+| Record | Date | DAW | Bridge | What it shows |
 | --- | --- | --- | --- | --- |
+| [logic-lab-2026-10-18.md](../evidence/logic-lab-2026-10-18.md) | 2026-10-18 | Logic Pro 12.3.1 | — | The Logic Pro lab (M0): a go or no-go per macOS channel (Accessibility reads and writes, key commands, the open and save panels, Mackie Control, OSC, the project file, the process tap), measured on this Mac |
+| [logic-m1-gate-2026-10-19.md](../evidence/logic-m1-gate-2026-10-19.md) | 2026-10-19 | Logic Pro 12.3.1 | `logic-kumi` 0.1.0 | The M1 gate: the bridge attached to the real Logic with its helper, `ping` and `status` over the wire; the install lifecycle, the doctor, and Kumi's host starting the bridge from a session |
 | [kumi-poc.md](../evidence/kumi-poc.md) | 2026-09-28 to 09-30 | 12.4.15b4, b5 | 1.0.0 to 1.0.63 | Kumi on real Live: acceptance runs, speed and big Sets, `kumi bridge`, audition and goals, a Max for Live device, reconnecting |
 | [live-extension.md](../evidence/live-extension.md) | 2026-09-30 | 12.4.15b5 | 1.0.57 to 1.0.65 | How Live runs Kumi's extension; offline renders, its costs, both channels agreeing, undo, right-click |
 | [lom-audit.md](../evidence/lom-audit.md), [JSON](../evidence/lom-audit-12.4.15b5.json) | 2026-09-30 | 12.4.15b5 | 1.0.55 | A census of Live's Python API against what the Remote Script uses |
@@ -87,11 +102,17 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
+- Logic Pro support reads the project and changes nothing yet (M2 in progress;
+  changes and undo are M3); Logic Pro 11 and Intel Macs are out of scope. See
+  [the Logic contract](LOGIC_CONTRACT.md).
 
 ## Open work
 
 - REAPER and Renoise on Windows and Linux, and REAPER for Windows on Arm, with
   the real DAWs.
+- Logic Pro: M2's reads over the real Logic (the bridge recording
+  `logic-reads.json` over its fixtures, and the acceptance run), then M3's
+  changes and undo.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

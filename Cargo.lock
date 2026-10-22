@@ -1440,6 +1440,7 @@ name = "logic-kumi"
 version = "0.1.0"
 dependencies = [
  "daw-bridge",
+ "flate2",
  "hex",
  "libc",
  "percent-encoding",

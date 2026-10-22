@@ -537,7 +537,7 @@ async fn own_session(
         let mut context = IntegrationContext::new(listener);
         let into = into.clone();
         context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
-        create(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect) })
+        create(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect), open_file: None })
     });
     let main = Rc::new(Recorded::default());
     let events = Rc::new(RefCell::new(vec![]));
