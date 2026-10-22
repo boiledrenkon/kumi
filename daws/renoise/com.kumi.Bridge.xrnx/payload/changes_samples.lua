@@ -283,10 +283,11 @@ end
 
 local function set_zone(sample, zone)
   local mapping = sample.sample_mapping
-  -- (a range is set whole; the base note after it)
-  mapping.note_range = copy_range(zone.noteRange)
-  mapping.velocity_range = copy_range(zone.velocityRange)
-  mapping.base_note = zone.baseNote
+  -- (a range is set whole, the base note after it, and only what differs: the step holds only what moved)
+  local notes, velocity = mapping.note_range, mapping.velocity_range
+  if notes[1] ~= zone.noteRange[1] or notes[2] ~= zone.noteRange[2] then mapping.note_range = copy_range(zone.noteRange) end
+  if velocity[1] ~= zone.velocityRange[1] or velocity[2] ~= zone.velocityRange[2] then mapping.velocity_range = copy_range(zone.velocityRange) end
+  if mapping.base_note ~= zone.baseNote then mapping.base_note = zone.baseNote end
 end
 
 local function drumkit_plan(song, env, input)
@@ -345,78 +346,173 @@ local function same_zones(a, b)
   return true
 end
 
-local function drumkit_preview(song, env, input)
-  local plan = drumkit_plan(song, env, input)
-  local unchanged = true
-  for k = 1, #plan.zones do if not same_zone(plan.zones[k], plan.before[k]) then unchanged = false end end
-  local display = { title = drumkit_title(plan), before = { zones = plan.before }, after = { zones = plan.zones }, unchanged = unchanged or nil }
-  return {
-    target = places_.target_of(env, "instrument", plan.n), prior = { zones = plan.before },
-    fence = { samples = plan.samples, zones = plan.before, count = plan.count }, display = display,
-  }
+-- The changes that lay out an instrument's keyzones in one step: a kind's `plan` says which samples get which zones (and, with
+-- `overlap`, the instrument's overlap mode); the preview, apply, restore and the journal's read are the same for each. The record
+-- keeps each sample's zone before and after by its place (and the overlap); the undo puts back only what still holds what Kumi
+-- set.
+local function zones_state(instrument, overlaps)
+  local state = all_zones(instrument)
+  if overlaps then state.overlap = OVERLAPS.get(instrument.sample_mapping_overlap_mode) end
+  return state
 end
 
-local function drumkit_apply(song, env, input, fence, desc)
-  local ok, plan = pcall(drumkit_plan, song, env, input)
-  if not ok then base.gone_is_changed(plan) end
-  if plan.count ~= fence.count or not base.same_table(plan.samples, fence.samples) then fail("changed", q(plan.label) .. "'s samples changed since the preview") end
-  for k = 1, #plan.before do
-    if not same_zone(plan.before[k], fence.zones[k]) then fail("changed", q(plan.label) .. "'s keyzones changed since the preview") end
+local function zones_kind(spec)
+  local overlaps = spec.overlap == true
+  local function preview(song, env, input)
+    local plan = spec.plan(song, env, input)
+    local unchanged = plan.overlap == nil or plan.overlap == plan.overlap_before
+    for k = 1, #plan.zones do if not same_zone(plan.zones[k], plan.before[k]) then unchanged = false end end
+    local prior, fence = { zones = plan.before }, { samples = plan.samples, zones = plan.before, count = plan.count }
+    if overlaps then prior.overlap, fence.overlap = plan.overlap_before, plan.overlap_before end
+    return {
+      target = places_.target_of(env, "instrument", plan.n), prior = prior, fence = fence,
+      display = { title = spec.title(plan), before = { zones = plan.before }, after = { zones = plan.zones }, unchanged = unchanged or nil },
+    }
   end
-  local instrument = song:instrument(plan.n[1])
-  local journal_prior = all_zones(instrument)
-  song:describe_undo(desc)
-  for k, s in ipairs(plan.samples) do set_zone(instrument:sample(s), plan.zones[k]) end
-  local places = {}
-  for k, s in ipairs(plan.samples) do places[k] = places_.place_of(env, "sample", { plan.n[1], s }) end
-  for k, s in ipairs(plan.samples) do
-    if not same_zone(zone_of(instrument:sample(s)), plan.zones[k]) then
-      for j, back in ipairs(plan.samples) do pcall(set_zone, instrument:sample(back), plan.before[j]) end
+
+  local function apply(song, env, input, fence, desc)
+    local ok, plan = pcall(spec.plan, song, env, input)
+    if not ok then base.gone_is_changed(plan) end
+    if plan.count ~= fence.count or not base.same_table(plan.samples, fence.samples) then fail("changed", q(plan.label) .. "'s samples changed since the preview") end
+    if overlaps and plan.overlap_before ~= fence.overlap then fail("changed", q(plan.label) .. "'s overlap changed since the preview") end
+    for k = 1, #plan.before do
+      if not same_zone(plan.before[k], fence.zones[k]) then fail("changed", q(plan.label) .. "'s keyzones changed since the preview") end
+    end
+    local instrument = song:instrument(plan.n[1])
+    local journal_prior = zones_state(instrument, overlaps)
+    song:describe_undo(desc)
+    for k, s in ipairs(plan.samples) do set_zone(instrument:sample(s), plan.zones[k]) end
+    if plan.overlap and plan.overlap ~= plan.overlap_before then instrument.sample_mapping_overlap_mode = OVERLAPS.parse(plan.overlap) end
+    local held = plan.overlap == nil or OVERLAPS.get(instrument.sample_mapping_overlap_mode) == plan.overlap
+    for k, s in ipairs(plan.samples) do if not same_zone(zone_of(instrument:sample(s)), plan.zones[k]) then held = false end end
+    if not held then
+      -- (nothing half-done stays: the zones and the overlap as they were)
+      for k, s in ipairs(plan.samples) do pcall(set_zone, instrument:sample(s), plan.before[k]) end
+      if overlaps then pcall(function() instrument.sample_mapping_overlap_mode = OVERLAPS.parse(plan.overlap_before) end) end
       fail("failed", "Renoise didn't keep the keyzones as laid out")
     end
+    local places = {}
+    for k, s in ipairs(plan.samples) do places[k] = places_.place_of(env, "sample", { plan.n[1], s }) end
+    -- (Renoise's own undo of any of it is seen through the bridge's watch of every sample's keys, velocities and base note
+    -- and of the instrument's overlap: journal_check then reads the zones again)
+    if env.watch_undo then
+      for _, s in ipairs(plan.samples) do env.watch_undo(instrument:sample(s).sample_mapping.note_range_observable) end
+    end
+    local applied, material = { zones = plan.zones }, { samples = places }
+    if overlaps then
+      applied.overlap = OVERLAPS.get(instrument.sample_mapping_overlap_mode)
+      material.instrument = places_.place_of(env, "instrument", plan.n)
+    end
+    return {
+      applied = applied, material = material, target = places_.target_of(env, "instrument", plan.n),
+      display = { title = spec.title(plan), before = { zones = plan.before }, after = { zones = plan.zones } },
+      undo = { desc = desc, entry = true }, prior = journal_prior, journal_applied = zones_state(instrument, overlaps),
+      place = places_.journal_place("instrument", plan.n),
+    }
   end
-  if env.watch_undo then
-    for _, s in ipairs(plan.samples) do env.watch_undo(instrument:sample(s).sample_mapping.note_range_observable) end
+
+  local function restore(song, env, restore_, desc)
+    local material, prior, applied = restore_.material, restore_.prior, restore_.applied
+    if type(material) ~= "table" or type(material.samples) ~= "table" or type(prior) ~= "table" or type(applied) ~= "table"
+      or type(prior.zones) ~= "table" or type(applied.zones) ~= "table" then
+      bad("material, prior and applied: the samples and their zones")
+    end
+    local found, todo = {}, false
+    for k, kept in ipairs(material.samples) do
+      local n, why, list = places_.follow(env, kept)
+      if not n then places_.follow_failed(why, list, spec.sample_words) end
+      local sample = song:instrument(n[1]):sample(n[2])
+      local now = zone_of(sample)
+      if not same_zone(now, prior.zones[k]) then
+        if not restore_.discard and not same_zone(now, applied.zones[k]) then
+          fail("changed", string.format("the keyzone of %s changed in Renoise since %s", q(places_.sample_label(n[2], sample)), spec.since))
+        end
+        todo = true
+      end
+      found[k] = n
+    end
+    local at
+    if material.instrument then
+      local n, why, list = places_.follow(env, material.instrument)
+      if not n then places_.follow_failed(why, list, "the instrument Kumi laid out") end
+      at = n[1]
+    elseif found[1] then
+      at = found[1][1]
+    end
+    local overlap_back = false
+    if overlaps and at and prior.overlap and applied.overlap then
+      local now = OVERLAPS.get(song:instrument(at).sample_mapping_overlap_mode)
+      if now ~= prior.overlap then
+        if not restore_.discard and now ~= applied.overlap then fail("changed", "the instrument's overlap changed in Renoise since " .. spec.since) end
+        overlap_back = true
+      end
+    end
+    if not todo and not overlap_back then
+      return { restored = { done = true }, display = { title = "The keyzones are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    end
+    song:describe_undo(desc)
+    for k, n in ipairs(found) do set_zone(song:instrument(n[1]):sample(n[2]), prior.zones[k]) end
+    if overlap_back then song:instrument(at).sample_mapping_overlap_mode = OVERLAPS.parse(prior.overlap) end
+    if at then base.note_restored_at(env.journal, spec.kind, places_.journal_place("instrument", { at })) end
+    return { restored = { done = true }, display = { title = "Keyzones put back as they were" }, undo = { desc = desc, entry = true } }
   end
+
+  base.register({
+    kind = spec.kind, custom = true, by_place = true, preview = preview, apply = apply, restore = restore,
+    reread = places_.reread("instrument"),
+    read = function(instrument) return zones_state(instrument, overlaps) end,
+    same = function(a, b) return same_zones(a, b) and (not overlaps or a.overlap == b.overlap) end,
+  })
+end
+
+zones_kind({ kind = "keyzone-drumkit", plan = drumkit_plan, title = drumkit_title, sample_words = "a sample of the kit", since = "Kumi laid out the kit" })
+
+-- keyzone-map (#401, sample mapping): an instrument's samples laid out as given, each its own zone, velocity range and base
+-- note, and the instrument's overlap mode, as one change: what Kumi's sample map plans for an instrument the song has.
+
+local function map_plan(song, env, input)
+  local n, objects, label = places_.locate(song, env, "instrument", input, "keyzone-map")
+  local instrument = objects.instrument
+  if type(input.samples) ~= "table" or #input.samples == 0 then bad("samples: each sample's {sampleRef, noteRange, velocityRange?, baseNote}") end
+  if #input.samples > #instrument.samples then bad("there are more samples than " .. q(label) .. " holds") end
+  local chosen, zones, before, seen = {}, {}, {}, {}
+  local in_keys, in_velocity = whole(0, 119), whole(0, 127)
+  for k, given in ipairs(input.samples) do
+    if type(given) ~= "table" then bad("each sample is {sampleRef, noteRange, velocityRange?, baseNote}") end
+    local found = places_.numbers_of(env, "sample", given.sampleRef, "sampleRef")
+    if found[1] ~= n[1] then bad("every sampleRef must be a sample of that instrument") end
+    if seen[found[2]] then bad("a sample is given twice") end
+    seen[found[2]] = true
+    local sample = instrument:sample(found[2])
+    if sample.sample_mapping.read_only then bad(q(label) .. " is sliced: its slices' keys follow the slice markers") end
+    local notes, velocity = given.noteRange, given.velocityRange or { 0, 127 }
+    if type(notes) ~= "table" or not in_keys(notes[1]) or not in_keys(notes[2]) or notes[1] > notes[2] then
+      bad("a sample's noteRange is [low, high], notes from 0 to 119")
+    end
+    if type(velocity) ~= "table" or not in_velocity(velocity[1]) or not in_velocity(velocity[2]) or velocity[1] > velocity[2] then
+      bad("a sample's velocityRange is [low, high], from 0 to 127")
+    end
+    if not in_keys(given.baseNote) then bad("a sample's baseNote is the note it sounds at, 0 to 119 (C-4 is 48)") end
+    chosen[k] = found[2]
+    before[k] = zone_of(sample)
+    zones[k] = { noteRange = { notes[1], notes[2] }, velocityRange = { velocity[1], velocity[2] }, baseNote = given.baseNote }
+  end
+  if input.overlap ~= nil and OVERLAPS.parse(input.overlap) == nil then bad("overlap is all (layered), cycle (round robin) or random") end
   return {
-    applied = { zones = plan.zones }, material = { samples = places }, target = places_.target_of(env, "instrument", plan.n),
-    display = { title = drumkit_title(plan), before = { zones = plan.before }, after = { zones = plan.zones } },
-    undo = { desc = desc, entry = true }, prior = journal_prior, journal_applied = all_zones(instrument),
-    place = places_.journal_place("instrument", plan.n),
+    n = n, label = label, samples = chosen, zones = zones, before = before, count = #instrument.samples,
+    overlap = input.overlap, overlap_before = OVERLAPS.get(instrument.sample_mapping_overlap_mode),
   }
 end
 
-local function drumkit_restore(song, env, restore, desc)
-  local material, prior, applied = restore.material, restore.prior, restore.applied
-  if type(material) ~= "table" or type(material.samples) ~= "table" or type(prior) ~= "table" or type(applied) ~= "table" then
-    bad("material, prior and applied: the samples and their zones")
+local function map_title(plan)
+  local words = string.format("Laid out %s: %d %s", q(plan.label), #plan.samples, #plan.samples == 1 and "sample" or "samples")
+  if plan.overlap and plan.overlap ~= plan.overlap_before then
+    words = words .. (plan.overlap == "cycle" and ", round robins in turn" or plan.overlap == "random" and ", round robins at random" or ", layers together")
   end
-  local found, todo = {}, false
-  for k, kept in ipairs(material.samples) do
-    local n, why, list = places_.follow(env, kept)
-    if not n then places_.follow_failed(why, list, "a sample of the kit") end
-    local sample = song:instrument(n[1]):sample(n[2])
-    local now = zone_of(sample)
-    if not same_zone(now, prior.zones[k]) then
-      if not restore.discard and not same_zone(now, applied.zones[k]) then
-        fail("changed", string.format("the keyzone of %s changed in Renoise since Kumi laid out the kit", q(places_.sample_label(n[2], sample))))
-      end
-      todo = true
-    end
-    found[k] = n
-  end
-  if not todo then return { restored = { done = true }, display = { title = "The keyzones are back already" }, undo = { desc = desc, entry = false }, unwritten = true } end
-  song:describe_undo(desc)
-  for k, n in ipairs(found) do set_zone(song:instrument(n[1]):sample(n[2]), prior.zones[k]) end
-  if found[1] then base.note_restored_at(env.journal, "keyzone-drumkit", places_.journal_place("instrument", { found[1][1] })) end
-  return { restored = { done = true }, display = { title = "Keyzones put back as they were" }, undo = { desc = desc, entry = true } }
+  return words
 end
 
-base.register({
-  kind = "keyzone-drumkit", custom = true, by_place = true,
-  preview = drumkit_preview, apply = drumkit_apply, restore = drumkit_restore,
-  reread = places_.reread("instrument"), read = function(instrument) return all_zones(instrument) end, same = same_zones,
-})
+zones_kind({ kind = "keyzone-map", plan = map_plan, title = map_title, overlap = true, sample_words = "a sample Kumi laid out", since = "Kumi laid it out" })
 
 -- Samples loaded, deleted
 
@@ -904,6 +1000,95 @@ base.register({
   preview = slices_preview, apply = slices_apply, restore = slices_restore,
   reread = places_.reread("sample"), read = function(sample) return { markers = sample.slice_markers } end,
   same = function(a, b) return same_list(a.markers, b.markers) end,
+})
+
+
+-- sample-invert {ref} (#401, layering breaks): a sample's audio with its polarity flipped (every value negated, Renoise clips at
+-- full scale), as one step. Renoise has no polarity switch on a track or device, so a layer that fights its main break is
+-- flipped in its sample. Kumi's undo flips it again: refused once the audio changed since, but with discard (the polarity back,
+-- the edits kept). A slice plays its sample's audio (the sample is flipped); more than M.MOST_INVERTED values (frames ×
+-- channels) is refused, since one callback flips them all.
+M.MOST_INVERTED = 2000000
+
+local function invert_buffer(buffer)
+  local frames, channels = buffer.number_of_frames, buffer.number_of_channels
+  buffer:prepare_sample_data_changes()
+  for channel = 1, channels do
+    for frame = 1, frames do
+      local value = buffer:sample_data(channel, frame)
+      buffer:set_sample_data(channel, frame, -(tonumber(type(value) == "table" and value[1] or value) or 0))
+    end
+  end
+  buffer:finalize_sample_data_changes()
+end
+
+local function invert_plan(song, env, input)
+  local n, objects, label = places_.locate(song, env, "sample", input, "sample-invert")
+  local sample = objects.sample
+  if sample.is_slice_alias then bad(label .. " is a slice: it plays its sample's audio, so flip the sample") end
+  local buffer = sample.sample_buffer
+  if not buffer.has_sample_data then bad(label .. " holds no audio") end
+  if buffer.read_only then bad(label .. "'s audio can't be written") end
+  local frames, channels = buffer.number_of_frames, buffer.number_of_channels
+  if frames * channels > M.MOST_INVERTED then
+    fail("failed", string.format("%s is too long to flip in one step (%d frames, %d channels; up to %d values): flip it in Renoise's sample editor",
+      label, frames, channels, M.MOST_INVERTED))
+  end
+  return { n = n, label = label, print = M.buffer_print(buffer) }
+end
+
+local function invert_preview(song, env, input)
+  local plan = invert_plan(song, env, input)
+  return {
+    target = sample_target(env, plan.n), prior = { print = plan.print }, fence = { print = plan.print },
+    display = { title = "Flipped the polarity of " .. plan.label },
+  }
+end
+
+local function invert_apply(song, env, input, fence, desc)
+  local ok, plan = pcall(invert_plan, song, env, input)
+  if not ok then base.gone_is_changed(plan) end
+  if not base.same_table(plan.print, fence.print) then fail("changed", plan.label .. "'s audio changed since the preview") end
+  local sample = song:instrument(plan.n[1]):sample(plan.n[2])
+  song:describe_undo(desc)
+  invert_buffer(sample.sample_buffer)
+  if env.watch_undo then env.watch_undo(sample.sample_buffer_observable) end
+  return {
+    applied = { print = M.buffer_print(sample.sample_buffer) }, material = { at = places_.place_of(env, "sample", plan.n) },
+    target = sample_target(env, plan.n), display = { title = "Flipped the polarity of " .. plan.label },
+    undo = { desc = desc, entry = true }, prior = { print = fence.print }, place = places_.journal_place("sample", plan.n),
+  }
+end
+
+local function invert_restore(song, env, restore, desc)
+  local material, applied = restore.material, restore.applied
+  if type(material) ~= "table" or type(applied) ~= "table" then bad("material and applied: the sample Kumi flipped") end
+  local n, why, list = places_.follow(env, material.at)
+  if not n then places_.follow_failed(why, list, "the sample Kumi flipped") end
+  local sample = song:instrument(n[1]):sample(n[2])
+  local label = q(places_.sample_label(n[2], sample))
+  local now = M.buffer_print(sample.sample_buffer)
+  if base.same_table(now, (restore.prior or {}).print) then
+    return { restored = { done = true }, display = { title = label .. " has its polarity back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+  end
+  local edited = not base.same_table(now, applied.print)
+  if edited and not restore.discard then fail("changed", label .. "'s audio changed in Renoise since Kumi flipped it") end
+  if not sample.sample_buffer.has_sample_data then fail("changed", label .. " holds no audio now") end
+  song:describe_undo(desc)
+  invert_buffer(sample.sample_buffer)
+  base.note_restored_at(env.journal, "sample-invert", places_.journal_place("sample", n))
+  return {
+    restored = { done = true }, display = { title = label .. " has its polarity back" .. (edited and " (with the edits made since)" or "") },
+    undo = { desc = desc, entry = true },
+  }
+end
+
+base.register({
+  kind = "sample-invert", custom = true, by_place = true,
+  preview = invert_preview, apply = invert_apply, restore = invert_restore,
+  reread = places_.reread("sample"),
+  read = function(sample) return { print = M.buffer_print(sample.sample_buffer) } end,
+  same = function(a, b) return base.same_table(a.print, b.print) end,
 })
 
 return M

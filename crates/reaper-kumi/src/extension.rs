@@ -454,11 +454,17 @@ impl Extension {
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
             // m4-r-fxenv
             "fx_chain_save" => self.changes.fx_chain_save(&self.reaper(), &self.reads, params),
+            // (#401) a chore kept as an action: a file and the Action List, not the project
+            "script_install" => crate::scripts::install(&self.reaper(), params),
+            "script_remove" => crate::scripts::remove(&self.reaper(), params),
             // (r-tracks) Saving: actions, no change.
             "project_save" => self.changes.project_save(&self.reaper(), &self.reads, params),
             "track_template_save" => self.changes.track_template_save(&self.reaper(), &self.reads, params),
             // M5 listening (m5-reaper).
             "render_start" => self.listening.render_start(&self.reaper(), &self.reads, params),
+            // #401: the producer's own files, dry run and render.
+            "deliver_targets" => self.listening.deliver_targets(&self.reaper(), &self.reads, params),
+            "deliver_start" => self.listening.deliver_start(&self.reaper(), &self.reads, params),
             "capture_start" => self.listening.capture_start(&self.reaper(), &self.reads, params),
             "audition" => self.listening.audition(&self.reaper(), params),
             "audio_file" => self.listening.audio_file(&self.reaper(), &self.reads, params),

@@ -22,7 +22,15 @@ does the job there.
 | Instant phrases, made with no model call | ✓ | ✓ | ✓ |
 | Code run inside the DAW | ✓ Python | ✓ Lua (ReaScript), REAPER's API and actions | ✓ Lua |
 | Stop everything at once (`/stop`) | ✓ | ✓ | ✓ |
-| Variations as numbered takes you keep, change or drop | not yet | not yet: item variations come later | ✓ |
+| Variations as numbered takes you keep, change or drop | ✓ Session clips | ✓ items | ✓ |
+| Sample maps: sounds laid across the keys by name, pitch and loudness, and an instrument tidy | not yet | not yet: drum kits only (`drum_kit`) | ✓ |
+| Chops a recording at its real hits and lays the slices out to play it | not yet | not yet | ✓ |
+| Delivers files: a region per asset, named in the project's convention, a dry run first | not yet | ✓ | not yet |
+| Finds why a track plays twice or nowhere, and builds sidechains, parallel buses and stems as one undo step | not yet | ✓ | not yet |
+| Keeps a repeated chore as a script: run once as one undo step, then kept as the DAW's own action once you say yes | not yet | ✓ | ✓ |
+| Meets a loudness spec: ACX, streaming or broadcast, measured, fixed at the master fader, measured again | not yet | ✓ | ✓ |
+| Cleans up a jam: empties, copies, repeats and mistakes told from feel, quantized by a strength | not yet | not yet | ✓ |
+| Lines up layered breaks: each layer's offset, polarity and level against the main break, and the glue measured | not yet | not yet | ✓ |
 | Knows whether the DAW is recording | ✓ | ✓ | ✓ |
 | A line in the DAW's status bar | ✓ | no: REAPER's API has no status bar (a notification instead) | ✓ |
 | Opens a saved project | ✓ | not yet: you open it yourself (`kumi -r` and setup's restart don't) | not yet: you open it yourself (`kumi -r` and setup's restart don't) |
@@ -34,8 +42,8 @@ does the job there.
 | Auditions candidates against a reference, and goals (`/goal`) on a rig kept open | ✓ | ✓ | ✓ |
 | Judges its changes, `/loop`, matches references | ✓ | ✓ | ✓ |
 | The audio file behind a clip, item or sample | ✓ | ✓ | ✓ |
-| Splits a track into stems | ✓ Live's own splitter | not yet: no splitter Kumi can use | not yet: no splitter Kumi can use |
-| Turns audio into MIDI | ✓ drums, melody and harmony | not yet: only a pitched part in a file (Basic Pitch) | not yet: only a pitched part in a file (Basic Pitch) |
+| Splits a track into stems | ✓ Live's own splitter | ✓ Kumi's own splitter: drums, bass and other | ✓ Kumi's own splitter: drums, bass and other |
+| Turns audio into MIDI | ✓ drums, melody and harmony | ✓ drums, melody and harmony, by Kumi's own ears | ✓ drums, melody and harmony, by Kumi's own ears |
 | **FOCUS** | | | |
 | FOCUS and the beat light follow the DAW as it changes | ✓ | ✓ | ✓ |
 | A track's devices as a tree | ✓ | ✓ FX chains and containers | ✓ Track DSPs, Doofers and Splitters |
@@ -67,6 +75,13 @@ does the job there.
 - A whole plan is one Live undo (Cmd-Z, or Ctrl-Z on Windows).
 - Live's own menus do what its scripting can't: freezing, bouncing, stems,
   audio to MIDI ([Live's own commands](KUMI_GUIDE.md#lives-own-commands)).
+- **Variations** (`variations`): numbered takes V1, V2… of a Session MIDI
+  clip, each a new clip below it on its track in a scene with no other clips
+  (a scene added at the end when none is free). Their notes move in pitch, velocity or
+  timing, or thin out, or Kumi writes them; the notes you name stay as they
+  are. Kumi checks each differs from the source and the others yet keeps its
+  key. Live plays a MIDI clip only live: launch the takes to hear them. Kept
+  takes are renamed "V3 · … · kept".
 
 ## REAPER
 
@@ -118,8 +133,9 @@ tool is in [KUMI_CHANGES](KUMI_CHANGES.md#what-kumi-can-change-in-reaper).
 - **MIDI** (`notes_…`, `midi_events_…`): notes added, changed, deleted,
   quantized, humanized; CC, pitch bend, program, pressure, text, SysEx.
 - **Markers, regions and the loop** (`marker_…`, `region_add`,
-  `region_render`, `ruler_lane`, `time_selection`, `loop_range`): ruler
-  lanes, the region render matrix.
+  `regions_add`, `region_render`, `ruler_lane`, `time_selection`,
+  `loop_range`): ruler lanes, the region render matrix, many regions in one
+  step.
 - **Tempo and project** (`tempo_set`, `tempo_marker_set`, `metronome_switch`,
   `project_…`): tempo markers, time signatures and ramps, the metronome, grid,
   timebase, notes, title, author.
@@ -141,6 +157,49 @@ next version), track templates and FX chains.
 
 ### Workflows
 
+- **Delivery** (`render_files`): files for a game or a client, one per sound.
+  Kumi groups the items into assets (stacked layers make one footstep), names
+  the new ones in the convention the project's regions follow (or as you say),
+  adds tails that stop before the next sound, and makes a region for each in
+  one step, rendering its asset's own tracks. It then checks the files REAPER
+  would write against those names, rendering nothing, and renders exactly
+  those files: only the delivery's regions, each its tracks through the
+  master, without the render dialog's normalizing or second format unless you
+  say, never over a file that's there unless you say, with REAPER's render
+  settings put back after.
+- **Routing** (`routing`): why a track is too loud, silent or cancels. Kumi
+  reads every way each track reaches the master (folders, sends, hardware
+  outputs) and names what's likely wrong: a track heard twice through buses
+  that only sum, a loop, a track heard nowhere, a sidechain on channels its
+  track doesn't have, a duplicate with its polarity inverted. It builds a
+  sidechain (the kick ducking the bass through ReaComp), a parallel bus or
+  stems as one step of REAPER's undo, and reads the routing again to check it.
+- **SFX variations** (`variations`): numbered takes V1, V2… of an item, each a
+  copy after it on its track with its own pitch, rate, start, length, fades
+  and volume (a MIDI item's notes, velocities and timing vary instead). Kumi
+  checks each differs from the source and the others yet stays the same sound
+  (its attack, and any notes you name, kept), renders them to hear them, and
+  keeps, changes or drops them as you say; `render_files` delivers a file each.
+- **Stems** (`stems`): a track's stretch split by Kumi's own splitter into
+  drums (what hits), bass (what sustains under 150 Hz) and other (the rest,
+  voices too), which add up to the track. Each goes on a new track under it,
+  an item over the stretch.
+- **Audio to MIDI** (`audio_to_midi`): a track's audio over a stretch heard by
+  Kumi's own ears: drums (each hit a kick, snare or hat on General MIDI's drum
+  keys, as loud as it hits, a ghost softer), a melody or the harmony (Basic
+  Pitch). The notes go in one MIDI item on a new track under it; add an
+  instrument to hear them.
+- **Delivery to a spec** (`delivery_spec`): ACX, streaming (Spotify, Apple
+  Music, YouTube…), podcasts or broadcast (EBU R 128, ATSC A/85, Netflix).
+  Kumi renders the mix offline and measures it: integrated loudness, true
+  peak, and for ACX the RMS and noise floor. It moves the master fader by the
+  gain the spec needs when the peaks allow, measures again, and says what a
+  fader can't fix (limiting, noise).
+- **Scripts for a chore** (`scripts`): a chore you repeat, written in Lua
+  against your project and run once as one step of REAPER's undo. Once you say
+  yes, Kumi keeps it to run again by name, and as an action in the Action List
+  (Scripts/Kumi) for a shortcut or a toolbar button. It won't keep one that
+  names this project's ids or Kumi's refs, and says what it takes by its place.
 - **Drum kits** from sound files: a ReaSamplOmatic5000 per pad, as a folder of
   pad tracks or one container, hi-hats choking.
 - **Sounds from tutorials and references:** `watch_video`, then ReaEQ,
@@ -206,7 +265,8 @@ Each change is its own step of Renoise's undo. Every tool is in
   device points.
 - **Instruments and samples** (`instrument_…`, `sample_…`, `keyzone_…`):
   added, duplicated, moved, loaded (.xrni, .sfz, a sample), made from sample
-  files; macros; sample settings, slices, keyzones, drum-kit layouts.
+  files; macros; sample settings, slices, keyzones, drum-kit layouts; a
+  sample's polarity flipped.
 - **Modulation and sample FX** (`modset_…`, `moddevice_…`, `chain_…`,
   `chaindevice_…`).
 - **Phrases** (`phrase_…`, `phrases_drop`): added (with their lines),
@@ -248,6 +308,57 @@ saves the song, instruments and device presets.
   lines; a pattern's lines become a phrase you play from any key (`variations`
   extract), and a faster copy is switched to with `0Zxx`, since a phrase's LPB
   is fixed.
+- **Sample maps** (`map_samples`): a folder of sounds, or an instrument's own
+  samples, laid across the keys in one step. Kumi reads each file name's note
+  ("C3", "A#2", "C-4"), velocity ("v3", "vel64", "ff") and round robin ("rr2"),
+  hears each sample's pitch and loudness, and works out whether the names put
+  middle C at C3, C4 or C5. It plans roots and zones, velocity layers in
+  loudness order, round robins that take turns, and an instrument per
+  articulation. It says what it decided and asks only what it can't tell. The
+  tidy finds instruments no note plays, spare copies, and samples two
+  instruments hold, and changes only what you accept.
+- **Chops** (`chop`): a break cut at its real hits, each found to the frame
+  and named as a kick, snare, hat, ghost or roll, with the break's own tempo
+  worked out from its length. Kumi slices it in one step (on the song's grid
+  when the tempos match) and lays the slices out to play it as recorded, using
+  the delay column for hits between lines. It renders the result and says how
+  close the hits land and how deeply it nulls against the recording. The
+  lighter densities (no ghosts or rolls; kick and snare) come as variations
+  takes to keep or drop.
+- **Cleaning up a jam** (`jam`): after a catch-up, what you recorded is set
+  against what came before. Kumi says what's new and proposes the clean-up:
+  slots playing empty patterns to drop, a pattern the same as an earlier one
+  to play that one instead, tracks repeating an earlier pattern's as aliases,
+  and notes that read as mistakes rather than feel (a double trigger, a note
+  far off the grid where its neighbours aren't, a stray; a swing every beat
+  shares is kept). It applies what you accept, quantizes by a strength if you
+  ask, and never touches what came before.
+- **Layering breaks** (`layers`): the main break and its layers rendered alone
+  over a stretch, hit by hit: how early or late each layer lands, whether its
+  polarity fights the main's, and how loud it sits. Kumi nudges a layer by its
+  track delay and flips one in its samples (Renoise has no polarity switch;
+  only when no other track plays them). For the glue it hears the group
+  without its compressor, then sets a Bus Compressor's threshold until the
+  glue measures as asked. The balance is yours, by ear.
+- **Stems** (`stems`): a track's stretch split by Kumi's own splitter into
+  drums, bass (under 150 Hz) and other (voices too), which add up to the
+  track. Each is loaded as a new instrument and played from the stretch's
+  start on a new track after it.
+- **Audio to MIDI** (`audio_to_midi`): a track's audio over a stretch heard by
+  Kumi's own ears: drums (kick, snare and hat, as loud as they hit), a melody
+  or the harmony (Basic Pitch). The notes go on a new track, in the patterns
+  its slots play, each on its line with a delay, played by the instrument you
+  name.
+- **Delivery to a spec** (`delivery_spec`): ACX, streaming, podcasts or
+  broadcast loudness. Kumi renders the song offline, measures it, moves the
+  master's post-FX fader by the gain the spec needs when the peaks allow, and
+  measures again; past the fader's +3 dB, it says a Gainer or the Maximizer
+  comes first.
+- **Scripts for a chore** (`scripts`): a chore you repeat, written in Lua
+  against your song and run once as one step of Renoise's undo. Once you say
+  yes, Kumi keeps it to run again by name, and as Tools > Kumi > its name, with
+  a shortcut to set in Renoise's Keys preferences. It won't keep one that names
+  Kumi's refs, and says what it takes by its place.
 - **Instruments from sample files:** a drum kit with mute groups, or keys with
   velocity layers, in one instrument.
 - **Doofers** from devices, with named macros.

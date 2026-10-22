@@ -7,6 +7,8 @@ local sha256 = T.load_payload_module("sha256")
 local test, eq, ok = T.test, T.eq, T.ok
 
 local PROTOCOL = "kumi-daw/1"
+-- The tool's own version (a release that changes the tool moves it).
+local VERSION = T.load_payload_module("version")
 local PORT = 9780
 local CLIENT_NONCE = "0123456789abcdef0123456789abcdef"
 
@@ -185,7 +187,7 @@ test("bridge: listens on 127.0.0.1:9780 and writes the discovery file", function
   eq(discovery.host, "127.0.0.1")
   eq(discovery.port, PORT)
   eq(discovery.protocol, PROTOCOL)
-  eq(discovery.version, "1.0.0")
+  eq(discovery.version, VERSION)
   eq(discovery.dawVersion, "3.5.4")
   eq(discovery.resource, env.resource)
   ok(discovery.project.id and discovery.project.path == nil, "an unsaved song has no path")
@@ -217,7 +219,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   local env = setup({ song = { name = "Tune Title", file_name = "/songs/tune.xrns", playing = true } })
   local _, welcome = connect(env)
   eq(welcome.daw, "renoise")
-  eq(welcome.bridge, "1.0.0")
+  eq(welcome.bridge, VERSION)
   eq(welcome.dawVersion, "3.5.4")
   eq(welcome.pid, 4242)
   eq(welcome.resource, env.resource)
@@ -227,7 +229,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,show_status,digest,render_start,listen_status,listen_cancel,audition,audition_stop,audio_file,scratch,preset_read,instrument_export,macro_read,device_editor,preset_save")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body,change_preview,change_apply,change_restore,undo_step_begin,undo_step_end,transport_stop,transport_play,audition_note,select,project_save,instrument_save,show_status,digest,render_start,listen_status,listen_cancel,audition,audition_stop,audio_file,scratch,preset_read,instrument_export,macro_read,device_editor,preset_save,script_install,script_remove")
   eq(table.concat(welcome.events, ","), "project,tracks,selection,transport,undone_in_daw,scratch_swept")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()

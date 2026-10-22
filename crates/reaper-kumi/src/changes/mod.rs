@@ -33,6 +33,8 @@ pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;
+// (#401) the variations tool's takes: items copied with their settings, rewritten, dropped
+mod variations;
 // m4-r-fxenv: FX in every chain, containers, parameter modulation, envelopes and automation items.
 mod containers;
 mod envelopes;
@@ -203,6 +205,8 @@ enum Kind {
     MarkProp(&'static marks::Prop),
     MarkerAdd,
     RegionAdd,
+    /// (#401) Several regions in one step, with their render matrix.
+    RegionsAdd,
     MarkerDelete,
     SendAdd,
     SendRemove,
@@ -260,6 +264,7 @@ fn kind(name: &str) -> Option<Kind> {
         "metronome-switch" => Some(Kind::Metronome),
         "marker-add" => Some(Kind::MarkerAdd),
         "region-add" => Some(Kind::RegionAdd),
+        "regions-add" => Some(Kind::RegionsAdd),
         "marker-delete" => Some(Kind::MarkerDelete),
         "send-add" => Some(Kind::SendAdd),
         "send-remove" => Some(Kind::SendRemove),
@@ -342,6 +347,7 @@ impl Kind {
             Kind::MarkProp(prop) => marks::prop_preview(ctx, prop, input),
             Kind::MarkerAdd => marks::add_preview(ctx, input, false),
             Kind::RegionAdd => marks::add_preview(ctx, input, true),
+            Kind::RegionsAdd => marks::regions_preview(ctx, input),
             Kind::MarkerDelete => marks::delete_preview(ctx, input),
             Kind::Fx(which) => fx::preview(ctx, input, which),
             Kind::Notes(mode) => notes::preview(ctx, input, mode),
@@ -391,6 +397,7 @@ impl Kind {
             Kind::MarkProp(prop) => marks::prop_apply(ctx, prop, input, fence),
             Kind::MarkerAdd => marks::add_apply(ctx, input, false),
             Kind::RegionAdd => marks::add_apply(ctx, input, true),
+            Kind::RegionsAdd => marks::regions_apply(ctx, input),
             Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
             Kind::Fx(which) => fx::apply(ctx, input, fence, which),
             Kind::Notes(mode) => notes::apply(ctx, input, fence, mode),
@@ -439,6 +446,7 @@ impl Kind {
             Kind::SendRemove => sends::remove_restore(ctx, restore),
             Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
             Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
+            Kind::RegionsAdd => marks::regions_restore(ctx, restore),
             Kind::MarkerDelete => marks::delete_restore(ctx, restore),
             Kind::Fx(which) => fx::restore(ctx, restore, which),
             Kind::Notes(_) => notes::restore(ctx, restore),
@@ -837,6 +845,7 @@ mod tests_actions;
 mod tests_carried;
 #[cfg(test)]
 mod tests_kits;
+// (#401) the variations tool's takes
 #[cfg(test)]
 mod tests_lab;
 #[cfg(test)]
@@ -845,3 +854,5 @@ mod tests_project;
 mod tests_routing;
 #[cfg(test)]
 mod tests_tracks;
+#[cfg(test)]
+mod tests_variations;

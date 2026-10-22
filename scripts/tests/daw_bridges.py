@@ -3,7 +3,7 @@
 up in its own, for the Installer workflow's jobs.
 
     python3 scripts/tests/daw_bridges.py prepare <reaper-resource> <renoise-version-folder>
-    python3 scripts/tests/daw_bridges.py placed <app> <kumi-home> <reaper-resource> <renoise-version-folder> [--load]
+    python3 scripts/tests/daw_bridges.py placed <app> <kumi-home> <reaper-resource> <renoise-version-folder> [--load] [--kept-logic]
     python3 scripts/tests/daw_bridges.py removed <kumi-home> <reaper-resource> <renoise-version-folder>
     python3 scripts/tests/daw_bridges.py earlier <app> <version>
 
@@ -19,7 +19,8 @@ extension with this system's loader and finds REAPER's entry point, and starts L
 Logic's bridge has no DAW folder: Kumi sets it up in <kumi-home>/bridges/logic/bridge/logic-kumi, from the
 daws/logic/logic-kumi folder the Kumi in <app> carries, with the version file in it. Only the Apple Silicon Mac's Kumi
 carries it (Logic Pro 12 runs on Apple Silicon only), so `placed` checks it there, and elsewhere (Linux, Windows, an
-Intel Mac) that Kumi carries none and set none up.
+Intel Mac) that Kumi carries none and set none up. With --kept-logic, a Logic Pro bridge a later Kumi set up may stay
+where it is (a rollback to a Kumi that carries none), and is listed as it stands.
 
 `earlier` makes the Kumi in <app> carry other copies of each, as an earlier release with other versions of them
 would: no release before this one carries them yet.
@@ -126,7 +127,7 @@ def start(bridge: Path, version: str) -> None:
         fail(f"{bridge / LOGIC} --version exited {said.returncode} saying {(said.stdout + said.stderr).strip()!r}, not logic-kumi {version}")
 
 
-def placed(app: Path, home: Path, reaper: Path, renoise: Path, loading: bool) -> None:
+def placed(app: Path, home: Path, reaper: Path, renoise: Path, loading: bool, kept_logic: bool = False) -> None:
     lines = []
     bridges = carried(app)
     places = {**daws(reaper, renoise), "logic": logic(home)}
@@ -151,7 +152,11 @@ def placed(app: Path, home: Path, reaper: Path, renoise: Path, loading: bool) ->
             fail(f"{daw}'s generation {kept['generation']} isn't the copy in place")
         lines.append(f"{daw} {version} {sha(tree(target))[:12]} {kept['generation']} {kept['history'][0]['action']}")
     if "logic" not in bridges and (logic(home)[0].exists() or receipt(home, "logic").get("status") == "installed"):
-        fail(f"{logic(home)[0]} was set up by a Kumi that carries no Logic Pro bridge: only {LOGIC_TARGET}'s carries one")
+        kept = receipt(home, "logic")
+        if not (kept_logic and logic(home)[0].exists() and kept.get("status") == "installed"):
+            fail(f"{logic(home)[0]} was set up by a Kumi that carries no Logic Pro bridge: only {LOGIC_TARGET}'s carries one")
+        # (--kept-logic: a rollback to a Kumi that carries none leaves the bridge a later one set up where it is)
+        lines.append(f"logic {kept.get('version')} {sha(tree(logic(home)[0]))[:12]} {kept['generation']} {kept['history'][0]['action']}")
     if loading:
         load(daws(reaper, renoise)["reaper"][0])
         if "logic" in bridges:
@@ -193,12 +198,12 @@ def earlier(app: Path, version: str) -> None:
 
 def main() -> None:
     args = sys.argv[1:]
-    loading = "--load" in args
-    args = [arg for arg in args if arg != "--load"]
+    loading, kept_logic = "--load" in args, "--kept-logic" in args
+    args = [arg for arg in args if arg not in ("--load", "--kept-logic")]
     if args[:1] == ["prepare"] and len(args) == 3:
         prepare(Path(args[1]), Path(args[2]))
     elif args[:1] == ["placed"] and len(args) == 5:
-        placed(*map(Path, args[1:]), loading)
+        placed(*map(Path, args[1:]), loading, kept_logic)
     elif args[:1] == ["removed"] and len(args) == 4:
         removed(*map(Path, args[1:]))
     elif args[:1] == ["earlier"] and len(args) == 3:

@@ -1,7 +1,7 @@
 //! The variations tool against a fake DAW of sixteen steps, with no DAW at all: what core owns, the same for every backend
 //! (numbering across makes, keep, change, drop and "rest", the checks and their warnings, the sets kept across a restart,
 //! takes found again by their names, and when takes are rendered and drawn again).
-use super::backend::{Rendered, Rewritten, Set, Source, VariationsBackend, Words};
+use super::backend::{Rendered, Rewritten, Set, Source, Undroppable, VariationsBackend, Words};
 use super::heard::Heard;
 use super::tool::{names, Variations};
 use super::{Material, Rng};
@@ -39,10 +39,17 @@ struct Daw {
     next: Cell<u64>,
     changes: Cell<usize>,
     playing: Cell<bool>,
+    /// The DAW can't say whether it plays (its focus read fails); it starts playing once it made this many renders (0: never).
+    focus_fails: Cell<bool>,
+    plays_after: Cell<usize>,
     renders: Cell<usize>,
     clips: Cell<usize>,
     generation: Cell<u64>,
     unreadable: Cell<Option<u64>>,
+    /// Kept sets' keys as their sources' places give them now (a position the producer moved).
+    moved: RefCell<BTreeMap<String, String>>,
+    /// Why a take stays out of a drop, by its id.
+    undroppable: RefCell<BTreeMap<u64, Undroppable>>,
 }
 
 impl Daw {
@@ -69,6 +76,9 @@ static WORDS: Words = Words {
     at: "nothing",
     options: "none",
     extract: None,
+    hears: None,
+    rewrites: None,
+    drops: None,
     idioms: "",
     directions: &["a few flipped", "some flipped", "more flipped", "many flipped"],
     source_schema: r#"{"type": "object"}"#,
@@ -98,10 +108,15 @@ impl VariationsBackend for Fake {
         let source = input.get("source").cloned().unwrap_or(Value::Null);
         let material = source["steps"].as_array().map(|steps| Steps(steps.iter().map(|level| level.as_u64().unwrap_or(0) as u8).collect()));
         let name = source["name"].as_str().unwrap_or("Beat");
-        Ok(Source { label: format!("steps of “{name}”"), short: name.into(), key: name.to_lowercase(), material, data: () })
+        let key = source["key"].as_str().map_or_else(|| name.to_lowercase(), str::to_owned);
+        Ok(Source { label: format!("steps of “{name}”"), short: name.into(), key, material, data: () })
     }
 
-    fn direction_ops(&self, direction: &str) -> Vec<Value> {
+    async fn key_now(&self, source: &Source<Steps, ()>, _: &Signal) -> Option<String> {
+        self.0.moved.borrow().get(&source.key).cloned()
+    }
+
+    fn direction_ops(&self, _: &Source<Steps, ()>, direction: &str) -> Vec<Value> {
         let amount = match direction {
             "a few flipped" => 0.15,
             "some flipped" => 0.2,
@@ -238,8 +253,8 @@ impl VariationsBackend for Fake {
         Ok(json!("at the end"))
     }
 
-    fn undroppable(&self, _: &Set<Self>, _: usize, _: &Value) -> Option<String> {
-        None
+    async fn undroppable(&self, _: &Set<Self>, _: usize, row: &Value, _: &Signal) -> Option<Undroppable> {
+        self.0.undroppable.borrow().get(&id_of(row)).cloned()
     }
 
     async fn drop(&self, _: &Set<Self>, rows: &[(usize, Value)], _: &Signal) -> Result<(String, Value), String> {
@@ -254,8 +269,10 @@ impl VariationsBackend for Fake {
         None
     }
 
-    async fn playing(&self, _: &Signal) -> bool {
-        self.0.playing.get()
+    async fn playing(&self, _: &Signal) -> Option<bool> {
+        let daw = &self.0;
+        let started = daw.plays_after.get() > 0 && daw.renders.get() >= daw.plays_after.get();
+        (!daw.focus_fails.get()).then_some(daw.playing.get() || started)
     }
 
     async fn render(&self, set: &mut Set<Self>, numbers: &[usize], with_source: bool, _: &Signal) -> Result<Rendered, String> {
@@ -395,6 +412,27 @@ async fn a_take_the_producer_edited_or_deleted_is_left_out_of_a_drop() {
     assert!(dropped["skipped"][0].as_str().unwrap().contains("V1 was edited in Fake"), "{dropped}");
     assert!(dropped["skipped"][1].as_str().unwrap().contains("V2 isn't in the Fake any more"), "{dropped}");
     assert_eq!(daw.names(), ["V1 \u{b7} Beat"]);
+    // (named, an edited take goes all the same, and the answer says it was edited)
+    let named = run(&tool, json!({"action": "drop", "names": ["V1"]})).await.unwrap();
+    assert_eq!((named["dropped"].clone(), named["edited"].clone()), (json!(["V1"]), json!(["V1"])), "{named}");
+    assert!(daw.names().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_named_take_goes_past_an_edit_the_backend_sees_but_never_past_its_use_elsewhere() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 3, "seed": 5, "listen": false})).await.unwrap();
+    daw.undroppable.borrow_mut().insert(1, Undroppable::Edited("was edited on its other tracks".into()));
+    daw.undroppable.borrow_mut().insert(2, Undroppable::InUse("plays in 2 slots now".into()));
+    let rest = run(&tool, json!({"action": "drop"})).await.unwrap();
+    assert_eq!(rest["dropped"], json!(["V3"]), "{rest}");
+    assert!(rest["skipped"][0].as_str().unwrap().contains("name it to drop it anyway"), "{rest}");
+    let named = run(&tool, json!({"action": "drop", "names": ["V1", "V2"]})).await.unwrap();
+    assert_eq!((named["dropped"].clone(), named["edited"].clone()), (json!(["V1"]), json!(["V1"])), "{named}");
+    assert!(named["skipped"][0].as_str().unwrap().starts_with("V2 plays in 2 slots now"), "{named}");
+    assert_eq!(daw.names(), ["V2 \u{b7} Beat"]);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -444,6 +482,68 @@ async fn nothing_renders_while_the_daw_plays_and_a_take_that_clips_where_the_sou
     assert!(line.contains(" \u{b7} heard: peak \u{2212}6.0 dBFS"), "heard again, fine now: {made}");
     assert_eq!(daw.changes.get(), 3, "the first take, the second, and its rewrite");
     assert_eq!(daw.renders.get(), 2, "the take, then the take drawn again");
+}
+
+/// (#400 review notes) Numbers once given to takes of a name never come back, though Kumi let go of the set that gave them (it
+/// holds 8): the takes may still be in the project.
+#[tokio::test(flavor = "current_thread")]
+async fn a_takes_number_never_comes_back_after_its_set_is_let_go() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    let first = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 2, "seed": 6, "listen": false})).await.unwrap();
+    assert_eq!(first["takes"][1]["take"], "V2", "{first}");
+    for k in 0..8 {
+        let name = format!("Other {k}");
+        run(&tool, json!({"action": "make", "source": {"steps": BEAT, "name": name}, "count": 1, "seed": 7, "listen": false}))
+            .await
+            .unwrap();
+    }
+    let again =
+        run(&tool, json!({"action": "make", "source": {"steps": BEAT, "key": "beat again"}, "count": 1, "seed": 8, "listen": false}))
+            .await
+            .unwrap();
+    assert_eq!(again["takes"][0]["take"], "V3", "after V2, whose set Kumi let go of: {again}");
+}
+
+/// (#400 review notes) A set whose source moved (its position in its key) goes on when a make names that source where it is now,
+/// and a source now at its old position starts a set of its own.
+#[tokio::test(flavor = "current_thread")]
+async fn a_set_goes_on_from_where_its_source_moved_to() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    let first = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 6, "listen": false})).await.unwrap();
+    assert_eq!(first["takes"][0]["take"], "V1", "{first}");
+    daw.moved.borrow_mut().insert("beat".into(), "beat@2".into());
+    let on = run(&tool, json!({"action": "make", "source": {"steps": BEAT, "key": "beat@2"}, "count": 1, "seed": 7, "listen": false}))
+        .await
+        .unwrap();
+    assert_eq!(on["takes"][0]["take"], "V2", "the same set goes on: {on}");
+    let other = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 8, "listen": false})).await.unwrap();
+    assert_eq!(other["takes"][0]["take"], "V3", "a set of its own, its numbers after the other's: {other}");
+    assert_ne!(other["set"], on["set"], "{other} {on}");
+}
+
+/// (#400 review notes) Nothing renders when the DAW can't say whether it plays, and a take drawn again isn't rendered again once
+/// the producer pressed play.
+#[tokio::test(flavor = "current_thread")]
+async fn nothing_renders_when_the_daw_cant_say_it_plays_or_starts_playing_between_rounds() {
+    let home = tempfile::tempdir().unwrap();
+    let daw = Rc::new(Daw::default());
+    let tool = kumi(&daw, home.path());
+    daw.focus_fails.set(true);
+    let made = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 6})).await.unwrap();
+    assert!(made["heard"][0].as_str().unwrap().starts_with("Kumi couldn't tell whether Fake is playing"), "{made}");
+    assert_eq!(daw.renders.get(), 0);
+
+    daw.focus_fails.set(false);
+    daw.clips.set(1);
+    daw.plays_after.set(1);
+    let made = run(&tool, json!({"action": "make", "source": {"steps": BEAT}, "count": 1, "seed": 7})).await.unwrap();
+    assert!(made["heard"].to_string().contains("Fake plays now (or couldn't say whether it does)"), "{made}");
+    assert!(made["takes"][0]["line"].as_str().unwrap().contains("drawn again after the render"), "{made}");
+    assert_eq!(daw.renders.get(), 1, "the take drawn again isn't rendered while the DAW plays");
 }
 
 /// (review W9) A make on the same source goes on with the source as it is now: a take is drawn from the producer's edit.

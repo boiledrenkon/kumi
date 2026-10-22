@@ -9,6 +9,7 @@ pub mod backend;
 #[cfg(test)]
 mod fake_backend_tests;
 pub mod heard;
+pub mod notes;
 pub mod tool;
 
 /// The most a take's name may be (Renoise's phrase names hold 64 characters).
@@ -205,6 +206,19 @@ pub fn roll<M: Material>(
         }
     }
     last
+}
+
+/// How many draws a take gets before Kumi gives up on it.
+pub const TRIES: u32 = 8;
+
+/// How much of its operators a draw takes (`factor` times their amounts), told why the one before failed: a near-copy of the
+/// source or a take draws bolder next time, one too far milder.
+pub fn bolder_or_milder(factor: f64, before: Option<&Verdict>) -> f64 {
+    match before {
+        Some(Verdict::NearSource(_) | Verdict::NearTake(..)) => factor * 1.35,
+        Some(Verdict::FarFromSource(_)) => factor * 0.7,
+        _ => factor,
+    }
 }
 
 /// Where a take stands in the loop.
@@ -456,6 +470,10 @@ mod tests {
     fn takes_are_named_after_their_source_and_a_kept_mark_always_fits() {
         assert_eq!(take_name(3, "Amen chop"), "V3 \u{b7} Amen chop");
         assert_eq!(kept_name(3, "Amen chop"), "V3 \u{b7} Amen chop \u{b7} kept");
+        // (a kept take is looked for by its kept name first)
+        let [first, second] = super::tool::names_to_find(3, "Amen chop", TakeState::Kept);
+        assert_eq!((first.as_str(), second.as_str()), ("V3 \u{b7} Amen chop \u{b7} kept", "V3 \u{b7} Amen chop"));
+        assert_eq!(super::tool::names_to_find(3, "Amen chop", TakeState::Shown)[0], "V3 \u{b7} Amen chop");
         let long = "x".repeat(80);
         assert_eq!(take_name(12, &long).chars().count(), NAME_MOST);
         let kept = kept_name(12, &long);

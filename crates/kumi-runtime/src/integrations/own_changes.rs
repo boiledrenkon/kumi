@@ -247,7 +247,7 @@ impl OwnKind {
         self.deletes = true;
         self
     }
-    fn input_schema(&self) -> JsonObject {
+    pub(super) fn input_schema(&self) -> JsonObject {
         serde_json::from_str(self.schema).expect("a change kind's schema is JSON")
     }
 }
@@ -683,14 +683,28 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     /// Kumi's track renames, oldest first: the change, the track's ref and the name it had and was given (a judged run
     /// follows its track by them).
     pub(super) renamed: RefCell<Vec<(String, String, String, String)>>,
-    /// (M7) What the DAW answered the last change it applied (`created`, `applied`): the variations find their takes by it.
-    pub(super) last_applied: RefCell<Option<Value>>,
     /// Itself, for what it does later on its own (a plug-in's curve read once its changes settle).
     me: std::rc::Weak<Self>,
     /// (M6) Changes under way now.
     changing: Cell<u32>,
     /// (M6) The epoch moves Kumi's own changes made, oldest first, for a DAW that reads curves.
     epoch_moves: RefCell<Vec<EpochMove>>,
+    /// (#401) The chunks run_lua ran this session without stopping at an error (their hashes, the latest kept): a script is
+    /// kept only once it ran so.
+    ran: RefCell<Vec<u64>>,
+}
+
+/// The most clean runs remembered.
+const MOST_RAN: usize = 64;
+
+/// A chunk's hash, its lines' trailing spaces and its ends left out (the same chunk sent again a little reformatted).
+fn chunk_hash(code: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for line in code.trim().lines() {
+        line.trim_end().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -707,10 +721,10 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             added: Cell::new(0),
             not_copied: RefCell::new(None),
             renamed: RefCell::default(),
-            last_applied: RefCell::default(),
             me: me.clone(),
             changing: Cell::new(0),
             epoch_moves: RefCell::default(),
+            ran: RefCell::default(),
         })
     }
 
@@ -730,6 +744,67 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// The epoch (and, where refs are places, the layout) a request about these refs is asked from, as a change's is.
     pub(super) fn place_request(&self, args: &mut Value, input: &JsonObject) {
         self.place(args, input)
+    }
+
+    /// (#401) Whether run_lua ran this chunk this session without stopping at an error.
+    pub(super) fn ran_cleanly(&self, code: &str) -> bool {
+        self.ran.borrow().contains(&chunk_hash(code))
+    }
+
+    /// A ref the model gave, long (as the bridge takes it), or why it isn't one of this turn's.
+    pub(super) fn lengthen(&self, reference: &str) -> Result<String, String> {
+        let long = self.link().book.borrow().lengthen(&json!({"ref": reference}));
+        let long = long["ref"].as_str().unwrap_or(reference).to_string();
+        if SHORT_REF.is_match(&long) {
+            return Err(format!("{reference} isn't one of this turn's refs (the song may have changed): read again for a current one"));
+        }
+        Ok(long)
+    }
+
+    /// (#401) Whether the DAW plays now, as its focus says; None when it couldn't say (a render then waits).
+    pub(super) async fn playing(&self, signal: &Signal) -> Option<bool> {
+        let focus = self.link().call("focus", json!({}), signal.clone()).await.ok()?.ok()?;
+        focus.pointer("/transport/playing").and_then(Value::as_bool)
+    }
+
+    /// A read as the read tool makes it, from the book's epoch when it names refs (and `layout`, when they are from then):
+    /// its answer, the book following the epoch it gives. Core tools' backends read through it (the variations, the sample map).
+    pub(super) async fn read_through(&self, mut args: Value, layout: Option<u64>, signal: &Signal) -> Result<Value, String> {
+        let link = self.link();
+        let input = args.as_object().cloned().unwrap_or_default();
+        if ["parent", "track", "items", "ref"].iter().any(|key| input.contains_key(*key)) {
+            self.place(&mut args, &input);
+        }
+        if let Some(layout) = layout {
+            args["layout"] = layout.into();
+        }
+        match link.call("read", args, signal.clone()).await {
+            Ok(Ok(answer)) => {
+                follow_epoch(&link.book, &link.epoch, &link.layout, &answer);
+                Ok(answer)
+            }
+            Ok(Err(refused)) => Err(refused.why),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Every row of a read, page after page (at most `pages` of them).
+    pub(super) async fn rows_through(&self, args: Value, pages: usize, signal: &Signal) -> Result<Vec<Value>, String> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..pages {
+            let mut asked = args.clone();
+            if let Some(cursor) = &cursor {
+                asked["cursor"] = cursor.clone().into();
+            }
+            let page = self.read_through(asked, None, signal).await?;
+            out.extend(page.get("items").and_then(Value::as_array).cloned().unwrap_or_default());
+            match page.get("nextCursor").and_then(Value::as_str) {
+                Some(next) => cursor = Some(next.into()),
+                None => return Ok(out),
+            }
+        }
+        Ok(out)
     }
 
     /// The tools for this DAW's changes: each core kind's and action's, make_changes with every kind and action as a step,
@@ -1162,6 +1237,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 is_error: false,
                 missed: None,
                 stops: false,
+                applied: None,
             };
         }
         let (Some(transaction), Some(confirmation)) =
@@ -1216,7 +1292,6 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         self.note_epoch_move(kind, &preview, &applied);
-        *self.last_applied.borrow_mut() = Some(applied.clone());
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
         // (r-tracks) Done, and nothing the DAW keeps changed (an action the DAW made no undo point of: a view, selection or
         // transport one): no row in HISTORY, and the host forgets it.
@@ -1224,10 +1299,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             self.history.release(std::slice::from_ref(&transaction));
             let why = applied.pointer("/display/note").and_then(Value::as_str).unwrap_or("it changed nothing the project keeps");
             return ChangeOutcome {
-                text: stringify(&json!({"changed": format!("{title}: {}", why.trim_end_matches('.')), "unchanged": true})),
+                // ("unkept", not "unchanged": it was done, and a plan's summary says it, unlike a step that was so already)
+                text: stringify(&json!({"changed": format!("{title}: {}", why.trim_end_matches('.')), "unkept": true})),
                 is_error: false,
                 missed: None,
                 stops: false,
+                applied: Some(applied.clone()),
             };
         }
         // What the producer should know of it (a step the DAW's own undo skips), on its row and in its answer.
@@ -1243,6 +1320,16 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             .or_else(|| skipped.then(|| format!("{own_undo} can't take this back; Kumi can.")));
         if kind.kind == "track-add" {
             self.added.set(self.added.get() + 1);
+        }
+        // (#401) a chunk that ran to its end: one a script may keep
+        if kind.kind == "run-lua" && applied.pointer("/applied/failed").is_none() {
+            if let Some(code) = input.get("code").and_then(Value::as_str) {
+                let mut ran = self.ran.borrow_mut();
+                ran.push(chunk_hash(code));
+                if ran.len() > MOST_RAN {
+                    ran.remove(0);
+                }
+            }
         }
         // Code run in the DAW may have changed anything, outside what HISTORY can take back: a judged run hears again.
         if matches!(kind.kind, "run-lua" | "api-call") {
@@ -1320,7 +1407,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 reply[key] = super::own_bridge::shorten_anywhere(&mut self.link().book.borrow_mut(), value);
             }
         }
-        ChangeOutcome { text: stringify(&reply), is_error: false, missed: None, stops: false }
+        ChangeOutcome { text: stringify(&reply), is_error: false, missed: None, stops: false, applied: Some(applied) }
     }
 
     /// One action through the host's tool: what the producer is told it did, or why it didn't.

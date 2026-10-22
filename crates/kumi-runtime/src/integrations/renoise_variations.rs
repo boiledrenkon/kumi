@@ -4,7 +4,6 @@
 //! Takes are found by the places the tool's logs follow, else by the names Kumi gave them; the source pattern, track and
 //! instrument the same way. Pattern takes render on the source's track from their slots, phrase takes through players of their
 //! phrases (scratch tracks, gone after). Core's tool does the rest.
-use super::own_bridge::follow_epoch;
 use super::own_changes::OwnPlan;
 use super::own_listening::OwnRenderer;
 use super::renoise_lines::{note_text, note_value, Lines, Op};
@@ -12,9 +11,9 @@ use crate::core::{
     contracts::JsonObject,
     refs::RefScheme,
     variations::{
-        backend::{Rendered, Rewritten, Source, VariationsBackend, Words},
+        backend::{Rendered, Rewritten, Source, Undroppable, VariationsBackend, Words},
         heard::{heard_of, Heard},
-        tool::names,
+        tool::{names, names_to_find},
         Rng, TakeSet, TakeState,
     },
 };
@@ -35,12 +34,15 @@ pub static WORDS: Words = Words {
     sources: "a pattern track's lines (patternRef, or a slot for its pattern and its matrix mutes; trackRef; first and last, as Renoise numbers lines, from 00), a phrase (phraseRef), or an instrument (instrumentRef: new phrases from lines you write)",
     anchors: "the lines (as Renoise numbers them) every take keeps as they are: the kick and snare that make it the producer's",
     ops: "shuffle, retrig, reverse, ghosts, thin, fill, accent, octave, transpose, swing, offsets, speed (phrase takes only: a pattern has no LPB of its own); amount 0 to 1",
-    lines: "lines you write, as notes_write takes them, numbered as the source's lines",
+    lines: "lines you write, as notes_write takes them, numbered as the source's lines (its anchor lines stay as they are: no need to write them)",
     places: "patterns (each take a slot of its own in a \"Variations of …\" section at the sequence's end, its other tracks playing the source pattern's, so playing it plays the take in context: a play or render of the whole song plays them too, and drop removes the ones not kept; the default for a pattern's lines) or phrases (new phrases of the instrument; the default otherwise)",
     place_names: &["patterns", "phrases"],
     at: "a phrase on keys [low, high], as the instrument's program, or switchAt {patternRef, trackRef, line, col}: a 0Zxx there plays it (how a pattern switches to a faster copy, since a phrase's LPB is fixed); a pattern take over the source's lines, after the source's slot, or at index",
     options: "a phrase take's instrumentRef (a pattern's lines become phrases of the instrument their notes play by default), keyTracking, baseNote (48 is C-4: the note that plays it as written), lines, lpb and name",
     extract: Some("one phrase of a pattern track's lines (source), relative to a base note so key tracking plays it from any key (options.baseNote: its first note by default; keyTracking none for a chop)."),
+    hears: None,
+    rewrites: None,
+    drops: None,
     idioms: "Renoise numbers lines from 00 as it shows them; effect commands as Renoise writes them: 0Sxx sample offset, 0Rxy retrig, 0B00 reverse, 0Zxx phrase.",
     directions: &["denser", "sparser", "more reverses", "shifted accents", "faster rolls", "swapped slices", "moved ghosts", "an octave up"],
     source_schema: r#"{"type":"object","additionalProperties":false,"properties":{"patternRef":{"type":"string","description":"The pattern, or a sequence slot for its pattern (its mutes go with the takes)"},"trackRef":{"type":"string"},"first":{"type":"integer","minimum":0},"last":{"type":"integer","minimum":0},"phraseRef":{"type":"string"},"instrumentRef":{"type":"string"}}}"#,
@@ -102,51 +104,57 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
     // Reading
 
     fn lengthen(&self, reference: &str) -> Result<String, String> {
-        let link = self.plan.link();
-        let long = link.book.borrow().lengthen(&json!({"ref": reference}));
-        let long = long["ref"].as_str().unwrap_or(reference).to_string();
-        if super::own_bridge::SHORT_REF.is_match(&long) {
-            return Err(format!("{reference} isn't one of this turn's refs (the song may have changed): read again for a current one"));
-        }
-        Ok(long)
+        self.plan.lengthen(reference)
     }
 
-    /// A read through the tool, from the book's epoch when it names refs (and `layout`, when they are from then): its answer.
-    async fn read(&self, mut args: Value, layout: Option<u64>, signal: &Signal) -> Result<Value, String> {
-        let link = self.plan.link();
-        let input = args.as_object().cloned().unwrap_or_default();
-        if ["parent", "track", "items", "ref"].iter().any(|key| input.contains_key(*key)) {
-            self.plan.place_request(&mut args, &input);
-        }
-        if let Some(layout) = layout {
-            args["layout"] = layout.into();
-        }
-        match link.call("read", args, signal.clone()).await {
-            Ok(Ok(answer)) => {
-                follow_epoch(&link.book, &link.epoch, &link.layout, &answer);
-                Ok(answer)
-            }
-            Ok(Err(refused)) => Err(refused.why),
-            Err(error) => Err(error.to_string()),
-        }
+    async fn read(&self, args: Value, layout: Option<u64>, signal: &Signal) -> Result<Value, String> {
+        self.plan.read_through(args, layout, signal).await
     }
 
     async fn rows(&self, args: Value, signal: &Signal) -> Result<Vec<Value>, String> {
-        let mut out = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..LINE_PAGES {
-            let mut asked = args.clone();
-            if let Some(cursor) = &cursor {
-                asked["cursor"] = cursor.clone().into();
-            }
-            let page = self.read(asked, None, signal).await?;
-            out.extend(page.get("items").and_then(Value::as_array).cloned().unwrap_or_default());
-            match page.get("nextCursor").and_then(Value::as_str) {
-                Some(next) => cursor = Some(next.into()),
-                None => return Ok(out),
+        self.plan.rows_through(args, LINE_PAGES, signal).await
+    }
+
+    /// A print of a pattern track's lines outside first..=last, with the pattern's length: what a pattern take's varied track
+    /// holds besides its varied lines (a copy of the source's when Kumi writes it), which its digest doesn't cover.
+    async fn outside_print(
+        &self,
+        pattern: &str,
+        track: &str,
+        length: u32,
+        first: u32,
+        last: u32,
+        signal: &Signal,
+    ) -> Result<String, String> {
+        let rows = self.rows(json!({"kind": "line", "parent": pattern, "track": track, "hidden": true, "limit": 200}), signal).await?;
+        let mut lines = Lines::from_rows(&rows, 0, length.max(1) - 1, 4);
+        lines.rows.retain(|number, _| *number < first || *number > last);
+        Ok(lines.digest())
+    }
+
+    /// A pattern take whose varied track's lines outside the take's range, or whose length, changed since Kumi wrote it (as the
+    /// print it kept then says): the producer's edit there (#400 review notes); None when they're as they were, or the take
+    /// was written before Kumi kept the print.
+    async fn edited_outside(&self, set: &RenoiseSet, number: usize, row: &Value, first: u32, last: u32, signal: &Signal) -> Option<String> {
+        let kept = set.take(number)?.place.get("outside")?.as_str()?.to_string();
+        let reference = row.get("ref")?.as_str()?;
+        let track = self.track_now(set, signal).await.ok()?;
+        let length = row.get("lines").and_then(Value::as_u64).unwrap_or(64) as u32;
+        let now = self.outside_print(reference, &track, length, first, last, signal).await.ok()?;
+        (now != kept).then(|| "has lines of its own outside the varied ones, or another length (since Kumi wrote it)".to_string())
+    }
+
+    /// Pattern takes' rows with the varied track's number now (`variedTrack`): what tells their own tracks apart (#401).
+    async fn with_varied_track(&self, set: &RenoiseSet, rows: &mut [Value], signal: &Signal) {
+        if !matches!(set.source.data.placement, Placement::Patterns { .. }) || !rows.iter().any(|row| row.get("ref").is_some()) {
+            return;
+        }
+        let number = self.track_now(set, signal).await.ok().and_then(|reference| reference.rsplit(':').next()?.parse::<u64>().ok());
+        for row in rows.iter_mut().filter(|row| row.get("ref").is_some()) {
+            if let Some(number) = number {
+                row["variedTrack"] = json!(number);
             }
         }
-        Ok(out)
     }
 
     /// Where each item is now (`read {kind: "where"}`): {pattern}, {instrument}, {phrase} (a place or a ref) or {track} (a ref
@@ -254,16 +262,17 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
     /// Phrase takes heard through players of their phrases: scratch tracks, one per phrase, made, rendered at once and dropped.
     async fn hear_phrases(&self, set: &mut RenoiseSet, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String> {
         let found = self.find(set, numbers, signal).await?;
-        let mut phrases: Vec<(Option<usize>, u64)> = Vec::new();
+        // (each phrase by its place: the players follow it to where it is when they're made)
+        let mut phrases: Vec<(Option<usize>, Value)> = Vec::new();
         if let (true, SourceKind::Phrase { place }) = (with_source, &set.source.data.kind) {
             let row = self.locate(vec![json!({"phrase": place})], None, signal).await?;
-            if let Some(index) = row.first().and_then(|row| row.get("index")).and_then(Value::as_u64) {
-                phrases.push((None, index));
+            if let Some(place) = row.first().filter(|row| row.get("index").is_some()).and_then(|row| row.get("place")) {
+                phrases.push((None, place.clone()));
             }
         }
         for (number, row) in numbers.iter().zip(&found) {
-            if let Some(index) = row.get("index").and_then(Value::as_u64) {
-                phrases.push((Some(*number), index));
+            if let Some(place) = row.get("place").filter(|_| row.get("index").is_some()) {
+                phrases.push((Some(*number), place.clone()));
             }
         }
         if phrases.is_empty() {
@@ -280,7 +289,7 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
             .map(|take| take.material.length as f64 / take.material.lpb.max(1) as f64)
             .fold(1., f64::max)
             .min(PHRASE_BEATS_MOST);
-        let list: Vec<u64> = phrases.iter().map(|(_, index)| *index).collect();
+        let list: Vec<Value> = phrases.iter().map(|(_, place)| place.clone()).collect();
         let args = json!({"action": "make", "count": list.len(), "label": "variations", "range": {"fromBeat": 0, "beats": beats},
             "phrases": {"instrument": instrument, "phrases": list, "note": note}});
         let made = match self.renderer.ask("scratch", args, self.renderer.cleanup_signal()).await {
@@ -329,7 +338,6 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
     /// One change of Kumi's by its step's name: its change id and what the DAW answered, or why it wasn't made (and whether the
     /// request must stop there).
     async fn change(&self, tool: &str, input: Value, signal: &Signal) -> Result<(String, Value), (String, bool)> {
-        *self.plan.last_applied.borrow_mut() = None;
         let outcome = self.plan.change_by(tool, input.as_object().cloned().unwrap_or_default(), signal.clone()).await;
         let answer: Value = serde_json::from_str(&outcome.text).unwrap_or(Value::Null);
         if outcome.is_error || outcome.stops {
@@ -337,7 +345,7 @@ impl<S: RefScheme + 'static> RenoiseBackend<S> {
             return Err((why, outcome.stops));
         }
         let id = answer.get("change").and_then(Value::as_str).unwrap_or("").to_string();
-        Ok((id, self.plan.last_applied.borrow_mut().take().unwrap_or(Value::Null)))
+        Ok((id, outcome.applied.unwrap_or(Value::Null)))
     }
 
     /// A phrase source's own settings (key tracking, base note), for its takes; what `options` gives wins.
@@ -426,8 +434,8 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                 last,
                 slot,
             };
-            let (placement, instrument_name) = match place.unwrap_or("patterns") {
-                "patterns" => (Placement::Patterns { section: format!("Variations of {pattern_name}") }, String::new()),
+            let (placement, instrument_name, set_of) = match place.unwrap_or("patterns") {
+                "patterns" => (Placement::Patterns { section: format!("Variations of {pattern_name}") }, String::new(), String::new()),
                 _ => {
                     // (a pattern's lines become phrases of the instrument they play: its notes lose their instrument column)
                     let instrument = match options.get("instrumentRef").and_then(Value::as_str) {
@@ -449,14 +457,13 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                     if let Some(base) = base {
                         settings.entry("baseNote").or_insert(base);
                     }
-                    (Placement::Phrases { instrument: row.get("place").cloned().unwrap_or(Value::Null), settings }, named(row, ""))
+                    // (phrase takes of a range are a set of their own for each instrument they go to)
+                    let set_of = format!(":phrases:{}", row.get("index").and_then(Value::as_u64).unwrap_or(0));
+                    (Placement::Phrases { instrument: row.get("place").cloned().unwrap_or(Value::Null), settings }, named(row, ""), set_of)
                 }
             };
-            // (phrase takes of a range are a set of their own: a make with another place starts another set)
-            let key = match placement {
-                Placement::Patterns { .. } => key,
-                Placement::Phrases { .. } => format!("{key}:phrases"),
-            };
+            // (a make with another place, or into another instrument, starts another set)
+            let key = format!("{key}{set_of}");
             let data = RenoiseData { kind, placement, instrument_name };
             return Ok(Source { label, short: pattern_name, key, material: Some(material), data });
         }
@@ -515,7 +522,48 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         Err("source is patternRef and trackRef (with first and last), phraseRef, or instrumentRef".into())
     }
 
-    fn direction_ops(&self, direction: &str) -> Vec<Value> {
+    async fn key_now(&self, source: &Source<Lines, RenoiseData>, signal: &Signal) -> Option<String> {
+        // (the pattern, track, phrase and instrument numbers in a key, as their places give them now; a source gone matches
+        // nothing, so what's at its old position starts a set of its own)
+        let data = &source.data;
+        let gone = |rows: &[Value]| rows.iter().any(|row| row.get("gone") == Some(&Value::Bool(true)));
+        let dead = format!("gone:{}", source.key);
+        let instrument = match &data.placement {
+            Placement::Phrases { instrument, .. } => {
+                let found = self.locate(vec![json!({"instrument": instrument})], None, signal).await.ok()?;
+                if gone(&found) {
+                    return Some(dead);
+                }
+                Some(found.first()?.get("index")?.as_u64()?)
+            }
+            Placement::Patterns { .. } => None,
+        };
+        match &data.kind {
+            SourceKind::Range { pattern, track, layout, first, last, .. } => {
+                let found = self.locate(vec![json!({"pattern": pattern}), json!({"track": track})], *layout, signal).await.ok()?;
+                if gone(&found) {
+                    return Some(dead);
+                }
+                let number = found.first()?.get("number")?.as_u64()?;
+                let track = found.get(1)?.get("ref")?.as_str()?.rsplit(':').next()?.parse::<u64>().ok()?;
+                let range = format!("range:{number}:{track}:{first}:{last}");
+                Some(match instrument {
+                    Some(instrument) => format!("{range}:phrases:{instrument}"),
+                    None => range,
+                })
+            }
+            SourceKind::Phrase { place } => {
+                let found = self.locate(vec![json!({"phrase": place})], None, signal).await.ok()?;
+                if gone(&found) {
+                    return Some(dead);
+                }
+                Some(format!("phrase:{}", found.first()?.get("ref")?.as_str()?.splitn(3, ':').nth(2)?))
+            }
+            SourceKind::Instrument => Some(format!("instrument:{}", instrument?)),
+        }
+    }
+
+    fn direction_ops(&self, _source: &Source<Lines, RenoiseData>, direction: &str) -> Vec<Value> {
         match direction {
             "denser" => vec![json!({"op": "fill", "amount": 0.3}), json!({"op": "retrig", "amount": 0.2})],
             "sparser" => vec![json!({"op": "thin", "amount": 0.35})],
@@ -552,7 +600,7 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
             _ => 0,
         };
         let mut written = Lines::from_cells(lines, offset, base.length, base.lpb)?;
-        written.anchors = base.anchors.clone();
+        written.keep_anchors_of(base);
         Ok(written)
     }
 
@@ -624,24 +672,32 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                 let named_slot = slot.filter(|s| plays(*s)).map(|s| format!("{epoch}:seq:{s}")).unwrap_or_else(|| pattern_ref.clone());
                 let mut input = json!({"patternRef": named_slot, "trackRef": track, "first": first, "last": last,
                     "content": material.cells(*first), "name": name});
-                // (after the take before it: the takes stay together)
+                // (after the take before it while that's still the song's last slot: the takes stay together at the end)
                 let previous: Vec<usize> =
                     set.takes.iter().rev().filter(|take| take.state != TakeState::Dropped).map(|take| take.number).take(1).collect();
                 let mut found_set = set.clone();
                 let found = self.find(&mut found_set, &previous, signal).await.map_err(|why| (why, true))?;
-                match found
+                let slot = found
                     .first()
                     .and_then(|row| row.get("slots"))
                     .and_then(Value::as_array)
                     .and_then(|slots| slots.last())
-                    .and_then(Value::as_u64)
-                {
+                    .and_then(Value::as_u64);
+                let end = self.song(signal).await.and_then(|song| song.get("sequenceLength").and_then(Value::as_u64));
+                match after_the_last_take(slot, end) {
                     Some(slot) => input["index"] = json!(slot + 1),
                     None => input["section"] = json!(section),
                 }
                 let (change, applied) = self.change("slot_variation", input, signal).await?;
-                let place = applied.pointer("/created/place").cloned().unwrap_or(Value::Null);
+                let mut place = applied.pointer("/created/place").cloned().unwrap_or(Value::Null);
                 let made = applied.pointer("/created/pattern").and_then(Value::as_str).unwrap_or("").to_string();
+                // (what its varied track holds outside the varied lines, as written: a drop tells the producer's edit there by it)
+                let length = source.get("lines").and_then(Value::as_u64).unwrap_or(64) as u32;
+                if let (Some(fields), Ok(print)) =
+                    (place.as_object_mut(), self.outside_print(&made, &track, length, *first, *last, signal).await)
+                {
+                    fields.insert("outside".into(), json!(print));
+                }
                 Ok((change, place, made))
             }
             _ => Err(("this set's takes can't go in patterns".into(), false)),
@@ -673,15 +729,24 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
             if !found.get(k).is_some_and(lost) {
                 continue;
             }
-            let Some(reference) = names(*number, &set.source.short).iter().find_map(|name| only_named(&rows, name)) else { continue };
+            let state = set.take(*number).map_or(TakeState::Shown, |take| take.state);
+            let Some(reference) = names_to_find(*number, &set.source.short, state).iter().find_map(|name| only_named(&rows, name)) else {
+                continue;
+            };
             let again = self.locate(vec![item(&set.source.data.placement, json!(reference))], None, signal).await?;
             if let Some(row) = again.into_iter().next().filter(|row| row.get("ref").is_some()) {
                 if let Some(take) = set.take_mut(*number) {
+                    // (the print of its lines outside the varied ones stays with it)
+                    let outside = take.place.get("outside").cloned();
                     take.place = row.get("place").cloned().unwrap_or(Value::Null);
+                    if let (Some(fields), Some(outside)) = (take.place.as_object_mut(), outside) {
+                        fields.insert("outside".into(), outside);
+                    }
                 }
                 found[k] = row;
             }
         }
+        self.with_varied_track(set, &mut found, signal).await;
         Ok(found)
     }
 
@@ -726,19 +791,21 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
                 if after.lpb == before.lpb {
                     return write(lines).await.map(|(change, _)| (change, None));
                 }
-                // (a phrase's LPB is a setting of its own, a step of its own: the lines first, when any changed, so a refusal there
-                // writes nothing; an LPB Renoise then refuses leaves lines that went in, told as what the take holds)
-                let written = if lines.is_empty() { None } else { Some(write(lines).await?.0) };
-                match self.change("phrase_set", json!({"ref": reference, "lpb": after.lpb}), signal).await {
-                    Ok((change, _)) => Ok((change, None)),
-                    Err((why, stops)) => match written {
-                        Some(change) => {
-                            let mut holds = after.clone();
-                            holds.lpb = before.lpb;
-                            Ok((change, Some((holds, format!("its LPB stayed {}: {why}", before.lpb)))))
-                        }
-                        None => Err((why, stops)),
-                    },
+                // (a phrase's LPB is a setting of its own, a step of its own: it goes first, so the lines' step is the last to touch
+                // the phrase and Kumi's undo takes each back in turn, and the take names both; lines Renoise then refuses leave the
+                // new LPB, told as what the take holds)
+                let (speed, _) = self.change("phrase_set", json!({"ref": reference, "lpb": after.lpb}), signal).await?;
+                if lines.is_empty() {
+                    return Ok((speed, None));
+                }
+                match write(lines).await {
+                    Ok((change, _)) => Ok((format!("{speed} and {change}"), None)),
+                    Err((why, true)) => Err((format!("{why} (its LPB is {} already: {speed})", after.lpb), true)),
+                    Err((why, false)) => {
+                        let mut holds = before.clone();
+                        holds.lpb = after.lpb;
+                        Ok((speed, Some((holds, format!("its lines stayed as they were: {why}")))))
+                    }
                 }
             }
         }
@@ -812,12 +879,23 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         Ok(json!({"change": change, "title": applied.pointer("/display/title").cloned().unwrap_or(Value::Null)}))
     }
 
-    fn undroppable(&self, set: &RenoiseSet, _number: usize, row: &Value) -> Option<String> {
-        match set.source.data.placement {
-            Placement::Phrases { .. } => None,
-            Placement::Patterns { .. } => {
+    async fn undroppable(&self, set: &RenoiseSet, number: usize, row: &Value, signal: &Signal) -> Option<Undroppable> {
+        match (&set.source.data.placement, &set.source.data.kind) {
+            (Placement::Phrases { .. }, _) => None,
+            (Placement::Patterns { .. }, kind) => {
                 let slots = row.get("slots").and_then(Value::as_array).map_or(0, Vec::len);
-                (slots != 1).then(|| format!("plays in {slots} slots now"))
+                if slots != 1 {
+                    return Some(Undroppable::InUse(format!("plays in {slots} slots now")));
+                }
+                if let Some(why) = edited_around(row) {
+                    return Some(Undroppable::Edited(why));
+                }
+                match kind {
+                    SourceKind::Range { first, last, .. } => {
+                        self.edited_outside(set, number, row, *first, *last, signal).await.map(Undroppable::Edited)
+                    }
+                    _ => None,
+                }
             }
         }
     }
@@ -835,9 +913,8 @@ impl<S: RefScheme + 'static> VariationsBackend for RenoiseBackend<S> {
         self.renderer.why_not()
     }
 
-    async fn playing(&self, signal: &Signal) -> bool {
-        let focus = self.plan.link().call("focus", json!({}), signal.clone()).await.ok().and_then(Result::ok).unwrap_or(Value::Null);
-        focus.pointer("/transport/playing") == Some(&Value::Bool(true))
+    async fn playing(&self, signal: &Signal) -> Option<bool> {
+        self.plan.playing(signal).await
     }
 
     async fn render(&self, set: &mut RenoiseSet, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String> {
@@ -981,6 +1058,26 @@ fn data_of(value: &Value) -> Option<RenoiseData> {
 }
 
 /// The one row named `name` (none when none or several are), its ref.
+/// The slot a new pattern take follows: the take before it, while that's the song's last slot (the takes' place at the end);
+/// None when the producer moved it, or slots came after it, and the take goes to the song's end in its own section (#400
+/// review notes: a take after one moved mid-song landed there while the answer said "at the song's end").
+fn after_the_last_take(slot: Option<u64>, end: Option<u64>) -> Option<u64> {
+    slot.filter(|slot| Some(*slot) == end)
+}
+
+/// A pattern take whose other tracks hold lines or automation of their own (not its source's, by alias), in words: the producer's
+/// edit around the take, which a drop would take with it (#400 review notes: the digest covers only the varied lines).
+fn edited_around(row: &Value) -> Option<String> {
+    let varied = row.get("variedTrack").and_then(Value::as_u64);
+    let others = row.get("ownTracks").and_then(Value::as_array)?.iter().filter_map(Value::as_u64).filter(|t| Some(*t) != varied).count();
+    (others > 0).then(|| {
+        format!(
+            "has lines or automation of its own on {others} other track{} (written since Kumi made it)",
+            if others == 1 { "" } else { "s" }
+        )
+    })
+}
+
 fn only_named(rows: &[Value], name: &str) -> Option<String> {
     if name.is_empty() {
         return None;
@@ -1150,6 +1247,25 @@ fn named(row: &Value, otherwise: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_pattern_take_follows_the_last_one_only_while_it_ends_the_song() {
+        assert_eq!(after_the_last_take(Some(12), Some(12)), Some(12));
+        assert_eq!(after_the_last_take(Some(5), Some(12)), None, "moved mid-song: the new take goes to the end");
+        assert_eq!(after_the_last_take(None, Some(12)), None);
+        assert_eq!(after_the_last_take(Some(12), None), None, "the song's length unread");
+    }
+
+    #[test]
+    fn a_pattern_take_with_lines_of_its_own_on_another_track_isnt_dropped() {
+        let row = |own: Value| json!({"slots": [9], "ownTracks": own, "variedTrack": 1});
+        assert_eq!(edited_around(&row(json!([1]))), None, "its varied track only");
+        assert_eq!(
+            edited_around(&row(json!([1, 3]))).as_deref(),
+            Some("has lines or automation of its own on 1 other track (written since Kumi made it)")
+        );
+        assert_eq!(edited_around(&json!({"slots": [9]})), None, "a bridge that doesn't say");
+    }
+
     use super::super::renoise_lines::OPS;
     use super::*;
 

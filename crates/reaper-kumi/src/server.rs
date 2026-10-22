@@ -54,7 +54,7 @@ const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
-const MAIN_METHODS: [&str; 17] = [
+const MAIN_METHODS: [&str; 19] = [
     "action",
     "quit",
     "read",
@@ -75,13 +75,17 @@ const MAIN_METHODS: [&str; 17] = [
     "track_template_save",
     // M6: catch-up and watch_me
     "digest",
+    // (#401) scripts kept as actions
+    "script_install",
+    "script_remove",
 ];
 const EVENTS: [&str; 5] =
     [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];
 // M5 listening (m5-reaper): the job's status, its cancel and a preview's stop answer off the main thread, even while it is
 // inside REAPER's render for Kumi; the rest run on it. A sweep of scratch copies an earlier session left is told.
 const LISTENING_SOCKET_METHODS: [&str; 3] = ["listen_status", "listen_cancel", "audition_stop"];
-const LISTENING_MAIN_METHODS: [&str; 5] = ["render_start", "capture_start", "audition", "audio_file", "scratch"];
+const LISTENING_MAIN_METHODS: [&str; 7] =
+    ["render_start", "capture_start", "audition", "audio_file", "scratch", "deliver_targets", "deliver_start"];
 const LISTENING_EVENTS: [&str; 1] = [crate::listening::SWEPT];
 
 /// Where the reference file lives for a resource folder.

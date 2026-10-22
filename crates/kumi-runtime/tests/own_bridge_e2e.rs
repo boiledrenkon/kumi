@@ -2526,6 +2526,47 @@ async fn a_take_that_clips_where_the_source_doesnt_is_drawn_again_and_nothing_re
         .await;
 }
 
+/// (#400 review notes) A pattern take whose varied track the producer wrote on outside the take's lines isn't dropped: its
+/// digest covers only those lines, so the drop compares the rest with the source's, says why, and leaves it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pattern_take_written_on_outside_its_lines_isnt_dropped() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, _told) = renoise_with_changes(home.path()).await;
+            script.set_lines(
+                2,
+                1,
+                json!([
+                    {"line": 0, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+                    {"line": 2, "notes": [{"col": 1, "note": "D-4", "instrument": "00", "volume": "30"}]},
+                    {"line": 4, "notes": [{"col": 1, "note": "E-4", "instrument": "00"}]},
+                    {"line": 6, "notes": [{"col": 1, "note": "C-4", "instrument": "00"}]},
+                ]),
+            );
+            let variations = tool(&observed, "variations");
+            run_tool(&tool(&observed, "renoise_read"), json!({"kind": "pattern"})).await;
+            let source = json!({"patternRef": "pattern:2", "trackRef": "track:1", "first": 0, "last": 7});
+            let rolls = json!([{"direction": "rolls", "ops": [{"op": "retrig", "amount": 0.5}]}, {"direction": "sparser", "ops": [{"op": "thin", "amount": 0.4}]}]);
+            let made = run_tool(&variations, json!({"action": "make", "source": source, "seed": 5, "takes": rolls, "listen": false})).await;
+            let first: u64 = made["takes"][0]["ref"].as_str().and_then(|r| r.rsplit(':').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{made}"));
+            // (the producer writes on the source past the lines Kumi varied: the takes are as Kumi wrote them, still droppable)
+            let mut source_lines = script.lines(2, 1).as_array().cloned().unwrap_or_default();
+            source_lines.push(json!({"line": 14, "notes": [{"col": 1, "note": "A-4", "instrument": "00"}]}));
+            script.set_lines(2, 1, Value::Array(source_lines));
+            // (the producer writes a note on V1's track past the lines Kumi varied)
+            let mut lines = script.lines(first, 1).as_array().cloned().unwrap_or_default();
+            lines.push(json!({"line": 12, "notes": [{"col": 1, "note": "G-4", "instrument": "00"}]}));
+            script.set_lines(first, 1, Value::Array(lines));
+            let dropped = run_tool(&variations, json!({"action": "drop"})).await;
+            assert_eq!(dropped["dropped"], json!(["V2"]), "{dropped}");
+            assert!(dropped["skipped"].to_string().contains("outside the varied ones"), "{dropped}");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// (review W6, W9, W5) Phrase takes of a pattern's lines are heard through players of their phrases, and changed and dropped as
 /// phrases; they're a set apart from the range's pattern takes. Speed is refused for pattern takes, before anything is drawn.
 #[tokio::test(flavor = "current_thread")]
@@ -2602,6 +2643,41 @@ async fn a_copy_named_like_a_take_is_never_taken_for_it() {
             assert!(dropped["skipped"][0].as_str().unwrap().contains("can't find V2"), "{dropped}");
             let names: Vec<String> = script.made_phrases(2).into_iter().map(|(name, _)| name).collect();
             assert_eq!(names, ["V2 \u{b7} Pad", "V2 \u{b7} Pad"], "the take and the producer's copy both stay");
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// (#400 review notes) A phrase take changed in speed and lines is two steps, the LPB first: the take names both, and Kumi's
+/// undo takes back the lines, then the LPB.
+#[tokio::test(flavor = "current_thread")]
+async fn a_phrase_take_changed_in_speed_and_lines_names_both_changes_and_each_undoes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let (script, simulator, renoise, observed, told) = renoise_with_changes(home.path()).await;
+            let pad = run_tool(&tool(&observed, "renoise_read"), json!({"kind": "instrument"})).await["items"][1]["ref"].as_str().unwrap().to_owned();
+            let arp: Value = serde_json::from_str(ARP).unwrap();
+            let variations = tool(&observed, "variations");
+            run_tool(&variations, json!({"action": "make", "source": {"instrumentRef": pad}, "takes": [{"lines": arp}], "count": 1, "seed": 5, "listen": false})).await;
+            let before = script.made_phrases(2)[0].1.clone();
+            let changed = run_tool(
+                &variations,
+                json!({"action": "change", "names": ["V1"], "takes": [{"direction": "faster, an octave up", "ops": [{"op": "speed", "factor": 2}, {"op": "transpose", "semitones": 12}]}], "listen": false}),
+            )
+            .await;
+            let line = changed["changed"][0]["line"].as_str().unwrap().to_owned();
+            let ids = regex::Regex::new(r"\((c\d+) and (c\d+)\)").unwrap().captures(&line).map(|found| (found[1].to_owned(), found[2].to_owned()));
+            let (speed, lines) = ids.unwrap_or_else(|| panic!("both changes named: {line}"));
+            assert_eq!(told.borrow().len(), 3, "the take, the LPB, then the lines");
+            assert_ne!(script.made_phrases(2)[0].1, before, "its lines transposed");
+            let undo = tool(&observed, "undo_change");
+            for id in [lines, speed] {
+                let undone = undo.execute(input(json!({"change": id})), Signal::new()).await.unwrap();
+                assert!(!undone.is_error, "{id}: {}", undone.text);
+            }
+            assert_eq!(script.made_phrases(2)[0].1, before, "its lines as they were");
             renoise.close().await.unwrap();
             simulator.stop();
         })

@@ -67,6 +67,8 @@ pub const DAW: OwnDaw = OwnDaw {
     // (Logic's catch-up, watch_me and phrases are its own above: `project` and `instant`, not the host's snapshots.)
     catch_up: None,
     phrases: None,
+    scripts: None,
+    spec: None,
 };
 
 /// (M6) Logic's changes for the fixed phrases: the tempo in whole BPM (Logic's tempo display takes no fraction from

@@ -49,6 +49,21 @@ pub struct Scenario {
 // The preludes (each DAW's first Lua: the project or song put back to a plain start, and the fixtures' helpers) and the
 // state readers (the fields every scenario's checks may use).
 
+/// Lua that sets `folder` to REAPER's render folder for the open project, as REAPER resolves it: the render folder when it's
+/// a whole path, else under the default render path (a whole path, or inside the media folder) or the project's media folder.
+macro_rules! reaper_render_folder {
+    () => {
+        r#"
+local function whole(path) return path:sub(1, 1) == "/" end
+local _, set = reaper.GetSetProjectInfo_String(0, "RENDER_FILE", "", false)
+local _, default = reaper.get_config_var_string("defrenderpath")
+local media = reaper.GetProjectPath("")
+local base = (default or "") == "" and media or (whole(default) and default or media .. "/" .. default)
+local folder = set == "" and base or (whole(set) and set or base .. "/" .. set)
+"#
+    };
+}
+
 pub const REAPER_PRELUDE: &str = r#"
 for i = reaper.CountTracks(0) - 1, 0, -1 do reaper.DeleteTrack(reaper.GetTrack(0, i)) end
 local _, markers, regions = reaper.CountProjectMarkers(0)
@@ -120,6 +135,7 @@ for i = 0, reaper.CountTracks(0) - 1 do
       fadein = r6(reaper.GetMediaItemInfo_Value(it, "D_FADEINLEN")), fadeout = r6(reaper.GetMediaItemInfo_Value(it, "D_FADEOUTLEN")),
       loop = reaper.GetMediaItemInfo_Value(it, "B_LOOPSRC") ~= 0}
     if take then
+      row.name = reaper.GetTakeName(take)
       row.rate = r6(reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE"))
       row.pitch = r6(reaper.GetMediaItemTakeInfo_Value(take, "D_PITCH"))
       row.offset = r6(reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS"))
@@ -141,6 +157,7 @@ while true do
   m = m + 1
 end
 out.tempo = reaper.Master_GetTempo()
+out.master = r6(reaper.GetMediaTrackInfo_Value(reaper.GetMasterTrack(0), "D_VOL"))
 local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
 out.targets = 0
 for _ in targets:gmatch("[^;]+") do out.targets = out.targets + 1 end
@@ -205,18 +222,8 @@ end
 
 pub const RENOISE_STATE: &str = r##"
 local R = renoise
+-- (the notes are counted by RENOISE_NOTES, in pages)
 local out = {notes = 0, tracks = {}, instruments = {}, sequence = {}}
-for _, p in ipairs(song.patterns) do
-  for t = 1, song.sequencer_track_count do
-    if song:track(t).type == R.Track.TRACK_TYPE_SEQUENCER then
-      for _, line in ipairs(p:track(t).lines) do
-        if not line.is_empty then
-          for c = 1, 12 do if line:note_column(c).note_value < 120 then out.notes = out.notes + 1 end end
-        end
-      end
-    end
-  end
-end
 local types = {[R.Track.TRACK_TYPE_SEQUENCER] = "sequencer", [R.Track.TRACK_TYPE_GROUP] = "group",
   [R.Track.TRACK_TYPE_SEND] = "send", [R.Track.TRACK_TYPE_MASTER] = "master"}
 for i, t in ipairs(song.tracks) do
@@ -232,13 +239,16 @@ for i, t in ipairs(song.tracks) do
   end
   local group = t.group_parent
   out.tracks[#out.tracks + 1] = {index = i, name = t.name, type = types[t.type], group = group and group.name or nil,
-    pre = t.prefx_volume.value, post = t.postfx_volume.value, devices = devices}
+    pre = t.prefx_volume.value, post = t.postfx_volume.value, devices = devices,
+    delay = t.type == R.Track.TRACK_TYPE_SEQUENCER and t.output_delay or nil}
 end
 for _, ins in ipairs(song.instruments) do
   local samples = {}
   for _, s in ipairs(ins.samples) do
     local b = s.sample_buffer
-    samples[#samples + 1] = {name = s.name, frames = b.has_sample_data and b.number_of_frames or 0, rate = b.has_sample_data and b.sample_rate or 0}
+    local keys = s.sample_mapping.note_range
+    samples[#samples + 1] = {name = s.name, frames = b.has_sample_data and b.number_of_frames or 0, rate = b.has_sample_data and b.sample_rate or 0,
+      low = keys[1], high = keys[2], base = s.sample_mapping.base_note}
   end
   out.instruments[#out.instruments + 1] = {name = ins.name, samples = samples}
 end
@@ -256,6 +266,43 @@ local function notes_of(p, t, c)
   end
   return r
 end
+"##;
+
+/// The notes a Renoise song plays, counted from pattern `FROM` (set before it) for half a second at most, Renoise stopping a
+/// callback at 800 ms (#400 review D21): `next` is the pattern to go on from, none once every pattern is counted. Each
+/// sequencer track's lines are read one by one, an empty pattern track skipped, and an alias through its source, as
+/// Renoise plays it (up to the shorter pattern's length).
+pub const RENOISE_NOTES: &str = r##"
+local R = renoise
+local out = {notes = 0}
+local deadline = os.clock() + 0.5
+local p = FROM
+while p <= #song.patterns do
+  local pattern = song:pattern(p)
+  for t = 1, #song.tracks do
+    if song:track(t).type == R.Track.TRACK_TYPE_SEQUENCER then
+      local pt, lines = pattern:track(t), pattern.number_of_lines
+      if pt.is_alias then
+        local source = song:pattern(pt.alias_pattern_index)
+        pt, lines = source:track(t), math.min(lines, source.number_of_lines)
+      end
+      if not pt.is_empty then
+        for l = 1, lines do
+          local line = pt:line(l)
+          if not line.is_empty then
+            for c = 1, 12 do if line:note_column(c).note_value < 120 then out.notes = out.notes + 1 end end
+          end
+        end
+      end
+    end
+  end
+  p = p + 1
+  if p <= #song.patterns and os.clock() > deadline then
+    out.next = p
+    break
+  end
+end
+return out
 "##;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -407,10 +454,37 @@ for i = 1, 3 do
   reaper.SetMediaItemSelected(it, true)
 end
 "#,
-            read: "",
-            teardown: None,
+            // (the files rendered: one a region, in REAPER's render folder for the project)
+            read: concat!(
+                reaper_render_folder!(),
+                r#"
+local named = {}
+for _, region in ipairs(out.regions) do named[region.name .. ".wav"] = true end
+out.rendered = {}
+local i = 0
+while true do
+  local file = reaper.EnumerateFiles(folder, i)
+  if not file then break end
+  if named[file] then out.rendered[#out.rendered + 1] = file end
+  i = i + 1
+end
+"#
+            ),
+            // (the files go, so the next run renders afresh)
+            teardown: Some(concat!(
+                reaper_render_folder!(),
+                r#"
+local m = 0
+while true do
+  local ok, isrgn, _, _, name = reaper.EnumProjectMarkers(m)
+  if ok == 0 then break end
+  if isrgn and name ~= "" then os.remove(folder .. "/" .. name .. ".wav") end
+  m = m + 1
+end
+return "ok""#
+            )),
             generates: false,
-            names: &["variation", "region"],
+            names: &["01", "Gravel 1", "Gravel 2", "Gravel 3"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let source = |state: &Value, i: usize| {
@@ -442,7 +516,220 @@ end
                         variations.len() >= 6,
                         format!("{} distinct", variations.len()),
                     ),
-                    Check::new("the render lists 12 files", after["targets"].as_u64() == Some(12), format!("{}", after["targets"])),
+                    Check::new(
+                        "12 files rendered, one a region",
+                        list(&after["rendered"]).len() == 12,
+                        list(&after["rendered"]).iter().filter_map(|file| file.as_str()).collect::<Vec<_>>().join(", "),
+                    ),
+                ]
+            },
+        },
+        // REAPER: SFX variations (#401) of one item, made, then some kept and the rest dropped.
+        Scenario {
+            id: "P31",
+            daw: Daw::Reaper,
+            says: &["Make 4 variations of this footstep", "Keep 1 and 3, drop the others"],
+            before: None,
+            fixture: r#"
+local it = audio(track("Step"), MEDIA .. "/gravel1.wav", 0, 0.4)
+reaper.SetMediaItemSelected(it, true)
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["V1", "V3"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let items = |state: &Value| {
+                    track(state, "Step").map(|t| list(&t["items"]).into_iter().cloned().collect::<Vec<_>>()).unwrap_or_default()
+                };
+                let sound = |item: &Value| (item["len"].clone(), item["rate"].clone(), item["pitch"].clone(), item["offset"].clone());
+                let source =
+                    |state: &Value| items(state).into_iter().find(|item| item["pos"].as_f64() == Some(0.0)).map(|item| sound(&item));
+                let names: Vec<String> = items(after).iter().filter_map(|item| item["name"].as_str().map(str::to_owned)).collect();
+                let kept: Vec<&String> = names.iter().filter(|name| name.ends_with("kept")).collect();
+                let left = |number: &str| names.iter().any(|name| name.starts_with(&format!("{number} ")));
+                let differ = items(after)
+                    .iter()
+                    .filter(|item| item["name"].as_str().is_some_and(|name| name.ends_with("kept")))
+                    .all(|item| Some(sound(item)) != source(before));
+                vec![
+                    Check::new("the variations tool made the takes", seen.tools.iter().any(|t| t == "variations"), seen.tools.join(", ")),
+                    Check::new("the source item is as it was", source(before).is_some() && source(before) == source(after), ""),
+                    Check::new(
+                        "V1 and V3 are kept (renamed so), V2 and V4 gone",
+                        kept.len() == 2 && left("V1") && left("V3") && !left("V2") && !left("V4"),
+                        names.join(", "),
+                    ),
+                    Check::new("the kept takes differ from the source", differ && !kept.is_empty(), ""),
+                ]
+            },
+        },
+        // REAPER: a track split into stems by Kumi's own splitter (#401), each on a new track.
+        Scenario {
+            id: "P32",
+            daw: Daw::Reaper,
+            says: &["Split the Loop track into stems"],
+            before: None,
+            fixture: r#"
+audio(track("Loop"), MEDIA .. "/break120.wav", 0, 8)
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["drums", "other"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let tracks: Vec<String> = list(&after["tracks"]).iter().filter_map(|t| t["name"].as_str().map(str::to_owned)).collect();
+                let stem = |word: &str| {
+                    list(&after["tracks"])
+                        .into_iter()
+                        .find(|t| t["name"].as_str().is_some_and(|n| n != "Loop" && n.to_lowercase().contains(word)))
+                        .cloned()
+                };
+                let placed = ["drums", "bass", "other"].iter().all(|word| stem(word).is_some_and(|t| list(&t["items"]).len() == 1));
+                let items = |state: &Value| track(state, "Loop").map(|t| list(&t["items"]).len());
+                vec![
+                    Check::new("the stems tool split it", seen.tools.iter().any(|t| t == "stems"), seen.tools.join(", ")),
+                    Check::new("drums, bass and other on tracks of their own, an item each", placed, tracks.join(", ")),
+                    Check::new("the Loop track is as it was", items(before).is_some() && items(before) == items(after), ""),
+                ]
+            },
+        },
+        // REAPER: a track's audio turned into MIDI by Kumi's own ears (#401), on a new track.
+        Scenario {
+            id: "P33",
+            daw: Daw::Reaper,
+            says: &["Turn the Bass track's audio into notes"],
+            before: None,
+            fixture: r#"
+audio(track("Bass"), MEDIA .. "/bass.wav", 0, 8)
+"#,
+            read: "",
+            teardown: None,
+            generates: true,
+            names: &["MIDI", "melody"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let written = list(&after["tracks"])
+                    .into_iter()
+                    .filter(|t| t["name"] != "Bass")
+                    .flat_map(|t| list(&t["items"]))
+                    .any(|item| item["notes"].as_u64().unwrap_or(0) > 0);
+                let items = |state: &Value| track(state, "Bass").map(|t| list(&t["items"]).len());
+                vec![
+                    Check::new("the audio-to-MIDI tool heard it", seen.tools.iter().any(|t| t == "audio_to_midi"), seen.tools.join(", ")),
+                    Check::new("notes written on a new track", written, format!("{} notes", after["notes"])),
+                    Check::new("the Bass track is as it was", items(before).is_some() && items(before) == items(after), ""),
+                ]
+            },
+        },
+        // REAPER: a track heard twice, found by the routing doctor (#401).
+        Scenario {
+            id: "P34",
+            daw: Daw::Reaper,
+            says: &["My kick sounds louder than its fader says, why?"],
+            before: None,
+            // (the kick reaches the master by its own send and through the bus it also sends to)
+            fixture: r#"
+local bus = track("Drum Bus")
+local kick = track("Kick")
+audio(kick, MEDIA .. "/kickloop.wav", 0, 8)
+reaper.CreateTrackSend(kick, bus)
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["Drum Bus"],
+            expect: |seen| {
+                vec![
+                    Check::new("the routing tool looked", seen.tools.iter().any(|t| t == "routing"), seen.tools.join(", ")),
+                    Check::new(
+                        "it says the kick reaches the master twice",
+                        mentions(seen.said, &["twice", "both", "two ways", "two routes", "two paths", "double"]),
+                        "",
+                    ),
+                ]
+            },
+        },
+        // REAPER: a narration delivered to ACX's spec (#401 delivery to a spec), measured, fixed at the master, measured again (a
+        // second of room tone, silence here, at its head).
+        Scenario {
+            id: "P35",
+            daw: Daw::Reaper,
+            says: &["Get this ready for ACX"],
+            before: None,
+            fixture: r#"
+reaper.SetMediaTrackInfo_Value(reaper.GetMasterTrack(0), "D_VOL", 1)
+audio(track("Narration"), MEDIA .. "/vocal.wav", 1, 6)
+"#,
+            read: "",
+            teardown: Some(r#"reaper.SetMediaTrackInfo_Value(reaper.GetMasterTrack(0), "D_VOL", 1) return "ok""#),
+            generates: false,
+            names: &["RMS", "LUFS", "peak"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let moved = before["master"] != after["master"];
+                vec![
+                    Check::new("the spec tool measured it", seen.tools.iter().any(|t| t == "delivery_spec"), seen.tools.join(", ")),
+                    Check::new(
+                        "it fixed the level at the master, or says it meets the spec",
+                        moved || mentions(seen.said, &["passes", "meets", "already"]),
+                        format!("master {} → {}", before["master"], after["master"]),
+                    ),
+                ]
+            },
+        },
+        // REAPER: a repeated chore kept as a script (#401 scripts), run once and kept as an action.
+        Scenario {
+            id: "P36",
+            daw: Daw::Reaper,
+            says: &[
+                "Each time I add a vocal track I name it Vox, color it red and put ReaComp on it. Do that now, and keep it as a script I can run again",
+                "Yes, keep it",
+            ],
+            before: None,
+            fixture: "",
+            read: r#"
+out.kept = {}
+local dir = reaper.GetResourcePath() .. "/Scripts/Kumi"
+local i = 0
+while true do
+  local file = reaper.EnumerateFiles(dir, i)
+  if not file then break end
+  out.kept[#out.kept + 1] = file
+  i = i + 1
+end
+"#,
+            // (the lab's kept scripts and their actions go)
+            teardown: Some(
+                r#"
+local dir = reaper.GetResourcePath() .. "/Scripts/Kumi"
+local files, i = {}, 0
+while true do
+  local file = reaper.EnumerateFiles(dir, i)
+  if not file then break end
+  files[#files + 1] = dir .. "/" .. file
+  i = i + 1
+end
+for _, path in ipairs(files) do reaper.AddRemoveReaScript(false, 0, path, true) os.remove(path) end
+return "ok""#,
+            ),
+            generates: false,
+            names: &["action", "Action List"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let vox = track(after, "Vox");
+                let comp = vox.is_some_and(|t| list(&t["fx"]).iter().any(|fx| fx["name"].as_str().is_some_and(|n| n.contains("ReaComp"))));
+                let kept = list(&after["kept"]).len() > list(&before["kept"]).len();
+                vec![
+                    Check::new("the chore done once: Vox with ReaComp", comp, ""),
+                    Check::new("the scripts tool kept it", seen.tools.iter().any(|t| t == "scripts"), seen.tools.join(", ")),
+                    Check::new(
+                        "kept as REAPER's own action (a file in Scripts/Kumi)",
+                        kept,
+                        list(&after["kept"]).iter().filter_map(|f| f.as_str()).collect::<Vec<_>>().join(", "),
+                    ),
                 ]
             },
         },
@@ -487,7 +774,7 @@ track("FX Hall Reverb")
             read: "",
             teardown: None,
             generates: false,
-            names: &["Keys & Harp", "stem"],
+            names: &["Keys & Harp"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let celesta = track_like(after, "celesta");
@@ -538,7 +825,7 @@ audio(track("Drums"), MEDIA .. "/break120.wav", 0, 8)
                 r#"reaper.set_config_var_string("itemtimelock", "1", 0) reaper.set_config_var_string("loopnewitems", "14", 0) reaper.set_config_var_string("splitautoxfade", "0", 0) return "ok""#,
             ),
             generates: false,
-            names: &["Synth", "128"],
+            names: &["4 bars", "Drums", "break120"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let tempo = after["tempo"].as_f64().unwrap_or(0.0);
@@ -636,7 +923,7 @@ audio(track("Bass"), MEDIA .. "/bass.wav", 0, 8)
             read: "",
             teardown: None,
             generates: false,
-            names: &["sidechain", "ReaComp", "3/4"],
+            names: &["ReaComp", "3/4"],
             expect: |seen| {
                 let after = seen.after;
                 let send = track(after, "Kick").and_then(|t| list(&t["sends"]).into_iter().find(|s| s["to"] == "Bass").cloned());
@@ -697,7 +984,7 @@ end
 "#,
             teardown: None,
             generates: false,
-            names: &["Snare", "0S40", "0SC0", "line 12", "line 20"],
+            names: &["0S40", "0SC0", "line 12"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let effects = |state: &Value, line: u64| -> Vec<String> {
@@ -736,7 +1023,7 @@ note(seq:pattern(1), 1, 0, "C-4", 0)
             read: r#"out.lines = notes_of(song.sequencer:pattern(1), 1)"#,
             teardown: None,
             generates: false,
-            names: &["instrument"],
+            names: &["Amen"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let count = |state: &Value| list(&state["instruments"]).len();
@@ -779,7 +1066,7 @@ note(seq:pattern(1), 2, 0, "C-4", 1)
             read: r#"out.lines = {notes_of(song.sequencer:pattern(1), 1), notes_of(song.sequencer:pattern(1), 2)}"#,
             teardown: None,
             generates: false,
-            names: &["group", "Bus Compressor", "Think"],
+            names: &["Bus Compressor"],
             expect: |seen| {
                 let after = seen.after;
                 let (amen, think) = (track(after, "Amen"), track(after, "Think"));
@@ -838,7 +1125,7 @@ end
 "#,
             teardown: None,
             generates: false,
-            names: &["duplicate", "column"],
+            names: &["03", "Hats"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let slots = |state: &Value| list(&state["slots"]).len();
@@ -883,7 +1170,7 @@ note(seq:pattern(1), 1, 0, "C-4", 0)
             read: "",
             teardown: None,
             generates: false,
-            names: &["Delay", "send"],
+            names: &["#Send", "Vox"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let sends_on = |state: &Value| {
@@ -964,7 +1251,8 @@ end
 "#,
             teardown: None,
             generates: false,
-            names: &["empty", "new"],
+            // (slots from 1, as Kumi's Renoise rules number them, or as the sequence shows them)
+            names: &["04", "06", "07", "slot 4", "slots 4", "slot 6", "slot 7"],
             expect: |seen| {
                 let (before, after) = (seen.before, seen.after);
                 let content = |state: &Value, s: usize| (state["slots"][s]["keys"].clone(), state["slots"][s]["drums"].clone());
@@ -982,6 +1270,255 @@ end
                         empties == 0 || mentions(seen.said, &["empty"]),
                         format!("{empties} empty slots left"),
                     ),
+                    // (four of the six hold notes: an exact copy and near copies of the first pattern)
+                    Check::new(
+                        "it tells the repeats from the empty patterns",
+                        mentions(seen.said, &["same", "copy", "copies", "duplicate", "alias", "repeat", "identical"]),
+                        "",
+                    ),
+                ]
+            },
+        },
+        // Renoise: a track split into stems by Kumi's own splitter (#401), each an instrument played on a new track.
+        Scenario {
+            id: "R36",
+            daw: Daw::Renoise,
+            says: &["Split the Loop track into stems"],
+            before: None,
+            fixture: r#"
+song:track(1).name = "Loop"
+sample_instrument(1, "Loop", MEDIA .. "/break120.wav")
+note(seq:pattern(1), 1, 0, "C-4", 0)
+"#,
+            read: "",
+            teardown: None,
+            generates: true,
+            names: &["drums", "other"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let instruments: Vec<String> =
+                    list(&after["instruments"]).iter().filter_map(|i| i["name"].as_str().map(str::to_owned)).collect();
+                let loaded = ["drums", "bass", "other"].iter().all(|word| {
+                    list(&after["instruments"]).iter().any(|i| {
+                        i["name"].as_str().is_some_and(|n| n.to_lowercase().contains(word))
+                            && list(&i["samples"]).iter().any(|s| s["frames"].as_u64().unwrap_or(0) > 0)
+                    })
+                });
+                let played = list(&after["tracks"]).iter().any(|t| t["name"].as_str().is_some_and(|n| n.to_lowercase().contains("stems")));
+                let source = |state: &Value| list(&state["instruments"]).first().map(|i| i["samples"].clone());
+                vec![
+                    Check::new("the stems tool split it", seen.tools.iter().any(|t| t == "stems"), seen.tools.join(", ")),
+                    Check::new("drums, bass and other loaded as instruments", loaded, instruments.join(", ")),
+                    Check::new(
+                        "a new track plays them",
+                        played && after["notes"].as_u64() > before["notes"].as_u64(),
+                        format!("{} notes", after["notes"]),
+                    ),
+                    Check::new("the Loop instrument is as it was", source(before).is_some() && source(before) == source(after), ""),
+                ]
+            },
+        },
+        // Renoise: a track's audio turned into notes by Kumi's own ears (#401), on a new track.
+        Scenario {
+            id: "R37",
+            daw: Daw::Renoise,
+            says: &["Turn the Bass track's audio into notes"],
+            before: None,
+            fixture: r#"
+song:track(1).name = "Bass"
+sample_instrument(1, "Bass", MEDIA .. "/bass.wav")
+note(seq:pattern(1), 1, 0, "C-4", 0)
+"#,
+            read: "",
+            teardown: None,
+            generates: true,
+            names: &["melody", "harmony"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let tracks: Vec<String> = list(&after["tracks"]).iter().filter_map(|t| t["name"].as_str().map(str::to_owned)).collect();
+                let new_track = tracks.iter().any(|name| name != "Bass" && name.starts_with("Bass"));
+                let more = after["notes"].as_u64().unwrap_or(0) > before["notes"].as_u64().unwrap_or(0) + 2;
+                vec![
+                    Check::new("the audio-to-MIDI tool heard it", seen.tools.iter().any(|t| t == "audio_to_midi"), seen.tools.join(", ")),
+                    Check::new(
+                        "notes written on a new track",
+                        new_track && more,
+                        format!("{} notes; {}", after["notes"], tracks.join(", ")),
+                    ),
+                    Check::new("the Bass track is still there", tracks.iter().any(|name| name == "Bass"), ""),
+                ]
+            },
+        },
+        // Renoise: a layer that lands late against its main break, lined up (#401 layering).
+        Scenario {
+            id: "R38",
+            daw: Daw::Renoise,
+            says: &["The Layer track sounds a bit late against the Amen, line it up"],
+            before: None,
+            // (the same break on both, the layer's 16 ms late in its own audio: both notes on the line)
+            fixture: r#"
+song:track(1).name = "Amen"
+song:track(2).name = "Layer"
+sample_instrument(1, "Amen", MEDIA .. "/break120.wav")
+sample_instrument(2, "Layer", MEDIA .. "/break120-late.wav")
+note(seq:pattern(1), 1, 0, "C-4", 0)
+note(seq:pattern(1), 2, 0, "C-4", 1)
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["16", "15.6"],
+            expect: |seen| {
+                let after = seen.after;
+                let delay = |name: &str| track(after, name).and_then(|t| t["delay"].as_f64());
+                let nudged = delay("Layer").is_some_and(|ms| (-21.0..=-11.0).contains(&ms));
+                vec![
+                    Check::new("the layers tool measured them", seen.tools.iter().any(|t| t == "layers"), seen.tools.join(", ")),
+                    Check::new(
+                        "the Layer moved about 16 ms earlier (its track delay)",
+                        nudged,
+                        format!("Layer {:?} ms, Amen {:?} ms", delay("Layer"), delay("Amen")),
+                    ),
+                    Check::new("the Amen stays where it was", delay("Amen").unwrap_or(0.0).abs() < 0.5, ""),
+                ]
+            },
+        },
+        // Renoise: a kit's samples laid out across the keys (#401 sample mapping), a key each.
+        Scenario {
+            id: "R39",
+            daw: Daw::Renoise,
+            says: &["Lay the Kit's samples out across the keys", "Yes, go ahead"],
+            before: None,
+            fixture: r#"
+local ins = sample_instrument(1, "Kit", MEDIA .. "/kick.wav")
+ins:sample(1).name = "Kick"
+for k, sound in ipairs({{"Snare", "snare.wav"}, {"Shaker", "gravel1.wav"}}) do
+  local s = ins:insert_sample_at(k + 1)
+  s.sample_buffer:load_from(MEDIA .. "/" .. sound[2])
+  s.name = sound[1]
+end
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["Kick", "Snare", "Shaker", "C-4"],
+            // (map_samples, or the keyzone change it makes given straight: a kit of three has nothing to plan)
+            expect: |seen| {
+                let after = seen.after;
+                let kit = list(&after["instruments"]).into_iter().find(|i| i["name"] == "Kit").cloned().unwrap_or(Value::Null);
+                let ranges: Vec<(i64, i64)> =
+                    list(&kit["samples"]).iter().filter_map(|s| Some((s["low"].as_i64()?, s["high"].as_i64()?))).collect();
+                let apart =
+                    ranges.len() == 3 && ranges.iter().enumerate().all(|(k, a)| ranges.iter().skip(k + 1).all(|b| a.1 < b.0 || b.1 < a.0));
+                vec![Check::new("each sample on keys of its own", apart, format!("{ranges:?}"))]
+            },
+        },
+        // Renoise: a drum recording chopped at its real hits and laid out to play it (#401 chop).
+        Scenario {
+            id: "R40",
+            daw: Daw::Renoise,
+            says: &["Chop the Amen at its hits and lay it out in the pattern", "The main hits"],
+            before: None,
+            fixture: r#"
+song:track(1).name = "Amen"
+sample_instrument(1, "Amen", MEDIA .. "/amen.wav")
+"#,
+            read: "",
+            teardown: None,
+            generates: true,
+            names: &["slices", "slice"],
+            expect: |seen| {
+                let (before, after) = (seen.before, seen.after);
+                let amen = list(&after["instruments"]).into_iter().find(|i| i["name"] == "Amen").cloned().unwrap_or(Value::Null);
+                let samples = list(&amen["samples"]).len();
+                let notes = (before["notes"].as_u64().unwrap_or(0), after["notes"].as_u64().unwrap_or(0));
+                vec![
+                    Check::new("the chop tool cut it", seen.tools.iter().any(|t| t == "chop"), seen.tools.join(", ")),
+                    Check::new("the Amen cut into slices (a sample each)", samples >= 6, format!("{samples} samples")),
+                    Check::new("the slices laid out as notes", notes.1 >= notes.0 + 6, format!("{} → {} notes", notes.0, notes.1)),
+                ]
+            },
+        },
+        // Renoise: a beat delivered to a streaming service's loudness (#401 delivery to a spec).
+        Scenario {
+            id: "R41",
+            daw: Daw::Renoise,
+            says: &["Get this ready for Spotify"],
+            before: None,
+            fixture: r#"
+song:track(song.sequencer_track_count + 1).postfx_volume.value = 1
+song:track(1).name = "Beat"
+sample_instrument(1, "Beat", MEDIA .. "/break120.wav")
+for l = 0, 48, 16 do note(seq:pattern(1), 1, l, "C-4", 0) end
+"#,
+            read: "",
+            teardown: Some(r#"song:track(song.sequencer_track_count + 1).postfx_volume.value = 1 return "ok""#),
+            generates: false,
+            names: &["LUFS", "-14"],
+            expect: |seen| {
+                vec![
+                    Check::new("the spec tool measured it", seen.tools.iter().any(|t| t == "delivery_spec"), seen.tools.join(", ")),
+                    Check::new("it says what it measured", mentions(seen.said, &["lufs"]), ""),
+                ]
+            },
+        },
+        // Renoise: a repeated chore kept as a script (#401 scripts), run once and kept in the Tools menu.
+        Scenario {
+            id: "R42",
+            daw: Daw::Renoise,
+            says: &[
+                "Whenever I start a beat I add a track called Drums with a Compressor on it. Do that now, and keep it as a script",
+                "Yes, keep it",
+            ],
+            before: None,
+            fixture: "",
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["Tools", "menu"],
+            expect: |seen| {
+                let after = seen.after;
+                let drums = track(after, "Drums")
+                    .is_some_and(|t| list(&t["devices"]).iter().any(|d| d["path"].as_str().is_some_and(|p| p.ends_with("/Compressor"))));
+                vec![
+                    Check::new("the chore done once: Drums with a Compressor", drums, ""),
+                    Check::new("the scripts tool kept it", seen.tools.iter().any(|t| t == "scripts"), seen.tools.join(", ")),
+                ]
+            },
+        },
+        // Renoise: a keyboard's samples mapped to the notes their names say, heard to settle the octave (#401 sample maps).
+        Scenario {
+            id: "R43",
+            daw: Daw::Renoise,
+            says: &["Map the Keys instrument's samples to their notes", "Yes, apply it"],
+            before: None,
+            fixture: r#"
+local ins = sample_instrument(1, "Keys", MEDIA .. "/keys_C3.wav")
+ins:sample(1).name = "Keys C3"
+for k, n in ipairs({"E3", "G3"}) do
+  local s = ins:insert_sample_at(k + 1)
+  s.sample_buffer:load_from(MEDIA .. "/keys_" .. n .. ".wav")
+  s.name = "Keys " .. n
+end
+"#,
+            read: "",
+            teardown: None,
+            generates: false,
+            names: &["C-5", "zone", "root"],
+            expect: |seen| {
+                let after = seen.after;
+                let keys = list(&after["instruments"]).into_iter().find(|i| i["name"] == "Keys").cloned().unwrap_or(Value::Null);
+                let samples: Vec<(i64, i64, i64)> = list(&keys["samples"])
+                    .iter()
+                    .filter_map(|s| Some((s["base"].as_i64()?, s["low"].as_i64()?, s["high"].as_i64()?)))
+                    .collect();
+                let bases: Vec<i64> = samples.iter().map(|(base, _, _)| *base).collect();
+                let zones = samples.iter().all(|(base, low, high)| low <= base && base <= high)
+                    && samples.iter().enumerate().all(|(k, a)| samples.iter().skip(k + 1).all(|b| a.2 < b.1 || b.2 < a.1));
+                vec![
+                    Check::new("the sample-map tool planned it", seen.tools.iter().any(|t| t == "map_samples"), seen.tools.join(", ")),
+                    Check::new("roots where the sounds are: C-5, E-5, G-5 (MIDI 60, 64, 67)", bases == [60, 64, 67], format!("{samples:?}")),
+                    Check::new("each a zone of its own around its root", zones, ""),
                 ]
             },
         },
@@ -1002,7 +1539,7 @@ note(seq:pattern(1), 2, 0, "C-3", 1)
             read: r#"out.lines = {notes_of(song.sequencer:pattern(1), 1), notes_of(song.sequencer:pattern(1), 2)}"#,
             teardown: None,
             generates: false,
-            names: &["sidechain", "Compressor"],
+            names: &["#Sidechain"],
             expect: |seen| {
                 let after = seen.after;
                 let has = |name: &str, path: &str| {
