@@ -483,13 +483,15 @@ async fn logics_bridge_goes_in_kumis_own_folder_is_found_and_chosen_and_comes_ou
     }
     let reference = daw_bridge::files::Reference::read(&placed.join("bridge-reference.json")).unwrap();
     assert_eq!((reference.daw.as_str(), reference.port), ("logic", Some(9790)));
-    assert!(reference.discovery_dir.ends_with("bridges/logic/discovery"), "{reference:?}");
+    // The reference names its paths as the system writes them (backslashes on Windows): compared as paths.
+    assert!(std::path::Path::new(&reference.discovery_dir).ends_with("bridges/logic/discovery"), "{reference:?}");
     assert!(
-        reference.secret_file.ends_with("bridges/logic/bridge.secret") && dir.path().join(".kumi/bridges/logic/bridge.secret").is_file()
+        std::path::Path::new(&reference.secret_file).ends_with("bridges/logic/bridge.secret")
+            && dir.path().join(".kumi/bridges/logic/bridge.secret").is_file()
     );
     assert!(logic.bridge_installed(&env));
     let config = logic.bridge_config(&env).expect("the reference, once installed");
-    assert!(config.ends_with("logic-kumi/bridge-reference.json"), "{config}");
+    assert!(std::path::Path::new(&config).ends_with("logic-kumi/bridge-reference.json"), "{config}");
     let (provider, found) = chosen(None, &env);
     assert_eq!((provider.id(), found.as_deref()), (DawId::Logic, Some(config.as_str())), "the only bridge installed is chosen");
 
