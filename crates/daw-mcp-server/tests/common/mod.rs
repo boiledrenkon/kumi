@@ -132,6 +132,10 @@ pub fn normalized(lines: &[daw_mcp_server::simulator::Line]) -> String {
             if object.contains_key("deadlineMs") {
                 object.insert("deadlineMs".into(), "<deadline>".into());
             }
+            // The host's own name in its hello, whose version moves with each release.
+            if object.get("client").and_then(Value::as_str) == Some(concat!("daw-mcp-server/", env!("CARGO_PKG_VERSION"))) {
+                object.insert("client".into(), "daw-mcp-server/<version>".into());
+            }
         }
         hide_pids(&mut value);
         out.push_str(&format!("{} {} {}\n", line.connection, if line.from_host { ">" } else { "<" }, value));
