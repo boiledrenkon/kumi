@@ -356,7 +356,11 @@ jobs:
           import re, sys
           key = lambda version: tuple(map(int, version.split(".")))
           published = [m[1] for line in sys.stdin if (m := re.fullmatch(r"v(\d+\.\d+\.\d+)", line.strip()))]
-          print(max((v for v in published if key(v) < key(sys.argv[1])), key=key))' "$version")"
+          print(max((v for v in published if key(v) < key(sys.argv[1])), key=key, default=""))' "$version")"
+          if [ -z "$previous" ]; then
+            echo "no release published below $version in $GITHUB_REPOSITORY (a fork, or the first release): nothing to update from"
+            exit 0
+          fi
           # A home with spaces and non-ASCII letters. zsh (the Mac's) reads its startup files from ZDOTDIR here, fish
           # from conf.d. (zsh 5.9 reads none from a ZDOTDIR named in some non-ASCII letters, such as ホーム: zsh's own.)
           home="$RUNNER_TEMP/John Smith ホーム é"
@@ -589,7 +593,8 @@ jobs:
           $previous = $tags |
             ForEach-Object { if ($_ -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } } |
             Where-Object { $_ -lt [version]$version } | Sort-Object -Descending | Select-Object -First 1
-          if (-not $previous) { throw 'no published release before this one' }
+          # A fork, or the first release, has nothing to update from: the shell step above says so and stops too.
+          if (-not $previous) { Write-Host "no release published below $version in $env:GITHUB_REPOSITORY (a fork, or the first release): nothing to update from"; exit 0 }
           $previous = "$previous"
           function Kumi { & $kumi @args; if ($LASTEXITCODE -ne 0) { throw "kumi $args exited $LASTEXITCODE" } }
           function OnPath { ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $bin }

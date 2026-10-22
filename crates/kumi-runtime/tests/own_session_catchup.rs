@@ -134,6 +134,7 @@ async fn session(daw: Daw, home: &Path, steps: Vec<Step>, question: &str) -> (Ve
     let (profile, create): (DawProfile, fn(OwnOptions) -> Rc<dyn Integration>) = match daw {
         Daw::Reaper => (DawProfile::REAPER, kumi_runtime::integrations::reaper::create_reaper_integration),
         Daw::Renoise => (DawProfile::RENOISE, kumi_runtime::integrations::renoise::create_renoise_integration),
+        Daw::Logic => unreachable!("Logic's catch-up is Kumi's own, not the host's snapshots"),
     };
     let events = Rc::new(RefCell::new(vec![]));
     let home_path = home.to_path_buf();

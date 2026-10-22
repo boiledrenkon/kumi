@@ -111,6 +111,7 @@ impl Own {
             Daw::Renoise => {
                 "Renoise isn't installed (or not where Kumi looks: set KUMI_RENOISE_PREFS_DIR to its preferences folder)".into()
             }
+            Daw::Logic => "Logic Pro isn't installed (or not where Kumi looks: set KUMI_LOGIC_APP to its app)".into(),
         }
     }
 
@@ -125,6 +126,8 @@ impl Own {
         match self.daw {
             Daw::Reaper => reaper_target(reaper_install(&self.reapers(env))?, Os::current()).map_err(Some),
             Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
+            // Logic's bridge is placed by Kumi, beside Kumi; its target comes with that bridge.
+            Daw::Logic => Err(None),
         }
     }
 
@@ -151,7 +154,8 @@ impl Own {
     fn elsewhere(&self, env: &Env) -> Vec<Target> {
         match self.daw {
             Daw::Renoise => renoise_targets(&detected(env, detect::detect_renoise)),
-            Daw::Reaper => vec![],
+            // (Logic's bridge is one folder, in Kumi's own folder)
+            Daw::Reaper | Daw::Logic => vec![],
         }
     }
 
@@ -184,6 +188,7 @@ impl Own {
         let path = match self.daw {
             Daw::Reaper => app.join("daws").join("reaper").join(reaper_extension_name(Os::current())),
             Daw::Renoise => app.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
+            Daw::Logic => app.join("daws").join("logic").join("logic-kumi"),
         };
         path.exists().then_some(path)
     }
@@ -199,6 +204,7 @@ impl Own {
                 beside.join(if cfg!(windows) { name.to_string() } else { format!("lib{name}") })
             }
             Daw::Renoise => checkout.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
+            Daw::Logic => beside.join("logic-kumi"),
         };
         self.carried_by(&beside).or_else(|| built.exists().then_some(built))
     }
@@ -213,6 +219,7 @@ impl Own {
         let text = match self.daw {
             Daw::Renoise => std::fs::read_to_string(source.join("payload").join("version.lua")).ok()?,
             Daw::Reaper => std::fs::read_to_string(source.with_extension("version")).ok()?,
+            Daw::Logic => std::fs::read_to_string(source.join("version")).ok()?,
         };
         let quoted = text.split('"').nth(1).unwrap_or(text.trim());
         detect::Version::parse(quoted).map(|_| quoted.to_string())
@@ -276,6 +283,7 @@ impl Own {
         match self.daw {
             Daw::Reaper => self.reapers(env).iter().any(|install| install.opened),
             Daw::Renoise => !detected(env, detect::detect_renoise).prefs.is_empty(),
+            Daw::Logic => false,
         }
     }
 
@@ -324,6 +332,7 @@ impl DawProvider for Own {
                 let found = detected(env, detect::detect_renoise);
                 !found.apps.is_empty() || !found.prefs.is_empty()
             }
+            Daw::Logic => false,
         }
     }
     fn running_now(&self) -> bool {
@@ -344,6 +353,11 @@ impl DawProvider for Own {
                 starting: "Renoise is open; Kumi connects once its tool answers.",
                 unreachable: "Kumi couldn't reach Renoise, so this is chat without it. Open Renoise with Kumi's tool installed (kumi --daw renoise bridge); Kumi connects by itself once it answers.",
                 answered: "Renoise answered, so Kumi is connected to it now.",
+            },
+            Daw::Logic => WatchWords {
+                starting: "Logic Pro is open; Kumi connects once its bridge attaches.",
+                unreachable: "Kumi couldn't reach Logic Pro, so this is chat without it. Open Logic Pro with Kumi's bridge installed (kumi --daw logic bridge); Kumi connects by itself once it answers.",
+                answered: "Logic Pro answered, so Kumi is connected to it now.",
             },
         }
     }
@@ -695,6 +709,7 @@ impl DawProvider for Own {
         match self.daw {
             Daw::Reaper => "bridges/reaper",
             Daw::Renoise => "bridges/renoise",
+            Daw::Logic => "bridges/logic",
         }
     }
     fn bridge_files_in_use(&self, _folder: &str, _env: &Env) -> bool {
@@ -741,6 +756,7 @@ impl DawProvider for Own {
         match self.daw {
             Daw::Reaper => "take Kumi's extension out of REAPER too",
             Daw::Renoise => "take Kumi's tool out of Renoise too",
+            Daw::Logic => "take Kumi's bridge for Logic Pro out too",
         }
     }
     fn files_stay(&self, folder: &str) -> String {
@@ -849,6 +865,7 @@ impl OwnSetup {
                 .into_iter()
                 .max_by_key(|app| app.version.as_deref().and_then(detect::Version::of_app))
                 .map(|app| app.path),
+            Daw::Logic => None,
         }
     }
 }
@@ -956,6 +973,7 @@ impl DawSetup for OwnSetup {
             Daw::Renoise => {
                 detected(&self.env, detect::detect_renoise).apps.into_iter().filter(|found| is(&found.path)).find_map(|found| found.version)
             }
+            Daw::Logic => None,
         }
     }
     async fn installed(&self) -> Installed {

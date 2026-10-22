@@ -55,6 +55,7 @@ pub fn doctor(daw: Daw, inputs: &Inputs) -> Vec<Check> {
     let target = match daw {
         Daw::Reaper => reaper_target(inputs, &mut checks),
         Daw::Renoise => renoise_target(inputs, &mut checks),
+        Daw::Logic => logic_target(inputs, &mut checks),
     };
     let Some((target, app_archs)) = target else { return checks };
     bridge_checks(daw, &target, &app_archs, inputs, &mut checks);
@@ -117,6 +118,12 @@ fn reaper_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Ve
             None
         }
     }
+}
+
+/// Logic's bridge is Kumi's own process beside Kumi, not a file in Logic's folders: its checks come with that bridge.
+fn logic_target(_inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
+    checks.push(check("installed", Level::Note, "Logic Pro support is being built: nothing to check yet"));
+    None
 }
 
 fn renoise_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
