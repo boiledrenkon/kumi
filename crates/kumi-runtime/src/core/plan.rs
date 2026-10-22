@@ -56,10 +56,14 @@ pub struct ChangeOutcome {
     /// refusal, with nothing changed, and the plan goes on with the steps that don't depend on it (#259).
     #[serde(skip)]
     pub stops: bool,
+    /// What the DAW answered when it applied the change (the place it made, its rows): a backend composing on it reads it
+    /// here (#401, no cell shared between changes).
+    #[serde(skip)]
+    pub applied: Option<Value>,
 }
 impl ChangeOutcome {
     pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: true, missed: None, stops: false }
+        Self { text: text.into(), is_error: true, missed: None, stops: false, applied: None }
     }
     /// An error after which nothing more should be tried: the DAW may have changed, or can't be read.
     pub fn stop(text: impl Into<String>) -> Self {
@@ -739,6 +743,11 @@ impl<H: PlanHost> Plan<H> {
             if let Some(lines) = reply.get("lines").filter(|v| v.is_array()) {
                 done.insert("lines".into(), lines.clone());
             }
+            // (a step that found it so already: left out of the producer's summary when others changed something; an action
+            // the DAW keeps no point of, `unkept`, was done and is said)
+            if reply.get("unchanged") == Some(&Value::Bool(true)) {
+                done.insert("unchanged".into(), Value::Bool(true));
+            }
             // What Kumi read for itself in the step's notation, or left to the DAW (a sidechain's channel, an audio
             // clip's looping): the model says it. And what Lua or a call through the DAW's API answered.
             for key in ["notation", "channel", "looping", "result", "printed", "out", "failed"] {
@@ -808,22 +817,7 @@ impl<H: PlanHost> Plan<H> {
             return Ok(ToolResult::error(STEP_COUNT));
         }
         let reply = if final_ && state.missed.is_empty() {
-            let lines: Vec<_> = state
-                .done
-                .iter()
-                .flat_map(|item| {
-                    item.get("lines")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_else(|| vec![item.get("changed").cloned().unwrap_or(Value::Null)])
-                })
-                .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
-                .collect();
-            let mut text = if lines.len() == 1 {
-                format!("Done: {}.", lines[0])
-            } else {
-                format!("Done:\n{}", lines.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n"))
-            };
+            let mut text = done_summary(&state.done);
             if let Some(copy) = state.copy.as_ref().filter(|s| !s.is_empty()) {
                 text.push_str(&format!(
                     "\n\nFirst, Kumi kept a copy of your {} as last saved, next to it: {}",
@@ -961,8 +955,64 @@ impl<H: PlanHost> StreamingCall for StreamingPlan<H> {
     }
 }
 
+/// The producer's summary of a plan's steps, a line each: a step that found it so already is left out when others changed
+/// something (#401), and when every step did, their lines are what's said.
+fn done_summary(done: &[Value]) -> String {
+    // (each step that says something: whether it found it so already, and its lines)
+    let said: Vec<(bool, Vec<String>)> = done
+        .iter()
+        .map(|item| {
+            let lines = item
+                .get("lines")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| vec![item.get("changed").cloned().unwrap_or(Value::Null)])
+                .into_iter()
+                .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+                .collect::<Vec<_>>();
+            (item.get("unchanged") == Some(&Value::Bool(true)), lines)
+        })
+        .filter(|(_, lines)| !lines.is_empty())
+        .collect();
+    let all_noops = said.iter().all(|(noop, _)| *noop);
+    let lines: Vec<String> = said.into_iter().filter(|(noop, _)| all_noops || !noop).flat_map(|(_, lines)| lines).collect();
+    let list = || lines.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n");
+    match (all_noops, lines.len()) {
+        (true, 1) => format!("{}.", lines[0]),
+        (true, _) => format!("Nothing changed:\n{}", list()),
+        (false, 1) => format!("Done: {}.", lines[0]),
+        (false, _) => format!("Done:\n{}", list()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    /// #401: a step that found it so already isn't said among what was done; when every step did, that's what's said.
+    #[test]
+    fn the_summary_leaves_out_steps_that_were_so_already() {
+        let noop = json!({"step": 2, "changed": "Bass volume -6 dB: it was so already, so nothing changed", "unchanged": true});
+        let tempo = json!({"step": 1, "changed": "Tempo 120 → 124 BPM"});
+        let pads = json!({"step": 3, "changed": "Renamed Pad to Pads"});
+        assert_eq!(super::done_summary(&[tempo.clone(), noop.clone()]), "Done: Tempo 120 → 124 BPM.");
+        assert_eq!(super::done_summary(&[tempo, noop.clone(), pads]), "Done:\n- Tempo 120 → 124 BPM\n- Renamed Pad to Pads");
+        assert_eq!(super::done_summary(std::slice::from_ref(&noop)), "Bass volume -6 dB: it was so already, so nothing changed.");
+        // An action the DAW keeps no point of (play, a selection) was done: it's said.
+        let play = json!({"step": 5, "changed": "Play from bar 5: it changed nothing the project keeps", "unkept": true});
+        let select = json!({"step": 6, "changed": "Select Kick: it changed nothing the project keeps", "unkept": true});
+        assert_eq!(
+            super::done_summary(&[json!({"step": 1, "changed": "Tempo 120 → 124 BPM"}), noop.clone(), play.clone()]),
+            "Done:\n- Tempo 120 → 124 BPM\n- Play from bar 5: it changed nothing the project keeps"
+        );
+        assert_eq!(super::done_summary(&[select, noop.clone(), play]).lines().next(), Some("Done:"));
+        let lines = json!({"step": 4, "lines": ["A: it was so already, so nothing changed"], "unchanged": true});
+        assert_eq!(
+            super::done_summary(&[noop, lines]),
+            "Nothing changed:\n- Bass volume -6 dB: it was so already, so nothing changed\n- A: it was so already, so nothing changed"
+        );
+    }
+
     /// Review K40: one cap for every DAW's changes, in the words Live's always said.
     #[test]
     fn the_cap_on_an_answers_changes_says_what_it_always_said() {

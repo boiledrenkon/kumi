@@ -485,6 +485,8 @@ pub struct State {
     pub marker_lanes: HashMap<String, i32>,
     /// The tracks each region (by its number) renders in the region render matrix: their ids, "master" for the master.
     pub render_matrix: HashMap<i32, Vec<String>>,
+    /// How many more item deletes REAPER makes before it refuses one (None: never refuses).
+    pub item_deletes_left: Option<usize>,
     pub fx_made: u32,
     /// TrackFX_Delete answers false and does nothing.
     pub fail_fx_delete: bool,
@@ -588,6 +590,7 @@ impl Default for State {
             made: 0,
             marker_lanes: HashMap::new(),
             render_matrix: HashMap::new(),
+            item_deletes_left: None,
             fx_made: 0,
             fail_fx_delete: false,
             meter_params: false,
@@ -1131,6 +1134,19 @@ unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
         54000
     } else {
         0
+    }
+}
+/// A script action's named command: "RS" and a hash of its file, as REAPER makes them.
+unsafe extern "C" fn reverse_named_command_lookup(command: c_int) -> *const c_char {
+    let file = with(|s| s.scripts.iter().find(|(id, _)| *id == command).map(|(_, file)| file.clone()));
+    match file {
+        Some(file) => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            file.hash(&mut hasher);
+            keep(format!("RS{:016x}", hasher.finish()))
+        }
+        None => ptr::null(),
     }
 }
 unsafe extern "C" fn get_main_hwnd() -> *mut c_void {
@@ -3168,6 +3184,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"PreventUIRefresh" => prevent_ui_refresh as unsafe extern "C" fn(c_int),
         b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as unsafe extern "C" fn(c_int, *mut c_void) -> *const c_char,
         b"NamedCommandLookup" => named_command_lookup as unsafe extern "C" fn(*const c_char) -> c_int,
+        b"ReverseNamedCommandLookup" => reverse_named_command_lookup as unsafe extern "C" fn(c_int) -> *const c_char,
         b"GetMainHwnd" => get_main_hwnd as unsafe extern "C" fn() -> *mut c_void,
         b"ValidatePtr2" => validate_ptr2 as unsafe extern "C" fn(*mut ReaProject, *mut c_void, *const c_char) -> bool,
         b"GetNumRegionsOrMarkers" => get_num_regions_or_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,

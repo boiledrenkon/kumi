@@ -271,6 +271,95 @@ impl AudioSource {
         Ok(())
     }
 }
+/// Channels of samples as a 32-bit float WAV.
+pub fn float_wav(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
+    let count = channels.len().max(1) as u16;
+    let frames = channels.first().map_or(0, Vec::len);
+    let data = frames * count as usize * 4;
+    let mut wav = Vec::with_capacity(44 + data);
+    wav.extend(b"RIFF");
+    wav.extend((36 + data as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend(3u16.to_le_bytes());
+    wav.extend(count.to_le_bytes());
+    wav.extend(rate.to_le_bytes());
+    wav.extend((rate * count as u32 * 4).to_le_bytes());
+    wav.extend((count * 4).to_le_bytes());
+    wav.extend(32u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend((data as u32).to_le_bytes());
+    for frame in 0..frames {
+        for channel in channels {
+            wav.extend(channel.get(frame).copied().unwrap_or(0.).to_le_bytes());
+        }
+    }
+    wav
+}
+
+/// `most` seconds of a file from `from` (seconds) as two channels (a mono file's twice, a file of more channels its first two),
+/// with its rate.
+pub async fn read_stereo(path: impl AsRef<Path>, signal: &Signal, from: f64, most: f64) -> Result<([Vec<f32>; 2], f64), AudioError> {
+    let mut source = open_audio_to(path, Some(signal.clone()), Some(from + most)).await?;
+    let rate = source.sample_rate;
+    source.seek(from * rate);
+    let wanted = (rate * most) as usize;
+    let (mut left, mut right): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    while left.len() < wanted {
+        let Some(block) = source.read(65_536).await? else { break };
+        let Some(first) = block.first() else { break };
+        left.extend_from_slice(first);
+        right.extend_from_slice(block.get(1).unwrap_or(first));
+    }
+    let _ = source.close().await;
+    left.truncate(wanted);
+    right.truncate(wanted);
+    Ok(([left, right], rate))
+}
+
+/// A 16-bit mono WAV of `mono` at `rate`: the tests' sound files.
+#[cfg(test)]
+pub fn write_test_wav(path: &Path, mono: &[f32], rate: u32) {
+    let frames = mono.len() as u32;
+    let mut bytes = Vec::with_capacity(44 + mono.len() * 2);
+    bytes.extend(b"RIFF");
+    bytes.extend((36 + frames * 2).to_le_bytes());
+    bytes.extend(b"WAVEfmt ");
+    bytes.extend(16u32.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(rate.to_le_bytes());
+    bytes.extend((rate * 2).to_le_bytes());
+    bytes.extend(2u16.to_le_bytes());
+    bytes.extend(16u16.to_le_bytes());
+    bytes.extend(b"data");
+    bytes.extend((frames * 2).to_le_bytes());
+    for value in mono {
+        bytes.extend(((value.clamp(-1., 1.) * 32767.) as i16).to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// `most` seconds of a file from `from` (seconds) as one mono channel (its channels averaged), with its rate and its whole
+/// length in seconds.
+pub async fn read_mono(path: impl AsRef<Path>, signal: &Signal, from: f64, most: f64) -> Result<(Vec<f32>, f64, f64), AudioError> {
+    let mut source = open_audio_to(path, Some(signal.clone()), Some(from + most)).await?;
+    let rate = source.sample_rate;
+    source.seek(from * rate);
+    let wanted = (rate * most) as usize;
+    let mut mono: Vec<f32> = Vec::new();
+    while mono.len() < wanted {
+        let Some(block) = source.read(65_536).await? else { break };
+        let channels = block.len().max(1);
+        let frames = block.first().map_or(0, Vec::len);
+        for frame in 0..frames {
+            mono.push(block.iter().map(|channel| channel[frame]).sum::<f32>() / channels as f32);
+        }
+    }
+    let _ = source.close().await;
+    mono.truncate(wanted);
+    Ok((mono, rate, source.frames as f64 / rate))
+}
 async fn open_pcm(mut handle: File) -> Result<AudioSource, AudioError> {
     let layout = read_layout(&mut handle).await?;
     Ok(AudioSource {

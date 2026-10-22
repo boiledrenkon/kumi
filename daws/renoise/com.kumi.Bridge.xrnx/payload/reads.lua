@@ -215,6 +215,130 @@ local function one(params, epoch)
   return { items = array({ row }), epoch = epoch }
 end
 
+-- The tidy's look at the song's instruments (#401, sample mapping), in pages a callback can afford, each from `cursor` on:
+-- `tidy` reads instruments (from the one numbered `cursor`, 1 first): each sample's print, where the sound is (its shape, 256
+-- frames from the first that isn't silence, and 16 points over its first second), so padded hits don't print alike, and a
+-- print of the instrument's settings (its devices, macros and samples' settings, not their names); `tidy-notes` counts the
+-- notes of the song's patterns (from the one numbered `cursor`) that play each instrument, hidden columns too, and with byTrack
+-- the same by track (its number, from 1): which tracks play an instrument (#401, layering breaks).
+M.TIDY_READS = 300000
+M.TIDY_CALLS = 120000
+M.TIDY_SEEK = 32768
+local function sum_of(sum, text)
+  for i = 1, #text do sum = (sum * 33 + text:byte(i)) % 4294967296 end
+  return sum
+end
+
+local function sample_print(sample, spent)
+  local buffer = sample.sample_buffer
+  if not buffer.has_sample_data then return nil, spent end
+  local frames, rate = buffer.number_of_frames, buffer.sample_rate
+  local function value(f)
+    spent = spent + 1
+    local v = buffer:sample_data(1, f)
+    return tonumber(type(v) == "table" and v[1] or v) or 0
+  end
+  -- (where the sound starts: a coarse look, then frame by frame back to it)
+  local start
+  for f = 1, math.min(frames, M.TIDY_SEEK), 64 do
+    if math.abs(value(f)) > 1e-4 then start = f; break end
+  end
+  if start then
+    for f = math.max(1, start - 63), start do
+      if math.abs(value(f)) > 1e-4 then start = f; break end
+    end
+  else
+    start = 1
+  end
+  local sum = 5381
+  for f = start, math.min(frames, start + 255) do sum = sum_of(sum, string.format("%.4f|", value(f))) end
+  local reach = math.max(0, math.min(frames - start, math.floor(rate)))
+  for k = 1, 16 do sum = sum_of(sum, string.format("%.3f|", value(start + math.floor(reach * k / 17)))) end
+  return string.format("%d.%d.%d.%d.%08x", frames, buffer.number_of_channels, rate, start, sum), spent
+end
+
+local function settings_print(instruments_, instrument)
+  local work = instruments_.instrument_work(instrument)
+  work.name = nil
+  for _, sample in ipairs(work.sampleWork or {}) do sample.name = nil end
+  return string.format("%08x", sum_of(5381, json.encode(work, { sort_keys = true })))
+end
+
+local function tidy_page(song, epoch, from)
+  local instruments_ = import("instruments")
+  local out, spent, i = {}, 0, from
+  while i <= #song.instruments and spent <= M.TIDY_CALLS do
+    local instrument = song:instrument(i)
+    local samples = {}
+    for s = 1, #instrument.samples do
+      local sample = instrument:sample(s)
+      if not sample.is_slice_alias then
+        local print
+        print, spent = sample_print(sample, spent)
+        samples[#samples + 1] = { name = sample.name, print = print or json.null }
+      end
+    end
+    out[#out + 1] = {
+      ref = refs.make(epoch, "instrument", i), index = i - 1, name = instrument.name, samples = array(samples),
+      settings = settings_print(instruments_, instrument), plugin = instrument.plugin_properties.plugin_loaded,
+      phrases = #instrument.phrases,
+    }
+    i = i + 1
+  end
+  return { items = array(out), epoch = epoch, nextCursor = i <= #song.instruments and tostring(i) or nil }
+end
+
+local function notes_page(song, from, by_track)
+  local counts, tracks_counts, reads, p = {}, {}, 0, from
+  local tracks = track_count(song)
+  while p <= #song.patterns and reads <= M.TIDY_READS do
+    local pattern = song:pattern(p)
+    for t = 1, tracks do
+      local pattern_track = pattern:track(t)
+      reads = reads + 1
+      -- (an alias's lines are its source pattern's, counted there)
+      if not pattern_track.is_alias and not pattern_track.is_empty and song:track(t).max_note_columns > 0 then
+        for l = 1, pattern.number_of_lines do
+          local line = pattern_track:line(l)
+          reads = reads + 1
+          if not line.is_empty then
+            -- (hidden columns too: a note there still names the instrument, and a tidy never calls it unplayed)
+            for c = 1, 12 do
+              local column = line:note_column(c)
+              reads = reads + 1
+              local v = column.instrument_value
+              if v < 255 and column.note_value < 120 then
+                counts[tostring(v)] = (counts[tostring(v)] or 0) + 1
+                if by_track then
+                  local mine = tracks_counts[tostring(t)] or {}
+                  tracks_counts[tostring(t)] = mine
+                  mine[tostring(v)] = (mine[tostring(v)] or 0) + 1
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    p = p + 1
+  end
+  local answer = {
+    counts = json.object(counts), to = p - 1, patterns = #song.patterns,
+    nextCursor = p <= #song.patterns and tostring(p) or nil,
+  }
+  if by_track then
+    for t, mine in pairs(tracks_counts) do tracks_counts[t] = json.object(mine) end
+    answer.tracks = json.object(tracks_counts)
+  end
+  return answer
+end
+
+local function tidy_from(params)
+  local from = tonumber(params.cursor or 1)
+  if not from or from < 1 or from ~= math.floor(from) then fail("bad-params", "cursor is where the last page ended") end
+  return from
+end
+
 -- read {kind, parent?, cursor?, limit?, track?} or {ref}
 function M.read(job, params, epoch)
   if type(params) ~= "table" then fail("bad-params", "read needs a kind") end
@@ -234,6 +358,29 @@ function M.read(job, params, epoch)
     return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return beats(sequence_row(the_song(), epoch, s, tracks), s) end)
   elseif kind == "pattern" then
     local tracks = track_count(song)
+    -- (#401: with prints, each track's lines summed up as the catch-up's digest does, and how many automation envelopes it
+    -- has: patterns compared without their lines read; a page of at most 16 of them)
+    if params.prints == true then
+      if type(params.limit) ~= "number" or params.limit > 16 then params.limit = 16 end
+      local digest = import("digest")
+      return page(job, epoch, params, #song.patterns, function(p)
+        local s = the_song()
+        local row = pattern_row(s, epoch, p, tracks)
+        local pattern, prints, automation = s:pattern(p), {}, 0
+        for t = 1, tracks do
+          local pattern_track = pattern:track(t)
+          if pattern_track.alias_pattern_index > 0 then
+            prints[tostring(t)] = string.format("alias of Pattern %02d", pattern_track.alias_pattern_index - 1)
+          elseif not pattern_track.is_empty then
+            prints[tostring(t)] = digest.lines_print(pattern_track, s:track(t), pattern.number_of_lines, nil)
+          end
+          automation = automation + #pattern_track.automation
+        end
+        row.prints = next(prints) and prints or json.object()
+        row.automation = automation
+        return row
+      end)
+    end
     return page(job, epoch, params, #song.patterns, function(p) return pattern_row(the_song(), epoch, p, tracks) end)
   elseif kind == "where" then
     -- M7 (variations): where what Kumi keeps by its place is now, and the place of what a ref names now, for Kumi to find it
@@ -272,6 +419,14 @@ function M.read(job, params, epoch)
           end
           row = { ref = refs.make(epoch, "pattern", p), number = p - 1, name = song:pattern(p).name, lines = song:pattern(p).number_of_lines,
             slots = array(slots), seqRef = slots[1] and refs.make(epoch, "seq", slots[1]) or nil, place = { n = p, mark = env.pattern_mark() } }
+          -- (#401: the tracks holding lines or automation of their own, not an alias's: a variation's pattern has them on its
+          -- varied track only, so another one is the producer's edit)
+          local own = {}
+          for t = 1, track_count(song) do
+            local pattern_track = song:pattern(p):track(t)
+            if pattern_track.alias_pattern_index == 0 and (not pattern_track.is_empty or #pattern_track.automation > 0) then own[#own + 1] = t end
+          end
+          row.ownTracks = array(own)
         else
           row = missing(why)
         end
@@ -378,6 +533,10 @@ function M.read(job, params, epoch)
       local row = param_row(live, epoch, t, d, k)
       return with_grid and with_grid(row, live:track(t):device(d):parameter(k)) or row
     end)
+  elseif kind == "tidy" then
+    return tidy_page(song, epoch, tidy_from(params))
+  elseif kind == "tidy-notes" then
+    return notes_page(song, tidy_from(params), params.byTrack == true)
   elseif kind == "spans" then
     return reads_listening.spans(job, params, epoch, page)
   elseif kind == "modset" or kind == "chain" then

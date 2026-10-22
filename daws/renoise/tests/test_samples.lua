@@ -213,6 +213,177 @@ test("samples: a drum-kit layout puts one sample per key from C-4 (white keys wh
   failure(call(peer, "change_preview", { kind = "keyzone-drumkit", input = { ref = iref(epoch, 1), first = 118 }, epoch = epoch }), "bad-params")
 end)
 
+test("samples: a key map lays out each sample as given and the overlap in one step; the undo puts back zones and overlap", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local input = { ref = iref(epoch, 1), overlap = "cycle", samples = {
+    { sampleRef = sref(epoch, 1, 1), noteRange = { 0, 49 }, velocityRange = { 0, 63 }, baseNote = 48 },
+    { sampleRef = sref(epoch, 1, 2), noteRange = { 0, 49 }, velocityRange = { 64, 127 }, baseNote = 48 },
+    { sampleRef = sref(epoch, 1, 3), noteRange = { 50, 119 }, baseNote = 52 },
+  } }
+  local record, done = change(peer, "keyzone-map", input)
+  eq(sample(1, 1).note_range[2], 49)
+  eq(sample(1, 2).velocity_range[1], 64)
+  eq(sample(1, 3).base_note, 52)
+  eq(sample(1, 3).velocity_range[2], 127, "a velocity range left out is the whole")
+  eq(instrument(1).overlap, 1)
+  eq(steps(), 1)
+  ok(done.display.title:find("3 samples, round robins in turn", 1, true), done.display.title)
+  local undone = restore(peer, "keyzone-map", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(sample(1, 1).note_range[2], 119)
+  eq(sample(1, 2).velocity_range[1], 0)
+  eq(instrument(1).overlap, 0)
+  -- Back already: nothing written.
+  local before = steps()
+  local again = restore(peer, "keyzone-map", record)
+  ok(again.result, json.encode(again.error or {}))
+  eq(steps(), before)
+end)
+
+test("samples: a key map's undo refuses a zone or the overlap the producer changed since, and a sample gone", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local input = { ref = iref(epoch, 1), overlap = "cycle", samples = {
+    { sampleRef = sref(epoch, 1, 1), noteRange = { 0, 59 }, baseNote = 48 }, { sampleRef = sref(epoch, 1, 2), noteRange = { 60, 119 }, baseNote = 60 },
+  } }
+  local record = change(peer, "keyzone-map", input)
+  sample(1, 2).base_note = 62 -- the producer retunes one
+  failure(restore(peer, "keyzone-map", record), "changed")
+  eq(sample(1, 1).note_range[2], 59, "nothing written")
+  sample(1, 2).base_note = 60
+  instrument(1).overlap = 2 -- then picks random
+  failure(restore(peer, "keyzone-map", record), "changed")
+  instrument(1).overlap = 1
+  mock.song:instrument(1):delete_sample_at(2)
+  local gone = restore(peer, "keyzone-map", record)
+  ok(gone.error and (gone.error.code == "gone" or gone.error.code == "changed"), json.encode(gone))
+end)
+
+test("samples: a key map follows its samples when the producer inserts one before them", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local record = change(peer, "keyzone-map", { ref = iref(epoch, 1), samples = {
+    { sampleRef = sref(epoch, 1, 2), noteRange = { 10, 20 }, baseNote = 15 },
+  } })
+  mock.song:instrument(1):insert_sample_at(1).name = "New"
+  local undone = restore(peer, "keyzone-map", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(sample(1, 3).note_range[1], 0, "the sample it laid out, now third, is back")
+  eq(sample(1, 3).base_note, 48)
+end)
+
+for _, case in ipairs({
+  { "base notes", function(E) return { { sampleRef = sref(E, 1, 1), noteRange = { 0, 119 }, baseNote = 60 } } end, nil },
+  { "velocities", function(E) return { { sampleRef = sref(E, 1, 1), noteRange = { 0, 119 }, velocityRange = { 0, 63 }, baseNote = 48 } } end, nil },
+  { "the overlap", function(E) return { { sampleRef = sref(E, 1, 1), noteRange = { 0, 119 }, baseNote = 48 } } end, "cycle" },
+}) do
+  test("samples: the producer's undo of a key map that changes only " .. case[1] .. " is told as undone in Renoise", function()
+    local env, peer = setup()
+    local epoch = place(peer)
+    change(peer, "keyzone-map", { ref = iref(epoch, 1), samples = case[2](epoch), overlap = case[3] }, "Kumi: map (k520)")
+    told(peer)
+    mock.song:undo()
+    local events = told(peer)
+    eq(#events, 1, case[1])
+    eq(events[1].data.descs[1], "Kumi: map (k520)")
+  end)
+end
+
+test("samples: the producer's undo of a drum kit that moves only base notes is told as undone in Renoise", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  -- (the zones already as a kit lays them, only the base notes off)
+  for s = 1, 3 do
+    sample(1, s).note_range = { 47 + s, 47 + s }
+    sample(1, s).base_note = 60
+  end
+  change(peer, "keyzone-drumkit", { ref = iref(epoch, 1) }, "Kumi: kit (k521)")
+  told(peer)
+  mock.song:undo()
+  local events = told(peer)
+  eq(#events, 1)
+end)
+
+test("samples: a key map refuses a sample of another instrument, a slice, a bad range", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  failure(call(peer, "change_preview", { kind = "keyzone-map", epoch = epoch,
+    input = { ref = iref(epoch, 1), samples = { { sampleRef = sref(epoch, 2, 1), noteRange = { 0, 10 }, baseNote = 5 } } } }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "keyzone-map", epoch = epoch,
+    input = { ref = iref(epoch, 1), samples = { { sampleRef = sref(epoch, 1, 1), noteRange = { 20, 10 }, baseNote = 5 } } } }), "bad-params")
+  failure(call(peer, "change_preview", { kind = "keyzone-map", epoch = epoch,
+    input = { ref = iref(epoch, 1), samples = { { sampleRef = sref(epoch, 1, 1), noteRange = { 0, 10 } } } } }), "bad-params")
+end)
+
+-- The tidy's read (#401)
+
+test("reads: the tidy prints each instrument's samples and settings, and counts the notes that play each", function()
+  local env, peer = setup()
+  mock.ops.set_note(1, 1, 1, 1, { note = 48, instrument = 0 })
+  mock.ops.set_note(1, 1, 5, 1, { note = 50, instrument = 0 })
+  local answer = call(peer, "read", { kind = "tidy" })
+  ok(answer.result, json.encode(answer.error or {}))
+  local items = answer.result.items
+  eq(#items, #mock.data.instruments)
+  eq(answer.result.nextCursor, nil, "one page")
+  eq(#items[1].samples, #mock.data.instruments[1].samples)
+  ok(type(items[1].samples[1].print) == "string", json.encode(items[1].samples[1]))
+  ok(type(items[1].settings) == "string", json.encode(items[1]))
+  local notes = call(peer, "read", { kind = "tidy-notes" })
+  ok(notes.result, json.encode(notes.error or {}))
+  eq(notes.result.counts["0"], 2)
+  eq(notes.result.counts["1"], nil)
+  eq(notes.result.to, #mock.data.patterns)
+  eq(notes.result.nextCursor, nil)
+end)
+
+test("reads: the tidy's pages go on from their cursor, and the count adds up over them", function()
+  local env, peer = setup({ patch = function(env_)
+    for _, swap in ipairs({ { "M%.TIDY_READS = 300000", "M.TIDY_READS = 1" }, { "M%.TIDY_CALLS = 120000", "M.TIDY_CALLS = 1" } }) do
+      local path = env_.bundle .. "payload/reads.lua"
+      local f = assert(io.open(path, "rb"))
+      local text = f:read("*a")
+      f:close()
+      local changed, count = text:gsub(swap[1], swap[2])
+      assert(count == 1, swap[1])
+      f = assert(io.open(path, "wb"))
+      f:write(changed)
+      f:close()
+    end
+  end })
+  ok(#mock.data.patterns >= 2, "a song of two patterns or more")
+  mock.ops.set_note(1, 1, 1, 1, { note = 48, instrument = 0 })
+  mock.ops.set_note(2, 1, 1, 1, { note = 48, instrument = 0 })
+  local first = call(peer, "read", { kind = "tidy-notes" })
+  eq(first.result.to, 1)
+  eq(first.result.nextCursor, "2")
+  local second = call(peer, "read", { kind = "tidy-notes", cursor = "2" })
+  eq(second.result.counts["0"], 1)
+  local instruments = call(peer, "read", { kind = "tidy" })
+  eq(#instruments.result.items, 1, "a page an instrument")
+  eq(instruments.result.nextCursor, "2")
+  local next_page = call(peer, "read", { kind = "tidy", cursor = "2" })
+  eq(next_page.result.items[1].index, 1)
+  failure(call(peer, "read", { kind = "tidy", cursor = "x" }), "bad-params")
+end)
+
+test("reads: two sounds padded to one length print apart, and one sound twice prints alike", function()
+  local env, peer = setup()
+  local samples = mock.data.instruments[1].samples
+  -- (two different sounds in their first frames, the rest of each file silence)
+  for s = 1, 2 do
+    samples[s].buffer.frames = 2000
+    samples[s].buffer.edits = {}
+    for f = 60, 2000 do samples[s].buffer.edits[f] = 0 end
+  end
+  local items = call(peer, "read", { kind = "tidy" }).result.items
+  ok(items[1].samples[1].print ~= items[1].samples[2].print, "different sounds: " .. json.encode(items[1].samples))
+  samples[2].buffer.content = samples[1].buffer.content
+  items = call(peer, "read", { kind = "tidy" }).result.items
+  eq(items[1].samples[1].print, items[1].samples[2].print, "one sound twice")
+end)
+
 -- sample-load
 
 local function wav_file(name, size)
@@ -421,4 +592,72 @@ test("samples: slice markers inserted, moved and deleted through Renoise's calls
   local epoch = place(peer)
   failure(call(peer, "change_preview", { kind = "sample-slices", input = { ref = sref(epoch, 1, 2), insert = { 10 } }, epoch = epoch }), "bad-params")
   failure(call(peer, "change_preview", { kind = "sample-slices", input = { ref = sref(epoch, 1, 1), delete = { 123 } }, epoch = epoch }), "bad-params")
+end)
+
+-- sample-invert (#401, layering breaks)
+
+local function value_of(i, s, c, f) return mock.song:instrument(i):sample(s).sample_buffer:sample_data(c, f) end
+
+test("samples: a sample's polarity flips in one step and Kumi's undo flips it back; back already writes nothing", function()
+  local env, peer = setup()
+  local before = { value_of(1, 1, 1, 1), value_of(1, 1, 1, 500), value_of(1, 1, 1, 1000) }
+  local record, done = change(peer, "sample-invert", { ref = sref(place(peer), 1, 1) })
+  eq(steps(), 1)
+  eq(value_of(1, 1, 1, 1), -before[1])
+  eq(value_of(1, 1, 1, 500), -before[2])
+  eq(value_of(1, 1, 1, 1000), -before[3])
+  eq(value_of(1, 2, 1, 500), mock.song:instrument(1):sample(2).sample_buffer:sample_data(1, 500), "the other samples as they were")
+  ok(done.display.title:find("Flipped the polarity of", 1, true), done.display.title)
+  local undone = restore(peer, "sample-invert", record)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(value_of(1, 1, 1, 500), before[2])
+  eq(steps(), 2)
+  local again = restore(peer, "sample-invert", record)
+  ok(again.result, json.encode(again.error or {}))
+  ok(again.result.display.title:find("back already", 1, true), again.result.display.title)
+  eq(steps(), 2, "nothing written")
+  -- Renoise's own undo of a flip: Kumi's undo finds it back already
+  record = change(peer, "sample-invert", { ref = sref(place(peer), 1, 1) })
+  mock.song:undo()
+  eq(value_of(1, 1, 1, 500), before[2])
+  again = restore(peer, "sample-invert", record)
+  ok(again.result and again.result.display.title:find("back already", 1, true), json.encode(again.result or again.error))
+end)
+
+test("samples: a flip's undo refuses audio the producer changed since, but with discard flips it back keeping the edit", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-invert", { ref = sref(place(peer), 1, 1) })
+  local flipped = value_of(1, 1, 1, 501)
+  sample(1, 1).buffer.values[1][1] = 0.25 -- the producer draws at the first frame
+  failure(restore(peer, "sample-invert", record), "changed")
+  eq(value_of(1, 1, 1, 501), flipped, "nothing written")
+  local undone = restore(peer, "sample-invert", record, nil, { discard = true })
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(value_of(1, 1, 1, 501), -flipped)
+  ok(undone.result.display.title:find("with the edits made since", 1, true), undone.result.display.title)
+end)
+
+test("samples: a flip refuses a slice, a sample without audio, and one too long for a callback", function()
+  local env, peer = setup()
+  mock.song:instrument(1):sample(1):insert_slice_marker(500)
+  local epoch = place(peer)
+  failure(call(peer, "change_preview", { kind = "sample-invert", input = { ref = sref(epoch, 1, 2) }, epoch = epoch }), "bad-params")
+  mock.ops.insert_sample(2, { name = "Empty" })
+  epoch = place(peer)
+  failure(call(peer, "change_preview", { kind = "sample-invert", input = { ref = sref(epoch, 2, 2) }, epoch = epoch }), "bad-params")
+  instrument(2).samples[1].buffer.frames = 2000001
+  failure(call(peer, "change_preview", { kind = "sample-invert", input = { ref = sref(epoch, 2, 1) }, epoch = epoch }), "failed")
+end)
+
+test("reads: the tidy's note count by track says which tracks play each instrument", function()
+  local env, peer = setup()
+  mock.ops.set_note(1, 1, 1, 1, { note = 48, instrument = 0 })
+  mock.ops.set_note(1, 2, 3, 1, { note = 48, instrument = 1 })
+  mock.ops.set_note(1, 2, 5, 1, { note = 50, instrument = 1 })
+  local notes = call(peer, "read", { kind = "tidy-notes", byTrack = true })
+  ok(notes.result, json.encode(notes.error or {}))
+  eq(notes.result.tracks["1"]["0"], 1)
+  eq(notes.result.tracks["2"]["1"], 2)
+  eq(notes.result.tracks["2"]["0"], nil)
+  eq(call(peer, "read", { kind = "tidy-notes" }).result.tracks, nil, "only when asked")
 end)

@@ -55,9 +55,15 @@ pub struct Words {
     pub options: &'static str,
     /// The extract action's words, when the DAW has it.
     pub extract: Option<&'static str>,
+    /// How the takes are heard when the DAW doesn't render them for Kumi (None: rendered and heard before they're shown).
+    pub hears: Option<&'static str>,
+    /// How a rewrite is made when it isn't one change, and a drop when it isn't one change for all.
+    pub rewrites: Option<&'static str>,
+    pub drops: Option<&'static str>,
     /// The DAW's notation the model writes in (effect commands, numbering).
     pub idioms: &'static str,
-    /// Directions Kumi picks for takes the model leaves to it, each one no other take of a request has.
+    /// Directions Kumi picks for takes the model leaves to it, each one no other take of a request has (a backend's
+    /// `directions` may give a source others: a REAPER MIDI item's are its notes').
     pub directions: &'static [&'static str],
     /// JSON schemas: a source, an operator, the options and `at`.
     pub source_schema: &'static str,
@@ -74,6 +80,14 @@ pub fn found(row: &Value) -> bool {
 
 pub fn gone(row: &Value) -> bool {
     row.get("gone") == Some(&Value::Bool(true))
+}
+
+/// Why a found take stays out of a drop: an edit Kumi's digest doesn't see (a take the producer names goes all the same), or
+/// its use elsewhere (it never goes).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Undroppable {
+    Edited(String),
+    InUse(String),
 }
 
 /// A rewrite made: its change, and what the take holds instead of what was asked when only part went in (and why).
@@ -95,8 +109,19 @@ pub trait VariationsBackend: Sized {
     /// The source a make names, read: its material and where its takes go.
     async fn source(&self, input: &JsonObject, signal: &Signal) -> Result<Source<Self::Material, Self::Data>, String>;
 
-    /// The operators of a direction Kumi picked.
-    fn direction_ops(&self, direction: &str) -> Vec<Value>;
+    /// A kept set's key as its source's places give it now, where its key holds a position the producer may have moved since
+    /// (Renoise's pattern, track and instrument numbers): a make on that source goes on with the set. None: its key as kept.
+    async fn key_now(&self, _source: &Source<Self::Material, Self::Data>, _signal: &Signal) -> Option<String> {
+        None
+    }
+
+    /// The directions Kumi picks from for takes of `source` the model leaves to it (the words' by default).
+    fn directions(&self, _source: &Source<Self::Material, Self::Data>) -> &'static [&'static str] {
+        self.words().directions
+    }
+
+    /// The operators of a direction Kumi picked for takes of `source`.
+    fn direction_ops(&self, source: &Source<Self::Material, Self::Data>, direction: &str) -> Vec<Value>;
 
     /// Whether the model's operators are the DAW's, and fit where the source's takes go (before anything is drawn).
     fn check_ops(&self, source: &Source<Self::Material, Self::Data>, ops: &[Value]) -> Result<(), String>;
@@ -159,8 +184,9 @@ pub trait VariationsBackend: Sized {
     /// Puts a kept take where the producer says (one change): what it answered.
     async fn place(&self, set: &mut Set<Self>, number: usize, row: &Value, at: &JsonObject, signal: &Signal) -> Result<Value, String>;
 
-    /// Why a found take can't go in a drop (it's in use elsewhere), or None.
-    fn undroppable(&self, set: &Set<Self>, number: usize, row: &Value) -> Option<String>;
+    /// Why a found take stays out of a drop (it holds the producer's edit where its digest doesn't look, or it's in use
+    /// elsewhere), or None.
+    async fn undroppable(&self, set: &Set<Self>, number: usize, row: &Value, signal: &Signal) -> Option<Undroppable>;
 
     /// Drops found takes in one change: its id and what the DAW said.
     async fn drop(&self, set: &Set<Self>, rows: &[(usize, Value)], signal: &Signal) -> Result<(String, Value), String>;
@@ -168,8 +194,8 @@ pub trait VariationsBackend: Sized {
     /// Why the DAW can't render for Kumi now, or None.
     fn cant_render(&self) -> Option<String>;
 
-    /// Whether the DAW plays now (a render would stop it).
-    async fn playing(&self, signal: &Signal) -> bool;
+    /// Whether the DAW plays now (a render would stop it); None when it couldn't say, and then nothing renders.
+    async fn playing(&self, signal: &Signal) -> Option<bool>;
 
     /// Renders the takes (and the source, when asked) offline and hears them.
     async fn render(&self, set: &mut Set<Self>, numbers: &[usize], with_source: bool, signal: &Signal) -> Result<Rendered, String>;

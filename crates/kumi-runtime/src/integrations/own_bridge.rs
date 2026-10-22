@@ -81,6 +81,10 @@ pub struct OwnDaw {
     pub catch_up: &'static CatchUpWords,
     /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call.
     pub phrases: &'static super::own_phrases::OwnPhrases,
+    /// (#401) What its kept scripts are in, become, and take by their place (lint rules).
+    pub scripts: &'static crate::core::scripts::backend::Words,
+    /// (#401) Its facts for delivery to a spec: its master's row and fader, and what limits or raises the master.
+    pub spec: &'static super::own_spec::OwnSpecFacts,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -166,6 +170,26 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     places: Places,
     /// (M7) The variations tool, where the DAW's profile offers it (core's, with the DAW's backend).
     variations: Option<Rc<dyn KernelTool>>,
+    /// (#401) The sample map, where the DAW's profile offers it (core's, with the DAW's backend).
+    mapping: Option<Rc<dyn KernelTool>>,
+    /// (#401) Chopping, where the DAW's profile offers it (core's, with the DAW's backend).
+    chop: Option<Rc<dyn KernelTool>>,
+    /// (#401) Delivery, where the DAW's profile offers it (core's, with the DAW's backend).
+    delivery: Option<Rc<dyn KernelTool>>,
+    /// (#401) The routing doctor and builder, where the DAW's profile offers it (core's, with the DAW's backend).
+    routing: Option<Rc<dyn KernelTool>>,
+    /// (#401) Kept scripts, where the DAW's profile offers them (core's, with the shared backend).
+    scripts: Option<Rc<dyn KernelTool>>,
+    /// (#401) Delivery to a spec, where the DAW's profile offers it (core's, with the shared backend).
+    spec: Option<Rc<dyn KernelTool>>,
+    /// (#401) Cleaning up a jam, where the DAW's profile offers it (core's, with the DAW's backend).
+    jam: Option<Rc<dyn KernelTool>>,
+    /// (#401) Layering breaks, where the DAW's profile offers it (core's, with the DAW's backend).
+    layers: Option<Rc<dyn KernelTool>>,
+    /// (#401) Audio to MIDI with Kumi's own ears, where the DAW's profile offers it (core's, with the DAW's backend).
+    to_midi: Option<Rc<dyn KernelTool>>,
+    /// (#401) Stems by Kumi's own splitter, where the DAW's profile offers it (core's, with the DAW's backend).
+    stems: Option<Rc<dyn KernelTool>>,
 }
 
 /// How REAPER and Renoise tell templates and a song's own folder, for core's rules on copies: a project in REAPER's
@@ -304,11 +328,82 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     };
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, on_change, context.on_action.clone());
     let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
-    let variations: Option<Rc<dyn KernelTool>> = (daw.profile.caps.variations && daw.profile.id == Some(crate::core::daw::DawId::Renoise))
-        .then(|| {
+    // (M7) the variations tool, where the DAW offers it: Renoise's patterns and phrases, REAPER's items (#401)
+    let variations: Option<Rc<dyn KernelTool>> = match daw.profile.id.filter(|_| daw.profile.caps.variations) {
+        Some(crate::core::daw::DawId::Renoise) => {
             let backend = super::renoise_variations::RenoiseBackend::new(changes.clone(), listening.renderer.clone());
-            crate::core::variations::tool::Variations::new(backend, options.kumi_home.clone()).tool()
+            Some(crate::core::variations::tool::Variations::new(backend, options.kumi_home.clone()).tool())
+        }
+        Some(crate::core::daw::DawId::Reaper) => {
+            let backend = super::reaper_variations::ReaperVariations::new(changes.clone(), listening.renderer.clone());
+            Some(crate::core::variations::tool::Variations::new(backend, options.kumi_home.clone()).tool())
+        }
+        _ => None,
+    };
+    // (#401) the sample map, where the DAW offers it
+    let mapping: Option<Rc<dyn KernelTool>> = (daw.profile.caps.sample_mapping && daw.profile.id == Some(crate::core::daw::DawId::Renoise))
+        .then(|| {
+            let backend = super::renoise_mapping::RenoiseMapping::new(changes.clone(), listening.renderer.clone());
+            crate::core::mapping::tool::Mapping::new(backend).tool()
         });
+    // (#401) chopping, where the DAW offers it: its lighter densities go to the variations tool as takes
+    let chop: Option<Rc<dyn KernelTool>> = (daw.profile.caps.chop && daw.profile.id == Some(crate::core::daw::DawId::Renoise)).then(|| {
+        let backend = super::renoise_chop::RenoiseChop::new(changes.clone(), listening.renderer.clone());
+        crate::core::chop::tool::Chop::new(backend, variations.clone()).tool()
+    });
+    // (#401) delivery, where the DAW offers it
+    let delivery: Option<Rc<dyn KernelTool>> =
+        (daw.profile.caps.delivery && daw.profile.id == Some(crate::core::daw::DawId::Reaper)).then(|| {
+            let backend = super::reaper_delivery::ReaperDelivery::new(changes.clone(), listening.renderer.clone());
+            crate::core::delivery::tool::Delivery::new(backend).tool()
+        });
+    // (#401) routing, where the DAW offers it
+    let routing: Option<Rc<dyn KernelTool>> =
+        (daw.profile.caps.routing && daw.profile.id == Some(crate::core::daw::DawId::Reaper)).then(|| {
+            let backend = super::reaper_routing::ReaperRouting::new(changes.clone());
+            crate::core::routing::tool::Routing::new(backend).tool()
+        });
+    // (#401) kept scripts, where the DAW offers them: Kumi's copies in its folder, one a DAW
+    let scripts: Option<Rc<dyn KernelTool>> = daw.profile.caps.scripts.then(|| {
+        let backend = super::own_scripts::OwnScripts::new(changes.clone(), daw.scripts);
+        crate::core::scripts::tool::Scripts::new(backend, options.kumi_home.join("scripts").join(daw.host_flag)).tool()
+    });
+    // (#401) delivery to a spec, where the DAW offers it
+    let spec: Option<Rc<dyn KernelTool>> = daw.profile.caps.delivery_spec.then(|| {
+        let backend = super::own_spec::OwnSpec::new(changes.clone(), listening.renderer.clone(), daw.spec);
+        crate::core::spec::tool::DeliverySpec::new(backend).tool()
+    });
+    // (#401) cleaning up a jam, where the DAW offers it
+    let jam: Option<Rc<dyn KernelTool>> = (daw.profile.caps.jam && daw.profile.id == Some(crate::core::daw::DawId::Renoise)).then(|| {
+        let backend = super::renoise_jam::RenoiseJam::new(changes.clone());
+        crate::core::jam::tool::Jam::new(backend).tool()
+    });
+    // (#401) layering breaks, where the DAW offers it
+    let layers: Option<Rc<dyn KernelTool>> =
+        (daw.profile.caps.layers && daw.profile.id == Some(crate::core::daw::DawId::Renoise)).then(|| {
+            let backend = super::renoise_layers::RenoiseLayers::new(changes.clone(), listening.renderer.clone());
+            crate::core::layers::tool::Layers::new(backend).tool()
+        });
+    // (#401) audio to MIDI, where the DAW offers it through Kumi's own ears
+    let to_midi: Option<Rc<dyn KernelTool>> = match (daw.profile.caps.audio_to_midi, daw.profile.id) {
+        (true, Some(crate::core::daw::DawId::Reaper)) => Some(super::own_ears::Daw::Reaper),
+        (true, Some(crate::core::daw::DawId::Renoise)) => Some(super::own_ears::Daw::Renoise),
+        _ => None,
+    }
+    .map(|which| {
+        let backend = super::own_ears::OwnEars::new(changes.clone(), listening.renderer.clone(), which);
+        crate::core::to_midi::tool::ToMidi::new(backend).tool()
+    });
+    // (#401) stems, where the DAW splits by Kumi's own splitter
+    let stems: Option<Rc<dyn KernelTool>> = match (daw.profile.caps.stems, daw.profile.id) {
+        (true, Some(crate::core::daw::DawId::Reaper)) => Some(super::own_ears::Daw::Reaper),
+        (true, Some(crate::core::daw::DawId::Renoise)) => Some(super::own_ears::Daw::Renoise),
+        _ => None,
+    }
+    .map(|which| {
+        let backend = super::own_ears::OwnEars::new(changes.clone(), listening.renderer.clone(), which);
+        crate::core::stems::tool::Stems::new(backend).tool()
+    });
     let kumi_home = options.kumi_home.clone();
     Rc::new(OwnIntegration::<S> {
         daw,
@@ -345,6 +440,16 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         shifts: Rc::default(),
         places: Places::new(&kumi_home, daw.host_flag),
         variations,
+        mapping,
+        chop,
+        delivery,
+        routing,
+        scripts,
+        spec,
+        jam,
+        layers,
+        to_midi,
+        stems,
     })
 }
 
@@ -908,6 +1013,37 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         // M7: the variations loop, where the DAW offers it.
         if let Some(variations) = &self.variations {
             tools.push(variations.clone());
+        }
+        // #401: the sample map, where the DAW offers it.
+        if let Some(mapping) = &self.mapping {
+            tools.push(mapping.clone());
+        }
+        if let Some(chop) = &self.chop {
+            tools.push(chop.clone());
+        }
+        if let Some(delivery) = &self.delivery {
+            tools.push(delivery.clone());
+        }
+        if let Some(routing) = &self.routing {
+            tools.push(routing.clone());
+        }
+        if let Some(scripts) = &self.scripts {
+            tools.push(scripts.clone());
+        }
+        if let Some(spec) = &self.spec {
+            tools.push(spec.clone());
+        }
+        if let Some(jam) = &self.jam {
+            tools.push(jam.clone());
+        }
+        if let Some(layers) = &self.layers {
+            tools.push(layers.clone());
+        }
+        if let Some(to_midi) = &self.to_midi {
+            tools.push(to_midi.clone());
+        }
+        if let Some(stems) = &self.stems {
+            tools.push(stems.clone());
         }
         tools
     }
@@ -1645,10 +1781,17 @@ pub fn instructions_of(daw: &OwnDaw) -> String {
 /// routes are a mistake to fix; a route through FX is the producer's sound, so a choice to ask about.
 pub fn own_rules(daw: &OwnDaw) -> String {
     let app = daw.profile.words.app;
-    format!(
+    let mut rules = format!(
         "The look's setup is how this producer set {app} up: follow it rather than {app}'s factory defaults. When the producer reports a problem: a clear mechanical mistake with one obvious fix ({}) gets that fix as one change, said with what you did and how to take it back (Kumi's undo or {app}'s own); when the fix means choosing between the producer's own routes or settings (one route running through FX, two settings they may have meant), name them exactly and ask one question. Never ask only because nothing is selected. Never change {app}'s preferences, key bindings, mouse modifiers or theme. Describe each change in words, naming what it touched and where. Offer alternatives as separate takes, each undoable, and never make a whole song or part unasked.",
         daw.mechanical
-    )
+    );
+    // (#401, R35) after time away, what's new first
+    rules.push_str(" After a catch-up, start from what changed since last time: say what's new, and propose or change only that, never what came before.");
+    // (#401) a chore kept as a script: once it ran, and only once the producer said yes
+    if daw.profile.caps.scripts {
+        rules.push_str(" A chore the producer repeats can be kept as a script (scripts): list what's kept first; a new one runs once with run_lua, and is kept only once they said yes.");
+    }
+    rules
 }
 
 /// The setup as the model sees it: a render folder outside the project is named by its last folder, as the project's file is

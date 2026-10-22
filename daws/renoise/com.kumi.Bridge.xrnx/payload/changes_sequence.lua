@@ -65,6 +65,15 @@ local function state_of(song, s)
   return { start = start, name = start and sequencer:sequence_section_name(s) or "", mutes = mutes }
 end
 
+-- The name of the section slot `s` is in (the nearest start at or before it), "" before any.
+local function section_at(song, s)
+  local sequencer = song.sequencer
+  for at = s, 1, -1 do
+    if sequencer:sequence_is_start_of_section(at) then return sequencer:sequence_section_name(at) end
+  end
+  return ""
+end
+
 local function set_state(song, s, state, sections_only)
   local sequencer = song.sequencer
   if sequencer:sequence_is_start_of_section(s) ~= state.start then sequencer:set_sequence_is_start_of_section(s, state.start) end
@@ -280,6 +289,11 @@ local function made_restore(kind, words)
     local same = words.mutes_only and same_list(now_state.mutes, made.state.mutes) or (not words.mutes_only and same_state(now_state, made.state))
     if not restore.discard and not same then
       fail("changed", string.format("slot %d's %s changed in Renoise since Kumi %s", s, words.mutes_only and "mutes" or "mutes or section", words.did))
+    end
+    -- (#401: a section that starts there under another name than the one the slot was made in is the producer's: deleting the
+    -- slot would take its name, as the slot after gets its own state back)
+    if words.mutes_only and not restore.discard and now_state.start and made.section ~= nil and now_state.name ~= made.section then
+      fail("changed", string.format("slot %d starts the section %s in Renoise now, named since Kumi %s", s, q(now_state.name), words.did))
     end
     if made.pattern then
       local why = pattern_changed(song, env, now[s], made.pattern)
@@ -641,9 +655,13 @@ end
 -- written. Answers the pattern's number, the cells written and the columns shown.
 local function make_variation(song, plan, name)
   local sequencer = song.sequencer
+  local pool = #song.patterns
   sequencer:insert_new_pattern_at(plan.index)
   local np = sequencer.pattern_sequence[plan.index]
   local new, source = song:pattern(np), song:pattern(plan.p)
+  -- (what was made, for a cleanup if Renoise refuses part of it: the slot's pattern, and when Renoise gave it a free one of the
+  -- pool rather than a new one, that pattern's name and length)
+  plan.made = { p = np, reused = np <= pool and { name = new.name, lines = new.number_of_lines } or nil }
   if new.number_of_lines ~= source.number_of_lines then new.number_of_lines = source.number_of_lines end
   new.name = name
   for t = 1, rows.track_count(song) do
@@ -683,6 +701,25 @@ local function make_variation(song, plan, name)
   return np, after, hidden
 end
 
+-- A variation Renoise refused part of, taken back (#401: Renoise may give the slot a free pattern of the pool, not a new one at
+-- its end): the slot it inserted goes, its pattern emptied so Renoise lets go of a new one, a free one's name and length put back.
+local function unmake_variation(song, plan, before)
+  local now = song.sequencer.pattern_sequence
+  if not plan.made or #now ~= #before + 1 or now[plan.index] ~= plan.made.p then return end
+  local pattern = song:pattern(plan.made.p)
+  if plan.made.reused then
+    -- (a free pattern of the pool: its slot goes first, while it holds the variation's lines, so Renoise keeps it; then it's
+    -- emptied, with its name and length back)
+    song.sequencer:delete_sequence_at(plan.index)
+    pattern:clear()
+    pattern.name, pattern.number_of_lines = plan.made.reused.name, plan.made.reused.lines
+  else
+    pattern:clear()
+    song.sequencer:delete_sequence_at(plan.index)
+  end
+end
+M.unmake_variation = unmake_variation
+
 local function variation_apply(song, env, input, fence, desc)
   local ok, plan = pcall(variation_plan, song, env, input)
   if not ok then base.gone_is_changed(plan) end
@@ -697,13 +734,7 @@ local function variation_apply(song, env, input, fence, desc)
   if not made then
     -- (what was made goes again: the slot, its pattern emptied so Renoise lets go of it, the columns as they were)
     local why = np
-    pcall(function()
-      local p = song.sequencer.pattern_sequence[plan.index]
-      if #song.sequencer.pattern_sequence > #before and p and p > fence.patterns then
-        song:pattern(p):clear()
-        song.sequencer:delete_sequence_at(plan.index)
-      end
-    end)
+    pcall(unmake_variation, song, plan, before)
     cells.set_columns(plan.track, columns)
     fail("failed", "Renoise wouldn't make the variation: " .. tostring(type(why) == "table" and why.message or why):gsub("^[^%s:]*%.lua:%d+: ", ""))
   end
@@ -713,7 +744,7 @@ local function variation_apply(song, env, input, fence, desc)
   local shown = cells.read_columns(plan.track)
   shown.hidden = hidden
   applied.pool, applied.at, applied.count = env.pattern_mark and env.pattern_mark() or nil, plan.index, 1
-  applied.made = { { state = state_of(song, plan.index), pattern = keep_pattern(song, env, np) } }
+  applied.made = { { state = state_of(song, plan.index), pattern = keep_pattern(song, env, np), section = section_at(song, plan.index) } }
   applied.columns, applied.priorColumns, applied.cells = shown, columns, #after
   return {
     applied = applied, target = base.target(env, plan.t),
@@ -789,13 +820,14 @@ local function drop_preview(song, env, input)
   }
 end
 
--- A pattern Renoise is about to remove as its slot lets go of it: what makes it again (its name, length and aliases; it is empty).
-local function gone_pattern(song, p)
+-- A pattern Renoise is about to remove as its slot lets go of it: what makes it again (its name, length and aliases, each a
+-- place in the pool, followed to where that pattern is when the undo makes it again; it is empty).
+local function gone_pattern(song, env, p)
   local pattern = song:pattern(p)
   local aliases = {}
   for t = 1, rows.track_count(song) do
     local alias = pattern:track(t).alias_pattern_index
-    if alias > 0 then aliases[tostring(t)] = alias end
+    if alias > 0 then aliases[tostring(t)] = base.pattern_place(env, alias) end
   end
   return { name = pattern.name, lines = pattern.number_of_lines, aliases = aliases }
 end
@@ -819,7 +851,7 @@ local function drop_apply(song, env, input, fence, desc)
     local pool = #song.patterns
     local p = sequencer.pattern_sequence[item.slot]
     local goes = goes_with_pattern(song, p, item.slot)
-    local kept = goes and gone_pattern(song, p) or nil
+    local kept = goes and gone_pattern(song, env, p) or nil
     sequencer:delete_sequence_at(item.slot)
     if #song.patterns < pool then item.gone = kept or { name = "", lines = 64, aliases = {} } end
   end
@@ -882,7 +914,12 @@ local function drop_restore(song, env, restore, desc)
       if item.gone.lines and pattern.number_of_lines ~= item.gone.lines then pattern.number_of_lines = item.gone.lines end
       if item.gone.name and item.gone.name ~= "" then pattern.name = item.gone.name end
       for key, alias in pairs(item.gone.aliases or {}) do
-        pcall(function() pattern:track(tonumber(key)).alias_pattern_index = alias end)
+        -- (a place followed to where its pattern is now; one gone since is left out. A number is a record's from before places)
+        local target = alias
+        if type(alias) == "table" then target = env.pattern_at and env.pattern_at(alias.n, alias.mark) or nil end
+        if type(target) == "number" and target <= #song.patterns then
+          pcall(function() pattern:track(tonumber(key)).alias_pattern_index = target end)
+        end
       end
     else
       sequencer:insert_sequence_at(item.slot, patterns[i])

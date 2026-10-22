@@ -164,6 +164,63 @@ test("variations: a variation slot is one step: a new pattern at the end, its ot
   eq(mock.song:track(1).visible_effect_columns, effect_columns)
 end)
 
+test("variations: where tells a variation pattern's own tracks: the varied one, and another once the producer writes there", function()
+  local _, peer = seq_setup()
+  local record = K.change(peer, "slot-variation", variation_input((K.place(peer))), "Kumi: V1 (kv01)")
+  local function own()
+    local where = K.call(peer, "read", { kind = "where", items = { { pattern = record.created.place } } })
+    ok(where.result, json.encode(where.error or {}))
+    return table.concat(where.result.items[1].ownTracks, ",")
+  end
+  eq(own(), "1", "only the varied track holds lines of its own")
+  mock.song:pattern(4):track(3).alias_pattern_index = 0
+  mock.ops.set_note(4, 3, 2, 1, { note = 36, instrument = 0 })
+  eq(own(), "1,3", "the bass the producer wrote")
+end)
+
+test("variations: a variation Renoise refused part of goes again: its slot, and a free pattern of the pool it took gets its name and length back", function()
+  seq_setup()
+  local S = T.load_payload_module("changes_sequence")
+  local song = mock.song
+  local function sequence() return table.concat(song.sequencer.pattern_sequence, ",") end
+  -- (a free pattern in the pool: made with a slot and a note, the slot deleted, then emptied)
+  song.sequencer:insert_new_pattern_at(5)
+  local free = song.sequencer.pattern_sequence[5]
+  mock.ops.set_note(free, 1, 1, 1, { note = 48, instrument = 0 })
+  song.sequencer:delete_sequence_at(5)
+  song:pattern(free):clear()
+  song:pattern(free).name, song:pattern(free).number_of_lines = "Old", 32
+  local before = {}
+  for s, p in ipairs(song.sequencer.pattern_sequence) do before[s] = p end
+  -- Renoise gave the variation's slot that free pattern, and the variation renamed and lengthened it before failing
+  song.sequencer:insert_sequence_at(5, free)
+  song:pattern(free).name, song:pattern(free).number_of_lines = "V1 \194\183 B", 64
+  mock.ops.set_note(free, 1, 1, 1, { note = 50, instrument = 0 })
+  S.unmake_variation(song, { index = 5, made = { p = free, reused = { name = "Old", lines = 32 } } }, before)
+  eq(sequence(), table.concat(before, ","), "the slot went")
+  eq(song:pattern(free).name, "Old")
+  eq(song:pattern(free).number_of_lines, 32)
+  ok(song:pattern(free).is_empty, "the variation's lines went")
+  -- (a slot not as the variation left it is left alone)
+  song.sequencer:insert_sequence_at(5, 1)
+  S.unmake_variation(song, { index = 5, made = { p = free } }, before)
+  eq(#song.sequencer.pattern_sequence, #before + 1, "another slot stays")
+end)
+
+test("variations: Kumi's undo of a variation refuses once the producer renamed the section its slot starts; with discard it goes", function()
+  local _, peer = seq_setup()
+  local record = K.change(peer, "slot-variation", variation_input((K.place(peer))), "Kumi: V1 (kv01)")
+  eq(sections(), "2:Break 5:Variations of B")
+  mock.song.sequencer:set_sequence_section_name(5, "Fills")
+  local refused = K.restore(peer, record)
+  K.failure(refused, "changed")
+  ok(refused.error.message:find("Fills", 1, true), refused.error.message)
+  eq(seq(), "1,2,1,3,4", "the slot stays")
+  local undone = K.restore(peer, record, nil, { discard = true })
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(seq(), "1,2,1,3")
+end)
+
 test("variations: Kumi's undo of a variation follows it past a slot made before it, refuses one edited since, and is unwritten once Renoise's undo took it", function()
   local _, peer = seq_setup()
   local record = K.change(peer, "slot-variation", variation_input((K.place(peer))))
@@ -279,6 +336,34 @@ test("variations: an empty pattern Renoise removes with its dropped slot is made
   eq(seq(), "1,2,1,3,4")
   eq(mock.data.patterns[4].name, "Empty")
   ok(made)
+end)
+
+test("variations: a removed pattern made again by Kumi's undo aliases the patterns it did, where the pool has them now", function()
+  local _, peer = seq_setup()
+  -- (pattern 4: unused, kept in the pool by a note; pattern 5: played at slot 5, the one the variation aliases)
+  K.change(peer, "slot-insert", {})
+  mock.ops.set_note(4, 1, 1, 1, { note = 48, instrument = 0 })
+  local E = K.place(peer)
+  K.change(peer, "slots-drop", { refs = { K.ref(E, "seq", 5) } })
+  K.change(peer, "slot-insert", {})
+  local target = #mock.data.patterns
+  mock.ops.set_note(target, 1, 1, 1, { note = 50, instrument = 0 })
+  -- (the variation: a new pattern after it, aliasing it on track 2)
+  K.change(peer, "slot-insert", {})
+  local v = #mock.data.patterns
+  mock.song:pattern(v):track(2).alias_pattern_index = target
+  mock.data.patterns[v].name = "V"
+  local E2 = K.place(peer)
+  local record = K.change(peer, "slots-drop", { refs = { K.ref(E2, "seq", 6) } })
+  eq(#mock.data.patterns, target, "Renoise removed the variation's pattern")
+  -- (the producer deletes the unused pattern 4: the pool's later patterns move down, and the slots playing them)
+  mock.ops.remove_pattern(4)
+  for s, p in ipairs(mock.data.sequence) do if p > 4 then mock.data.sequence[s] = p - 1 end end
+  local undone = K.restore(peer, record)
+  ok(undone.result, json.encode(undone.error or {}))
+  local again = #mock.data.patterns
+  eq(mock.data.patterns[again].name, "V")
+  eq(mock.song:pattern(again):track(2).alias_pattern_index, target - 1, "the pattern it aliased, one down now")
 end)
 
 -- (review W3)
@@ -478,6 +563,31 @@ test("variations: Kumi's undo of a take leaves it once the producer plays it by 
   local again = change(peer, "phrase-add", { ref = iref(place(peer), 2), lines = 8, content = CHOP })
   eq(bass.phrase_program, 2)
   ok(restore(peer, "phrase-add", again).result)
+end)
+
+test("variations: in a song too big to look through whole, Kumi's undo of a take looks at the patterns changed since it came", function()
+  local _, peer = setup({ patch = function(env_)
+    local path = env_.bundle .. "payload/changes_phrases.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local changed, count = text:gsub("M%.ZERO_Z_READS = 200000", "M.ZERO_Z_READS = 150")
+    assert(count == 1, "the limit")
+    f = assert(io.open(path, "wb"))
+    f:write(changed)
+    f:close()
+  end })
+  -- (two patterns with a note each: more than 150 reads to look through)
+  mock.ops.set_note(1, 1, 1, 1, { note = 48, instrument = 1 })
+  mock.ops.set_note(2, 1, 1, 1, { note = 48, instrument = 1 })
+  local record = change(peer, "phrase-add", { ref = iref(place(peer), 2), lines = 8, content = CHOP })
+  ok(restore(peer, "phrase-add", record).result, "no pattern changed since it came: nothing names it")
+  eq(#instrument(2).phrases, 1)
+  local again = change(peer, "phrase-add", { ref = iref(place(peer), 2), lines = 8, content = CHOP })
+  mock.ops.set_effect(1, 1, 1, 1, 256 + 35, 2)
+  local refused = restore(peer, "phrase-add", again)
+  failure(refused, "changed")
+  ok(refused.error.message:find("is named by 1 0Z command", 1, true), refused.error.message)
 end)
 
 -- read {kind: where}

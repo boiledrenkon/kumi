@@ -25,10 +25,10 @@ const INSTRUCTIONS: &str = concat!(
     " The project's timebase is in project. In the look's setup, new items get newItemFades: off, or a fade in and out that long. Add no fade an item wouldn't get, and never a fade-in on a drum hit. An item extended past its source repeats it only when it loops (loopSourceOfNewItems for new ones; read an item's own), and with the items timebase time a tempo change leaves items where they are in seconds. Call an extension's functions or named commands (SWS's _SWS_…, ReaPack, ReaImGui, js_ReaScriptAPI) only when setup.extensions says it's there. render is what File > Render does now: say so before you change it.",
     " Work as REAPER's power users do, in REAPER's words (items, takes, regions, FX, actions, named rather than by their keys), and put another DAW's words into REAPER's without comment (Strip Silence is a dynamic split; a Pro Tools region is an item). Tell the job from the project before choosing how: many short regions or items rendered by $region or $track names at 48 kHz is game audio; speech on a time timebase is voice-over or a podcast; hundreds of tracks with offline instruments is a composer's template; anything else is music.",
     " When the producer says this or these, or names nothing to edit: a razor area, else the selected items (within the time selection, if there is one), else the time selection; ask only when none is set.",
-    " Names a render pattern uses ($project, $region, $track, $parenttrack, $timelineorder) become file names: keep the project's naming style (such as UCS's CatID_FXName), with no spaces for game audio or a spec that asks it, say so before renaming, and check the render targets (REAPER adds -001, -002 to names that clash).",
+    " Names a render pattern uses ($project, $region, $track, $parenttrack, $timelineorder) become file names: keep the project's naming style (such as UCS's CatID_FXName), with no spaces for game audio or a spec that asks it, say so before renaming, and check the render targets (REAPER adds -001, -002 to names that clash). Files for a game or a client go through render_files: plan the assets, make their regions, check the files against the names, then render (into the project's render folder unless the producer names one).",
     " Variations keep their sources: new items or takes with small changes of pitch, playrate, start offset and fades, a region each.",
-    " Spoken word works on a time timebase in minutes and seconds, without beat snapping; deliver to a spec only when one is named (ACX: RMS −23 to −18 dB, peaks at most −3 dB, a noise floor at most −60 dB RMS, 0.5–1 s of room tone at the head and 1–5 s at the tail, at most 120 minutes a file, all files mono or all stereo, 192 kbps CBR MP3 at 44.1 kHz).",
-    " In a big template never bring offline FX online, show hidden tracks or move folders as a side effect: a new track goes into its section's folder and stem. Reverbs and delays go on shared FX buses fed by sends, or into each stem when the project delivers stems.",
+    " Spoken word is worked in minutes and seconds, without beat snapping (the project's timebase changes only when the producer asks); deliver to a spec only when one is named (ACX: RMS −23 to −18 dB, peaks at most −3 dB, a noise floor at most −60 dB RMS, 0.5–1 s of room tone at the head and 1–5 s at the tail, at most 120 minutes a file, all files mono or all stereo, 192 kbps CBR MP3 at 44.1 kHz).",
+    " In a big template never bring offline FX online, show hidden tracks or move folders as a side effect: a new track goes into its section's folder and stem. Reverbs and delays go on shared FX buses fed by sends, or into each stem when the project delivers stems. Why a track is too loud, silent or cancels, and sidechains, parallel buses and stems, go through routing: look first, then say what's wrong by the tracks' names before fixing or building.",
     " Keep the producer's colours and naming; colour tracks by family only in an uncoloured project.",
     " Corrective work takes ReaEQ, ReaComp, ReaLimit and JS; reverb, saturation and instruments come from what the producer has installed first (REAPER's own instruments are ReaSynth, ReaSynDr and ReaSamplOmatic5000). A multi-FX sound to keep goes in a container with macros; match levels before comparing."
 );
@@ -50,6 +50,37 @@ pub const DAW: OwnDaw = OwnDaw {
     changes: &super::reaper_changes::CHANGES,
     catch_up: &CATCH_UP,
     phrases: &PHRASES,
+    scripts: &SCRIPTS,
+    spec: &SPEC,
+};
+
+/// (#401) Delivery to a spec in REAPER: the master's row and fader, and what limits or raises it.
+static SPEC: super::own_spec::OwnSpecFacts = super::own_spec::OwnSpecFacts {
+    words: crate::core::spec::backend::Words {
+        app: "REAPER",
+        fader_most: 24.,
+        limiter: "ReaLimit (Cockos) as the master's last FX, its Ceiling a few tenths under the spec's and its Threshold down by the gain still needed",
+        gainer: "JS: Volume Adjustment on the master's FX before its limiter, for the gain past the fader",
+    },
+    is_master: |row| row.get("master") == Some(&serde_json::Value::Bool(true)),
+    fader: "volumeDb",
+};
+
+/// (#401) Kept scripts in REAPER: ReaScript, kept as actions, and what takes a thing by its place there.
+static SCRIPTS: crate::core::scripts::backend::Words = crate::core::scripts::backend::Words {
+    app: "REAPER",
+    language: "Lua (ReaScript: the reaper table)",
+    action: "an action in REAPER's Action List (Scripts/Kumi), for a shortcut or a toolbar button",
+    places: &[
+        (
+            r"GetTrack\(\s*0\s*,\s*[0-9]+\s*\)",
+            "it takes a track by its place (GetTrack(0, n)): in another project that's another track; the selected ones (GetSelectedTrack) or a name follow the producer",
+        ),
+        (
+            r"GetMediaItem\(\s*0\s*,\s*[0-9]+\s*\)",
+            "it takes an item by its place (GetMediaItem(0, n)): the selected ones (GetSelectedMediaItem) follow the producer",
+        ),
+    ],
 };
 
 /// What changed in a REAPER project, in REAPER's words: catch-up's lines, watch_me's changes and its draft recipe.

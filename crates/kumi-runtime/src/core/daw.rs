@@ -588,9 +588,11 @@ pub struct Capabilities {
     pub audition: bool,
     /// A goal's render rig, kept open across generations.
     pub goal_rig: bool,
-    /// Splitting a track into stems inside the DAW (Live 12's own splitter).
+    /// Splitting a track into stems inside the DAW: Live 12's own splitter, or (#401) Kumi's own where the DAW has none (core's
+    /// stems, with the DAW's backend: drums, bass and other).
     pub stems: bool,
-    /// Turning audio into MIDI inside the DAW (Live's conversions).
+    /// Turning audio into MIDI inside the DAW: Live's conversions, or (#401) Kumi's own ears where the DAW has none (core's
+    /// audio_to_midi, with the DAW's backend: drums by the hit detector, pitched parts by Basic Pitch).
     pub audio_to_midi: bool,
     /// Stop clips, the transport and recording at once.
     pub stop_transport: bool,
@@ -641,8 +643,33 @@ pub struct Capabilities {
     /// it plays: REAPER's and Renoise's bridges.
     pub renders_to_listen: bool,
     /// (M7) The variations tool: numbered takes of a source, kept, changed or dropped by number (core's, with the DAW's backend):
-    /// Renoise's patterns and phrases.
+    /// Renoise's patterns and phrases, REAPER's items, Live's Session clips.
     pub variations: bool,
+    /// (#401) The sample map: sound files or an instrument's samples laid out across the keys from their names, pitch and
+    /// loudness, and the song's instruments tidied (core's, with the DAW's backend): Renoise's keyzones.
+    pub sample_mapping: bool,
+    /// (#401) Chopping: a drum recording cut at its real hits and laid out to play it, lighter densities as variations takes
+    /// (core's, with the DAW's backend): Renoise's slices.
+    pub chop: bool,
+    /// (#401) Delivery: assets' regions from the timeline's items, named in the project's convention, the DAW's own dry run of
+    /// the files, and the render (core's, with the DAW's backend): REAPER's regions and render.
+    pub delivery: bool,
+    /// (#401) Routing: the project's routing as a graph, what's likely wrong in it in words, and sidechains, parallel buses and
+    /// stems built as one plan (core's, with the DAW's backend): REAPER's sends and folders.
+    pub routing: bool,
+    /// (#401) Kept scripts: a chore run once, then kept to run again by name and as the DAW's own action (core's, with the
+    /// DAW's backend): REAPER's Action List, Renoise's Tools menu.
+    pub scripts: bool,
+    /// (#401) Delivery to a loudness spec: the mix rendered and measured against ACX, streaming or broadcast, its master
+    /// fader moved by the gain the spec needs, and measured again (core's, with the DAW's backend).
+    pub delivery_spec: bool,
+    /// (#401) Cleaning up a jam: what was recorded set against what came before, empties, copies, repeats and mistakes
+    /// proposed, the accepted ones fixed, and a quantize by a strength (core's, with the DAW's backend): Renoise's patterns.
+    pub jam: bool,
+    /// (#401) Layering breaks: each layer's hits against the main break's (offsets, polarity, level), a layer nudged or flipped,
+    /// and the glue the group's compressor adds measured and set (core's, with the DAW's backend): Renoise's track delay, samples
+    /// and Bus Compressor.
+    pub layers: bool,
 }
 
 /// One DAW as Kumi knows it: its id (None when no DAW is known), its words and what it can do.
@@ -764,7 +791,16 @@ impl DawProfile {
             presets: true,
             // (Live hears as it plays, through Kumi Ears or a recording)
             renders_to_listen: false,
-            variations: false,
+            // (#401) Session clips' takes, in the slots below the source
+            variations: true,
+            sample_mapping: false,
+            chop: false,
+            delivery: false,
+            routing: false,
+            scripts: false,
+            delivery_spec: false,
+            jam: false,
+            layers: false,
         },
         vocab: PromptVocab {
             plan_tool: crate::live_word!(plan_tool),
@@ -856,6 +892,14 @@ impl DawProfile {
             audio_file: true,
             renders_to_listen: true,
             presets: true,
+            delivery: true,
+            routing: true,
+            scripts: true,
+            // (#401) SFX variations: items copied with their own settings
+            variations: true,
+            delivery_spec: true,
+            audio_to_midi: true,
+            stems: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -949,6 +993,14 @@ impl DawProfile {
             catch_up: true,
             presets: true,
             variations: true,
+            sample_mapping: true,
+            chop: true,
+            scripts: true,
+            delivery_spec: true,
+            jam: true,
+            layers: true,
+            audio_to_midi: true,
+            stems: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -1078,6 +1130,14 @@ impl Capabilities {
         presets: false,
         renders_to_listen: false,
         variations: false,
+        sample_mapping: false,
+        chop: false,
+        delivery: false,
+        routing: false,
+        scripts: false,
+        delivery_spec: false,
+        jam: false,
+        layers: false,
     };
 }
 
