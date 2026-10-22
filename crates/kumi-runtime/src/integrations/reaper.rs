@@ -52,6 +52,9 @@ pub const DAW: OwnDaw = OwnDaw {
     changes: &super::reaper_changes::CHANGES,
     open_project: None,
     listening: None,
+    project: None,
+    instant: None,
+    curves: None,
     catch_up: Some(&CATCH_UP),
     phrases: Some(&PHRASES),
 };

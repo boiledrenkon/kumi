@@ -63,6 +63,7 @@ use std::sync::{Arc, Mutex};
 mod listen;
 mod mixer;
 mod render;
+mod sampler;
 use mixer::{AutoEvent, Aux, Channel, Output, Plugin, Smart};
 
 const VECTORS: &str = include_str!("../../tests/vectors/logic-reads.json");
@@ -99,10 +100,15 @@ const NOT_YET: [(&str, &str); 5] = [
     ("track-move", "the track headers can't be dragged from outside, no key command reorders tracks, and the headers offer no action but their menu"),
     ("track-color", "Logic Pro's Color palette shows its swatches to Accessibility as bare positions, and the track headers show no colour: nothing to read back"),
 ];
+/// (M6) The kinds the bridge's bulk read answers (`read.rs`'s `BULK_KINDS`), and the most rows of a kind it answers.
+const BULK_KINDS: [&str; 7] = ["project", "track", "region", "plugin", "send", "marker", "tempo"];
+const MOST_BULK: usize = 10_000;
+/// (M6) Where Spotlight found one of the recent projects (one outside `~/Music`, which macOS keeps from the bridge).
+const RECENT_FOUND: &str = "/Users/me/Projects/Night Drive.logicx";
 /// The kinds the bridge makes whose state the simulator doesn't hold.
 const NOT_SIMULATED: [&str; 4] = ["notes-add", "notes-change", "notes-delete", "notes-quantize"];
 /// The kinds the simulator makes, for the refusal that names them.
-const SIMULATED: &str = "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, track-stack, track-stack-flatten, marker-add, marker-move, marker-delete, tempo-set, tempo-marker-set, tempo-marker-delete, signature-set, loop-range, region-move, region-resize, region-split, region-loop, region-rename, region-delete, midi-import, key-command, fx-add, fx-delete, fx-bypass, fx-param, fx-params, fx-preset, patch-load, send-add, send-remove, send-volume, smart-control-set, automation-add, automation-change and automation-delete";
+const SIMULATED: &str = "track-volume, track-pan, track-mute, track-solo, track-arm, track-rename, track-add, track-delete, track-stack, track-stack-flatten, marker-add, marker-move, marker-delete, tempo-set, tempo-marker-set, tempo-marker-delete, signature-set, loop-range, region-move, region-resize, region-split, region-loop, region-rename, region-delete, midi-import, key-command, fx-add, fx-delete, fx-bypass, fx-param, fx-params, fx-preset, patch-load, send-add, send-remove, send-volume, smart-control-set, automation-add, automation-change, automation-delete, metronome-set and sample-load";
 /// (M4) What a key command's answers say of taking it back, and what one Logic kept no step of says, as the bridge
 /// says them (`changes/command.rs`).
 const KEY_NOTE: &str = "Only Logic Pro's own undo can take this back (Cmd-Z in Logic Pro).";
@@ -746,6 +752,11 @@ struct State {
     /// The playhead, in beats from the project's start.
     playhead: f64,
     playing: bool,
+    /// (M6) The control bar's Metronome Click: on, as Scratch's scenes recorded it.
+    metronome: bool,
+    /// (M6) The octave Logic's editors name middle C in ("Display Middle C As": 3 for C3, Yamaha, Logic's default; 4
+    /// for C4, Roland), which the project row says: the recorded one's until the producer chooses the other.
+    middle_c: i64,
     /// Logic's undo history, newest last.
     undo: Vec<UndoStep>,
     /// A plan's step, counted (Logic has no undo block): its id and label, and the changes applied in it so far.
@@ -1148,6 +1159,7 @@ impl State {
             })
             .collect();
         let focus = find(&cases, "focus", &json!({})).and_then(|case| case.response.as_ref().ok()).cloned().unwrap_or(Value::Null);
+        let middle_c = rows("project").first().and_then(|row| row["middleC"].as_i64()).unwrap_or(3);
         let (next_track, next_region) = (tracks.len() as u64 + 2, regions.len() as u64 + 1);
         let mut state = State {
             epoch: RECORDED_EPOCH,
@@ -1180,6 +1192,8 @@ impl State {
             loaded_patches: HashMap::new(),
             playhead: focus["transport"]["beat"].as_f64().unwrap_or(0.0),
             playing: focus["transport"]["playing"] == true,
+            metronome: true,
+            middle_c,
             undo: vec![],
             open_step: None,
             steps: 0,
@@ -1451,6 +1465,9 @@ impl State {
             "region-delete" => self.region_delete(method, params),
             "midi-import" => self.midi_import(method, params),
             "key-command" => self.key_command(method, params),
+            // (M6) the metronome, and a sample into a Sampler on a new track
+            "metronome-set" => self.metronome_set(method, params),
+            "sample-load" => self.sample_load(method, params),
             // (M4b) plug-ins, a patch, sends, Smart Controls, automation
             "fx-add" => self.fx_add(method, params),
             "fx-delete" => self.fx_delete(method, params),
@@ -2881,6 +2898,53 @@ impl State {
         )
     }
 
+    /// (M6) `metronome-set {on}`: the control bar's Metronome Click, pressed only when it differs from what is asked and
+    /// read back (`changes/metronome.rs`). A click already as asked previews as unchanged. No step of Logic's undo: its
+    /// restore presses it back by value, unless the producer turned it since.
+    fn metronome_set(&mut self, method: &str, params: &Value) -> Answer {
+        let state = |on: bool| json!({"on": on});
+        let title = |on: bool| if on { "Metronome on" } else { "Metronome off" };
+        let now = self.metronome;
+        if method == "change_restore" {
+            let desc = Self::desc(params)?;
+            let prior = params["prior"]["on"].as_bool().ok_or_else(|| bad("prior.on"))?;
+            let applied = params["applied"]["on"].as_bool();
+            if now != prior {
+                if params["discard"] != true && applied.is_some_and(|applied| applied != now) {
+                    return Err(changed("the metronome has been turned on or off in Logic Pro since Kumi set it"));
+                }
+                self.metronome = prior;
+            }
+            let undo = self.restored(None, &desc)?;
+            return Ok(json!({
+                "epoch": self.epoch_text(), "restored": state(prior),
+                "display": {"title": format!("{} (put back)", title(prior)), "before": state(now), "after": state(prior)},
+                "undo": undo,
+            }));
+        }
+        let on = params["input"]["on"].as_bool().ok_or_else(|| bad("on must be true (the metronome's click on) or false (off)"))?;
+        if method == "change_preview" {
+            let mut display = json!({"title": title(on), "before": state(now), "after": state(on)});
+            if now == on {
+                display["unchanged"] = true.into();
+            }
+            return Ok(json!({
+                "epoch": self.epoch_text(), "target": {"ref": null, "kind": "project"}, "prior": state(now), "fence": state(now),
+                "display": display,
+            }));
+        }
+        if params["fence"] != state(now) {
+            return Err(changed("the metronome was turned on or off in Logic Pro since the preview"));
+        }
+        let desc = Self::desc(params)?;
+        self.metronome = on;
+        let undo = self.applied(None, &desc)?;
+        Ok(json!({
+            "epoch": self.epoch_text(), "applied": state(on),
+            "display": {"title": title(on), "before": state(now), "after": state(on)}, "undo": undo,
+        }))
+    }
+
     /// The Tempo List's row at a beat, if one is (0 is the project's first tempo event, always there).
     fn tempo_at(&self, beats: f64) -> Value {
         if beats == 0.0 {
@@ -3760,6 +3824,10 @@ impl State {
             project["tempo"] = self.tempo.into();
             project["trackCount"] = self.tracks.len().into();
             project["timeSignature"] = signature_text.clone().into();
+            // (M6) the octave Logic names middle C in, as the producer set it
+            if project.get("middleC").is_some() {
+                project["middleC"] = self.middle_c.into();
+            }
         };
         let playhead = || {
             let position = position_of(self.playhead);
@@ -3822,24 +3890,18 @@ impl State {
                 Some(at) => page_of(self.regions[at].note_rows(at + 1), asked),
                 None => Err(gone(params["parent"].as_str().unwrap_or_default())),
             },
-            "read" if kind == Some("project") => recorded("read", asked.clone()).map(|mut page| {
-                patch_project(&mut page["items"][0]);
-                page
+            // (M6) The project's row and the tempo row are paged as any kind's (catch-up's snapshot asks for a page).
+            "read" if kind == Some("project") => recorded("read", json!({"kind": "project"})).and_then(|page| {
+                let mut row = page["items"][0].clone();
+                patch_project(&mut row);
+                page_of(vec![row], asked)
             }),
-            "read" if kind == Some("tempo") => recorded("read", asked.clone()).map(|mut page| {
-                let row = &mut page["items"][0];
-                row["bpm"] = self.tempo.into();
-                // (M4) The Signature List as changed (the tempo row lists no tempo events, as the bridge's doesn't).
-                if self.signature != (4, 4) || !self.signature_changes.is_empty() {
-                    let key = row["signatures"][0]["key"].clone();
-                    let mut signatures = vec![json!({"key": key, "position": position_of(0.0), "time": signature_text})];
-                    signatures.extend(self.signature_changes.iter().map(|(at, (num, den))| {
-                        json!({"key": key, "position": position_of(*at), "time": format!("{num}/{den}")})
-                    }));
-                    row["signatures"] = Value::Array(signatures);
-                }
-                page
-            }),
+            "read" if kind == Some("tempo") => recorded("read", json!({"kind": "tempo"}))
+                .and_then(|page| page_of(vec![self.tempo_row(&page["items"][0], &signature_text)], asked)),
+            // (M6) The projects Logic opened lately, as File > Open Recent lists them.
+            "read" if kind == Some("recent") => page_of(self.recent_rows(), asked),
+            // (M6) The bulk read: every row of the kinds asked, as `read` pages them, from one look in one epoch.
+            "snapshot" if asked.get("rows").is_some_and(|rows| !rows.is_null()) => self.bulk(asked, &signature_text),
             "snapshot" => recorded("snapshot", asked.clone()).map(|mut snapshot| {
                 patch_project(&mut snapshot["project"]);
                 snapshot["tracks"] = Value::Array(track_rows());
@@ -3900,6 +3962,117 @@ impl State {
     }
 }
 
+impl State {
+    /// The tempo row as the Tempo and Signature Lists read now (`recorded`, the row the vectors hold): the project's tempo,
+    /// (M6) every event of the Tempo List by position (the first the project's tempo at its start), and (M4) the
+    /// Signature List as changed.
+    fn tempo_row(&self, recorded: &Value, signature_text: &str) -> Value {
+        let mut row = recorded.clone();
+        row["bpm"] = self.tempo.into();
+        if row.get("tempos").is_some() {
+            let mut tempos = vec![json!({"bpm": self.tempo, "position": position_of(0.0)})];
+            tempos.extend(self.tempo_changes.iter().map(|(at, bpm)| json!({"bpm": bpm, "position": position_of(*at)})));
+            row["tempos"] = Value::Array(tempos);
+        }
+        if self.signature != (4, 4) || !self.signature_changes.is_empty() {
+            let key = row["signatures"][0]["key"].clone();
+            let mut signatures = vec![json!({"key": key, "position": position_of(0.0), "time": signature_text})];
+            signatures.extend(
+                self.signature_changes
+                    .iter()
+                    .map(|(at, (num, den))| json!({"key": key, "position": position_of(*at), "time": format!("{num}/{den}")})),
+            );
+            row["signatures"] = Value::Array(signatures);
+        }
+        row
+    }
+
+    /// (M6) File > Open Recent's items, most recent first, as the bridge reads them (`recent.rs`): the project open now
+    /// (its path from its window), Scratch when another is open, a project Spotlight found once by its name, and one it
+    /// found under two folders (so no path).
+    fn recent_rows(&self) -> Vec<Value> {
+        let open = self.project_path();
+        let name_of = |path: &str| path.rsplit('/').next().unwrap_or(path).trim_end_matches(".logicx").to_string();
+        let mut rows = vec![json!({"name": name_of(&open), "path": open, "open": true})];
+        let recorded = project().path.unwrap_or_default();
+        if recorded != open {
+            rows.push(json!({"name": name_of(&recorded), "path": recorded, "open": false}));
+        }
+        rows.push(json!({"name": "Night Drive", "path": RECENT_FOUND, "open": false}));
+        rows.push(json!({"name": "Old Demo", "path": null, "open": false}));
+        rows.into_iter()
+            .enumerate()
+            .map(|(at, mut row)| {
+                row["index"] = (at + 1).into();
+                alphabetical(row)
+            })
+            .collect()
+    }
+
+    /// (M6) `snapshot {rows, limit?}`: every row of the kinds asked (of the bridge's `BULK_KINDS`, each once, in the
+    /// order asked), each kind's exactly what `read` pages for it, with its total; a kind past `limit` (10000 at most) is
+    /// cut there and named under `truncated`.
+    fn bulk(&self, asked: &Value, signature_text: &str) -> Answer {
+        let kinds = asked["rows"]
+            .as_array()
+            .filter(|kinds| !kinds.is_empty())
+            .ok_or_else(|| bad(format!("rows: a list of the kinds to read whole, of {}", BULK_KINDS.join(", "))))?;
+        let mut wanted: Vec<&str> = vec![];
+        for kind in kinds {
+            let name = kind.as_str().unwrap_or_default();
+            let Some(known) = BULK_KINDS.iter().find(|known| **known == name) else {
+                let parent = if ["note", "param", "smart", "automation"].contains(&name) { ", under its parent" } else { "" };
+                return Err(bad(format!(
+                    "rows: Logic Pro's bulk read takes {}; {} is read with read{parent}",
+                    BULK_KINDS.join(", "),
+                    if name.is_empty() { kind.to_string() } else { name.to_string() }
+                )));
+            };
+            if !wanted.contains(known) {
+                wanted.push(known);
+            }
+        }
+        let most = asked.get("limit").and_then(Value::as_u64).map_or(MOST_BULK, |n| (n as usize).clamp(1, MOST_BULK));
+        let recorded_row = |kind: &str| -> Result<Value, Fault> {
+            find(&self.cases, "read", &json!({"kind": kind}))
+                .and_then(|case| case.response.as_ref().ok())
+                .map(|page| page["items"][0].clone())
+                .ok_or_else(|| bad(format!("the simulator has no {kind} row recorded")))
+        };
+        let (mut rows, mut totals, mut truncated) = (serde_json::Map::new(), serde_json::Map::new(), vec![]);
+        for kind in wanted {
+            let all: Vec<Value> = match kind {
+                "project" => {
+                    let mut row = recorded_row("project")?;
+                    row["tempo"] = self.tempo.into();
+                    row["trackCount"] = self.tracks.len().into();
+                    row["timeSignature"] = signature_text.into();
+                    if row.get("middleC").is_some() {
+                        row["middleC"] = self.middle_c.into();
+                    }
+                    vec![row]
+                }
+                "track" => self.tracks.iter().enumerate().map(|(at, track)| track.row(at + 1)).collect(),
+                "region" => self.region_rows(),
+                "plugin" => self.plugin_rows(),
+                "send" => self.send_rows(),
+                "marker" => self.markers.iter().enumerate().map(|(at, marker)| marker.row(at + 1)).collect(),
+                _ => vec![self.tempo_row(&recorded_row("tempo")?, signature_text)],
+            };
+            totals.insert(kind.into(), all.len().into());
+            if all.len() > most {
+                truncated.push(Value::from(kind));
+            }
+            rows.insert(kind.into(), Value::Array(all.into_iter().take(most).collect()));
+        }
+        let mut answer = json!({"epoch": RECORDED_EPOCH.to_string(), "rows": rows, "totals": totals});
+        if !truncated.is_empty() {
+            answer["truncated"] = Value::Array(truncated);
+        }
+        Ok(answer)
+    }
+}
+
 impl LogicScript {
     /// The project of the vectors: what the bridge answers for Scratch.
     pub fn new() -> Self {
@@ -3953,6 +4126,22 @@ impl LogicScript {
     /// (M4) How many notes the region at `place` (from 1) holds.
     pub fn notes_of(&self, place: usize) -> usize {
         self.state.lock().unwrap().regions.get(place - 1).map_or(0, |region| region.notes.len())
+    }
+
+    /// (M6) Whether the control bar's Metronome Click is on (it is, as recorded).
+    pub fn metronome(&self) -> bool {
+        self.state.lock().unwrap().metronome
+    }
+
+    /// (M6) The producer turns the metronome on or off in Logic, behind Kumi's back.
+    pub fn set_metronome(&self, on: bool) {
+        self.state.lock().unwrap().metronome = on;
+    }
+
+    /// (M6) The producer chooses the octave Logic names middle C in (Settings > View > General, "Display Middle C As":
+    /// 3 for C3, 4 for C4): the project row says it from the next read.
+    pub fn set_middle_c(&self, octave: i64) {
+        self.state.lock().unwrap().middle_c = octave;
     }
 
     /// (M4) The cycle: whether it is on, and the locators in beats (off, bar 1 to bar 5, as recorded).

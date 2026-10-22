@@ -181,6 +181,67 @@ and migration checks do not replace a new real-Live acceptance run.
   1 to 5 found on disk, and the project as before at the end. The M5 gate on
   this Mac, every check passed on its first run, is recorded in
   `docs/evidence/logic-m5-gate-2026-10-21.md`.
+  M6, the bridge's new kinds and reads in Kumi: the change set declares
+  `metronome_set` (the control bar's Metronome Click, no step of Logic's undo,
+  so its row says Kumi's undo takes it back) and `sample_load` (an audio file
+  imported onto an audio track and converted into a new Sampler track below it;
+  Logic copies the file into the project's package, and its own undo takes the
+  load back, both steps, while it is on top). Kumi finds a sample's file on this
+  computer before Logic is asked, as it finds Live's (a whole path, or one under
+  `~`, to an audio file Logic imports), and refuses one that isn't there in its
+  own words. The host forwards Logic's bulk read (`snapshot` with `rows` and
+  `limit`) and its `recent` read; the model's read lists the projects Logic
+  opened lately. The simulated Logic makes both kinds as the bridge's scenes
+  do, keeps the click's state, and answers the project row's `middleC`, the tempo
+  row's Tempo List, the recent projects and the bulk read.
+  Logic's fixed phrases ("tempo 124", "mute drums", "loop 9-16", "metronome
+  off") run with no model call, as Live's do: each is one of Logic's own changes
+  (`tempo_set` in whole BPM, a header's mute, solo or arm, `loop_range` for the
+  cycle, `metronome_set`), made through `make_changes` on the project as a fresh
+  look reads it, with tracks named or counted by their place among the
+  producer's own (never an aux, an output or the Stereo Out); each lands in
+  HISTORY with Kumi's undo. A tempo past Logic's 990 BPM goes to the model.
+  Middle C follows Logic's "Display Middle C As" setting, which the project row
+  says (`middleC`, 3 or 4): the session names notes in that octave (the listen
+  tool's pitch of a sound, `find_sounds`' note words, FOCUS's keyzones), taking
+  it from the open project rather than Logic's default. A recipe's save text
+  names `watch_me` only in a DAW that has it, and Logic's
+  example of a recipe's step names its own tools (`fx_param` on the plug-in an
+  earlier `fx_add` inserted). `kumi export` takes the DAW's words from the
+  conversation's place (a Logic project's says Logic Pro and project, as the
+  session's own export does), and the export, `kumi import` and the budget's list
+  of what the producer asked recognise a loop's or a goal's request in every
+  registered DAW's framing, so one of several lines framed in REAPER's,
+  Renoise's or Logic Pro's words is the producer's, not left out as Kumi's.
+  Logic's library is its own: the session's and `kumi library`'s library learn
+  Logic's content folders (the producer's under `~/Music/Audio Music Apps`
+  before Logic's own under `/Library/Application Support/Logic`), Apple Loops,
+  Splice's folder and the folders named, never Live's; `.caf` is a sound there,
+  a patch (a package counted whole), a channel strip or plug-in setting, a
+  Sampler instrument and an Audio Unit's preset are presets (`find_presets` is
+  offered for Logic, its kinds an instrument or a plug-in's setting), and a
+  `.logicx` package is a project, counted by its name (Kumi doesn't read inside
+  it: `my_sets` lists it by its file, with no tempo or key to filter by, and the
+  producer's habits are still learned from Live's Sets alone); the library's
+  tools say so in Logic's words (`find_sounds` likens a sound to an audio
+  region's by its ref, and names `sample_load`). Logic's projects
+  are looked for in `~/Music/Logic` and the folders holding the ones it opened
+  lately, which the integration reads once connected from the bridge's File >
+  Open Recent and the library keeps for its next run: the bridge knows a recent
+  project's place only for the one open and for those Spotlight finds outside
+  `~/Music` (macOS keeps that folder from the bridge), so others aren't learned
+  until opened. REAPER and Renoise keep Live's layout, their own libraries
+  added. Over Logic, judge and groove say a region and its ref where Live's say
+  a clip, groove names Logic's note changes and says in Logic's words that it
+  can't read a region's notes there yet, and the gap guidance and `note_gap`
+  name Kumi's tools alone, as Logic has no scripting Kumi reaches.
+  A plug-in's parameter change in Logic draws in HISTORY as Live's do: the
+  values it moved at once (as Logic shows them, with what was asked when Logic
+  set something else), then, for Channel EQ and the Compressor, their curves
+  before and after (Channel EQ's eight bands; the Compressor's threshold,
+  ratio, knee and make-up), from one read of the plug-in's Controls View once
+  its changes settle. That read opens the plug-in's window in Logic for a
+  moment, as a change of it does.
 
 ## Evidence
 
@@ -231,36 +292,63 @@ bridge, the version given is the one in the commit that added it.
 - Logic Pro support can't name or rename a marker, since a marker's name cell
   isn't a text field; nor move or colour a track, since the headers can't be
   dragged from outside and the Color palette's swatches are bare positions that
-  no header reads back; the bridge refuses each saying why. The first M4 slice
-  declares the cycle range, regions, the Tempo and Signature Lists, a MIDI
-  import, Track Stacks and a key command, the kinds the bridge makes over the
-  real Logic; nor move a plug-in (Logic drags it) or set a send's mode (a mark
-  Logic draws itself, which nothing outside can read). The second slice's
-  kinds (plug-ins, settings, patches, sends, Smart Controls, automation, a
-  bounce and an export) are declared ahead of this branch's bridge: until the
-  two lanes are merged, it refuses the ones it doesn't make yet, saying why.
+  no header reads back; nor move a plug-in (Logic drags it) or set a send's
+  mode (a mark Logic draws itself, which nothing outside can read); the bridge
+  refuses each saying why. Kumi declares the kinds the bridge makes over the
+  real Logic, both M4 slices' and M6's.
   Logic has no undo block and keeps no undo step for a fader, pan, mute, solo,
   arm, tempo, bypass or the cycle, nor for a plug-in's parameter or setting
-  (steps of the plug-in window's own undo), a Smart Control or a send's level,
-  so Kumi puts those back by value; a deleted track or region, a split, an
-  import, a flattened Track Stack and a patch loaded come back through Logic's
-  own undo only while that step is on top (a deleted plug-in with its
-  settings, and a send made with the aux Logic made for it), and what a key
-  command did only Logic's own undo takes back. A region moves in time only,
+  (steps of the plug-in window's own undo), a Smart Control, a send's level or
+  the metronome, so Kumi puts those back by value; a deleted track or region, a
+  split, an import, a flattened Track Stack and a patch loaded come back
+  through Logic's own undo only while that step is on top (a deleted plug-in
+  with its settings, and a send made with the aux Logic made for it), and a
+  sample loaded goes that way, its Sampler track and both regions, the copies
+  of its file staying in the project's package. What a key command did only
+  Logic's own undo takes back. A sample goes into Logic's Sampler only: Quick
+  Sampler takes one by a drag onto its window. A region moves in time only,
   along its track; its edges, a split and an import's place go on whole beats,
   and an import makes a track of its own. The tempo takes whole BPM. Saving
   keeps no versions (that is REAPER's). Logic Pro 11 and Intel Macs are out of
   scope. See [the Logic contract](LOGIC_CONTRACT.md).
+- Logic Pro keeps no id Kumi could put inside a project, so Kumi knows a Logic
+  project by its path (the bridge's id is a hash of it): a project moved or
+  saved under another name is a new one for catching up and for memory.
+  Catching up and `watch_me` compare
+  snapshots Kumi reads through the bridge: tracks are matched by name and order
+  (a track renamed in its place and kind is told as renamed), regions by their
+  track and start, plug-ins by their order on the strip and markers by
+  position, and what can't be told apart is said to be unclear. They don't
+  compare notes or plug-in settings yet. A track whose Mixer strip Logic hadn't
+  drawn when it was read (in a project wider than the Mixer's view) has its
+  plug-ins and routing left out of the comparison rather than told as removed.
+  The Stereo Out's plug-ins are the project's own lines (one added, removed,
+  bypassed or back on), compared once both snapshots have read them. Where the
+  bridge reads every row of the kinds at once (`snapshot` with `rows`), the
+  snapshot is that one look at the project, its Mixer and List Editors shown
+  once (2.7 s on Scratch against 4.5 s for the pages, by the M6 bridge's
+  measure); an older bridge's is read a page at a time, as before.
+  A project in Logic's Project Templates folder is never caught up on.
 
 ## Open work
 
 - REAPER and Renoise on Windows and Linux, and REAPER for Windows on Arm, with
   the real DAWs.
-- Logic Pro: M6 (catch-up and `watch_me`, instant phrases, change pictures of
-  Channel EQ and Compressor, Logic's library and places, the export's words,
-  middle C), M7 (the manual, the instruction pack, knowledge probes and evals)
-  and M8 (the release); the goal search over Logic (a `GoalRig`); a region's
-  notes past the rows the Event List shows on its screen.
+- Logic Pro: M7 (the manual,
+  the instruction pack, knowledge probes and evals) and M8 (the release); the
+  goal search over Logic (a `GoalRig`); a region's notes past the rows the
+  Event List shows on its screen.
+- Logic Pro, M6: catching up on a saved project as it opens or is switched to,
+  and `watch_me`, run over the simulated Logic (the snapshot is kept in the
+  project store under the project's place, `logic-<id>`, beside its
+  conversations, saved again every five minutes and after Kumi's own changes);
+  the M6 gate on this Mac, every check passed on its third run and recorded in
+  `docs/evidence/logic-m6-gate-2026-10-21.md`, ran the bulk snapshot (2.8 s on
+  Scratch, against 4.9 s for six paged reads, the Mixer and the List Editors
+  opening once for a moment), `watch_me`, instant phrases, the metronome, a
+  sample into a Sampler track, the recent projects, middle C and the curves of
+  Channel EQ and the Compressor on the real Logic; catch-up as a project opens
+  still waits for a run of its own there.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

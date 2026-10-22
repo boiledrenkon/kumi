@@ -127,6 +127,11 @@ pub fn answer_keyed(
     let result = match method {
         "read" => 'read: {
             let want = read::want(params, project.epoch)?;
+            if matches!(&want, Want::Kind { kind, .. } if kind == "recent") {
+                // The projects Logic opened lately: its File > Open Recent menu, read without opening it.
+                let rows = crate::recent::rows(project, &mut ax).map_err(|e| Project::fault(&e))?;
+                break 'read read::page(&rows, params, project.epoch);
+            }
             if let Some(answer) = crate::changes::read_wide(project, &mut ax, keys, &want, params) {
                 break 'read answer;
             }
@@ -149,10 +154,18 @@ pub fn answer_keyed(
             let catalog = project.catalog(&mut ax, &needs).map_err(|e| Project::fault(&e))?;
             read::read(&catalog, params)
         }
-        "snapshot" => {
-            let catalog = project.catalog(&mut ax, &Needs::snapshot()).map_err(|e| Project::fault(&e))?;
-            Ok(read::snapshot(&catalog))
-        }
+        "snapshot" => match params.get("rows").filter(|rows| !rows.is_null()) {
+            // The bulk read: every row of the kinds asked from one catalog, the panes it needs shown once.
+            Some(rows) => {
+                let kinds = read::bulk_kinds(rows)?;
+                let catalog = project.catalog(&mut ax, &Needs::for_kinds(&kinds)).map_err(|e| Project::fault(&e))?;
+                Ok(read::bulk(&catalog, &kinds, params))
+            }
+            None => {
+                let catalog = project.catalog(&mut ax, &Needs::snapshot()).map_err(|e| Project::fault(&e))?;
+                Ok(read::snapshot(&catalog))
+            }
+        },
         "focus_body" => {
             let kind = params.get("kind").and_then(Value::as_str).unwrap_or("");
             let mut catalog = project.catalog(&mut ax, &Needs::for_body(kind, None)).map_err(|e| Project::fault(&e))?;

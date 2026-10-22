@@ -34,9 +34,16 @@ const BASE_HZ: f64 = 110.0;
 const LEAST_BEATS: f64 = 0.25;
 const MOST_SECONDS: f64 = 600.0;
 const MOST_CANDIDATES: usize = 16;
-/// What every answer says of the metronome: Scratch's is on (as the bridge's scenes recorded it), so it is off for
-/// the pass and on again after.
-const METRONOME: &str = "off for the pass";
+/// What an answer says of the metronome, as the bridge's `metronome_word` says it: Scratch's is on (as the bridge's
+/// scenes recorded it), so it is off for the pass and on again after; one the producer (or Kumi's `metronome-set`)
+/// turned off stays off.
+fn metronome_word(was_on: bool) -> &'static str {
+    if was_on {
+        "off for the pass"
+    } else {
+        "off"
+    }
+}
 
 /// One pass: the tracks soloed alone for it, by index (none: the whole mix, no track soloed).
 struct Pass {
@@ -274,7 +281,7 @@ impl State {
         answer["beats"] = length.into();
         answer["mute"] = mute.into();
         answer["solo"] = Value::Array(refs);
-        answer["metronome"] = METRONOME.into();
+        answer["metronome"] = metronome_word(self.metronome).into();
         answer["epoch"] = self.epoch_text().into();
         Ok(answer)
     }
@@ -323,7 +330,7 @@ impl State {
         }
         Ok(json!({
             "epoch": self.epoch_text(), "fromBeats": from, "beats": length, "mute": mute, "aligned": aligned(),
-            "metronome": METRONOME, "candidates": listed,
+            "metronome": metronome_word(self.metronome), "candidates": listed,
         }))
     }
 
@@ -347,7 +354,7 @@ impl State {
         let mut answer = json!({
             "epoch": self.epoch_text(), "file": written.file.to_string_lossy(), "seconds": written.frames as f64 / f64::from(RATE),
             "sampleRate": RATE, "channels": CHANNELS, "bits": 32, "lead": 0.0, "fromBeats": from, "beats": length,
-            "metronome": METRONOME,
+            "metronome": metronome_word(self.metronome),
         });
         if let Some(reference) = params.get("ref").filter(|reference| !reference.is_null()) {
             answer["ref"] = reference.clone();

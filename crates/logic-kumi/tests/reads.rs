@@ -46,7 +46,11 @@ fn run_with(name: &str, requests: &[(&'static str, Value)]) -> (Vec<Value>, Vec<
     let hands = SceneHands::new(&scene);
     let mut helper = Launch::launch(&mut hands.clone()).unwrap();
     logic_kumi::changes::set_settling(false);
+    // What the recording saw outside Logic (its preferences), answered back; a scene recorded before kept none.
+    let looked: Vec<Value> = scene.logic.get("disk").and_then(Value::as_array).cloned().unwrap_or_default();
+    logic_kumi::disk::set_hook(Some(logic_kumi::disk::replaying(&looked)));
     let cases = scenes::run_set(helper.as_mut(), pid, Strings::english(), status, (id.as_deref(), path.as_deref(), &pname), requests);
+    logic_kumi::disk::set_hook(None);
     (cases, hands.unrecorded())
 }
 
@@ -295,4 +299,29 @@ fn the_second_slices_reads_over_scratch_are_a_plug_ins_parameters_its_smart_cont
     assert_eq!(answer(5)["result"]["total"], 0);
     assert_eq!(answer(6)["error"]["message"], "param: pass the parent plug-in");
     assert_eq!(answer(7)["error"]["message"], "smart: pass the parent track");
+}
+
+#[test]
+fn the_project_row_says_which_octave_logic_names_middle_c_in_from_its_display_setting() {
+    // Recorded with Logic's "Display Middle C As" on C3 (Yamaha), its default: the preferences' MiddleC switch off.
+    let (cases, _) = run_with("scratch", &[("read", json!({"kind": "project"}))]);
+    assert_eq!(result(&cases[0])["items"][0]["middleC"], 3);
+    // The same scene with the switch on (C4, Roland), as the lab's toggle of the setting wrote it.
+    let scene = Scene::load(&fixtures().join("scratch")).unwrap();
+    let pid = scene.logic.get("pid").and_then(Value::as_u64).unwrap_or(1) as u32;
+    let project = scene.logic["project"].clone();
+    let hands = SceneHands::new(&scene);
+    let mut helper = Launch::launch(&mut hands.clone()).unwrap();
+    logic_kumi::changes::set_settling(false);
+    logic_kumi::disk::set_hook(Some(logic_kumi::disk::replaying(&[json!({"kind": "preference", "path": "MiddleC", "answer": "1"})])));
+    let cases = scenes::run_set(
+        helper.as_mut(),
+        pid,
+        Strings::english(),
+        json!({"project": project, "busy": false, "permission": null}),
+        (project["id"].as_str(), project["path"].as_str(), project["name"].as_str().unwrap_or_default()),
+        &[("read", json!({"kind": "project"}))],
+    );
+    logic_kumi::disk::set_hook(None);
+    assert_eq!(result(&cases[0])["items"][0]["middleC"], 4);
 }

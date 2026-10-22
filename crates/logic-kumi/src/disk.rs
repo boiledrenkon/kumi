@@ -147,6 +147,68 @@ pub fn cut(source: &Path, dest: &Path, from: u64, frames: u64) -> Option<crate::
     })
 }
 
+/// One key of Logic's preferences (the `com.apple.logic10` domain) as `defaults read` prints it ("1" for a switch that is
+/// on), through the preferences daemon, so a setting just changed in Logic's Settings window is seen at once; None when
+/// the key isn't written (Logic leaves a setting it never changed unwritten) or can't be read. The seam's path is the
+/// key alone, so a recording names no home.
+pub fn preference(key: &str) -> Option<String> {
+    let owned = key.to_string();
+    let value = look("preference", Path::new(key), &move || {
+        let Ok(output) = std::process::Command::new("defaults").args(["read", "com.apple.logic10", &owned]).output() else {
+            return Value::Null;
+        };
+        if !output.status.success() {
+            return Value::Null;
+        }
+        Value::String(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    });
+    value.as_str().map(str::to_string)
+}
+
+/// Where Spotlight finds Logic projects of these file names (`Song.logicx`): for each name, the packages of that name
+/// macOS lets Kumi see, outside any other package and the Trash. Spotlight answers only for folders the process may
+/// read, so a project under `~/Music`, which macOS keeps from a process without the Files and Folders permission,
+/// isn't found. The seam's path is the names, one a line.
+pub fn projects_named(names: &[String]) -> Vec<(String, Vec<String>)> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let owned = names.to_vec();
+    let value = look("spotlight", Path::new(&names.join("\n")), &move || {
+        let quoted: Vec<String> =
+            owned.iter().map(|name| format!("kMDItemFSName == \"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))).collect();
+        let Ok(output) = std::process::Command::new("mdfind").arg(quoted.join(" || ")).output() else { return Value::Null };
+        if !output.status.success() {
+            return Value::Null;
+        }
+        let mut found = serde_json::Map::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = Path::new(line.trim());
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            let inside = path.parent().is_some_and(|parent| {
+                parent.components().any(|part| {
+                    let part = part.as_os_str().to_string_lossy();
+                    part.ends_with(".logicx") || part == ".Trash"
+                })
+            });
+            if inside || !owned.contains(&name) {
+                continue;
+            }
+            if let Value::Array(paths) = found.entry(name).or_insert_with(|| Value::Array(vec![])) {
+                paths.push(line.trim().into());
+            }
+        }
+        Value::Object(found)
+    });
+    names
+        .iter()
+        .map(|name| {
+            let paths = value.get(name).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string);
+            (name.clone(), paths.collect())
+        })
+        .collect()
+}
+
 /// Takes the file at `path` away: whether it went.
 pub fn remove(path: &Path) -> bool {
     let owned = path.to_path_buf();

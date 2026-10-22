@@ -157,6 +157,9 @@ impl Integration for FallbackIntegration {
     async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
         self.current().recording(signal).await
     }
+    fn middle_c_octave(&self) -> Option<i8> {
+        self.current().middle_c_octave()
+    }
     fn has_instant(&self) -> bool {
         true
     }

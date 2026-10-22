@@ -8,6 +8,7 @@ use super::own_views::{body_args, selected, view};
 use crate::core::{
     contracts::{ClipNote, Integration, JsonObject},
     daw::DawProfile,
+    phrases::{InstantVocab, Switch},
     presentation::{ToolActivity, ToolPresentation},
     refs::{moved_index, Moved, RefScheme, Shift},
     view::*,
@@ -15,13 +16,13 @@ use crate::core::{
 use crate::mcp::client::BridgeDescriptor;
 use futures::{future::LocalBoxFuture, FutureExt};
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{rc::Rc, sync::LazyLock};
 
 /// (M4b) Logic's terms and ways, as its instructions carry them (a macro, so `concat!` takes it as the literal it is).
 macro_rules! addendum {
     () => {
-        "Logic Pro's words and ways: what sits on a track in the Tracks area is a region (audio or MIDI), and what a region holds are its notes or its audio. The Stereo Out is the project's output, a strip of the Mixer that no track has (its ref is in the observation's outputs; read its plug-ins with it as parent): its plug-ins act on the whole mix, so a Gain or a limiter on everything goes there. A send feeds a bus, and Logic Pro makes an aux strip for a bus nothing takes yet. A Track Stack gathers tracks under a track of its own: a summing stack mixes them through a bus, a folder stack only groups them. A fader, pan, mute, solo, arm, bypass, the tempo, the cycle, a plug-in's parameter or setting, a Smart Control and a send's level make no step of Logic Pro's own undo (Kumi's undo puts them back). Quantize is a parameter of a region's events in Logic Pro: they play on the grid and keep their positions underneath. A MIDI file imported lands on a new track of its own. Markers, tempo changes and signatures live in Logic Pro's Marker, Tempo and Signature Lists. A key command acts on what is selected in Logic Pro now. A plug-in's parameters are reached only in its window's Controls View, which Kumi opens and closes itself."
+        "Logic Pro's words and ways: what sits on a track in the Tracks area is a region (audio or MIDI), and what a region holds are its notes or its audio. The Stereo Out is the project's output, a strip of the Mixer that no track has (its ref is in the observation's outputs; read its plug-ins with it as parent): its plug-ins act on the whole mix, so a Gain or a limiter on everything goes there. A send feeds a bus, and Logic Pro makes an aux strip for a bus nothing takes yet. A Track Stack gathers tracks under a track of its own: a summing stack mixes them through a bus, a folder stack only groups them. A fader, pan, mute, solo, arm, bypass, the tempo, the cycle, a plug-in's parameter or setting, a Smart Control and a send's level make no step of Logic Pro's own undo, nor does the metronome (Kumi's undo puts them back). Quantize is a parameter of a region's events in Logic Pro: they play on the grid and keep their positions underneath. A MIDI file imported lands on a new track of its own. Markers, tempo changes and signatures live in Logic Pro's Marker, Tempo and Signature Lists. A key command acts on what is selected in Logic Pro now. A plug-in's parameters are reached only in its window's Controls View, which Kumi opens and closes itself."
     };
 }
 
@@ -41,8 +42,8 @@ pub const DAW: OwnDaw = OwnDaw {
     instructions: INSTRUCTIONS,
     mechanical: "two equal routes to the Stereo Out, a duplicated send, a send to a bus no aux takes, a muted track or a bypassed plug-in",
     read_tool: "logic_read",
-    read_description: "Read Logic Pro: the project, its tracks, and what's on them (regions, a region's notes, a channel strip's plug-ins and sends, a plug-in's parameters, a track's Smart Controls and automation, markers, the tempo and signatures), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in the Tracks area's order: kind is audio, instrument, external, aux or output; volumeDb is the fader, pan runs -64 to 63, output names the bus or Stereo Out. A region's startBeats and endBeats count from the project's start. A note's position is Logic's bar, beat, division (a sixteenth) and tick (240 to a division), its lengthTicks in ticks of 1/960 of a beat, its channel 1-16. A plug-in's slot counts its strip's plug-ins from 1, the instrument first (kind instrument or effect, bypassed when off); the Stereo Out's are read with its ref (the observation's outputs) as parent. A parameter, as the plug-in window's Controls View lists it, has value (its slider's position between min and max; null for a pop-up menu), normalized (that position's share of its range, 0 to 1) and text as Logic Pro shows it; a send names its destination bus and its level in dB (-96 is −∞); a Smart Control's value runs 0 to 1, with its text; automation comes a parameter at a time (its name and number), each event at positionBeats with its value as the Track Automation Event List's Val shows it, 0 to 127.",
-    read_kinds: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation"],
+    read_description: "Read Logic Pro: the project, its tracks, and what's on them (regions, a region's notes, a channel strip's plug-ins and sends, a plug-in's parameters, a track's Smart Controls and automation, markers, the tempo and signatures), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more. Tracks come in the Tracks area's order: kind is audio, instrument, external, aux or output; volumeDb is the fader, pan runs -64 to 63, output names the bus or Stereo Out. A region's startBeats and endBeats count from the project's start. A note's position is Logic's bar, beat, division (a sixteenth) and tick (240 to a division), its lengthTicks in ticks of 1/960 of a beat, its channel 1-16. A plug-in's slot counts its strip's plug-ins from 1, the instrument first (kind instrument or effect, bypassed when off); the Stereo Out's are read with its ref (the observation's outputs) as parent. A parameter, as the plug-in window's Controls View lists it, has value (its slider's position between min and max; null for a pop-up menu), normalized (that position's share of its range, 0 to 1) and text as Logic Pro shows it; a send names its destination bus and its level in dB (-96 is −∞); a Smart Control's value runs 0 to 1, with its text; automation comes a parameter at a time (its name and number), each event at positionBeats with its value as the Track Automation Event List's Val shows it, 0 to 127. The project row's middleC is the octave Logic Pro names middle C (MIDI 60) in, 3 (C3) or 4 (C4), as the producer set it; the tempo row's tempos are the Tempo List's events. recent lists the projects Logic Pro opened lately (File > Open Recent), most recent first, with each one's path when Kumi can tell.",
+    read_kinds: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo", "param", "smart", "automation", "recent"],
     project_kind: "project",
     fill_focus,
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
@@ -54,10 +55,48 @@ pub const DAW: OwnDaw = OwnDaw {
     open_project: Some(open_project),
     // (M5) Logic is heard: a part played and what it outputs captured, a part bounced offline (`logic_listening`).
     listening: Some(super::logic_listening::hook),
+    project: Some(&super::logic_project::PROJECT),
+    // (M6) "tempo 124", "mute drums", "loop 9-16", "metronome off" as Logic's own changes, with no model call.
+    instant: Some(&LogicInstant),
+    // (M6) Channel EQ's and the Compressor's curves, drawn after a parameter change from one read of the plug-in.
+    curves: Some(&super::logic_curves::CURVES),
     // (Logic's catch-up, watch_me and phrases are its own above: `project` and `instant`, not the host's snapshots.)
     catch_up: None,
     phrases: None,
 };
+
+/// (M6) Logic's changes for the fixed phrases: the tempo in whole BPM (Logic's tempo display takes no fraction from
+/// outside, and goes to 990), a track header's M, S and R buttons, the cycle for a loop (0 and 0 turn it off), and the
+/// control bar's Metronome Click. None of them is a step of Logic's own undo: each lands in HISTORY with Kumi's.
+pub struct LogicInstant;
+
+/// The tempo Logic's tempo display takes from outside, in whole BPM.
+const PHRASE_TEMPO: std::ops::RangeInclusive<f64> = 5.0..=990.0;
+
+impl InstantVocab for LogicInstant {
+    fn takes_tempo(&self, bpm: f64) -> bool {
+        PHRASE_TEMPO.contains(&bpm.round())
+    }
+    fn tempo(&self, bpm: f64) -> Value {
+        json!({"tool": "tempo_set", "input": {"bpm": bpm.round() as i64}})
+    }
+    fn track(&self, reference: &str, switch: Switch, on: bool) -> Value {
+        match switch {
+            Switch::Mute => json!({"tool": "track_mute", "input": {"ref": reference, "mute": on}}),
+            Switch::Solo => json!({"tool": "track_solo", "input": {"ref": reference, "solo": on}}),
+            Switch::Arm => json!({"tool": "track_arm", "input": {"ref": reference, "arm": on}}),
+        }
+    }
+    fn loop_on(&self, start: f64, length: f64) -> Value {
+        json!({"tool": "loop_range", "input": {"startBeats": start, "endBeats": start + length}})
+    }
+    fn loop_off(&self) -> Value {
+        json!({"tool": "loop_range", "input": {"startBeats": 0, "endBeats": 0}})
+    }
+    fn metronome(&self, on: bool) -> Value {
+        json!({"tool": "metronome_set", "input": {"on": on}})
+    }
+}
 
 /// Logic's bundle id: what a project is opened with when the bridge hasn't said which Logic it attached to.
 const BUNDLE_ID: &str = "com.apple.logic10";
@@ -451,13 +490,19 @@ impl RefScheme for LogicRefs {
 pub const PRESENTATION: ToolPresentation = ToolPresentation {
     label: |tool| match tool {
         "logic_read" => Some("looked at your project"),
+        "watch_me" => Some("watched you work"),
         _ => None,
     },
     doing: |tool| match tool {
         "logic_read" => Some("looking at your project"),
+        "watch_me" => Some("comparing your project"),
         _ => None,
     },
-    activity: |tool| (tool == "logic_read").then_some(ToolActivity::Read),
+    activity: |tool| match tool {
+        "logic_read" => Some(ToolActivity::Read),
+        "watch_me" => Some(ToolActivity::Look),
+        _ => None,
+    },
     plan: |tool| tool == "make_changes",
     acts: |_| false,
     read_prefix: Some("logic_"),
@@ -528,6 +573,40 @@ mod tests {
         assert_eq!(refs.parents("plugin"), Some(vec!["track".to_string(), "output".to_string()]));
         assert_eq!(refs.parents("automation"), Some(vec!["track".to_string()]));
         assert_eq!(refs.standing("7"), [("7:output:1".to_string(), "output", "Stereo Out")]);
+    }
+
+    /// (M6) Each fixed phrase is one of Logic's changes as a make_changes step: the tempo in whole BPM (one past 990
+    /// goes to the model), a header's buttons, the cycle (0 and 0 off), the click; tracks by name or by their place among
+    /// the producer's own (no aux or output track), never the Stereo Out.
+    #[test]
+    fn each_fixed_phrase_is_one_of_logics_changes() {
+        use crate::core::phrases::{instant_steps, parse, PhraseTrack};
+        let rows = [
+            ("1:track:1", "Vocal", true, false),
+            ("1:track:2", "Bus 1", false, false),
+            ("1:track:3", "Keys", true, false),
+            ("1:track:4", "Stereo Out", false, true),
+        ];
+        let tracks: Vec<PhraseTrack> =
+            rows.iter().map(|(reference, name, own, master)| PhraseTrack { reference, name, own: *own, master: *master }).collect();
+        let step = |text: &str| instant_steps(&LogicInstant, &parse(text).unwrap(), &tracks, 3.0).map(|plan| plan["steps"][0].clone());
+        assert_eq!(step("tempo 124"), Some(json!({"tool": "tempo_set", "input": {"bpm": 124}})));
+        assert_eq!(step("tempo 87.5").unwrap()["input"]["bpm"], 88, "whole BPM, as Logic's tempo display takes it");
+        assert_eq!(step("tempo 990.4").unwrap()["input"]["bpm"], 990);
+        assert_eq!(step("tempo 995"), None, "past Logic's 990: the model says why");
+        assert_eq!(step("mute keys"), Some(json!({"tool": "track_mute", "input": {"ref": "1:track:3", "mute": true}})));
+        assert_eq!(step("unsolo vocal"), Some(json!({"tool": "track_solo", "input": {"ref": "1:track:1", "solo": false}})));
+        assert_eq!(
+            step("arm track 2"),
+            Some(json!({"tool": "track_arm", "input": {"ref": "1:track:3", "arm": true}})),
+            "an aux isn't the producer's own"
+        );
+        assert_eq!(step("mute stereo out"), None, "the master is never named");
+        // In 3/4, bars 9 to 16 start at beat 24 and end at beat 48.
+        assert_eq!(step("loop 9-16"), Some(json!({"tool": "loop_range", "input": {"startBeats": 24.0, "endBeats": 48.0}})));
+        assert_eq!(step("loop off"), Some(json!({"tool": "loop_range", "input": {"startBeats": 0, "endBeats": 0}})));
+        assert_eq!(step("metronome off"), Some(json!({"tool": "metronome_set", "input": {"on": false}})));
+        assert_eq!(instant_steps(&LogicInstant, &parse("tempo 124").unwrap(), &tracks, 4.0).unwrap()["final"], true);
     }
 
     /// (M4b) The Stereo Out stands in every epoch, though no read lists it: named once, its name kept when the epoch

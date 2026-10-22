@@ -57,6 +57,12 @@ pub struct PromptVocab {
     pub recipe_step_example: &'static str,
     /// A capability scripts can't reach, for note_gap's example: "setting Operator's voice count".
     pub missing_example: &'static str,
+    /// What a request may need beyond, as the gap guidance says it: "Kumi's tools or Live's scripting" (Kumi's tools
+    /// alone, for a DAW Kumi reaches only through them).
+    pub gap_offer: &'static str,
+    /// What may lack a capability, as the gap tool says it, with its example: "Kumi's tools or Live's API lack it (a
+    /// device setting scripts can't reach, an operation no tool offers)".
+    pub gap_lack: &'static str,
     /// Base instruments a sound-matching search tries apart: "Operator, Wavetable, Drift, Collision or a Simpler sample".
     pub goal_instruments: &'static str,
     /// Topologies to try apart: "serial chains against parallel racks".
@@ -216,6 +222,12 @@ macro_rules! live_word {
     };
     (missing_example) => {
         "setting Operator's voice count"
+    };
+    (gap_offer) => {
+        "Kumi's tools or Live's scripting"
+    };
+    (gap_lack) => {
+        "Kumi's tools or Live's API lack it (a device setting scripts can't reach, an operation no tool offers)"
     };
     (goal_instruments) => {
         "Operator, Wavetable, Drift, Collision or a Simpler sample"
@@ -387,6 +399,12 @@ macro_rules! daw_word {
     };
     ($profile:expr, missing_example) => {
         $profile.vocab.missing_example
+    };
+    ($profile:expr, gap_offer) => {
+        $profile.vocab.gap_offer
+    };
+    ($profile:expr, gap_lack) => {
+        $profile.vocab.gap_lack
     };
     ($profile:expr, goal_instruments) => {
         $profile.vocab.goal_instruments
@@ -673,6 +691,8 @@ impl DawProfile {
             ref_example: "track:3",
             recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
             missing_example: "setting a synth's voice count",
+            gap_offer: "Kumi's tools or the DAW's scripting",
+            gap_lack: "Kumi's tools or the DAW's API lack it (a device setting scripts can't reach, an operation no tool offers)",
             goal_instruments: "different synths or a sampler",
             serial_parallel: "serial chains against parallel ones",
             build_chains: "add parallel chains, load devices into them",
@@ -779,6 +799,8 @@ impl DawProfile {
             ref_example: crate::live_word!(ref_example),
             recipe_step_example: crate::live_word!(recipe_step_example),
             missing_example: crate::live_word!(missing_example),
+            gap_offer: crate::live_word!(gap_offer),
+            gap_lack: crate::live_word!(gap_lack),
             goal_instruments: crate::live_word!(goal_instruments),
             serial_parallel: crate::live_word!(serial_parallel),
             build_chains: crate::live_word!(build_chains),
@@ -872,6 +894,8 @@ impl DawProfile {
             ref_example: "track:3",
             recipe_step_example: "a parameter set by its name on an FX an earlier step added",
             missing_example: "setting a plug-in's oversampling",
+            gap_offer: "Kumi's tools or REAPER's scripting",
+            gap_lack: "Kumi's tools or REAPER's API lack it (a device setting scripts can't reach, an operation no tool offers)",
             goal_instruments: "ReaSynth, a ReaSamplOmatic5000 sample or a plug-in synth",
             serial_parallel: "serial FX chains against parallel containers",
             build_chains: "add an FX container with parallel chains, load FX into them",
@@ -965,6 +989,8 @@ impl DawProfile {
             ref_example: "track:3",
             recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
             missing_example: "setting a plug-in's oversampling",
+            gap_offer: "Kumi's tools or Renoise's scripting",
+            gap_lack: "Kumi's tools or Renoise's API lack it (a device setting scripts can't reach, an operation no tool offers)",
             goal_instruments: "a sample instrument with keyzones, a plug-in synth or a Doofer of layers",
             serial_parallel: "serial device chains against a Splitter's parallel branches",
             build_chains: "add a Splitter, load devices into its branches",
@@ -1029,9 +1055,12 @@ impl DawProfile {
         // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window. Kumi's
         // changes in Logic are undone through its host's journal (M3), each as a new step of Logic's own undo. (M5) Kumi
         // hears Logic: it plays a part and captures what Logic outputs, and auditions candidates a pass each; a region's
-        // audio file waits for the bridge's rows to name it, and a goal's render rig for a later slice.
+        // audio file waits for the bridge's rows to name it, and a goal's render rig for a later slice. A saved project is
+        // caught up on as it opens (M6), from the snapshot Kumi kept of it; its id is its path's, not kept inside it. Its
+        // fixed phrases run with no model call (M6), each as one of its own changes.
         caps: Capabilities {
             undo: true,
+            instant: true,
             hear: true,
             audition: true,
             device_tree: true,
@@ -1042,13 +1071,17 @@ impl DawProfile {
             recording_state: true,
             open_project: true,
             ui_hands: true,
+            catch_up: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",
-            recipe_step_example: "a parameter set by its name on a plug-in an earlier step inserted",
+            recipe_step_example: "fx_param with ref \"@eq\" and param \"Peak 1 Gain\", on the plug-in an earlier step inserted with fx_add as \"eq\"",
             missing_example: "setting a plug-in's oversampling",
+            // Logic has no scripting of its own that Kumi reaches: its bridge works Logic's windows for Kumi's tools.
+            gap_offer: "Kumi's tools",
+            gap_lack: "Kumi's tools lack it (a plug-in setting Kumi's bridge can't reach, an operation no tool offers)",
             goal_instruments: "Alchemy, Retro Synth, Sampler, Quick Sampler or an Audio Unit synth",
             serial_parallel: "serial insert chains against parallel auxes fed by sends",
             build_chains: "add aux tracks fed by sends, insert plug-ins on them",
@@ -1122,6 +1155,15 @@ impl DawProfile {
         } else {
             self
         }
+    }
+
+    /// The same DAW naming middle C (MIDI 60) in `octave` when the open project says it does (Logic Pro's "Display
+    /// Middle C as", 3 or 4); as its profile has it otherwise.
+    pub fn with_middle_c(mut self, octave: Option<i8>) -> DawProfile {
+        if let Some(octave) = octave {
+            self.vocab.middle_c_octave = octave;
+        }
+        self
     }
 
     /// A MIDI note by the name the DAW gives it: "C3" for 60 in Live.
@@ -1301,6 +1343,11 @@ mod tests {
         assert_eq!((DawProfile::LOGIC.words.master, DawProfile::LOGIC.words.timeline), ("Stereo Out", "Tracks area"));
         // Logic names middle C as Live does; its channel strips, regions and plug-ins are its own words.
         assert_eq!(DawProfile::LOGIC.note_name(60), "C3");
+        // (M6) Logic's "Display Middle C As", as the open project says it: C4 when the producer chose it.
+        assert_eq!(DawProfile::LOGIC.with_middle_c(Some(4)).note_name(60), "C4");
+        assert_eq!(DawProfile::LOGIC.with_middle_c(Some(4)).note_name(61), "C#4");
+        assert_eq!(DawProfile::LOGIC.with_middle_c(None).note_name(60), "C3");
+        assert_eq!(DawProfile::LOGIC.with_middle_c(Some(3)), DawProfile::LOGIC);
         assert_eq!(DawProfile::LOGIC.vocab.eq, "Channel EQ");
         assert!(DawProfile::LOGIC.caps.device_tree && DawProfile::LOGIC.caps.note_view && DawProfile::LOGIC.caps.timeline_strip);
         assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && DawProfile::LOGIC.caps.undo);

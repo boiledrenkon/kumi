@@ -6,7 +6,10 @@ mod daws_doc;
 pub mod fallback;
 pub mod logic;
 pub mod logic_changes;
+pub mod logic_curves;
+pub mod logic_library;
 pub mod logic_listening;
+pub mod logic_project;
 pub mod none;
 pub mod own_bridge;
 pub mod own_catchup;
@@ -17,6 +20,7 @@ pub mod own_listen;
 pub mod own_listening;
 pub mod own_phrases;
 pub mod own_pictures;
+pub mod own_project;
 pub mod own_views;
 #[cfg(test)]
 mod pack_tests;
@@ -80,18 +84,34 @@ pub fn manual_tool(id: DawId, options: live_manual::ManualOptions) -> Option<std
     }
 }
 
-/// Where the DAW keeps the producer's sounds, presets and saved projects, beside the folders named: Live's layout (its
-/// User Library, Places, packs and Core Library) and Splice's folder. Live is the only DAW registered; another DAW's
-/// places come with it.
-pub fn library_sources(options: &crate::library::sources::SourceOptions) -> Vec<crate::library::sources::Source> {
-    debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's places");
-    crate::library::sources::library_sources(options)
+/// What a DAW gives the library of its own (its places, files and projects): Logic Pro's; None for Live's layout, which
+/// REAPER and Renoise take too until their own places come with them.
+pub fn library(daw: Option<DawId>) -> Option<&'static crate::library::sources::DawLibrary> {
+    match daw {
+        Some(DawId::Logic) => Some(&logic_library::LIBRARY),
+        _ => None,
+    }
 }
 
-/// The DAW's saved projects it opened lately (Live's Sets, from its log).
+/// Where the DAW keeps the producer's sounds, presets and saved projects, beside the folders named: Live's layout (its
+/// User Library, Places, packs and Core Library) and Splice's folder; (M6) Logic Pro's content folders, the producer's
+/// before Logic's own, Apple Loops and Splice's.
+pub fn library_sources(options: &crate::library::sources::SourceOptions) -> Vec<crate::library::sources::Source> {
+    debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's places");
+    match library(options.daw) {
+        Some(library) => (library.sources)(options),
+        None => crate::library::sources::library_sources(options),
+    }
+}
+
+/// The DAW's saved projects it opened lately: Live's Sets, from its log; (M6) Logic Pro's as its bridge read them from
+/// File > Open Recent (none until a session has read them).
 pub fn recent_projects(options: &crate::library::sources::SourceOptions) -> Vec<String> {
     debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's projects");
-    crate::library::sources::recent_sets(options)
+    match library(options.daw) {
+        Some(library) => (library.recent)(options),
+        None => crate::library::sources::recent_sets(options),
+    }
 }
 
 /// REAPER's and Renoise's instructions, packs included, keep within the budget Live's instructions keep. (Here, because

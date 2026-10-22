@@ -434,6 +434,25 @@ fn tool_list(daw: Daw) -> Value {
                 "description": "The ref of a track to centre the first page of the timeline's lanes on: the page starts half a page above it, and says where in `from`.",
             }),
         );
+        // (M6) The bulk read: every row of the kinds asked, from one look at the project in one epoch, as `read` pages
+        // them (catch-up reads a project whole this way, showing Logic's panes once rather than once a kind).
+        property(
+            &mut list,
+            "snapshot",
+            "rows",
+            json!({
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "enum": ["project", "track", "region", "plugin", "send", "marker", "tempo"]},
+                "description": "The kinds to read whole instead of the one screen: the answer is {epoch, rows: {kind: [rows]}, totals: {kind: n}, truncated?: [kinds]}, each kind's rows exactly what read pages for it, in one epoch.",
+            }),
+        );
+        property(
+            &mut list,
+            "snapshot",
+            "limit",
+            json!({"type": "integer", "minimum": 1, "maximum": crate::tools::MOST_BULK_ROWS, "description": "With rows: the most rows of a kind (10000 by default); a kind with more is named under truncated, to page with read."}),
+        );
         // (M4b) A bounce and the tracks exported: files written, nothing in the project changed, so no change and no undo.
         let epoch = json!({"type": "string", "description": "The epoch of the answer the project was read in: if the project open now is another, it is refused as stale."});
         list.as_array_mut().expect("a list").push(json!({

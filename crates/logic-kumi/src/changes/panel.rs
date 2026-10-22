@@ -202,6 +202,31 @@ pub fn press(ax: &mut Ax, panel: &Panel, id: &str) -> Done<()> {
     Ok(())
 }
 
+/// Presses a button (`OKButton`) once the panel enables it. Logic's panel for an audio import reads the file it was
+/// taken to (its format and length show beside it) before its Open button takes a press: pressed right after the
+/// go-to sheet went, the button was still disabled and the panel stayed up (M6). Polled until it is enabled or the
+/// wait is up, then pressed; the panel's going says whether it took the press.
+pub fn press_when_enabled(ax: &mut Ax, panel: &Panel, id: &str, wait: Duration) -> Done<()> {
+    let until = Instant::now() + wait;
+    loop {
+        let reply = nudge::read(
+            ax.helper
+                .call("tree", json!({"pid": panel.pid, "root": "focused", "path": "", "depth": 2, "children": 40, "attrs": ["role", "id", "enabled"]}))
+                .map_err(crate::ax::AxError::from),
+        )?;
+        let node = Node::from_json(&reply["node"]);
+        let ready = control(&node, id).map(|button| (button.path.clone(), button.enabled != Some(false)));
+        match ready {
+            Some((path, enabled)) if enabled || Instant::now() >= until => {
+                call(ax, "action", json!({"pid": panel.pid, "root": "focused", "path": path, "name": "AXPress", "settleMs": SETTLE_MS}))?;
+                return Ok(());
+            }
+            None if Instant::now() >= until => return Err(failed(format!("the panel shows no {id}"))),
+            _ => super::pause(Duration::from_millis(150)),
+        }
+    }
+}
+
 /// Cancels a panel left up, as far as it can (a go-to-folder sheet closed first): nothing is written.
 pub fn cancel(ax: &mut Ax, panel: &Panel) {
     if let Ok(Some(_)) = sheet(ax, panel) {

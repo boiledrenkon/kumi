@@ -8,7 +8,7 @@ use crate::{
         daw::DawProfile,
         errors::{FailureKind, KumiError, RuntimeError},
         fold::fold_tracks_with,
-        phrases::{Intent, PhraseTrack},
+        phrases::{instant_steps, InstantVocab, Intent, PhraseTrack},
         place::{is_project_id, unsaved, Place},
         plan::make_changes,
         project::{decide_project_with, ProjectRules},
@@ -22,6 +22,7 @@ use crate::{
         own_listen::{HookListening, ListenHook, OwnListenLink},
         own_listening::{Flags, OwnListening},
         own_phrases::{PhraseLook, Phrased},
+        own_project::{OwnProject, Remember, Seen},
     },
     library::taste,
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
@@ -94,12 +95,36 @@ pub struct OwnDaw {
     /// (M5) Hears the DAW: builds the listening tools' `Renderer`, and what answers `hear` and `audio_file`, over Kumi's
     /// link to its host (Logic's); None for a DAW Kumi can't hear yet, whose integration offers no listening.
     pub listening: Option<ListenHook>,
-    /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe; None for a
-    /// DAW without them (Logic's).
+    /// How Kumi catches up on the DAW's saved projects and watches the producer work (watch_me): its snapshot of a
+    /// project and how two differ, in its words. None for a DAW that has neither yet.
+    pub project: Option<&'static OwnProject>,
+    /// (M6) The fixed phrases ("tempo 124", "mute drums", "loop 9-16", "metronome off") as the DAW's own changes, run
+    /// through make_changes with no model call (each lands in HISTORY with Kumi's undo); None for a DAW whose phrases go
+    /// to the model.
+    pub instant: Option<&'static (dyn InstantVocab + Sync)>,
+    /// (M6) How the DAW's equaliser's and compressor's curves are read from their plug-in's parameters, for the
+    /// pictures of a parameter change (Logic's Channel EQ and Compressor); None for a DAW that draws none.
+    pub curves: Option<&'static OwnCurves>,
+    /// M6: what catch-up and watch_me say of its projects, and how a watched routine is drafted as a recipe, for a DAW
+    /// whose host keeps its snapshots (REAPER's, Renoise's); None for one whose catch-up is Kumi's own (`project`).
     pub catch_up: Option<&'static CatchUpWords>,
-    /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call; None for a DAW without them
-    /// (Logic's).
+    /// How it makes the fixed phrases ("tempo 124", "mute drums") with no model call, from the look; None for a DAW
+    /// whose phrases are its own vocabulary's (`instant`).
     pub phrases: Option<&'static super::own_phrases::OwnPhrases>,
+}
+
+/// (M6) A DAW's curves: its reader, and which parameters' changes are worth a read of the plug-in's others for one.
+pub struct OwnCurves {
+    pub reader: &'static (dyn crate::core::picture::CurveReader + Sync),
+    pub curve_parameter: fn(&str) -> bool,
+}
+
+/// (M6) What a fixed phrase finds in the project as Kumi last looked at it: each track's ref, name, kind and whether it
+/// is a Track Stack's own track, in order, and the beats in a bar of the project's signature.
+#[derive(Clone)]
+struct Phrases {
+    tracks: Vec<(String, String, String, bool)>,
+    beats_per_bar: f64,
 }
 
 /// Opens a project's file with the DAW that's running (`resource`: the running DAW as the host's status names it,
@@ -188,6 +213,14 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     /// (M5) The DAW's listening, when it hears through a hook of its own (Logic's): its listening tools and what
     /// hears for `hear`, in place of the shared listening's.
     hook_listening: Option<HookListening>,
+    /// What Kumi keeps of the saved project open, for catching up and watch_me, for a DAW that has them.
+    remember: Option<Rc<Remember>>,
+    /// (M6) The project's tracks and bar as the last look read them, for the fixed phrases.
+    phrases: RefCell<Option<Phrases>>,
+    /// (M6) The octave the DAW names middle C in, as the open project's row last said (Logic's `middleC`).
+    middle_c: Cell<Option<i8>>,
+    /// (M6) The recent projects were read and told (once an integration).
+    recent_read: Cell<bool>,
     /// M6: when the project's snapshot is kept again, and what catch-up told of it.
     remembered: Rc<Remembered>,
     /// The task that keeps the snapshot again as edits settle is running.
@@ -332,16 +365,25 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         made_in: RefCell::default(),
     });
     let context = &options.context;
-    // A change of Kumi's (or its undo) is kept in the project's snapshot once things settle.
+    // (the session's project store, from the neutral context: none keeps no baseline)
+    let remember = daw.project.map(|project| {
+        let store = context.project_store.clone();
+        Remember::new(project, daw.profile, store, link.endpoint.clone(), link.connected.clone(), link.lifetime.clone(), context)
+    });
+    // A change of Kumi's (or its undo) is kept in the project's snapshot once things settle: the host's (REAPER's and
+    // Renoise's catch-up) or Kumi's own baseline (Logic's), so the next catch-up doesn't tell it as the producer's.
     let remembered = Rc::new(Remembered::default());
     let on_change: Option<Rc<dyn Fn(ChangeRecord)>> = {
-        let (remembered, on_change) = (Rc::downgrade(&remembered), context.on_change.clone());
+        let (remembered, remember, told) = (Rc::downgrade(&remembered), remember.as_ref().map(Rc::downgrade), context.on_change.clone());
         Some(Rc::new(move |record: ChangeRecord| {
             if let Some(remembered) = remembered.upgrade() {
                 remembered.kumi_changed();
             }
-            if let Some(on_change) = &on_change {
-                on_change(record);
+            if let Some(remember) = remember.as_ref().and_then(|remember| remember.upgrade()) {
+                remember.keep_soon();
+            }
+            if let Some(told) = &told {
+                told(record);
             }
         }))
     };
@@ -389,6 +431,10 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         projects: Rc::new(tokio::sync::watch::channel(None).0),
         project_changed: Rc::default(),
         hook_listening,
+        remember,
+        phrases: RefCell::default(),
+        middle_c: Cell::default(),
+        recent_read: Cell::default(),
         remembered,
         keeping: Cell::new(false),
         listening,
@@ -924,6 +970,37 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         Some((self.daw.permission_words)(permission))
     }
 
+    /// (M6) The projects the DAW opened lately, as its bridge reads them (Logic's File > Open Recent), told once to
+    /// whoever keeps them (the library, which learns them and the folders they're in): the ones whose place the bridge
+    /// knew. A DAW whose read has no such kind tells nothing.
+    fn read_recent(&self) {
+        let Some(told) = self.options.context.on_recent_projects.clone() else { return };
+        if !self.daw.read_kinds.contains(&"recent") || self.recent_read.replace(true) {
+            return;
+        }
+        let Some(endpoint) = self.endpoint.borrow().clone() else {
+            self.recent_read.set(false);
+            return;
+        };
+        tokio::task::spawn_local(async move {
+            let mut args = JsonObject::new();
+            args.insert("kind".into(), "recent".into());
+            args.insert("limit".into(), 50.into());
+            let Ok(result) = endpoint.call("read", args, abort::timeout(CALL_MS)).await else { return };
+            let Ok(page) = answer_of(&result) else { return };
+            let paths: Vec<String> = page
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row.get("path").and_then(Value::as_str))
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect();
+            told(paths);
+        });
+    }
+
     /// Asks the session for another look a second from now (a few times at most since the last good one).
     fn look_again_later(&self) {
         let Some(look_again) = self.options.context.on_look_again.clone() else { return };
@@ -978,12 +1055,69 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
     }
 
-    /// The model's tools: the read, the DAW's changes with their plan and undo, and the listening tools it can run now
-    /// ((M5) through its own hook, for a DAW that hears through one).
+    /// (the shared phrases') A fixed phrase as the DAW's change, in the project the session's look just read: one plan, so it lands in HISTORY
+    /// with Kumi's undo and Kumi says what changed. A phrase the DAW has no such thing for is refused in its words; one
+    /// that can't run as asked here goes to the model.
+    async fn shared_instant(
+        &self,
+        phrases: &super::own_phrases::OwnPhrases,
+        intent: &Intent,
+        signal: Signal,
+    ) -> Result<Option<InstantOutcome>, RuntimeError> {
+        if self.closed.get() || !self.connected.get() {
+            return Ok(None);
+        }
+        let Some(snapshot) = self.looked.borrow().clone() else { return Ok(None) };
+        let Some(rows) = self.every_track(&snapshot, &signal).await? else { return Ok(None) };
+        let slots = match intent {
+            Intent::Loop { .. } if phrases.loops_by_slot => match self.slots(&snapshot, &signal).await? {
+                Some(slots) => Some(slots),
+                None => return Ok(None),
+            },
+            _ => None,
+        };
+        // Each track by this turn's short ref, as the look named them; the master never counts, nor a send track by place.
+        let named: Vec<(String, String, bool, bool)> = {
+            let mut book = self.book.borrow_mut();
+            rows.iter()
+                .filter_map(|row| {
+                    let kind = row.get("type").and_then(Value::as_str);
+                    let master = row.get("master") == Some(&Value::Bool(true)) || kind == Some("master");
+                    let name = row.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    Some((book.short_ref(row.get("ref")?.as_str()?), name, !master && kind != Some("send"), master))
+                })
+                .collect()
+        };
+        let tracks: Vec<PhraseTrack> =
+            named.iter().map(|(reference, name, own, master)| PhraseTrack { reference, name, own: *own, master: *master }).collect();
+        let none = Value::Null;
+        let look = PhraseLook {
+            tracks: &tracks,
+            project: snapshot.get("project").unwrap_or(&none),
+            transport: snapshot.get("transport").unwrap_or(&none),
+            slots: slots.as_deref(),
+        };
+        match (phrases.plan)(intent, &look) {
+            Phrased::Model => Ok(None),
+            Phrased::Refused(text) => Ok(Some(InstantOutcome { text, is_error: true })),
+            Phrased::Steps(steps) => {
+                let plan = json!({"steps": steps, "final": true}).as_object().cloned().unwrap_or_default();
+                let result = make_changes(&self.changes, plan, signal).await?;
+                Ok(Some(InstantOutcome {
+                    text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text),
+                    is_error: result.is_error,
+                }))
+            }
+        }
+    }
+
+    /// The model's tools: the read, the DAW's changes with their plan and undo, watch_me, the listening tools it can run
+    /// now ((M5) through its own hook, for a DAW that hears through one), and the variations where the DAW offers them.
     fn tools(&self) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = vec![self.read_tool()];
         tools.extend(self.changes.tools());
-        // M6: learning a routine the producer does by hand, for a recipe.
+        // M6: learning a routine the producer does by hand, for a recipe: the host's watch (REAPER's and Renoise's), or
+        // Kumi's own over its baseline (Logic's), after the listening tools.
         if let Some(words) = self.daw.catch_up {
             tools.push(Rc::new(WatchTool {
                 endpoint: self.endpoint.clone(),
@@ -995,6 +1129,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         match &self.hook_listening {
             Some(listening) => tools.extend(listening.tools()),
             None => tools.extend(self.listening.tools()),
+        }
+        if let Some(remember) = &self.remember {
+            tools.push(remember.watch_tool());
         }
         // M7: the variations loop, where the DAW offers it.
         if let Some(variations) = &self.variations {
@@ -1123,6 +1260,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
 
     /// The observation from the host's snapshot.
     fn observation(&self, snapshot: &Value, pinned: Option<&PinnedNode>) -> Observation {
+        // (the DAW went away since the look before, and is back: its project's identity went with it)
+        let came_back = self.identity.borrow().is_none();
         self.see_epoch(snapshot.get("epoch").and_then(Value::as_str));
         note_epoch(&self.seen_in, &self.book.borrow().scheme, snapshot);
         if self.layout.get().is_none() {
@@ -1243,6 +1382,16 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         } else if !markers.is_null() {
             context["markers"] = markers;
         }
+        // A saved project opened or switched to is caught up on, and what changed since Kumi last saw it is told here.
+        if let Some(remember) = &self.remember {
+            let playing =
+                ["playing", "recording"].iter().any(|key| snapshot.pointer(&format!("/transport/{key}")) == Some(&Value::Bool(true)));
+            let path = project.get("path").and_then(Value::as_str);
+            remember.seen(Seen { id: saved, path, name: &name, came_back, playing });
+            if let Some(since) = remember.context() {
+                context["sinceLastTime"] = Value::Object(since);
+            }
+        }
         if let Some(latest) = self.changes.latest() {
             context["kumiChanges"] = latest;
         }
@@ -1250,6 +1399,28 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         if let Some(pin) = pinned {
             context["pinned"] = self.pin_now(pin);
         }
+        // (M6) What a fixed phrase finds: the tracks as read (long refs, in the project's order) and the bar's beats.
+        if self.daw.instant.is_some() {
+            let tracks = snapshot.get("tracks").and_then(Value::as_array).into_iter().flatten();
+            let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+            let signature =
+                ["/transport/timeSignature", "/project/timeSignature"].iter().find_map(|at| snapshot.pointer(at)).and_then(Value::as_str);
+            let beats_per_bar = signature
+                .and_then(|signature| signature.split('/').next()?.trim().parse::<f64>().ok())
+                .or_else(|| snapshot.pointer("/transport/beatsPerBar").and_then(Value::as_f64))
+                .filter(|beats| beats.is_finite() && *beats > 0.0)
+                .unwrap_or(4.0);
+            *self.phrases.borrow_mut() = Some(Phrases {
+                tracks: tracks
+                    .filter(|row| row.get("ref").is_some_and(Value::is_string))
+                    .map(|row| (text(row, "ref"), text(row, "name"), text(row, "kind"), row.get("stack") == Some(&Value::Bool(true))))
+                    .collect(),
+                beats_per_bar,
+            });
+        }
+        // (M6) The octave the producer has the DAW name middle C in (Logic's "Display Middle C as": 3 or 4).
+        self.middle_c
+            .set(project.get("middleC").and_then(Value::as_i64).filter(|octave| matches!(octave, 3 | 4)).map(|octave| octave as i8));
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         // M6: what changed while Kumi wasn't looking, while this project stays open.
         if let Some(since) = identity.as_deref().and_then(|identity| self.remembered.since(identity)) {
@@ -1346,7 +1517,11 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 *self.file.borrow_mut() = Some(path.to_owned());
             }
         }
-        self.set_connected(status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false))));
+        let connected = status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false)));
+        self.set_connected(connected);
+        if connected {
+            self.read_recent();
+        }
         self.watch_focus();
         self.keep_snapshots();
         Ok(())
@@ -1521,6 +1696,47 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     fn has_stop_live(&self) -> bool {
         true
     }
+    fn middle_c_octave(&self) -> Option<i8> {
+        self.middle_c.get()
+    }
+    /// (M6) A fixed phrase as the DAW's own change, with no model call: from the DAW's own vocabulary (Logic's), one
+    /// make_changes step on the project as the session's fresh look read it, or from the shared phrases (REAPER's and
+    /// Renoise's). None when it can't run as asked here (a track that isn't there, or two that fit; a tempo the DAW
+    /// doesn't take): the model takes it.
+    fn has_instant(&self) -> bool {
+        (self.daw.instant.is_some() || self.daw.phrases.is_some()) && self.daw.profile.caps.instant
+    }
+    async fn instant(&self, intent: &Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        if !self.has_instant() {
+            return Ok(None);
+        }
+        // REAPER's and Renoise's phrases are the shared ones, made from the look.
+        let Some(vocab) = self.daw.instant else {
+            return match self.daw.phrases {
+                Some(phrases) => self.shared_instant(phrases, intent, signal).await,
+                None => Ok(None),
+            };
+        };
+        if self.closed.get() || !self.connected.get() {
+            return Ok(None);
+        }
+        let Some(phrases) = self.phrases.borrow().clone() else { return Ok(None) };
+        // A track counts by its place among the producer's own (an audio, software instrument or external MIDI track, or
+        // a Track Stack's own track), never an aux's or an output's; an output track is the master, never named.
+        let tracks: Vec<PhraseTrack> = phrases
+            .tracks
+            .iter()
+            .map(|(reference, name, kind, stack)| PhraseTrack {
+                reference,
+                name,
+                own: *stack || matches!(kind.as_str(), "audio" | "instrument" | "external"),
+                master: kind == "output",
+            })
+            .collect();
+        let Some(plan) = instant_steps(vocab, intent, &tracks, phrases.beats_per_bar) else { return Ok(None) };
+        let result = make_changes(&self.changes, plan.as_object().cloned().unwrap_or_default(), signal).await?;
+        Ok(Some(InstantOutcome { text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text), is_error: result.is_error }))
+    }
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         // What Kumi plays out loud stops too (a preview isn't the DAW's playback).
         if self.listening.renderer.flags().known {
@@ -1537,57 +1753,6 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         let Ok(focus) = self.call("focus", json!({}), signal).await? else { return Ok(None) };
         let on = |key: &str| focus.pointer(&format!("/transport/{key}")).and_then(Value::as_bool);
         Ok(on("playing").map(|playing| playing && on("recording") == Some(true)))
-    }
-    /// A fixed phrase as the DAW's change, in the project the session's look just read: one plan, so it lands in HISTORY
-    /// with Kumi's undo and Kumi says what changed. A phrase the DAW has no such thing for is refused in its words; one
-    /// that can't run as asked here goes to the model. None for a DAW without them (Logic's).
-    async fn instant(&self, intent: &Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
-        let Some(phrases) = self.daw.phrases else { return Ok(None) };
-        if self.closed.get() || !self.connected.get() {
-            return Ok(None);
-        }
-        let Some(snapshot) = self.looked.borrow().clone() else { return Ok(None) };
-        let Some(rows) = self.every_track(&snapshot, &signal).await? else { return Ok(None) };
-        let slots = match intent {
-            Intent::Loop { .. } if phrases.loops_by_slot => match self.slots(&snapshot, &signal).await? {
-                Some(slots) => Some(slots),
-                None => return Ok(None),
-            },
-            _ => None,
-        };
-        // Each track by this turn's short ref, as the look named them; the master never counts, nor a send track by place.
-        let named: Vec<(String, String, bool, bool)> = {
-            let mut book = self.book.borrow_mut();
-            rows.iter()
-                .filter_map(|row| {
-                    let kind = row.get("type").and_then(Value::as_str);
-                    let master = row.get("master") == Some(&Value::Bool(true)) || kind == Some("master");
-                    let name = row.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
-                    Some((book.short_ref(row.get("ref")?.as_str()?), name, !master && kind != Some("send"), master))
-                })
-                .collect()
-        };
-        let tracks: Vec<PhraseTrack> =
-            named.iter().map(|(reference, name, own, master)| PhraseTrack { reference, name, own: *own, master: *master }).collect();
-        let none = Value::Null;
-        let look = PhraseLook {
-            tracks: &tracks,
-            project: snapshot.get("project").unwrap_or(&none),
-            transport: snapshot.get("transport").unwrap_or(&none),
-            slots: slots.as_deref(),
-        };
-        match (phrases.plan)(intent, &look) {
-            Phrased::Model => Ok(None),
-            Phrased::Refused(text) => Ok(Some(InstantOutcome { text, is_error: true })),
-            Phrased::Steps(steps) => {
-                let plan = json!({"steps": steps, "final": true}).as_object().cloned().unwrap_or_default();
-                let result = make_changes(&self.changes, plan, signal).await?;
-                Ok(Some(InstantOutcome {
-                    text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text),
-                    is_error: result.is_error,
-                }))
-            }
-        }
     }
     /// Where refs are places (Renoise's), the pin as it is carried to now, in the turn's short refs, which the book follows
     /// from here (a recipe line typed later still names what was pinned); None when it can't be carried or was deleted.
@@ -1694,7 +1859,11 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
     }
     async fn close(&self) -> Result<(), RuntimeError> {
-        // The project as Kumi leaves it: what changes after is what the next catch-up tells (bounded, as Live's).
+        // The project as Kumi leaves it: what changes after is what the next catch-up tells (bounded, as Live's), in the
+        // host's snapshot (REAPER's and Renoise's) or Kumi's own baseline (Logic's), if the DAW answers at once.
+        if let Some(remember) = self.remember.as_ref().filter(|_| !self.closed.get()) {
+            remember.close().await;
+        }
         let host = self.endpoint.borrow().clone();
         if let Some(host) = host.filter(|_| self.daw.catch_up.is_some() && self.connected.get() && !self.closed.get()) {
             let _ = tokio::time::timeout(

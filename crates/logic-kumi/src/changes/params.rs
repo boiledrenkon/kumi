@@ -5,7 +5,8 @@
 //! control's range) or `value`, what the Controls View shows: a number in the parameter's own units ("-6" for
 //! "-6.0 dB"), found by setting the slider and reading its text, or an option's name for a choice. Read back from
 //! the view. Logic keeps no step of its project undo for a parameter (the plug-in window's own undo has it), so a
-//! restore is by value.
+//! restore is by value. A value the view shows with no control (the Compressor's Knee) is read, with its text and no
+//! value, and a change of it is refused.
 
 use serde_json::{json, Value};
 
@@ -207,6 +208,9 @@ pub fn preview(ctx: &mut Ctx, input: &Value, many: bool) -> Done<Preview> {
         for ((_, wanted), param) in asks.iter().zip(&chosen) {
             if let (Wanted::Option(_), Kind::Slider) = (wanted, param.kind) {
                 return Err(bad(format!("{} is a slider: give normalized or a number", param.name)));
+            }
+            if param.kind == Kind::Readout {
+                return Err(bad(window::readout_words(&shown.plugin, &param.name)));
             }
         }
         let prior = record(&chosen);

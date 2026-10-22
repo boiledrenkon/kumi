@@ -19,6 +19,7 @@ mod import;
 mod lists;
 mod marks;
 mod menus;
+mod metronome;
 mod notes;
 pub(crate) mod nudge;
 pub mod panel;
@@ -29,6 +30,7 @@ mod plugins;
 mod preset;
 mod quantize;
 mod regions;
+mod sample;
 mod save;
 mod sends;
 mod smart;
@@ -176,6 +178,8 @@ pub enum Kind {
     SmartControlSet,
     PatchLoad,
     Automation(automation::Mode),
+    MetronomeSet,
+    SampleLoad,
 }
 
 /// The kinds Logic's bridge can't make yet, and why, so the refusal says so.
@@ -226,6 +230,8 @@ impl std::fmt::Debug for Kind {
             Kind::SmartControlSet => f.write_str("SmartControlSet"),
             Kind::PatchLoad => f.write_str("PatchLoad"),
             Kind::Automation(mode) => write!(f, "Automation({mode:?})"),
+            Kind::MetronomeSet => f.write_str("MetronomeSet"),
+            Kind::SampleLoad => f.write_str("SampleLoad"),
         }
     }
 }
@@ -274,12 +280,14 @@ pub fn kind(name: &str) -> Option<Kind> {
         "automation-add" => Some(Kind::Automation(automation::Mode::Add)),
         "automation-change" => Some(Kind::Automation(automation::Mode::Change)),
         "automation-delete" => Some(Kind::Automation(automation::Mode::Delete)),
+        "metronome-set" => Some(Kind::MetronomeSet),
+        "sample-load" => Some(Kind::SampleLoad),
         _ => None,
     }
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 44] = [
+pub const KINDS: [&str; 46] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -324,6 +332,8 @@ pub const KINDS: [&str; 44] = [
     "automation-add",
     "automation-change",
     "automation-delete",
+    "metronome-set",
+    "sample-load",
 ];
 
 impl Kind {
@@ -365,6 +375,8 @@ impl Kind {
             Kind::SmartControlSet => smart::preview(ctx, input),
             Kind::PatchLoad => patch::preview(ctx, input),
             Kind::Automation(mode) => automation::preview(ctx, keys, input, mode),
+            Kind::MetronomeSet => metronome::preview(ctx, input),
+            Kind::SampleLoad => sample::preview(ctx, input),
         }
     }
 
@@ -406,6 +418,8 @@ impl Kind {
             Kind::SmartControlSet => smart::apply(ctx, input, fence),
             Kind::PatchLoad => patch::apply(ctx, input, fence, desc),
             Kind::Automation(mode) => automation::apply(ctx, keys, input, fence, mode),
+            Kind::MetronomeSet => metronome::apply(ctx, input, fence),
+            Kind::SampleLoad => sample::apply(ctx, input, fence),
         }
     }
 
@@ -449,6 +463,8 @@ impl Kind {
             Kind::SmartControlSet => smart::restore(ctx, restore),
             Kind::PatchLoad => patch::restore(ctx, watch, restore),
             Kind::Automation(_) => automation::restore(ctx, keys, restore),
+            Kind::MetronomeSet => metronome::restore(ctx, restore),
+            Kind::SampleLoad => sample::restore(ctx, watch, restore),
         }
     }
 }

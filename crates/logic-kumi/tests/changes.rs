@@ -25,7 +25,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// Every change scene, by its name.
-const SCENES: [&str; 55] = [
+const SCENES: [&str; 61] = [
     "change-track-volume",
     "change-track-pan",
     "change-track-mute",
@@ -81,6 +81,12 @@ const SCENES: [&str; 55] = [
     "change-fx-param-exact",
     "change-bounce-undo",
     "change-playhead-exact",
+    "change-metronome-set",
+    "read-recent",
+    "read-paged",
+    "read-bulk",
+    "change-sample-load",
+    "read-param-compressor",
 ];
 
 /// One step of a scene replayed: what was asked, what the real Logic answered, what the replay answered.
@@ -168,7 +174,46 @@ fn replay_scene(scene: &Scene) -> Replayed {
     Replayed { steps, unrecorded: hands.unrecorded(), events }
 }
 
+/// Whether `recorded` is all in `replayed`: every field it has answered the same, an array as long; `replayed` may add
+/// fields.
+fn within(recorded: &Value, replayed: &Value) -> bool {
+    match (recorded, replayed) {
+        (Value::Object(was), Value::Object(now)) => was.iter().all(|(key, value)| now.get(key).is_some_and(|got| within(value, got))),
+        (Value::Array(was), Value::Array(now)) => was.len() == now.len() && was.iter().zip(now).all(|(a, b)| within(a, b)),
+        (was, now) => was == now,
+    }
+}
+
+/// `KUMI_BLESS=1`: a scene's recorded answers take what the replay adds to them, a field the bridge answers now that it
+/// didn't when the scene was recorded (derived from the same recorded replies of Logic: the tempo row's `tempos` from
+/// the Tempo List), and only where every recorded field is answered as it was; anything else stays a failure. As the
+/// vectors are blessed, and run one test at a time (`-- --test-threads=1`).
+fn bless_additions(name: &str) {
+    let replayed = replay_scene(&load(name));
+    let dir = fixtures().join(name);
+    let mut raw: Value = serde_json::from_str(&logic_kumi::fixtures::scene_text(&dir).unwrap()).unwrap();
+    let mut blessed = 0;
+    let steps = raw["logic"]["steps"].as_array_mut().unwrap();
+    let mut kept = steps.iter_mut().filter(|record| record["step"].get("method").is_some() || record["step"].get("poll").is_some());
+    for step in &replayed.steps {
+        let record = kept.next().unwrap();
+        if step.replayed != step.recorded && within(&step.recorded, &step.replayed) {
+            record["answer"] = step.replayed.clone();
+            blessed += 1;
+        }
+    }
+    if blessed > 0 {
+        let mut text = serde_json::to_string(&raw).unwrap();
+        text.push('\n');
+        logic_kumi::fixtures::write_scene_text(&dir, &text).unwrap();
+        eprintln!("{name}: {blessed} recorded answers took the fields the replay adds");
+    }
+}
+
 fn replay(name: &str) -> Replayed {
+    if std::env::var("KUMI_BLESS").is_ok_and(|v| v == "1") {
+        bless_additions(name);
+    }
     let replayed = replay_scene(&load(name));
     assert!(
         replayed.unrecorded.is_empty(),
@@ -1144,4 +1189,211 @@ fn a_split_after_logic_played_lands_exactly_on_the_bar_asked() {
     let reads = of(&replayed, "read");
     assert_eq!(reads[0].result()["items"][1]["startBeats"], 8.0);
     assert_eq!(reads[1].result()["items"].as_array().unwrap().len(), 1, "the region whole again");
+}
+
+#[test]
+fn the_metronome_is_turned_off_and_on_by_the_control_bars_metronome_click_and_makes_no_step_of_logics_undo() {
+    let replayed = replay("change-metronome-set");
+    let previews = of(&replayed, "change_preview");
+    // Scratch's click is on: the preview fences it as read, and writes nothing.
+    assert_eq!((&previews[0].result()["prior"], &previews[0].result()["fence"]), (&json!({"on": true}), &json!({"on": true})));
+    assert_eq!(previews[0].result()["target"], json!({"ref": null, "kind": "project"}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(applied["applied"], json!({"on": false}));
+    assert_eq!((applied["display"]["title"].as_str(), applied["undo"]["entry"].as_bool()), (Some("Metronome off"), Some(false)));
+    let presses: Vec<(i64, i64)> = load("change-metronome-set")
+        .calls
+        .iter()
+        .filter(|call| call.op == "action")
+        .filter_map(|call| Some((call.reply.get("before")?.as_i64()?, call.reply.get("after")?.as_i64()?)))
+        .collect();
+    assert_eq!(presses, [(1, 0), (0, 1)], "one press off, one press back on, each read back");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!((&restored["restored"], restored["undo"]["entry"].as_bool()), (&json!({"on": true}), Some(false)));
+    // On asked of an on click: nothing to do, so no step for the history either.
+    assert_eq!(previews[1].result()["display"]["unchanged"], true);
+    assert_eq!(previews[2].replayed["error"]["code"], "bad-params");
+}
+
+#[test]
+fn the_recent_projects_are_logics_open_recent_menu_read_without_opening_it_with_a_path_where_one_is_known() {
+    let replayed = replay("read-recent");
+    let reads = of(&replayed, "read");
+    let items = reads[0].result()["items"].as_array().unwrap().clone();
+    assert_eq!(reads[0].result()["total"], 8);
+    // The open project first, its path from its window; the others' from Spotlight, which finds the gate's copies
+    // outside the Music folder.
+    assert_eq!(items[0], json!({"index": 1, "name": "Scratch", "path": "/Users/me/Music/Logic/Scratch.logicx", "open": true}));
+    assert_eq!(items[1]["name"], "Scratch Kumi M4 20261021-142756");
+    assert!(items[1]["path"].as_str().unwrap().ends_with("/Scratch Kumi M4 20261021-142756.logicx"));
+    assert!(items[1..].iter().all(|item| item["open"] == false && item["path"].is_string()));
+    assert_eq!((reads[1].result()["items"].as_array().unwrap().len(), reads[1].result()["nextCursor"].as_str()), (2, Some("1.2")));
+    // Only reads of the menu bar: no menu was opened.
+    let scene = load("read-recent");
+    assert!(scene.calls.iter().all(|call| call.op != "action" && call.op != "menu" && call.op != "keys"));
+}
+
+#[test]
+fn the_bulk_read_answers_the_paged_reads_rows_in_one_request_showing_each_pane_once() {
+    let paged = replay("read-paged");
+    let bulk = replay("read-bulk");
+    let answer = of(&bulk, "snapshot")[0].result().clone();
+    let pages = of(&paged, "read");
+    for (at, kind) in ["project", "track", "region", "plugin", "marker", "tempo"].iter().enumerate() {
+        assert_eq!(answer["rows"][*kind], pages[at].result()["items"], "{kind}: the bulk read's rows are the page's");
+        assert_eq!(answer["totals"][*kind], pages[at].result()["total"], "{kind}");
+    }
+    assert_eq!((answer["epoch"].as_str(), answer.get("truncated")), (Some("1"), None));
+    assert_eq!(answer["rows"]["tempo"][0]["tempos"][0]["bpm"], 160.0);
+    // The List Editors shown once for the three lists (their button pressed to open and to close), against once per
+    // list for the pages; the Mixer once in each.
+    let presses = |name: &str, label: &str| -> usize {
+        let scene = load(name);
+        let buttons: Vec<String> = scene
+            .calls
+            .iter()
+            .filter(|call| call.op == "tree")
+            .flat_map(|call| {
+                let mut found = vec![];
+                collect_buttons(&call.reply["node"], label, &mut found);
+                found
+            })
+            .collect();
+        scene.calls.iter().filter(|call| call.op == "action" && buttons.iter().any(|b| call.params["path"] == b.as_str())).count()
+    };
+    assert_eq!((presses("read-bulk", "List Editors"), presses("read-paged", "List Editors")), (2, 6));
+    assert_eq!((presses("read-bulk", "Mixer"), presses("read-paged", "Mixer")), (2, 2));
+    // Measured on Scratch: the six pages took 4.4 to 4.5 s, the bulk read 2.7 s.
+    let ms = |name: &str| -> u64 { load(name).logic["steps"].as_array().unwrap().iter().filter_map(|step| step["ms"].as_u64()).sum() };
+    assert!(ms("read-bulk") < ms("read-paged"), "{} ms against {} ms", ms("read-bulk"), ms("read-paged"));
+}
+
+/// The paths of the control bar's view buttons of a label in a recorded tree.
+fn collect_buttons(node: &Value, label: &str, found: &mut Vec<String>) {
+    if node["role"] == "AXCheckBox" && (node["desc"] == label || node["title"] == label) {
+        if let Some(path) = node["i"].as_str() {
+            found.push(path.to_string());
+        }
+    }
+    for child in node["c"].as_array().into_iter().flatten() {
+        collect_buttons(child, label, found);
+    }
+}
+
+#[test]
+fn a_sample_comes_in_on_an_audio_track_and_logic_converts_it_into_a_new_sampler_track_and_its_undo_takes_both_back() {
+    // Recorded on a copy of Scratch: Logic copies the file into the project's package at once.
+    let replayed = replay("change-sample-load");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[0].replayed["error"]["code"], "bad-params", "Quick Sampler takes a sample by a drag only");
+    assert!(previews[0].replayed["error"]["message"].as_str().unwrap().contains("Quick Sampler"));
+    assert_eq!(previews[1].replayed["error"]["code"], "bad-params", "a file that isn't there");
+    assert_eq!(previews[2].replayed["error"]["code"], "bad-params", "Keys is an instrument track");
+    let preview = previews[3].result();
+    assert_eq!(preview["fence"], json!({"tracks": 2, "names": ["Vocal", "Keys"], "regions": 1}));
+    let applied = of(&replayed, "change_apply")[0].result().clone();
+    assert_eq!(
+        (applied["applied"]["name"].as_str(), applied["applied"]["instrument"].as_str(), applied["applied"]["track"].as_u64()),
+        (Some("kumi-tone"), Some("Sampler"), Some(2))
+    );
+    // The new track's trigger region where the audio region came in (bar 3), and the audio region left muted on Vocal.
+    assert_eq!(applied["applied"]["startBeats"], 8.0);
+    assert_eq!(applied["created"]["ref"], format!("{}:track:2", applied["epoch"].as_str().unwrap()));
+    assert!(applied["created"]["region"].is_string() && applied["created"]["source"].is_string());
+    assert_eq!(applied["undo"]["entry"], true);
+    let reads = of(&replayed, "read");
+    let names: Vec<&str> = reads[0].result()["items"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Vocal", "kumi-tone", "Keys"]);
+    assert_eq!(reads[0].result()["items"][1]["kind"], "instrument");
+    let restored = of(&replayed, "change_restore")[0].result().clone();
+    assert_eq!(restored["undo"]["how"], "undo");
+    assert_eq!(restored["restored"]["pressed"], json!(["Undo Convert Regions to New Sampler Track", "Undo Insert"]));
+    assert_eq!(reads[2].result()["total"], 2, "the Sampler track gone");
+    assert_eq!(reads[3].result()["total"], 1, "the audio region gone too");
+}
+
+#[test]
+fn the_compressors_window_is_found_past_its_editors_controls_and_its_controls_view_reads_as_channel_eqs_does() {
+    // Scratch's Keys holds a Compressor, whose editor puts its own controls at the window's top level with the header's
+    // (44 in all), the texts naming the plug-in and the strip last: the header read cut at 40 is made again whole, so
+    // the window is found, its view switched to Controls, its rows read, its editor put back and the window closed.
+    let replayed = replay("read-param-compressor");
+    let reads = of(&replayed, "read");
+    let page = reads[0].result();
+    assert_eq!(page["total"], 25);
+    let items = page["items"].as_array().unwrap();
+    let names: Vec<&str> = items.iter().map(|row| row["name"].as_str().unwrap()).collect();
+    assert_eq!(names[..6], ["Threshold", "Ratio", "Attack", "Release", "Make Up", "Knee"]);
+    assert_eq!(
+        items[0],
+        json!({"ref": "1:param:2.3.1", "pluginRef": "1:plugin:2.3", "index": 1, "name": "Threshold", "value": 65.0, "text": "-17.5 dB", "min": 0.0, "max": 100.0, "normalized": 0.65})
+    );
+    let shown = |name: &str| items.iter().find(|row| row["name"] == name).map(|row| row["text"].clone()).unwrap();
+    assert_eq!((shown("Ratio"), shown("Make Up"), shown("Mix")), (json!("3.9:1"), json!("0.0 dB"), json!("59.0 %")));
+    // A value the view shows with no control (its slider disabled, with no range) reads as its text alone, as a menu's.
+    let knee = items.iter().find(|row| row["name"] == "Knee").unwrap();
+    assert_eq!((knee["text"].as_str(), knee["value"].is_null(), knee["min"].is_null()), (Some("0.7"), true, true));
+    assert_eq!(reads[1].result()["items"][0], items[0], "the Threshold by its ref");
+    let previews = of(&replayed, "change_preview");
+    assert_eq!(previews[0].replayed["error"]["code"], "bad-params");
+    assert!(previews[0].replayed["error"]["message"].as_str().unwrap().contains("Knee with no control"));
+    // The setting is the header's last pop-up: the Compressor lists its Side Chain pop-up ("Internal") before it.
+    assert_eq!(previews[1].result()["fence"], json!({"plugin": "Compressor", "preset": "Custom"}));
+    let scene = load("read-param-compressor");
+    let headers: Vec<(u64, usize)> = scene
+        .calls
+        .iter()
+        .filter(|call| call.op == "tree" && call.params["root"] == json!({"title": "Keys"}) && call.params["depth"] == 1)
+        .map(|call| (call.params["children"].as_u64().unwrap(), call.reply["node"]["c"].as_array().map_or(0, Vec::len)))
+        .collect();
+    assert!(headers.contains(&(40, 40)) && headers.contains(&(256, 44)), "{headers:?}");
+    // Each read opened the window and closed it after, its view put back to the editor.
+    let presses = |path: &str| {
+        scene
+            .calls
+            .iter()
+            .filter(|call| call.op == "action" && call.params["root"] == json!({"title": "Keys"}) && call.params["path"] == path)
+            .count()
+    };
+    assert_eq!((presses("3.0.0"), presses("3.0.1"), presses("0")), (3, 3, 4), "Controls, Editor, close");
+}
+
+#[test]
+fn a_sample_loads_restore_reads_back_that_the_imports_region_went_too_and_says_which_undo_didnt_land() {
+    // The sample-load scene with the Tracks area read after both undos as the restore read it before them: the Sampler
+    // track's header is gone, but the audio region the import made still shows, so the restore answers `uncertain`
+    // and names the import's undo. (Replayed as recorded, the region is gone and the restore answers as Logic did.)
+    let mut scene = load("change-sample-load");
+    let pressed = |titles: Value| scene.calls.iter().position(|call| call.op == "menu" && call.params["titles"] == titles).unwrap();
+    let (conversion, import) =
+        (pressed(json!(["Edit", "Undo Convert Regions to New Sampler Track"])), pressed(json!(["Edit", "Undo Insert"])));
+    let regions = |call: &logic_kumi::fixtures::Call| call.op == "tree" && call.params["depth"] == 3 && call.params["children"] == 256;
+    let before = (0..conversion).rev().find(|at| regions(&scene.calls[*at])).unwrap();
+    let after = (import..scene.calls.len()).find(|at| scene.calls[*at].params == scene.calls[before].params).unwrap();
+    scene.calls[after].reply = scene.calls[before].reply.clone();
+    let replayed = replay_scene(&scene);
+    let restore = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(restore["error"]["code"], "uncertain", "{restore}");
+    assert_eq!(
+        restore["error"]["message"],
+        "Logic Pro took the Sampler track back, but its “Undo Insert” didn't land: the audio region of “kumi-tone” is still on “Vocal”"
+    );
+    // The headers read after both undos as before them: the conversion's undo is the step named.
+    let mut scene = load("change-sample-load");
+    let headers = |call: &logic_kumi::fixtures::Call| call.op == "tree" && call.params["depth"] == 2 && call.params["children"] == 256;
+    let before = (0..conversion).rev().find(|at| headers(&scene.calls[*at])).unwrap();
+    let later: Vec<usize> =
+        (import..scene.calls.len()).filter(|at| scene.calls[*at].params == scene.calls[before].params).take(2).collect();
+    for at in later {
+        scene.calls[at].reply = scene.calls[before].reply.clone();
+    }
+    let replayed = replay_scene(&scene);
+    let restore = &of(&replayed, "change_restore")[0].replayed;
+    assert_eq!(
+        (restore["error"]["code"].as_str(), restore["error"]["message"].as_str()),
+        (
+            Some("uncertain"),
+            Some("Logic Pro's “Undo Convert Regions to New Sampler Track” was pressed, but the Sampler track is still there")
+        )
+    );
 }

@@ -22,6 +22,15 @@
 //! Stereo Out and set (read back as a parameter), then each of the run's changes undone through Kumi; tracks 1 and 2
 //! auditioned, a pass each; a render of bars 1 to 5 of the instrument track found on disk with its length, then
 //! deleted; and the project read as before (its tracks, their faders and solos, the Stereo Out's plug-ins).
+//! M6: the fixed phrases (the tempo 4 BPM up, the metronome turned and turned back, a track muted, the cycle on bars 1
+//! to 4 and off), each through the integration's instant path with no model, one HISTORY row each, read back and undone
+//! through Kumi; the metronome set as a make_changes step and undone; a 1 s sine the run writes under the `--files`
+//! folder loaded into a new Sampler track (only into the copy the save as made, since Logic copies the file into the
+//! project's package), read back and undone through both of Logic's undo steps, and Quick Sampler refused; the projects
+//! Logic opened lately, the copy among them; middle C on the project row and the notes named in its octave; the bulk
+//! read beside the paged reads (the same tracks and markers, both timed); watch_me over a marker added through Kumi;
+//! Channel EQ's and the Compressor's parameter changes drawn as curves in HISTORY, each undone; Logic's library folders
+//! on this Mac; and the project read as before (its tracks, markers, tempo, metronome and cycle).
 //! It leaves the project as it found it: every change it makes is undone before it ends (the operator's own steps of
 //! M2 aside). It prints a Markdown summary for docs/evidence/ at the end (and writes it to --report, when given). The
 //! bridge must be set up in the home (`kumi --daw logic bridge`) and Accessibility allowed; build the host first:
@@ -35,13 +44,19 @@ use kumi_common::{
 use kumi_runtime::{
     core::{
         context::IntegrationContext,
-        contracts::{ChangeRecord, ChangeState, HearRequest},
+        contracts::{ChangeRecord, ChangeState, HearRequest, KernelTool},
+        daw::DawId,
+        phrases::{self, Intent},
+        picture::ChangePicture,
         view::BodyRequest,
     },
     integrations::{
+        self,
         logic::create_logic_integration,
+        logic_project,
         own_bridge::{Connect, OwnOptions},
     },
+    library::sources::{SourceKind, SourceOptions},
     listening::measure::{measure_file, MeasureOptions},
     mcp::{
         client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
@@ -66,6 +81,14 @@ const FOCUS_CALLS: usize = 50;
 const OPERATOR_MS: u64 = 90_000;
 /// (M4b) The Library's patch the run loads on a software instrument track, unless `--patch` names another.
 const PATCH: &str = "Piano/Steinway Grand Piano";
+/// (M6) The sine the run writes under the `--files` folder and loads into a Sampler track, which Logic names after it.
+const SINE: &str = "Kumi M6 Sine.wav";
+/// (M6) The most a change's curve may take to be drawn in HISTORY: the follow-up read waits for the changes to settle
+/// (0.3 s, at most 3 s), then reads the plug-in's Controls View.
+const CURVE_MS: f64 = 20_000.0;
+/// (M6) The pause before the paged reads and the bulk read are each timed: past the bridge's caches (the Mixer's strips
+/// are kept 5 s, the List Editors' rows 2 s), so each reads Logic afresh.
+const COLD_MS: u64 = 5_500;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -247,6 +270,184 @@ fn body_of(result: &CallToolResult) -> Value {
         .collect::<Vec<_>>()
         .join("\n");
     serde_json::from_str(&text).unwrap_or(Value::String(text))
+}
+
+/// (M6) A second of a 440 Hz sine at half scale, 44.1 kHz, 16-bit and mono, as a WAV file: the sample the run loads.
+fn write_sine(path: &Path) -> std::io::Result<()> {
+    const RATE: u32 = 44_100;
+    let data: Vec<u8> = (0..RATE)
+        .flat_map(|n| {
+            let phase = f64::from(n) * 440.0 * std::f64::consts::TAU / f64::from(RATE);
+            ((phase.sin() * 0.5 * f64::from(i16::MAX)).round() as i16).to_le_bytes()
+        })
+        .collect();
+    let mut bytes = Vec::with_capacity(44 + data.len());
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    // PCM, one channel, the rate, the bytes a second, the bytes a frame and the bits a sample.
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&RATE.to_le_bytes());
+    bytes.extend_from_slice(&(RATE * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    std::fs::write(path, bytes)
+}
+
+/// (M6) The first figure of a value as Logic shows it: "+3.0 dB" is 3, "−20.0 dB" -20.
+fn number_of(text: &str) -> Option<f64> {
+    let text = text.trim().replace('\u{2212}', "-");
+    let figure: String = text.trim_start_matches('+').chars().take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '.')).collect();
+    figure.parse().ok()
+}
+
+/// (M6) Two readings alike: numbers within a hundredth, objects and lists field by field, anything else equal.
+fn alike(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64().zip(y.as_f64()).is_some_and(|(x, y)| (x - y).abs() < 0.01),
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(key, value)| y.get(key).is_some_and(|other| alike(value, other)))
+        }
+        (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(value, other)| alike(value, other)),
+        _ => a == b,
+    }
+}
+
+/// (M6) A path with the home folder written `~`, so the record names no one's home.
+fn tilde(path: &str) -> String {
+    let home = kumi_runtime::library::sources::homedir();
+    match path.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
+}
+
+/// (M6) A path as the disk has it, to tell whether one is inside another; as given when it isn't there.
+fn whole(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// (M6) Rows with their refs read without the epoch they carry (`7:track:2` as `track:2`), so two reads of the same rows
+/// in different epochs compare.
+fn without_epoch(value: &Value, epoch: &str) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(|item| without_epoch(item, epoch)).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, item)| {
+                    let item = match item.as_str() {
+                        Some(text) if key == "ref" || key.ends_with("Ref") => {
+                            json!(text.strip_prefix(&format!("{epoch}:")).unwrap_or(text))
+                        }
+                        _ => without_epoch(item, epoch),
+                    };
+                    (key.clone(), item)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// (M6) What HISTORY draws of a change, in words.
+fn picture_words(picture: Option<&ChangePicture>) -> String {
+    match picture {
+        Some(ChangePicture::Eq { before, after, .. }) => {
+            let moved = before
+                .iter()
+                .zip(after)
+                .position(|(was, now)| (was.gain_db - now.gain_db).abs() > 0.05 || (was.freq - now.freq).abs() > 0.5 || was.on != now.on);
+            match moved {
+                Some(at) => format!(
+                    "an EQ curve of {} bands, band {} ({:?}) {:+.1} → {:+.1} dB",
+                    after.len(),
+                    at + 1,
+                    after[at].shape,
+                    before[at].gain_db,
+                    after[at].gain_db
+                ),
+                None => format!("an EQ curve of {} bands, none of them moved", after.len()),
+            }
+        }
+        Some(ChangePicture::Dynamics { before, after, .. }) => {
+            format!("a compressor's curve, its threshold {:.1} → {:.1} dB at {:.1}:1", before.threshold_db, after.threshold_db, after.ratio)
+        }
+        Some(ChangePicture::Values { values }) => format!(
+            "its values only ({})",
+            values
+                .iter()
+                .map(|value| format!(
+                    "{} {} → {}",
+                    value.name,
+                    value.from_text.as_deref().unwrap_or("?"),
+                    value.to_text.as_deref().unwrap_or("?")
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Some(_) => "another kind of picture".into(),
+        None => "no picture".into(),
+    }
+}
+
+/// (M6) What a fixed phrase or a step changes, read back through the bridge.
+enum Reading {
+    /// The project's tempo, from its row.
+    Tempo,
+    /// The metronome's click (true for on), from a metronome-set previewed and never applied.
+    Click,
+    /// A track's mute, from its row, by the track's name.
+    Mute(String),
+    /// The cycle as a loop-range previewed (never applied) fences it, `{on, startBeats, endBeats}`, with the focus's
+    /// transport's `cycle` beside it as `focus`.
+    Cycle,
+}
+
+/// (M6) A reading in words.
+fn reading_words(what: &Reading, value: &Value) -> String {
+    let on = |value: &Value, yes: &str, no: &str, none: &str| match value.as_bool() {
+        Some(true) => yes.to_owned(),
+        Some(false) => no.to_owned(),
+        None => none.to_owned(),
+    };
+    match what {
+        Reading::Tempo => format!("{value} BPM"),
+        Reading::Click => on(value, "the click on", "the click off", "no click"),
+        Reading::Mute(name) => on(value, &format!("“{name}” muted"), &format!("“{name}” not muted"), &format!("no track “{name}”")),
+        Reading::Cycle if value.get("on").is_none() => format!("no cycle (the focus: cycle {})", value["focus"]),
+        Reading::Cycle => format!(
+            "the cycle {}, beats {} to {} (the focus: cycle {})",
+            on(&value["on"], "on", "off", "?"),
+            value["startBeats"],
+            value["endBeats"],
+            value["focus"]
+        ),
+    }
+}
+
+/// (M6) What M6 leaves as it found, in words.
+fn state_words(state: &Value) -> String {
+    let tracks: Vec<String> = state["tracks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|track| format!("{}{}", track["name"].as_str().unwrap_or("?"), if track["mute"] == true { " (muted)" } else { "" }))
+        .collect();
+    format!(
+        "{} tracks ({}), {} markers, {}, {}, {}",
+        tracks.len(),
+        tracks.join(", "),
+        state["markers"].as_array().map_or(0, Vec::len),
+        reading_words(&Reading::Tempo, &state["tempo"]),
+        reading_words(&Reading::Click, &state["click"]),
+        reading_words(&Reading::Cycle, &state["cycle"])
+    )
 }
 
 async fn accept_logic(
@@ -567,6 +768,11 @@ impl Accept {
         }
         println!("\nM5: bars 1 to 5 heard, a judged round's gain on the Stereo Out, an audition, a render, each undone");
         self.m5_listening().await?;
+        if self.stopping.get() {
+            return Ok(self.exit_code());
+        }
+        println!("\nM6: the fixed phrases, the metronome, a sample in a Sampler track, the new reads, watch_me, curves, the library");
+        self.m6_kinds().await?;
         if !self.operator || self.stopping.get() {
             println!("\n(the steps with an operator at Logic Pro were skipped)");
             return Ok(self.exit_code());
@@ -1836,6 +2042,873 @@ impl Accept {
         Ok(())
     }
 
+    /// M6: the fixed phrases through the integration's instant path (no model), one HISTORY row each, read back and undone
+    /// through Kumi; metronome_set as a make_changes step, undone; a sample into a new Sampler track (only into the copy
+    /// the save as made), undone through both of Logic's undo steps, and Quick Sampler refused; the recent projects, middle
+    /// C, and the bulk read beside the paged reads; watch_me over a marker added through Kumi, undone; Channel EQ's and the
+    /// Compressor's changes drawn as curves in HISTORY, undone; Logic's library folders; and the project read as before
+    /// (its tracks, markers, tempo, metronome and cycle). Each part undoes what it made before the next begins.
+    async fn m6_kinds(&self) -> Result<(), RuntimeError> {
+        let observation = self.observe().await?;
+        let Some(undo) = tool_named(&observation, "undo_change") else {
+            self.say(false, None, "M6: no undo_change tool");
+            return Ok(());
+        };
+        let before = self.m6_state().await;
+        self.m6_phrases(&undo).await?;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        self.m6_metronome(&undo).await?;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        self.m6_sample(&undo).await?;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        let (recent, open) = self.m6_recent().await;
+        self.m6_middle_c().await?;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        self.m6_bulk().await;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        self.m6_watch(&undo).await?;
+        if self.stopping.get() {
+            return Ok(());
+        }
+        self.m6_curves(&undo).await?;
+        self.m6_library(&recent, open.as_deref());
+        let after = self.m6_state().await;
+        let same = alike(&before, &after);
+        self.say(
+            same,
+            None,
+            &format!(
+                "the project reads as before M6: {}{}",
+                state_words(&after),
+                if same { String::new() } else { format!(" (before: {})", state_words(&before)) }
+            ),
+        );
+        Ok(())
+    }
+
+    /// (M6) What M6 leaves as it found: the tracks (name, kind, mute), the markers (name, position, length), the tempo, the
+    /// metronome's click and the cycle.
+    async fn m6_state(&self) -> Value {
+        let fields_of = |page: Answer, fields: &[&str]| -> Vec<Value> {
+            page.body["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| Value::Object(fields.iter().map(|field| (field.to_string(), row[*field].clone())).collect()))
+                .collect()
+        };
+        let tracks = fields_of(self.tool("read", json!({"kind": "track", "limit": 200})).await, &["name", "kind", "mute"]);
+        let markers = fields_of(self.tool("read", json!({"kind": "marker", "limit": 200})).await, &["name", "position", "length"]);
+        let tempo = self.reading(&Reading::Tempo).await;
+        let click = self.reading(&Reading::Click).await;
+        let cycle = self.reading(&Reading::Cycle).await;
+        json!({"tracks": tracks, "markers": markers, "tempo": tempo, "click": click, "cycle": cycle})
+    }
+
+    /// (M6) The project row as the bridge reads it now.
+    async fn project_row(&self) -> Value {
+        self.tool("read", json!({"kind": "project"})).await.body["items"][0].clone()
+    }
+
+    /// (M6) The beats in a bar of the project's time signature ("4/4" has 4).
+    async fn beats_per_bar(&self) -> f64 {
+        self.project_row().await["timeSignature"]
+            .as_str()
+            .and_then(|time| time.split('/').next()?.trim().parse::<f64>().ok())
+            .filter(|beats| *beats > 0.0)
+            .unwrap_or(4.0)
+    }
+
+    /// (M6) The start of the bar after the bar past every region (as M4's marker and MIDI import are placed).
+    async fn past_regions(&self, beats_per_bar: f64) -> f64 {
+        let regions = self.tool("read", json!({"kind": "region", "limit": 200})).await;
+        let end =
+            regions.body["items"].as_array().into_iter().flatten().filter_map(|region| region["endBeats"].as_f64()).fold(0.0, f64::max);
+        ((end / beats_per_bar).floor() + 2.0) * beats_per_bar
+    }
+
+    /// (M6) What a change of `kind` would change from, read through the bridge: a preview (never applied) names the state
+    /// it fences, as M4's read of the Tempo List does.
+    async fn prior_of(&self, kind: &str, input: Value) -> Result<Value, String> {
+        let epoch = self.tool("read", json!({"kind": "project"})).await.body["epoch"].clone();
+        let preview = self.tool("change_preview", json!({"kind": kind, "input": input, "epoch": epoch})).await;
+        if preview.ok && preview.body["prior"].is_object() {
+            Ok(preview.body["prior"].clone())
+        } else {
+            Err(short(&preview.error(), 160))
+        }
+    }
+
+    /// (M6) What a phrase or a step changes, as the bridge reads it now (null when it can't be read).
+    async fn reading(&self, what: &Reading) -> Value {
+        match what {
+            Reading::Tempo => self.project_row().await["tempo"].clone(),
+            Reading::Click => {
+                self.prior_of("metronome-set", json!({"on": true})).await.map(|prior| prior["on"].clone()).unwrap_or(Value::Null)
+            }
+            Reading::Mute(name) => {
+                let page = self.tool("read", json!({"kind": "track", "limit": 200})).await;
+                page.body["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|row| row["name"] == name.as_str())
+                    .map(|row| row["mute"].clone())
+                    .unwrap_or(Value::Null)
+            }
+            Reading::Cycle => {
+                let focus = self.tool("focus", json!({})).await.body["transport"]["cycle"].clone();
+                match self.prior_of("loop-range", json!({"startBeats": 0, "endBeats": 0})).await {
+                    Ok(prior) => {
+                        json!({"on": prior["on"], "startBeats": prior["startBeats"], "endBeats": prior["endBeats"], "focus": focus})
+                    }
+                    Err(_) => json!({"focus": focus}),
+                }
+            }
+        }
+    }
+
+    /// (M6) A reading once it is `wanted`, or as it stands after two seconds (the focus is a cache the bridge refreshes
+    /// every 150 ms).
+    async fn settled(&self, what: &Reading, wanted: &Value) -> Value {
+        let mut now = self.reading(what).await;
+        for _ in 0..10 {
+            if alike(&now, wanted) || self.stopping.get() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            now = self.reading(what).await;
+        }
+        now
+    }
+
+    /// (M6) The changes HISTORY heard of since `from`, each once, in the order they came.
+    fn made_since(&self, from: usize) -> Vec<String> {
+        let heard = self.changes.borrow();
+        let mut ids: Vec<String> = Vec::new();
+        for record in heard[from.min(heard.len())..].iter() {
+            if !ids.contains(&record.id) {
+                ids.push(record.id.clone());
+            }
+        }
+        ids
+    }
+
+    /// (M6) Changes' titles as HISTORY says them.
+    fn titles(&self, ids: &[String]) -> String {
+        let titles: Vec<String> = ids.iter().filter_map(|id| self.change(id)).map(|row| format!("“{}”", row.title)).collect();
+        if titles.is_empty() {
+            "none".into()
+        } else {
+            titles.join(", ")
+        }
+    }
+
+    /// (M6) A fixed phrase as the session runs one: a fresh look, then the integration's instant path, with no model. It
+    /// counts when it makes one HISTORY row and what it changes reads `wanted`. The rows it made, for Kumi's undo.
+    async fn phrase_row(&self, said: &str, what: &Reading, wanted: &Value) -> Result<Vec<String>, RuntimeError> {
+        let Some(intent) = phrases::parse(said) else {
+            self.say(false, None, &format!("“{said}”: not one of Kumi's fixed phrases"));
+            return Ok(vec![]);
+        };
+        self.observe().await?;
+        let heard = self.changes.borrow().len();
+        let t0 = perf_now();
+        let outcome = self.integration.instant(&intent, signal()).await?;
+        let ms = perf_now() - t0;
+        let ids = self.made_since(heard);
+        let Some(outcome) = outcome else {
+            self.say(false, Some(ms), &format!("“{said}”: the instant path didn't take it, so it would go to the model"));
+            return Ok(ids);
+        };
+        let now = self.settled(what, wanted).await;
+        self.say(
+            !outcome.is_error && ids.len() == 1 && alike(&now, wanted),
+            Some(ms),
+            &format!(
+                "“{said}” through the instant path, no model: {} HISTORY row(s) ({}); reads {}; Kumi said: {}",
+                ids.len(),
+                self.titles(&ids),
+                reading_words(what, &now),
+                short(&outcome.text, 160)
+            ),
+        );
+        Ok(ids)
+    }
+
+    /// (M6) Changes undone through Kumi, the last made first, each read back as it was before it (`made`: the rows of a
+    /// phrase or a step, with the reading from before it).
+    async fn undo_rows(&self, undo: &Rc<dyn KernelTool>, made: &[(Vec<String>, Value)], what: &Reading) -> Result<(), RuntimeError> {
+        for (ids, before) in made.iter().rev() {
+            for id in ids.iter().rev() {
+                let title = self.change(id).map(|row| row.title).unwrap_or_else(|| id.clone());
+                let t0 = perf_now();
+                let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+                let ms = perf_now() - t0;
+                let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+                let now = self.settled(what, before).await;
+                self.say(
+                    undone && alike(&now, before),
+                    Some(ms),
+                    &format!(
+                        "undo “{title}” through Kumi: {}; reads {}",
+                        if undone { "undone".to_string() } else { short(&result.text, 200) },
+                        reading_words(what, &now)
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// (M6) The fixed phrases, each through the integration's instant path with no model, one HISTORY row each, read back
+    /// and undone through Kumi: the tempo 4 BPM up (in whole BPM), the metronome turned and turned back, a track muted by
+    /// its name (unmuted when it is muted), the cycle on bars 1 to 4 and off.
+    async fn m6_phrases(&self, undo: &Rc<dyn KernelTool>) -> Result<(), RuntimeError> {
+        if !self.integration.has_instant() {
+            self.say(false, None, "the fixed phrases: Logic Pro's integration has no instant path, so they would go to the model");
+            return Ok(());
+        }
+        let tempo = self.reading(&Reading::Tempo).await;
+        match tempo.as_f64() {
+            None => self.say(false, None, "“tempo”: the project row reads no tempo"),
+            Some(bpm) => {
+                let target = if bpm.round() + 4.0 <= 990.0 { bpm.round() + 4.0 } else { bpm.round() - 4.0 };
+                let made = self.phrase_row(&format!("tempo {target}"), &Reading::Tempo, &json!(target)).await?;
+                self.undo_rows(undo, &[(made, tempo)], &Reading::Tempo).await?;
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+        // The metronome turned, then turned back as it began: a row each, undone last first.
+        let click = self.reading(&Reading::Click).await;
+        match click.as_bool() {
+            None => self.say(false, None, "“metronome”: the click can't be read (a metronome-set previewed named none)"),
+            Some(on) => {
+                let (first, second) = if on { ("metronome off", "metronome on") } else { ("metronome on", "metronome off") };
+                let mut made = vec![(self.phrase_row(first, &Reading::Click, &json!(!on)).await?, json!(on))];
+                made.push((self.phrase_row(second, &Reading::Click, &json!(on)).await?, json!(!on)));
+                self.undo_rows(undo, &made, &Reading::Click).await?;
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+        // A track by its name: the first of the producer's own whose name a phrase can say, and no other track has.
+        let page = self.tool("read", json!({"kind": "track", "limit": 200})).await;
+        let rows = page.body["items"].as_array().cloned().unwrap_or_default();
+        let names: Vec<String> = rows.iter().filter_map(|row| row["name"].as_str()).map(str::to_lowercase).collect();
+        let pick = rows.iter().find(|row| {
+            let name = row["name"].as_str().unwrap_or_default();
+            matches!(row["kind"].as_str(), Some("audio" | "instrument" | "external"))
+                && names.iter().filter(|other| **other == name.to_lowercase()).count() == 1
+                && matches!(phrases::parse(&format!("mute {name}")), Some(Intent::Track { .. }))
+        });
+        match pick {
+            None => self.say(false, None, "“mute”: no track of the producer's whose name a phrase can say"),
+            Some(row) => {
+                let name = row["name"].as_str().unwrap_or_default().to_owned();
+                let muted = row["mute"] == true;
+                let what = Reading::Mute(name.clone());
+                let said = format!("{} {name}", if muted { "unmute" } else { "mute" });
+                let made = self.phrase_row(&said, &what, &json!(!muted)).await?;
+                self.undo_rows(undo, &[(made, json!(muted))], &what).await?;
+            }
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+        // The cycle on bars 1 to 4, then off: a row each, undone last first, the cycle as it began.
+        let cycle = self.reading(&Reading::Cycle).await;
+        if cycle.get("on").is_none() {
+            self.say(false, None, "“loop”: the cycle can't be read (a loop-range previewed named none)");
+            return Ok(());
+        }
+        // (bars 2 to 5 when the cycle stands on bars 1 to 4 already, which a phrase for them wouldn't change)
+        let bar = self.beats_per_bar().await;
+        let there = cycle["on"] == true && alike(&cycle["startBeats"], &json!(0.0)) && alike(&cycle["endBeats"], &json!(4.0 * bar));
+        let (said, start) = if there { ("loop 2-5", bar) } else { ("loop 1-4", 0.0) };
+        let on = json!({"on": true, "startBeats": start, "endBeats": start + 4.0 * bar, "focus": true});
+        let off = json!({"on": false, "startBeats": start, "endBeats": start + 4.0 * bar, "focus": false});
+        let mut made = vec![(self.phrase_row(said, &Reading::Cycle, &on).await?, cycle)];
+        made.push((self.phrase_row("loop off", &Reading::Cycle, &off).await?, on));
+        self.undo_rows(undo, &made, &Reading::Cycle).await
+    }
+
+    /// (M6) metronome_set as a make_changes step: the click turned, read back, and undone through Kumi.
+    async fn m6_metronome(&self, undo: &Rc<dyn KernelTool>) -> Result<(), RuntimeError> {
+        let click = self.reading(&Reading::Click).await;
+        let Some(on) = click.as_bool() else {
+            self.say(false, None, "metronome_set: the click can't be read (a metronome-set previewed named none)");
+            return Ok(());
+        };
+        let look = self.observe().await?;
+        let heard = self.changes.borrow().len();
+        let t0 = perf_now();
+        let (is_error, text) = self.run_tool(&look, "metronome_set", json!({"on": !on})).await?;
+        let ms = perf_now() - t0;
+        let made = self.made_since(heard);
+        let now = self.settled(&Reading::Click, &json!(!on)).await;
+        self.say(
+            !is_error && made.len() == 1 && alike(&now, &json!(!on)),
+            Some(ms),
+            &format!(
+                "metronome_set {{on: {}}} as a make_changes step: {} HISTORY row(s) ({}); reads {}{}",
+                !on,
+                made.len(),
+                self.titles(&made),
+                reading_words(&Reading::Click, &now),
+                if is_error { format!(": {}", short(&text, 200)) } else { String::new() }
+            ),
+        );
+        self.undo_rows(undo, &[(made, click)], &Reading::Click).await
+    }
+
+    /// (M6) A sample into a new Sampler track: a 1 s sine the run writes under the --files folder, loaded through
+    /// sample_load onto the first audio track, a bar past every region (Logic imports it, then converts its region), read
+    /// back (a new track named after the file, its instrument the Sampler) and undone through Kumi (Logic's own undo of the
+    /// conversion and of the import under it: the tracks and regions as before); Quick Sampler refused first. Only into the
+    /// copy the save as made: Logic copies the file into the open project's package, and its undo leaves the copy there.
+    async fn m6_sample(&self, undo: &Rc<dyn KernelTool>) -> Result<(), RuntimeError> {
+        let Some(folder) = &self.files else {
+            self.say(
+                true,
+                None,
+                "sample_load: skipped (no --files folder was given, and the run loads a sample only into the copy it saves there)",
+            );
+            return Ok(());
+        };
+        let folder = whole(folder);
+        let open = self.project_row().await["path"].as_str().unwrap_or_default().trim_end_matches('/').to_owned();
+        if open.is_empty() || !whole(Path::new(&open)).starts_with(&folder) {
+            self.say(
+                false,
+                None,
+                &format!(
+                    "sample_load: not run, since the project open ({}) isn't the copy the save as made under {} (Logic Pro copies a sample into the open project's package)",
+                    if open.is_empty() { "unsaved".to_string() } else { tilde(&open) },
+                    tilde(&folder.to_string_lossy())
+                ),
+            );
+            return Ok(());
+        }
+        let wav = folder.join(SINE);
+        if let Err(error) = write_sine(&wav) {
+            self.say(false, None, &format!("sample_load: the sine couldn't be written to {}: {error}", tilde(&wav.to_string_lossy())));
+            return Ok(());
+        }
+        let loaded = self.sample_kinds(undo, &wav).await;
+        if std::fs::remove_file(&wav).is_ok() {
+            println!("        (the sine is deleted; the copy's package keeps Logic Pro's copies of it)");
+        }
+        loaded
+    }
+
+    /// (M6) Quick Sampler refused and the Sampler loaded and undone, with the sine at `wav`.
+    async fn sample_kinds(&self, undo: &Rc<dyn KernelTool>, wav: &Path) -> Result<(), RuntimeError> {
+        let file = wav.to_string_lossy().into_owned();
+        let stem = SINE.trim_end_matches(".wav");
+        let look = self.observe().await?;
+        // Quick Sampler: refused in Logic's words, nothing made.
+        let heard = self.changes.borrow().len();
+        let t0 = perf_now();
+        let (is_error, text) = self.run_tool(&look, "sample_load", json!({"kind": "quick-sampler", "file": file})).await?;
+        let why = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|answer| answer["refused"][0]["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| text.clone());
+        self.say(
+            is_error && self.made_since(heard).is_empty() && why.contains("Quick Sampler"),
+            Some(perf_now() - t0),
+            &format!("sample_load kind quick-sampler refused, nothing made: {}", short(&why, 320)),
+        );
+        // The Sampler, on the first audio track, a bar past every region.
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let Some(audio) = context["tracks"].as_array().into_iter().flatten().find(|track| track["kind"] == "audio").cloned() else {
+            self.say(false, None, "sample_load: the project has no audio track for the sample to come in on");
+            return Ok(());
+        };
+        let audio_name = audio["name"].as_str().unwrap_or("?").to_owned();
+        let at = self.past_regions(self.beats_per_bar().await).await;
+        let named = |page: &Answer| -> Vec<String> {
+            page.body["items"].as_array().into_iter().flatten().filter_map(|row| row["name"].as_str().map(str::to_owned)).collect()
+        };
+        let names = named(&self.tool("read", json!({"kind": "track", "limit": 200})).await);
+        let (tracks, regions) = (self.count("track").await, self.count("region").await);
+        let heard = self.changes.borrow().len();
+        let t0 = perf_now();
+        let (is_error, text) =
+            self.run_tool(&look, "sample_load", json!({"kind": "sampler", "file": file, "ref": audio["ref"], "positionBeats": at})).await?;
+        let ms = perf_now() - t0;
+        let made = self.made_since(heard);
+        // The track the load made: the one named after the file, else the one whose name wasn't there before.
+        let page = self.tool("read", json!({"kind": "track", "limit": 200})).await;
+        let tracks_now = page.body["total"].as_u64().unwrap_or(0) as usize;
+        let rows = page.body["items"].as_array().cloned().unwrap_or_default();
+        let track = rows
+            .iter()
+            .find(|row| row["name"] == stem)
+            .or_else(|| rows.iter().find(|row| row["name"].as_str().is_some_and(|name| !names.iter().any(|was| was == name))))
+            .cloned();
+        let instrument = match track.as_ref().and_then(|row| row["ref"].as_str()) {
+            Some(parent) => {
+                self.tool("read", json!({"kind": "plugin", "parent": parent})).await.body["items"][0]["name"].as_str().map(str::to_owned)
+            }
+            None => None,
+        };
+        let regions_now = self.count("region").await;
+        let what = if is_error {
+            format!("sample_load of {SINE} on “{audio_name}”: {}", short(&text, 300))
+        } else {
+            format!(
+                "sample_load of a 1 s sine ({SINE}: 44.1 kHz, 16-bit, {} s) on “{audio_name}” at beat {at}: {}, its instrument {}; {tracks} → {tracks_now} tracks, {regions} → {regions_now} regions; {} HISTORY row(s) ({})",
+                wav_seconds(wav).map_or("unread".to_string(), |seconds| format!("{seconds:.2}")),
+                match &track {
+                    Some(row) => format!("a new {} track “{}”", row["kind"].as_str().unwrap_or("?"), row["name"].as_str().unwrap_or("?")),
+                    None => format!("no new track (none named “{stem}”)"),
+                },
+                instrument.as_deref().unwrap_or("unread"),
+                made.len(),
+                self.titles(&made)
+            )
+        };
+        self.say(
+            !is_error
+                && made.len() == 1
+                && tracks_now == tracks + 1
+                && track.as_ref().is_some_and(|row| row["kind"] == "instrument" && row["name"] == stem)
+                && instrument.as_deref() == Some("Sampler"),
+            Some(ms),
+            &what,
+        );
+        // Undone through Kumi: Logic's own undo of the conversion, then of the import under it (the audio region with it).
+        for id in made.iter().rev() {
+            let title = self.change(id).map(|row| row.title).unwrap_or_else(|| id.clone());
+            let t0 = perf_now();
+            let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let ms = perf_now() - t0;
+            let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+            let (tracks_back, regions_back) = (self.count("track").await, self.count("region").await);
+            let note = self.change(id).and_then(|row| row.note).map(|note| format!(" ({note})")).unwrap_or_default();
+            self.say(
+                undone && tracks_back == tracks && regions_back == regions,
+                Some(ms),
+                &format!(
+                    "undo “{title}” through Kumi, both of Logic Pro's undo steps (the conversion, then the import): {}; {tracks_back} tracks, {regions_back} regions (before the load: {tracks}, {regions}){note}",
+                    if undone { "undone".to_string() } else { short(&result.text, 200) }
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// (M6) The recent projects as the bridge reads them (File > Open Recent): rows, the open project among them with its
+    /// path (the copy the save as made, when the run made one). The paths the rows name, and the open project's.
+    async fn m6_recent(&self) -> (Vec<String>, Option<String>) {
+        let open =
+            self.project_row().await["path"].as_str().map(|path| path.trim_end_matches('/').to_owned()).filter(|path| !path.is_empty());
+        let recent = self.tool("read", json!({"kind": "recent", "limit": 50})).await;
+        let rows = recent.body["items"].as_array().cloned().unwrap_or_default();
+        let paths: Vec<String> =
+            rows.iter().filter_map(|row| row["path"].as_str()).map(|path| path.trim_end_matches('/').to_owned()).collect();
+        let open_row = rows.iter().find(|row| row["open"] == true);
+        let named = open_row.and_then(|row| row["path"].as_str()).map(|path| path.trim_end_matches('/').to_owned());
+        let the_copy = match (&self.files, &named) {
+            (None, _) => true,
+            (Some(folder), Some(path)) => whole(Path::new(path)).starts_with(whole(folder)),
+            (Some(_), None) => false,
+        };
+        let what = if recent.ok {
+            format!(
+                "read recent: {} projects Logic Pro opened lately, {} with a path; the open one {}",
+                rows.len(),
+                paths.len(),
+                match open_row {
+                    Some(row) => format!(
+                        "“{}” (item {}) at {}{}",
+                        row["name"].as_str().unwrap_or("?"),
+                        row["index"],
+                        named.as_deref().map_or("no path".to_string(), tilde),
+                        match (self.files.is_some(), the_copy) {
+                            (true, true) => ", the copy the save as made",
+                            (true, false) => ", which isn't a copy under the --files folder",
+                            _ => "",
+                        }
+                    ),
+                    None => format!("isn't among them ({})", open.as_deref().map_or("unsaved".to_string(), tilde)),
+                }
+            )
+        } else {
+            format!("read recent: {}", recent.error())
+        };
+        self.say(recent.ok && named.is_some() && named == open && the_copy, Some(recent.ms), &what);
+        (paths, open)
+    }
+
+    /// (M6) Middle C: the project row's middleC (3 or 4: Logic's Display Middle C As, which the run reads and never
+    /// changes), the integration's octave from a look, and MIDI 60 named in it as the session's profile names notes.
+    async fn m6_middle_c(&self) -> Result<(), RuntimeError> {
+        let middle_c = self.project_row().await["middleC"].as_i64();
+        self.observe().await?;
+        let octave = self.integration.middle_c_octave();
+        let named = self.integration.profile().with_middle_c(octave).note_name(60);
+        self.say(
+            matches!(middle_c, Some(3 | 4)) && octave.map(i64::from) == middle_c && middle_c.is_some_and(|c| named == format!("C{c}")),
+            None,
+            &format!(
+                "middle C: the project row says middleC {} (Logic Pro's Display Middle C As, read and never changed); the integration takes octave {}, so the session names MIDI 60 {named}",
+                middle_c.map_or("none".to_string(), |c| c.to_string()),
+                octave.map_or("none".to_string(), |o| o.to_string())
+            ),
+        );
+        Ok(())
+    }
+
+    /// (M6) Every row of a kind, read a page (200 rows) at a time through the host, as catch-up's paged reads take them:
+    /// the rows and their epoch, or why not.
+    async fn paged(&self, kind: &str) -> Result<(Vec<Value>, String), String> {
+        let (mut rows, mut cursor, mut epoch) = (Vec::new(), None::<String>, String::new());
+        for _ in 0..50 {
+            let mut args = json!({"kind": kind, "limit": 200});
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let page = self.tool("read", args).await;
+            if !page.ok {
+                return Err(page.error());
+            }
+            epoch = page.body["epoch"].as_str().unwrap_or_default().to_owned();
+            rows.extend(page.body["items"].as_array().cloned().unwrap_or_default());
+            cursor = page.body["nextCursor"].as_str().filter(|next| !next.is_empty()).map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok((rows, epoch))
+    }
+
+    /// (M6) The bulk read beside the paged reads: the six kinds catch-up reads, a page at a time, then in one
+    /// `snapshot {rows}` (each after a pause past the bridge's caches), both timed; the tracks and the markers alike.
+    async fn m6_bulk(&self) {
+        let kinds = logic_project::READS;
+        tokio::time::sleep(Duration::from_millis(COLD_MS)).await;
+        let t0 = perf_now();
+        let mut paged = Vec::new();
+        for kind in kinds {
+            let t1 = perf_now();
+            let read = self.paged(kind).await;
+            paged.push((*kind, read, perf_now() - t1));
+        }
+        let paged_ms = perf_now() - t0;
+        tokio::time::sleep(Duration::from_millis(COLD_MS)).await;
+        let bulk = self.tool("snapshot", json!({"rows": kinds})).await;
+        let epoch = bulk.body["epoch"].as_str().unwrap_or_default().to_owned();
+        let same = |kind: &str| {
+            paged.iter().find(|(read, ..)| *read == kind).and_then(|(_, read, _)| read.as_ref().ok()).is_some_and(|(rows, paged_epoch)| {
+                without_epoch(&Value::Array(rows.clone()), paged_epoch) == without_epoch(&bulk.body["rows"][kind], &epoch)
+            })
+        };
+        let (tracks, markers) = (same("track"), same("marker"));
+        let others: Vec<&str> = kinds.iter().copied().filter(|kind| !matches!(*kind, "track" | "marker") && !same(kind)).collect();
+        let count = |kind: &str| bulk.body["rows"][kind].as_array().map_or(0, Vec::len);
+        let truncated = bulk.body.get("truncated").filter(|kinds| !kinds.is_null()).map(Value::to_string);
+        let times: Vec<String> = paged
+            .iter()
+            .map(|(kind, read, ms)| match read {
+                Ok((rows, _)) => format!("{kind} {} ({} rows)", seconds(*ms), rows.len()),
+                Err(why) => format!("{kind} failed ({})", short(why, 80)),
+            })
+            .collect();
+        let what = if bulk.ok {
+            format!(
+                "the bulk read, snapshot {{rows: [{}]}}: {} rows in one answer in {} (epoch {epoch}), the six paged reads {} ({}); the tracks ({}) {} and the markers ({}) {} the paged reads'{}{}",
+                kinds.join(", "),
+                kinds.iter().map(|kind| count(kind)).sum::<usize>(),
+                seconds(bulk.ms),
+                seconds(paged_ms),
+                times.join(", "),
+                count("track"),
+                if tracks { "are" } else { "aren't" },
+                count("marker"),
+                if markers { "are" } else { "aren't" },
+                if others.is_empty() { ", as are the other kinds'".to_string() } else { format!("; the {} rows differ", others.join(", ")) },
+                truncated.as_deref().map(|kinds| format!("; cut: {kinds}")).unwrap_or_default()
+            )
+        } else {
+            format!("the bulk read, snapshot {{rows}}: {}", bulk.error())
+        };
+        self.say(bulk.ok && truncated.is_none() && tracks && markers, Some(bulk.ms), &what);
+    }
+
+    /// (M6) watch_me: started, a marker added through Kumi (a bar past every region), stopped: what it tells names the
+    /// marker added there in Logic's words (a marker, never Live's locator); then the marker undone through Kumi.
+    async fn m6_watch(&self, undo: &Rc<dyn KernelTool>) -> Result<(), RuntimeError> {
+        let look = self.observe().await?;
+        let Some(watch) = tool_named(&look, "watch_me") else {
+            self.say(false, None, "watch_me: Logic Pro's integration offers no watch_me tool");
+            return Ok(());
+        };
+        let beats_per_bar = self.beats_per_bar().await;
+        let at = self.past_regions(beats_per_bar).await;
+        let position = format!("bar {}", (at / beats_per_bar).round() as i64 + 1);
+        let markers = self.count("marker").await;
+        let action = |action: &str| json!({"action": action}).as_object().cloned().unwrap_or_default();
+        let t0 = perf_now();
+        let started = watch.execute(action("start"), signal()).await?;
+        let heard = self.changes.borrow().len();
+        let (is_error, text) = self.run_tool(&look, "marker_add", json!({"positionBeats": at})).await?;
+        let made = self.made_since(heard);
+        let stopped = watch.execute(action("stop"), signal()).await?;
+        let ms = perf_now() - t0;
+        let told =
+            serde_json::from_str::<Value>(&stopped.text).ok().and_then(|reply| reply["changes"].as_array().cloned()).unwrap_or_default();
+        let named = told.iter().any(|change| change["added"] == "marker" && change["position"] == position.as_str());
+        let said = stopped.text.to_lowercase();
+        let lives: Vec<&str> = ["locator", "scene", "clip", "the set"].into_iter().filter(|word| said.contains(word)).collect();
+        let what = if started.is_error || is_error || stopped.is_error {
+            let failed = if started.is_error {
+                &started.text
+            } else if is_error {
+                &text
+            } else {
+                &stopped.text
+            };
+            format!("watch_me around a marker added at {position}: {}", short(failed, 240))
+        } else {
+            format!(
+                "watch_me: started, a marker added through Kumi at {position}, stopped: {}{}",
+                short(&stopped.text, 400),
+                if lives.is_empty() { String::new() } else { format!(" (Live's words: {})", lives.join(", ")) }
+            )
+        };
+        self.say(
+            !started.is_error
+                && !is_error
+                && made.len() == 1
+                && !stopped.is_error
+                && named
+                && lives.is_empty()
+                && watch.description().contains("Logic Pro"),
+            Some(ms),
+            &what,
+        );
+        for id in made.iter().rev() {
+            let title = self.change(id).map(|row| row.title).unwrap_or_else(|| id.clone());
+            let t0 = perf_now();
+            let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let ms = perf_now() - t0;
+            let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+            let markers_back = self.count("marker").await;
+            self.say(
+                undone && markers_back == markers,
+                Some(ms),
+                &format!(
+                    "undo “{title}” through Kumi: {}; {markers_back} markers (before: {markers})",
+                    if undone { "undone".to_string() } else { short(&result.text, 200) }
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// (M6) Curves in HISTORY: a band's gain of the first Channel EQ (Scratch's Vocal holds one) and the threshold of a
+    /// Compressor (on the EQ's strip, else the first strip that holds one; skipped when none does), each changed through
+    /// fx_param, its record drawn as the plug-in's curve once the follow-up read lands, and undone.
+    async fn m6_curves(&self, undo: &Rc<dyn KernelTool>) -> Result<(), RuntimeError> {
+        let look = self.observe().await?;
+        let Some(read) = tool_named(&look, "logic_read") else {
+            self.say(false, None, "curves: no logic_read tool");
+            return Ok(());
+        };
+        let context: Value = serde_json::from_str(&look.context).unwrap_or(Value::Null);
+        let mut strips: Vec<(String, Vec<Value>)> = Vec::new();
+        for track in context["tracks"].as_array().cloned().unwrap_or_default() {
+            let plugins = self.rows(&read, json!({"kind": "plugin", "parent": track["ref"], "limit": 200})).await?;
+            strips.push((track["name"].as_str().unwrap_or("?").to_owned(), plugins));
+        }
+        let find = |plugin: &str, first: Option<&str>| -> Option<(String, Value)> {
+            let on =
+                |strip: &(String, Vec<Value>)| strip.1.iter().find(|row| row["name"] == plugin).map(|row| (strip.0.clone(), row.clone()));
+            first.and_then(|first| strips.iter().filter(|strip| strip.0 == first).find_map(on)).or_else(|| strips.iter().find_map(on))
+        };
+        let eq = find("Channel EQ", None);
+        match &eq {
+            None => self.say(false, None, "curves: no track's strip holds a Channel EQ"),
+            Some((strip, plugin)) => self.curve_row(&look, &read, undo, strip, plugin, "Low Shelf Gain", true).await?,
+        }
+        if self.stopping.get() {
+            return Ok(());
+        }
+        match find("Compressor", eq.as_ref().map(|(strip, _)| strip.as_str())) {
+            None => self.say(true, None, "curves: the Compressor's threshold skipped, since no track's strip holds a Compressor"),
+            Some((strip, plugin)) => self.curve_row(&look, &read, undo, &strip, &plugin, "Threshold", false).await?,
+        }
+        Ok(())
+    }
+
+    /// (M6) A parameter of a plug-in's curve changed through Kumi's fx_param (an EQ band's gain 3 dB, a compressor's
+    /// threshold 6 dB), its HISTORY record then drawn as the plug-in's curve once the follow-up read of the plug-in lands
+    /// (an EQ's bands, or a compressor's curve, before and after; waited for up to 20 s), and undone through Kumi.
+    #[allow(clippy::too_many_arguments)]
+    async fn curve_row(
+        &self,
+        look: &Observation,
+        read: &Rc<dyn KernelTool>,
+        undo: &Rc<dyn KernelTool>,
+        strip: &str,
+        plugin: &Value,
+        param: &str,
+        eq: bool,
+    ) -> Result<(), RuntimeError> {
+        let name = plugin["name"].as_str().unwrap_or("?").to_owned();
+        let shown_in =
+            |rows: &[Value]| rows.iter().find(|row| row["name"] == param).and_then(|row| row["text"].as_str().map(str::to_owned));
+        let params = self.rows(read, json!({"kind": "param", "parent": plugin["ref"], "limit": 200})).await?;
+        let Some((was, from)) = shown_in(&params).and_then(|was| number_of(&was).map(|from| (was, from))) else {
+            let names: Vec<&str> = params.iter().filter_map(|row| row["name"].as_str()).take(30).collect();
+            self.say(
+                false,
+                None,
+                &format!(
+                    "{name}'s {param} on “{strip}”: its Controls View shows no {param} with a number ({})",
+                    if names.is_empty() { "nothing read".to_string() } else { names.join(", ") }
+                ),
+            );
+            return Ok(());
+        };
+        let by = if eq {
+            if from <= 20.0 {
+                3.0
+            } else {
+                -3.0
+            }
+        } else if from - 6.0 >= -48.0 {
+            -6.0
+        } else {
+            6.0
+        };
+        let target = from.round() + by;
+        let heard = self.changes.borrow().len();
+        let t0 = perf_now();
+        let (is_error, text) = self.run_tool(look, "fx_param", json!({"ref": plugin["ref"], "param": param, "value": target})).await?;
+        let ms = perf_now() - t0;
+        let made = self.made_since(heard);
+        // The record's picture: the values it moved at once, the curve once the follow-up read of the plug-in lands.
+        let curve = |picture: Option<&ChangePicture>| {
+            if eq {
+                matches!(picture, Some(ChangePicture::Eq { .. }))
+            } else {
+                matches!(picture, Some(ChangePicture::Dynamics { .. }))
+            }
+        };
+        let t1 = perf_now();
+        let mut picture = None;
+        if let Some(id) = made.last().filter(|_| !is_error) {
+            loop {
+                picture = self.change(id).and_then(|row| row.picture);
+                if curve(picture.as_ref()) || perf_now() - t1 > CURVE_MS || self.stopping.get() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        let drawn_in = perf_now() - t1;
+        let reads = shown_in(&self.rows(read, json!({"kind": "param", "parent": plugin["ref"], "limit": 200})).await?);
+        let set = reads.as_deref().and_then(number_of).is_some_and(|now| (now - target).abs() < 0.5);
+        let what = if is_error {
+            format!("{name}'s {param} on “{strip}” to {target} through fx_param: {}", short(&text, 200))
+        } else {
+            format!(
+                "{name}'s {param} on “{strip}” {was} → {} through fx_param, {} HISTORY row(s): its record draws {} ({} after the change)",
+                reads.as_deref().unwrap_or("unread"),
+                made.len(),
+                picture_words(picture.as_ref()),
+                seconds(drawn_in)
+            )
+        };
+        self.say(!is_error && made.len() == 1 && set && curve(picture.as_ref()), Some(ms), &what);
+        for id in made.iter().rev() {
+            let title = self.change(id).map(|row| row.title).unwrap_or_else(|| id.clone());
+            let t0 = perf_now();
+            let result = undo.execute(json!({"change": id}).as_object().cloned().unwrap_or_default(), signal()).await?;
+            let ms = perf_now() - t0;
+            let undone = !result.is_error && self.change(id).is_some_and(|now| now.state == ChangeState::Undone);
+            let back = shown_in(&self.rows(read, json!({"kind": "param", "parent": plugin["ref"], "limit": 200})).await?);
+            self.say(
+                undone && back.as_deref().and_then(number_of).is_some_and(|now| (now - from).abs() < 0.05),
+                Some(ms),
+                &format!(
+                    "undo “{title}” through Kumi: {}; {param} reads {} (before: {was})",
+                    if undone { "undone".to_string() } else { short(&result.text, 200) },
+                    back.as_deref().unwrap_or("unread")
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// (M6) Logic's library: integrations::library_sources for Logic gives only folders there on this Mac and none of
+    /// Live's (Splice's folder is both DAWs'); and the library's recent Logic projects are those the bridge named that are
+    /// still there, the open one among them.
+    fn m6_library(&self, recent: &[String], open: Option<&str>) {
+        let logic = integrations::library_sources(&SourceOptions { daw: Some(DawId::Logic), ..SourceOptions::default() });
+        let live: Vec<String> = integrations::library_sources(&SourceOptions::default())
+            .into_iter()
+            .filter(|source| source.kind != SourceKind::Splice)
+            .map(|source| source.path)
+            .collect();
+        let missing: Vec<String> =
+            logic.iter().filter(|source| !Path::new(&source.path).is_dir()).map(|source| tilde(&source.path)).collect();
+        let lives: Vec<String> = logic
+            .iter()
+            .filter(|source| live.contains(&source.path) || source.path.to_lowercase().contains("ableton"))
+            .map(|source| tilde(&source.path))
+            .collect();
+        let listed: Vec<String> = logic.iter().map(|source| format!("{} ({})", source.label, tilde(&source.path))).collect();
+        self.say(
+            !logic.is_empty() && missing.is_empty() && lives.is_empty(),
+            None,
+            &format!(
+                "Logic Pro's library sources: {} folder(s){}{}: {}",
+                logic.len(),
+                if missing.is_empty() {
+                    ", each there on this Mac".to_string()
+                } else {
+                    format!(", {} not there ({})", missing.len(), missing.join(", "))
+                },
+                if lives.is_empty() { ", none of Live's".to_string() } else { format!(", Live's among them ({})", lives.join(", ")) },
+                if listed.is_empty() { "none".to_string() } else { listed.join("; ") }
+            ),
+        );
+        let kept = integrations::recent_projects(&SourceOptions {
+            daw: Some(DawId::Logic),
+            recent: Some(recent.to_vec()),
+            ..SourceOptions::default()
+        });
+        let among = open.is_some_and(|open| kept.iter().any(|path| path == open));
+        self.say(
+            among,
+            None,
+            &format!(
+                "the library's recent Logic Pro projects: {} of the {} the bridge named with a path (those still there), the open one {}",
+                kept.len(),
+                recent.len(),
+                if among { "among them" } else { "not among them" }
+            ),
+        );
+    }
+
     fn exit_code(&self) -> i32 {
         let rows = self.rows.borrow();
         let passed = rows.iter().filter(|row| row.ok).count();
@@ -1854,7 +2927,7 @@ impl Accept {
         let rows = self.rows.borrow();
         let passed = rows.iter().filter(|row| row.ok).count();
         let today = chrono::Utc::now().format("%Y-%m-%d");
-        let mut out = format!("# Logic Pro M2 to M5 acceptance, {today}\n\nStatus: {} of {} checks passed.\n\n", passed, rows.len());
+        let mut out = format!("# Logic Pro M2 to M6 acceptance, {today}\n\nStatus: {} of {} checks passed.\n\n", passed, rows.len());
         out.push_str("| | |\n| --- | --- |\n");
         out.push_str(&format!(
             "| Logic Pro | {} (pid {}, `{}`) |\n| Bridge | {} |\n| Project | {} |\n| Host | `daw-mcp-server --daw logic` from this build |\n\n",
