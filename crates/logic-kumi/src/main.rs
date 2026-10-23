@@ -172,7 +172,9 @@ fn main() -> ExitCode {
         },
     };
     log::set_dir(Some(config.server.log_dir.clone().unwrap_or_else(|| bridge_paths.logs())));
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    // The checkout this bridge was built in, where a development run finds its helper. Cargo gives `<checkout>/.`
+    // (.cargo/config.toml): its components drop the `.`.
+    let checkout: PathBuf = Path::new(env!("KUMI_WORKSPACE")).components().collect();
     let Some(helper) = find_helper(args.helper, std::env::var(HELPER_ENV).ok(), exe_dir.as_deref(), &checkout) else {
         log::line("no helper: build kumi-logic-hands (python3 scripts/build-logic-hands.py), or name it with --helper or KUMI_LOGIC_HANDS");
         return ExitCode::from(2);

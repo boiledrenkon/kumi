@@ -1449,6 +1449,7 @@ dependencies = [
  "daw-bridge",
  "flate2",
  "hex",
+ "kumi-testkit",
  "libc",
  "percent-encoding",
  "serde_json",

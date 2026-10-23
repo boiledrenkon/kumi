@@ -66,7 +66,7 @@ mod render;
 mod sampler;
 use mixer::{AutoEvent, Aux, Channel, Output, Plugin, Smart};
 
-const VECTORS: &str = include_str!("../../tests/vectors/logic-reads.json");
+const VECTORS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/logic-reads.json"));
 const VECTORS_NAME: &str = "tests/vectors/logic-reads.json";
 /// The timeline body's page, in tracks.
 const MAX_LANES: usize = 500;

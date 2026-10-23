@@ -59,7 +59,7 @@ fn main() {
     let helper_path = helper_path
         .or_else(|| std::env::var("KUMI_LOGIC_HANDS").ok().map(PathBuf::from))
         .or_else(|| {
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/logic-hands");
+            let dir = kumi_testkit::workspace_path("target/logic-hands");
             std::fs::read_dir(dir)
                 .ok()?
                 .flatten()

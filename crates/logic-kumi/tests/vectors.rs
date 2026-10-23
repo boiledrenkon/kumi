@@ -2,8 +2,6 @@
 //! ids, discovery keys, the proofs), the framer every connection reads with, the frame grammar, and discovery file
 //! names. The server's side of a connection is replayed over real sockets in `src/server.rs`'s tests.
 
-use std::path::PathBuf;
-
 use daw_bridge::auth::{hmac_sha256_hex, sha256_hex};
 use daw_bridge::files::{discovery_file_name, discovery_key};
 use daw_bridge::frame::Framer;
@@ -11,7 +9,7 @@ use daw_bridge::wire::{Frame, Response, MAX_JSON_DEPTH};
 use serde_json::{json, Value};
 
 fn vectors(name: &str) -> Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../daw-bridge/tests/vectors").join(name);
+    let path = kumi_testkit::workspace_path("crates/daw-bridge/tests/vectors").join(name);
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("no vectors at {}", path.display()))).unwrap()
 }
 

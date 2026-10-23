@@ -786,12 +786,11 @@ mod tests {
     use daw_bridge::handshake::{ClientHandshake, ClientStep, HandshakeError};
     use daw_bridge::owner;
     use std::io::{BufRead, BufReader};
-    use std::path::Path;
 
     const VECTOR_SECRET: &str = "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz";
 
     fn vectors(name: &str) -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daw-bridge/tests/vectors").join(name);
+        let path = kumi_testkit::workspace_path("crates/daw-bridge/tests/vectors").join(name);
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 

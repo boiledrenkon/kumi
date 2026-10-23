@@ -16,7 +16,7 @@ fn fixtures() -> PathBuf {
 }
 
 fn vectors_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../daw-mcp-server/tests/vectors/logic-reads.json")
+    kumi_testkit::workspace_path("crates/daw-mcp-server/tests/vectors/logic-reads.json")
 }
 
 /// The second slice's reads, blessed beside this crate's scenes: the host's replay of them is the wiring side's.

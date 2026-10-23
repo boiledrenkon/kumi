@@ -456,7 +456,8 @@ fn bridge_version(binary: &Path) -> Option<String> {
 /// (`scripts/build-logic-hands.py` builds it when it isn't there yet) and the version file. Staged afresh each time, so
 /// what's installed is the build of now.
 fn stage_logic_bridge(beside: Option<&Path>) -> Result<PathBuf, String> {
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let checkout = kumi_common::dev::checkout()
+        .ok_or_else(|| "this Kumi wasn't built in a checkout: it has no build of Logic Pro's bridge".to_string())?;
     let target = checkout.join("target");
     let binary = beside
         .map(|beside| beside.join(LOGIC_BINARY))
