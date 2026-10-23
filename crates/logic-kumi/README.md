@@ -91,10 +91,13 @@ changes the project.
   its header's name field (the helper's `click`, at the system's event tap):
   the headers' selected state isn't settable, and the surface's select button
   adds to a selection rather than replacing it.
-- The socket threads queue `read`, `snapshot` and `focus_body` for the run
-  loop, which alone talks to the helper (`src/queue.rs`); `ping`, `status` and
-  `focus` never wait. Without the Accessibility grant every read fails with
-  words, never `busy`, and `status.permission` names the grant.
+- A connection's reader queues reads and changes for the run loop, which alone
+  talks to the helper (`src/queue.rs`), in the order they came, and waits for
+  each answer on a thread of its own; `ping`, `status` and `focus` never wait,
+  even behind a change the run loop takes seconds over (an import, a page of
+  notes), so a host never takes a bridge at work for one gone. Without the
+  Accessibility grant every read fails with words, never `busy`, and
+  `status.permission` names the grant.
 
 Fixtures (`tests/fixtures/<scene>/scene.json.gz`: gzipped JSON, read one with
 `gunzip -c <file> | jq .`) are every helper reply the readers asked for over

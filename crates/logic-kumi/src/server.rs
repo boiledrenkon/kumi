@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use crate::focus::Focus;
 use crate::log;
 use crate::logic::Model;
-use crate::queue::{Outcome, Queue};
+use crate::queue::{Outcome, Queue, Waiter};
 use crate::BRIDGE_VERSION;
 
 /// Frames queued for one connection before it counts as stuck and is closed.
@@ -98,6 +98,9 @@ const MAX_WAIT: Duration = Duration::from_secs(60);
 /// the part through, so its wait is the part's length and a margin (`listen::bound_seconds`) unless the host's call
 /// says otherwise.
 const MOST_LISTENING: Duration = Duration::from_secs(2 * 3600);
+/// Queued requests one connection may have waiting for the run loop at once, each on a thread of its own; past that, a
+/// request is waited for on the connection's reader, as every one was before.
+const MAX_ANSWERING: usize = 8;
 const CLOSING: &str = "the Logic Pro bridge is closing; nothing changed";
 /// What a read answers while the helper lacks the Accessibility grant: `failed`, never `busy`, with the status's
 /// `permission` naming what to grant.
@@ -410,6 +413,23 @@ impl Server {
     }
 }
 
+/// What a connection's reader makes of a request.
+enum Received {
+    /// Answered at once: ping, status and focus from what is known, and refusals.
+    Answered(Frame),
+    /// Queued for the run loop, its answer waited for by `Shared::wait`.
+    Queued(Queued),
+}
+
+/// A request in the run loop's queue, and how long its answer is waited for.
+struct Queued {
+    id: u64,
+    waiter: Waiter,
+    wait: Duration,
+    /// The host gave a deadline: a request never started by then is late, not busy.
+    deadline: bool,
+}
+
 struct Shared {
     config: Config,
     hub: Hub,
@@ -451,22 +471,25 @@ impl Shared {
         Frame::ok(id, answer)
     }
 
-    fn answer(&self, request: Request) -> Frame {
+    /// Answers a request at once (ping, status and focus from what is known, or a refusal), or queues it for the run
+    /// loop in the order its connection sent it: `wait` then gets the run loop's answer.
+    fn receive(&self, request: Request) -> Received {
         let id = request.id;
         match request.method.as_str() {
-            "ping" => return Frame::ok(id, json!({})),
-            "status" => return Frame::ok(id, lock(&self.model).status()),
-            "focus" => return self.focus(id),
+            "ping" => return Received::Answered(Frame::ok(id, json!({}))),
+            "status" => return Received::Answered(Frame::ok(id, lock(&self.model).status())),
+            "focus" => return Received::Answered(self.focus(id)),
             _ => {}
         }
         if !QUEUED_METHODS.contains(&request.method.as_str()) {
-            return Frame::error(id, code::UNKNOWN_METHOD, format!("the Logic Pro bridge has no method {:?}", request.method));
+            let unknown = format!("the Logic Pro bridge has no method {:?}", request.method);
+            return Received::Answered(Frame::error(id, code::UNKNOWN_METHOD, unknown));
         }
         if self.stopping.load(Ordering::Acquire) {
-            return Frame::error(id, code::FAILED, CLOSING);
+            return Received::Answered(Frame::error(id, code::FAILED, CLOSING));
         }
         if lock(&self.model).permission.is_some() {
-            return Frame::error(id, code::FAILED, UNTRUSTED);
+            return Received::Answered(Frame::error(id, code::FAILED, UNTRUSTED));
         }
         let now = unix_ms();
         // A listening request plays its part through: it waits that long and a margin, the rest the usual.
@@ -479,20 +502,26 @@ impl Shared {
         };
         let wait = match request.deadline_ms {
             Some(deadline) if deadline <= now => {
-                return Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed")
+                let late = "the deadline passed before the bridge got to it; nothing changed";
+                return Received::Answered(Frame::error(id, code::DEADLINE, late));
             }
             Some(deadline) => Duration::from_millis(deadline - now),
             None => usual,
         };
+        let deadline = request.deadline_ms.is_some();
         let waiter = self.queue.submit(&request.method, request.params);
-        match waiter.wait(wait.min(most), &self.stopping) {
+        Received::Queued(Queued { id, waiter, wait: wait.min(most), deadline })
+    }
+
+    /// A queued request's answer: the run loop's, or why there is none (it never started, or didn't finish in time).
+    fn wait(&self, queued: Queued) -> Frame {
+        let Queued { id, waiter, wait, deadline } = queued;
+        match waiter.wait(wait, &self.stopping) {
             Outcome::Answered(Ok(result)) => Frame::ok(id, result),
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
             Outcome::Cancelled => match lock(&self.model).busy {
                 Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
-                None if request.deadline_ms.is_some() => {
-                    Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed")
-                }
+                None if deadline => Frame::error(id, code::DEADLINE, "the deadline passed before the bridge got to it; nothing changed"),
                 None => Frame::error(id, code::BUSY, "the bridge didn't get to it in time; nothing changed"),
             },
             Outcome::Uncertain => Frame::error(id, code::UNCERTAIN, "the bridge started this but didn't finish in time"),
@@ -643,7 +672,26 @@ fn write_frame(stream: &mut TcpStream, mut bytes: &[u8], stopping: &AtomicBool) 
     true
 }
 
-fn serve(conn: &Arc<Conn>, mut state: ServerConnection, mut stream: TcpStream, started: Instant, shared: &Shared) {
+fn serve(conn: &Arc<Conn>, state: ServerConnection, stream: TcpStream, started: Instant, shared: &Arc<Shared>) {
+    let mut answering = Vec::new();
+    read_requests(conn, state, stream, started, shared, &mut answering);
+    // A stopping server's bye follows the answers still waited for, as it followed a reader's own answer before: each
+    // ends within a poll of `stopping`. A connection that went away doesn't wait for them, and frees its place at once.
+    if shared.stopping.load(Ordering::Acquire) {
+        for answer in answering {
+            let _ = answer.join();
+        }
+    }
+}
+
+fn read_requests(
+    conn: &Arc<Conn>,
+    mut state: ServerConnection,
+    mut stream: TcpStream,
+    started: Instant,
+    shared: &Arc<Shared>,
+    answering: &mut Vec<JoinHandle<()>>,
+) {
     let mut buf = vec![0u8; 64 * 1024];
     let _ = stream.set_read_timeout(Some(READ_POLL));
     loop {
@@ -684,14 +732,46 @@ fn serve(conn: &Arc<Conn>, mut state: ServerConnection, mut stream: TcpStream, s
                 }
                 ServerAction::Authenticated => conn.authenticated.store(true, Ordering::Release),
                 ServerAction::Request(request) => {
-                    let response = shared.answer(request);
-                    if conn.out.send(response.encode()).is_err() {
+                    let sent = match shared.receive(request) {
+                        Received::Answered(frame) => conn.out.send(frame.encode()).is_ok(),
+                        Received::Queued(queued) => answer_apart(conn, shared, queued, answering),
+                    };
+                    if !sent {
                         return;
                     }
                 }
             }
         }
     }
+}
+
+/// Waits for a queued request's answer on a thread of its own. The run loop may take seconds over a read or a change
+/// (an import, notes written row by row), and meanwhile the connection goes on answering ping, status and focus: a host
+/// never takes a bridge at work for one gone silent, and Logic Pro for closed. The queue keeps the order requests came
+/// in; their answers carry their ids, so they go out as they come. Past `MAX_ANSWERING`, or with no thread to be had,
+/// the answer is waited for here. False when the connection is gone.
+fn answer_apart(conn: &Arc<Conn>, shared: &Arc<Shared>, queued: Queued, answering: &mut Vec<JoinHandle<()>>) -> bool {
+    answering.retain(|answer| !answer.is_finished());
+    let queued = if answering.len() < MAX_ANSWERING {
+        // Handed over once the thread is there: one that can't be started drops its end, and the request comes back.
+        let (hand, handed) = mpsc::sync_channel::<Queued>(1);
+        let (waiting, out) = (shared.clone(), conn.out.clone());
+        let spawned = thread::Builder::new().name("kumi-answer".into()).spawn(move || {
+            if let Ok(queued) = handed.recv() {
+                let _ = out.send(waiting.wait(queued).encode());
+            }
+        });
+        match hand.send(queued) {
+            Ok(()) => {
+                answering.extend(spawned.ok());
+                return true;
+            }
+            Err(mpsc::SendError(queued)) => queued,
+        }
+    } else {
+        queued
+    };
+    conn.out.send(shared.wait(queued).encode()).is_ok()
 }
 
 fn unix_ms() -> u64 {
@@ -828,13 +908,29 @@ mod tests {
         }
     }
 
-    fn request(stream: &mut TcpStream, reader: &mut BufReader<TcpStream>, id: u64, method: &str) -> Value {
+    fn send(stream: &mut TcpStream, id: u64, method: &str) {
         stream
             .write_all(Frame::Request(Request { id, method: method.into(), params: json!({}), deadline_ms: None }).encode().as_slice())
             .unwrap();
+    }
+
+    fn request(stream: &mut TcpStream, reader: &mut BufReader<TcpStream>, id: u64, method: &str) -> Value {
+        send(stream, id, method);
         let response = read_frame(reader);
         assert_eq!(response["id"], id);
         response
+    }
+
+    /// The next job for the run loop, as the run loop takes it.
+    fn next_job(queue: &Queue) -> crate::queue::Job {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(job) = queue.take() {
+                return job;
+            }
+            assert!(Instant::now() < until, "no job came");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     // Replays daw-bridge's server vectors against the real sockets: what a host sees from this bridge.
@@ -1076,6 +1172,59 @@ mod tests {
         lab.hub.heartbeat();
         let beat: Value = serde_json::from_str(&read_line(&mut reader).unwrap()).unwrap();
         assert_eq!(beat["type"], "heartbeat");
+    }
+
+    // What the run loop takes seconds over (an import, notes written row by row) doesn't hold up its connection: ping,
+    // status and focus are answered meanwhile. A bridge that went quiet mid-import was taken by its host for one gone,
+    // and Kumi told the producer Logic Pro had closed. The run loop gets the requests in the order they were sent, and
+    // their answers go out as they come, each with its id.
+    #[test]
+    fn a_request_waiting_for_the_run_loop_doesnt_hold_up_ping_status_or_focus() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        lock(&lab.focus).update(crate::focus::Look { epoch: 3, view: "tracks", ..Default::default() });
+        send(&mut stream, 1, "change_apply");
+        send(&mut stream, 2, "read");
+        assert_eq!(request(&mut stream, &mut reader, 3, "ping")["result"], json!({}));
+        assert!(request(&mut stream, &mut reader, 4, "status")["result"].is_object());
+        assert_eq!(request(&mut stream, &mut reader, 5, "focus")["result"]["epoch"], "3");
+        let (apply, read) = (next_job(&lab.queue), next_job(&lab.queue));
+        assert_eq!((apply.method.as_str(), read.method.as_str()), ("change_apply", "read"));
+        read.answer(Ok(json!({"items": [], "epoch": "3"})));
+        assert_eq!(read_frame(&mut reader)["id"], 2);
+        apply.answer(Ok(json!({"epoch": "4"})));
+        let applied = read_frame(&mut reader);
+        assert_eq!((applied["id"].as_u64(), &applied["result"]), (Some(1), &json!({"epoch": "4"})));
+    }
+
+    // A stopping server says goodbye last: what waits for the run loop is answered first (closing, nothing changed).
+    #[test]
+    fn a_stopping_server_answers_what_waits_for_the_run_loop_before_its_bye() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        send(&mut stream, 1, "read");
+        assert_eq!(request(&mut stream, &mut reader, 2, "ping")["result"], json!({}));
+        lab.server.take().unwrap().stop("quit");
+        let closing = read_frame(&mut reader);
+        assert_eq!((closing["id"].as_u64(), closing["error"]["message"].as_str()), (Some(1), Some(CLOSING)));
+        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
+    }
+
+    // A host that lets go of a connection while a request on it waits for the run loop frees its place at once, not when
+    // the run loop gets to the request: a host replacing connections mid-import found the bridge full ("too many open").
+    #[test]
+    fn a_connection_let_go_of_while_a_request_waits_frees_its_place() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        send(&mut stream, 1, "read");
+        assert_eq!(request(&mut stream, &mut reader, 2, "ping")["result"], json!({}));
+        assert_eq!(lab.hub.counts(), (0, 1));
+        drop((stream, reader));
+        let until = Instant::now() + Duration::from_secs(2);
+        while lab.hub.counts() != (0, 0) {
+            assert!(Instant::now() < until, "the connection still holds its place");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Work for the run loop, which alone talks to the helper. A socket thread queues a request and waits for its answer
-//! with a deadline; the run loop takes the queue between its polls and answers each request through the helper. A
+//! Work for the run loop, which alone talks to the helper. A connection's reader queues a request, and a thread of its
+//! own waits for the answer with a deadline; the run loop takes the queue between its polls and answers each request through the helper. A
 //! request the run loop hasn't started by its deadline is cancelled; one it started but didn't finish in time is
 //! uncertain, though M2's reads change nothing. Copied in spirit from the REAPER extension's queue to its main thread.
 

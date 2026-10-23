@@ -619,27 +619,40 @@ impl Host {
                 // new one); if not, the DAW is busy and the old connection is kept, as it was.
                 if client.busy() && client.request("ping", json!({}), PING_PROBE).await == Err(RequestError::Timeout) {
                     let Some(fresh) = self.fresh_connection(&client, pid, &resource).await else { return Err(CallError::Timeout) };
-                    // Only a read is asked again: a write the old connection carried may have been made, and making it twice
-                    // (or refusing it as changed) would be wrong; its caller is told it timed out (uncertain).
-                    if !RESENT.contains(&method) {
-                        return Err(CallError::Timeout);
-                    }
-                    return match fresh.request(method, params, timeout).await {
-                        Ok(answer) => Ok(answer),
-                        Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
-                        Err(RequestError::Timeout) => Err(CallError::Timeout),
-                        Err(RequestError::Closed) => Err(CallError::Closed(format!("{} closed the connection", self.daw))),
-                    };
+                    return self.again(&fresh, method, params, timeout).await;
                 }
                 Err(CallError::Timeout)
             }
             Err(RequestError::Closed) => {
                 let mut current = self.current.lock().await;
+                // The host let this connection go for a fresh one to the same instance while the call waited on it (another
+                // call's timeout, above): the DAW is still there, and the call is never told it closed.
+                let replaced =
+                    current.as_ref().filter(|open| open.pid == pid && !open.client.same_connection(&client) && !open.client.is_closed());
+                if let Some(fresh) = replaced.map(|open| open.client.clone()) {
+                    drop(current);
+                    return self.again(&fresh, method, params, timeout).await;
+                }
                 if current.as_ref().is_some_and(|open| open.pid == pid && open.client.is_closed()) {
                     current.take();
                 }
                 Err(CallError::Closed(format!("{} closed the connection", self.daw)))
             }
+        }
+    }
+
+    /// A call whose connection was let go of for a fresh one. Only a read is asked again: a write the old connection carried
+    /// may have been made, and making it twice (or refusing it as changed) would be wrong; its caller is told it timed out
+    /// (uncertain).
+    async fn again(&self, fresh: &BridgeClient, method: &str, params: Value, timeout: Duration) -> Result<Value, CallError> {
+        if !RESENT.contains(&method) {
+            return Err(CallError::Timeout);
+        }
+        match fresh.request(method, params, timeout).await {
+            Ok(answer) => Ok(answer),
+            Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
+            Err(RequestError::Timeout) => Err(CallError::Timeout),
+            Err(RequestError::Closed) => Err(CallError::Closed(format!("{} closed the connection", self.daw))),
         }
     }
 
