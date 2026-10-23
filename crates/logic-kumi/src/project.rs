@@ -983,7 +983,8 @@ pub fn sample_rate_of(path: &str) -> Option<u32> {
         }
     }
     for candidate in candidates {
-        let Ok(output) = std::process::Command::new("plutil").args(["-extract", "SampleRate", "raw", "-o", "-"]).arg(&candidate).output()
+        let Ok(output) =
+            std::process::Command::new(crate::tools::PLUTIL).args(["-extract", "SampleRate", "raw", "-o", "-"]).arg(&candidate).output()
         else {
             continue;
         };

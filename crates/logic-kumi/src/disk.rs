@@ -154,7 +154,7 @@ pub fn cut(source: &Path, dest: &Path, from: u64, frames: u64) -> Option<crate::
 pub fn preference(key: &str) -> Option<String> {
     let owned = key.to_string();
     let value = look("preference", Path::new(key), &move || {
-        let Ok(output) = std::process::Command::new("defaults").args(["read", "com.apple.logic10", &owned]).output() else {
+        let Ok(output) = std::process::Command::new(crate::tools::DEFAULTS).args(["read", "com.apple.logic10", &owned]).output() else {
             return Value::Null;
         };
         if !output.status.success() {
@@ -177,7 +177,7 @@ pub fn projects_named(names: &[String]) -> Vec<(String, Vec<String>)> {
     let value = look("spotlight", Path::new(&names.join("\n")), &move || {
         let quoted: Vec<String> =
             owned.iter().map(|name| format!("kMDItemFSName == \"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))).collect();
-        let Ok(output) = std::process::Command::new("mdfind").arg(quoted.join(" || ")).output() else { return Value::Null };
+        let Ok(output) = std::process::Command::new(crate::tools::MDFIND).arg(quoted.join(" || ")).output() else { return Value::Null };
         if !output.status.success() {
             return Value::Null;
         }

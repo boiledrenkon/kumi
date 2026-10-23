@@ -138,7 +138,7 @@ fn tables(bundle: &Path, language: &str) -> Vec<PathBuf> {
 
 /// A `.strings` table (UTF-16 text or a binary plist) as JSON, through `plutil`.
 fn read_table(path: &Path) -> Option<Vec<(String, String)>> {
-    let output = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(path).output().ok()?;
+    let output = Command::new(crate::tools::PLUTIL).args(["-convert", "json", "-o", "-"]).arg(path).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -165,7 +165,7 @@ pub fn language_of(preferred: &[String]) -> String {
 #[cfg(target_os = "macos")]
 pub fn preferred_languages(bundle_id: &str) -> Vec<String> {
     for args in [vec!["read", bundle_id, "AppleLanguages"], vec!["read", "-g", "AppleLanguages"]] {
-        let Ok(output) = Command::new("defaults").args(&args).output() else { continue };
+        let Ok(output) = Command::new(crate::tools::DEFAULTS).args(&args).output() else { continue };
         if !output.status.success() {
             continue;
         }

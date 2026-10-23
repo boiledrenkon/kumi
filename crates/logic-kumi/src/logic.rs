@@ -434,7 +434,7 @@ pub mod macos {
 
     /// A process's executable path, from `ps`.
     pub fn executable_of(pid: u32) -> Option<String> {
-        let output = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
+        let output = Command::new(crate::tools::PS).args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!path.is_empty()).then_some(path)
     }
@@ -442,7 +442,7 @@ pub mod macos {
     /// An app bundle's `CFBundleShortVersionString`, read with `defaults` (its Info.plist is binary).
     pub fn bundle_version(bundle: &Path) -> Option<String> {
         let info = bundle.join("Contents").join("Info");
-        let output = Command::new("defaults").args(["read"]).arg(&info).arg("CFBundleShortVersionString").output().ok()?;
+        let output = Command::new(crate::tools::DEFAULTS).args(["read"]).arg(&info).arg("CFBundleShortVersionString").output().ok()?;
         if !output.status.success() {
             return None;
         }
