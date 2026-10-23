@@ -11,6 +11,7 @@ members = [
     "crates/daw-mcp-server",
     "crates/reaper-kumi",
     "crates/logic-kumi",
+    "crates/kumi-testkit",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ kumi-genexpr = { path = "crates/kumi-genexpr" }
 kumi-runtime = { path = "crates/kumi-runtime" }
 ableton-mcp-server = { path = "crates/ableton-mcp-server" }
 daw-bridge = { path = "crates/daw-bridge" }
+kumi-testkit = { path = "crates/kumi-testkit" }
 
 async-trait = "0.1"
 base64 = "0.22"
@@ -97,6 +99,16 @@ opt-level = 3
 [profile.dev.package.crc32fast]
 opt-level = 3
 [profile.dev.package.adler2]
+opt-level = 3
+
+# And regular expressions: the terminal's Markdown is matched by a backtracking one, which long lines take to its limit.
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
 opt-level = 3
 
 # The GenExpr interpreter runs Kumi's building blocks a sample at a time in their tests: optimized, a song's worth of

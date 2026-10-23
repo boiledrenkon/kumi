@@ -259,7 +259,7 @@ and migration checks do not replace a new real-Live acceptance run.
   first, so words no title uses ("sidechain", which the guide writes "side
   chain") may miss a topic that only its text names; `topic` reads one whole
   by its title or address. The parser and the tool are tested over a synthetic
-  site laid out as Apple's (`crates/kumi-runtime/tests/logic_manual.rs`); the
+  site laid out as Apple's (`crates/kumi-runtime/tests/it/logic_manual.rs`); the
   guide's structure was read from a dozen of Apple's pages while developing.
 - **Logic Pro's instruction pack (M7):** Logic's turns carry Kumi's persona and
   the general rules Live's pack carries, said for Logic in its words

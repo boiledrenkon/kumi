@@ -1,6 +1,5 @@
 //! The initial sample of an inserted Simpler follows the verified import lifecycle.
-#[path = "../../../tests/support/fixture_paths.rs"]
-mod fixture_paths;
+kumi_testkit::fixture_paths!();
 use ableton_mcp_server::{
     host::{mutations::result_body, McpHost, McpHostOptions},
     live::*,

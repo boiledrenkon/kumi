@@ -89,13 +89,13 @@ cargo run --release -p kumi -- bridge --allow-dirty   # 需先关闭 Live
 
 ## 构建、测试与测量
 
-在仓库根目录运行原生检查。隔离运行器会在临时主目录中调用 `cargo test --workspace --locked`：
+在仓库根目录运行原生检查。隔离运行器会在临时主目录中用 cargo-nextest 运行全部测试，每个测试一个进程：
 
 ```sh
 npm ci --prefix crates/kumi-runtime/tests/support   # 只需一次：部分测试运行的官方 SDK
 cargo build --locked --workspace --all-targets
 sh scripts/test-isolated.sh                 # PowerShell: ./scripts/test-isolated.ps1
-sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport
+sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'
 python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 ```
 

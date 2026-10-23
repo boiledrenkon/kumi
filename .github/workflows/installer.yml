@@ -46,22 +46,17 @@ jobs:
       - id: plan
         shell: bash
         run: |
-          # Main, and pull requests that change installing, updating, releasing, Willington's files, the Mac helper the
+          # Each push to main, and a pull request that changes the install surface, build and install on one machine of
+          # each system (Linux and Windows on x64, macOS on Apple silicon). The install surface is the `install` area in
+          # scripts/areas.toml: the installers, installing, updating and releasing, Willington's files, the Mac helper the
           # bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings) and
-          # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), how Kumi's extension
-          # goes into Live, or how REAPER's, Renoise's and Logic Pro's bridges are built and go in (the extension's
-          # build, shim, SDK and entry point, the host's binary, the tool's manifest, entry and version, Logic's
-          # bridge's binary and its helper, and the shared lifecycle, detection and files: a REAPER change kind or a
-          # host tool is CI's), build and install on one machine of each system (Linux and Windows on x64, macOS on
-          # Apple silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install
-          # each, update to it from the release before it and check the update from the JavaScript release (see below).
-          # A pull request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a
-          # version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory, techniques,
-          # playbook, gaps, an older Kumi's files) installs on Linux. Any other builds Linux's bundle only; main
-          # installs and checks it once merged.
+          # builds paths, how Kumi's extension goes into Live, how REAPER's, Renoise's and Logic Pro's bridges are built and go
+          # in, and this workflow; not their tests. Any other pull request builds nothing: main's run covers it once merged. Tags,
+          # a run by hand and a pull request labelled full-tests build all six platforms, install each, update to it from
+          # the release before it and check the update from the JavaScript release (see below); the nightly run only
+          # builds them.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/reaper-kumi/(build\.rs|Cargo\.toml|shim/|sdk/|src/lib\.rs)|crates/daw-mcp-server/(Cargo\.toml|src/bin/)|crates/daw-bridge/(Cargo\.toml|src/(lifecycle|install|detect|files|owner|paths)\.rs)|crates/logic-kumi/(Cargo\.toml|src/main\.rs|helper/)|daws/renoise/com\.kumi\.Bridge\.xrnx/(manifest\.xml|main\.lua|payload/version\.lua))'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
@@ -77,31 +72,16 @@ jobs:
             daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua daws/renoise/com.kumi.Bridge.xrnx/payload/version.lua \
             crates/logic-kumi/src/main.rs crates/logic-kumi/helper/KumiLogicHands.swift scripts/build-logic-hands.py; do
             test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
-            grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
+            python3 scripts/dev.py areas --in install "$path" > /dev/null || { echo "::error::$path must count as installing (scripts/areas.toml)"; exit 1; }
           done
           # The nightly run only builds, to keep the release profile's cache warm. A run started by hand also installs.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             checks=false
           fi
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="origin/${GITHUB_BASE_REF}"
-            # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
-            changed="$(git diff --name-only "$base...HEAD")"
-            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.|^crates/(reaper-kumi|daw-bridge|daw-mcp-server|logic-kumi)/(tests|examples)/|^crates/(reaper-kumi|daw-bridge|daw-mcp-server|logic-kumi)/src/(.*/)?tests\.rs$|^crates/logic-kumi/helper/tests/' || true)"
-            # Cargo's changed lines less version numbers (a bridge or release bump): what's left is a dependency.
-            dependencies="$(git diff -U0 "$base...HEAD" -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' \
-              | grep -E '^[-+]' | grep -v -E '^(---|\+\+\+) |^[-+]version = "[^"]*"$' || true)"
-            if [[ -z "$installing" && -z "$dependencies" ]]; then
-              full=false
-              if ! grep -q -E '^(remote-script/|protocol/|apps/live-extension/|Cargo\.(toml|lock)$|crates/[^/]+/Cargo\.toml$|crates/kumi-store/|crates/kumi-runtime/src/core/(memory|techniques|playbook|gaps|file_sync|store_[a-z_]+)\.rs$|crates/kumi/src/config\.rs$)' <<<"$changed"; then
-                checks=false
-              fi
-            fi
-          fi
           # Every platform, the updates from GitHub's releases, the edges and the transition from the JavaScript installer run
           # on tags, by hand and on a pull request labelled full-tests (the nightly run only builds, above). Each push to
-          # main, and a pull request that changes installing, install and remove on one machine of each system: Linux and
-          # Windows on x64, macOS on Apple silicon.
+          # main, and a pull request that changes the install surface, install and remove on one machine of each system:
+          # Linux and Windows on x64, macOS on Apple silicon.
           extended=false
           case "${{ github.event_name }}" in
             workflow_dispatch) extended=true ;;
@@ -109,6 +89,13 @@ jobs:
             pull_request) [[ "${{ contains(github.event.pull_request.labels.*.name, 'full-tests') }}" == "true" ]] && extended=true ;;
           esac
           if [[ "${{ github.event_name }}" == "schedule" ]]; then extended=true; fi
+          if [[ "${{ github.event_name }}" == "pull_request" ]] && ! $extended; then
+            installing="$(python3 scripts/dev.py affected --base "origin/${GITHUB_BASE_REF}" --job installer)"
+            if [[ "$installing" == false ]]; then
+              full=false
+              checks=false
+            fi
+          fi
           echo "full=$extended" >> "$GITHUB_OUTPUT"
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
           if $extended; then
@@ -123,14 +110,16 @@ jobs:
             echo 'installs=[{"os":"macos-15","label":"macOS-arm64"},{"os":"ubuntu-22.04","label":"Linux-x64"},{"os":"windows-2025","label":"Windows-x64"}]' >> "$GITHUB_OUTPUT"
             echo 'migrations=[]' >> "$GITHUB_OUTPUT"
           else
-            echo 'targets=[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' >> "$GITHUB_OUTPUT"
-            echo 'installs=[{"os":"ubuntu-22.04","label":"Linux-x64"}]' >> "$GITHUB_OUTPUT"
+            # Nothing to build: every job below skips.
+            echo 'targets=[]' >> "$GITHUB_OUTPUT"
+            echo 'installs=[]' >> "$GITHUB_OUTPUT"
             echo 'migrations=[]' >> "$GITHUB_OUTPUT"
           fi
 
   native:
     name: Native bundle / ${{ matrix.target }}
     needs: plan
+    if: needs.plan.outputs.targets != '[]'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -152,12 +141,13 @@ jobs:
           # And REAPER's extension's (scripts/build-native-release.py): both Mac architectures, in one file, and on Windows
           # the x64 build, which REAPER for Windows on Arm (ARM64EC) loads too.
           targets: ${{ matrix.target }}${{ runner.os == 'macOS' && ',aarch64-apple-darwin,x86_64-apple-darwin' || '' }}${{ matrix.target == 'aarch64-pc-windows-msvc' && ',x86_64-pc-windows-msvc' || '' }}
-      # Saved from main only: pull requests and tags restore main's (ci-release from its pushes, release from its
-      # nightly run).
+      # Saved from main only: ci-release from its pushes, release from its nightly run. Pull requests and tags restore
+      # main's. A run by hand saves nothing: its release caches would only push the nightly's out of the repository's
+      # 10 GB (and a tag's own cache can't be read by later tags).
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
           key: ${{ env.PROFILE }}-${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
       # Only the Mac bundles carry the helper Kumi uses Live's menus with, and only the Apple Silicon Mac's the helper Logic
       # Pro's bridge reads Logic with (Logic Pro 12 runs on Apple Silicon only); each Mac job builds what its bundle
       # carries (universal, under a minute each) instead of waiting for a job of its own.

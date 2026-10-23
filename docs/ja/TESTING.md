@@ -23,6 +23,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 | 必要なもの | 用途 |
 | --- | --- |
 | Rust と Cargo | クレートと移行テスト |
+| cargo-nextest（`cargo install cargo-nextest --locked`） | Rust のテスト（一つずつ別のプロセスで実行） |
 | PATH 上の Node.js（CI は 24 を使用） | 一部の Rust テスト、Live 拡張機能のテスト、移行テスト |
 | PATH 上の Python 3.11 以降（`python3`、Windows では `python.exe`） | Remote Script のテスト、リリーススクリプトのテスト、Python を実行する Rust テスト |
 | `vendor/` にローカルで用意した Extensions SDK | Live 拡張機能のビルドや型チェック（そのテストには不要） |
@@ -36,13 +37,14 @@ Windows では、いくつかのテストがシンボリックリンクを作成
 
 | コマンド | 内容 |
 | --- | --- |
-| `sh scripts/test-isolated.sh`（Windows では `./scripts/test-isolated.ps1`） | テスト専用のホームで `cargo test --workspace --locked` を実行します。引数は `cargo test` に渡します |
-| `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 一つのクレートの、一つのテストファイルだけを実行します |
+| `sh scripts/test-isolated.sh`（Windows では `./scripts/test-isolated.ps1`） | テスト専用のホームで、すべてのテストを cargo-nextest で一つずつ別のプロセスで実行します。引数は `cargo nextest run` に渡します（`KUMI_NEXTEST=0` では `cargo test`。クレートのテストが一つのプロセスで動きます） |
+| `sh scripts/test-isolated.sh -p kumi-runtime -E 'test(/^hands_transport::/)'` | 一つのクレートの、一つのテストファイルだけを実行します。クレートのテストは一つのバイナリ（`tests/it/`、ファイルごとに一つのモジュール）です |
 | `KUMI_PACKAGES="daw-bridge daw-mcp-server logic-kumi" sh scripts/test-isolated.sh` | それらのパッケージだけを、そのすべてのテストとともに実行します。ここでは Logic Pro ブリッジのクレートで、CI の `Logic bridge` ジョブが macOS で `python3 scripts/build-logic-hands.py` の後に実行するのと同じです |
 | `cargo fmt --all --check` | CI と同じようにフォーマットを確認します |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint。CI では今のところ参考扱いです |
 | `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | await をまたいで保持される `RefCell` の借用。Lint の CI ジョブを失敗させます |
-| `KUMI_NEXTEST=1 sh scripts/test-isolated.sh --profile ci` | `Rust / Linux` の各パートが実行するテストを cargo-nextest で実行します（一つのパートのものは `-p <crate>` か `--exclude <crate>`、`--profile ci-os`：macOS と Windows が実行するもの、`--profile extended`：すべてのテスト） |
+| `sh scripts/test-isolated.sh --profile ci` | `Rust / Linux` の各パートが実行するテストを cargo-nextest で実行します（一つのパートのものは `-p <crate>` か `--exclude <crate>`、`--profile ci-os`：macOS と Windows が実行するもの、`--profile extended`：すべてのテスト） |
+| `python3 scripts/dev.py check` | このブランチが `origin/main` から変えたものについて、Required CI のチェックを実行します（別の起点は `--base`）：変更の空白、すべてのファイルがクレートかエリアに属すること、続いて影響を受けるクレートの `cargo fmt --check`、`RefCell` の lint、`ci` テスト（cargo-nextest）、さらに変更があれば Remote Script、Live の拡張機能、Renoise のツールのテスト、そしてリリーススクリプトのテスト。`--dry-run` は何を実行するかだけを示します |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | ブリッジの性能の基準。[開発者ガイド](DEVELOPER_GUIDE.md#ビルドテスト計測)を参照してください |
 
 分離ランナーはテスト専用のホームを用意します。`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME`、`KUMI_HOME` は新しい一時フォルダーの中を指し、`KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は取り除かれるので、どのテストもあなたの Live のフォルダーや `~/.kumi` には届きません。
@@ -108,11 +110,11 @@ python3 -m unittest discover -s scripts/tests -p test_release.py
 
 ## CI
 
-プルリクエストのたびに次のワークフローが実行され、CI、Willington files、Installer は `main` へのプッシュのたびにも実行されます：
+プルリクエストのたびに次のワークフローが実行され、CI、Willington files、Installer、Network は `main` へのプッシュのたびにも実行されます：
 
 | ワークフロー | ジョブ | 実行内容 |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`、`Rust / Linux (Live's bridge)`、`Rust / Linux (DAW bridges)` | `.config/nextest.toml` の `ci` セットを分離ランナーで、クレートごとに三つのパートに分けて同時に実行します（Kumi とそのランタイム、`ableton-mcp-server`、`daw-bridge` と `daw-mcp-server` と `reaper-kumi`）。どのランナーもすべてのテストバイナリをビルドすることはありません。Extended ワークフローが実行する長いテスト（REAPER と Renoise の流れ全体のシミュレーションを含み、設定ファイルに理由とともに列挙）以外のすべてのテストです。30 秒を超えたテストは名前つきで失敗します。続いて `git diff --check` |
+| **CI** | `Rust / Linux`、`Rust / Linux (Live's bridge)`、`Rust / Linux (DAW bridges)` | `.config/nextest.toml` の `ci` セットを分離ランナーで、クレートごとに三つのパートに分けて同時に実行します（Kumi とそのランタイム、`ableton-mcp-server`、`daw-bridge` と `daw-mcp-server` と `reaper-kumi`）。どのランナーもすべてのテストバイナリをビルドすることはありません。Extended ワークフローが実行する長いテスト（REAPER と Renoise の流れ全体のシミュレーションを含み、設定ファイルに理由とともに列挙）以外のすべてのテストです。プルリクエストでは、各パートは変更が影響する自分のクレートだけをテストし（`scripts/dev.py` が `dev.py check` と同じように選びます）、該当するものがないパートは省かれます。30 秒を超えたテストは名前つきで失敗します。続いて `git diff --check`。各 Rust ジョブ（Extended のものも）は、選んだテストの一覧をアーティファクト（`nextest-list-*`）として残し、実行どうしでテストを比べられるようにします |
 | | `Rust / macOS`、`Rust / Windows` | `ci-os` セット：プラットフォームによって異なるテスト（インストール、起動、更新、ターミナル、stdin と Windows のコンソール、Hands、パス、ファイル、子プロセス、ストア）。ビルドするのもそれらだけです |
 | | `Rust / Lint`（Ubuntu） | `cargo fmt --check`、サンプルのビルド、Clippy（参考扱い。ただし await をまたいで保持される `RefCell` の借用はジョブを失敗させます） |
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script のテストを実行し、パッケージをコンパイルします |
@@ -124,6 +126,7 @@ python3 -m unittest discover -s scripts/tests -p test_release.py
 | | `Required CI` | 上記がすべてパスした場合にだけパスします |
 | **Extended** | `Extended / Linux (1/3)` から `(3/3)`、`Extended / macOS (1/2)`、`(2/2)`、`Extended / Windows (1/3)` から `(3/3)`、`Extended / documentation tests` | 公式 SDK をインストールした状態での全テスト（`extended` セット）：`ci` が省くもの（記録されたソースのオラクル、長いリスニング・フォーム・レンダリングのシミュレーション、ffmpeg を使うビデオ、ベンチマーク、公式の MCP とモデルの SDK と並べて実行する相互運用テスト、Kumi 1.7.5 からの移行、タイミングのビルディングブロックの長いスイープ）と、各プラットフォームの全テスト。続いてドキュメントテスト。毎週、手動で、また `full-tests` ラベルの付いたプルリクエストで実行され、何もブロックしません |
 | | `Extended / REAPER SDK, newest header` | Cockos が公開している最新の SDK ヘッダーで REAPER の拡張機能をビルドし、生成した関数テーブルを確認し、それに移ると増える関数を一覧します |
+| **Network** | `Network / What changed`、続いて `Network / Linux`、`macOS`、`Windows` | 各システム自身の信頼ストアに入れた認証局と、システム自身の設定にあるプロキシを通した、Kumi の HTTP クライアント（`network.rs` の ignored のテスト）。各システムのジョブは、クライアントの作り方を変える変更（`scripts/areas.toml` の `network` エリア）のときだけ実行されます |
 | **Willington files** | `Willington files`（Ubuntu） | `vendor/willington/` を変えられるのは、このリポジトリの `willington/` ブランチから出たリポジトリ所有者のプルリクエストだけで、そのプルリクエストはほかに何も変えません。`main` にあるこのチェックが、プルリクエストのコードではなくファイルの一覧を読んで実行されます |
 | **Installer** | `Native bundle / <target>`、`Aggregate native and existing-installer releases`、続いて `Install / <system>` と `Existing installer transition / <system>`。`Installer edges / <system>`（3 つ）はバンドルを必要としません | `main` へのプッシュと、インストールを変えるプルリクエストでは、x64 の Linux と Windows、Apple Silicon の macOS のバンドルをビルドし、それぞれで以下のとおりインストール、確認、アンインストールします。タグ、手動の実行、`full-tests` ラベルの付いたプルリクエストではすべてを行います：macOS、Linux、Windows の Intel と ARM 向けのネイティブバンドル（Mac のバンドルには、Kumi が Live のメニューを使うためのヘルパー（ユニバーサル、アドホック署名）が入り、Intel 向けは Apple Silicon でクロスビルドします）、続いて既存のインストールが更新に使う互換リリースをビルドし、インストーラーと一緒に、GitHub がリリースのファイルを配信するのと同じ形でローカルで配信します。Apple シリコン搭載 Mac のバンドルは Logic Pro ブリッジとそのヘルパー（`scripts/build-logic-hands.py` がビルド）を収め、それぞれ Apple 自身のツールから見たとおりに確認します。ほかのバンドルはこれを収めません。各システムで：そこからワンライナーでプロデューサーと同じ方法でインストールし（Windows では、非 ASCII 文字の名前のフォルダーにある `KUMI_HOME` で、Windows PowerShell 5.1 を使います）、バージョン、`doctor`、ブリッジとその解析ワーカーを確認し、修復として再インストールし、使い捨ての Remote Scripts フォルダーに `kumi bridge --yes` を実行し、プロデューサー自身のファイルをそれぞれ置いた使い捨ての DAW フォルダーに REAPER の拡張機能と Renoise のツールを入れ（`kumi --daw reaper|renoise bridge --yes`）、Apple シリコン搭載 Mac では Logic Pro ブリッジを Kumi 自身のフォルダーに入れ（それ以外では、`kumi --daw logic bridge` が何も用意せず、Logic Pro は Apple シリコン搭載 Mac にしか対応していないと伝えることを確認し）、それぞれがバンドルのコピーで、リファレンス、レシート、残した世代があることを確かめ、拡張機能を REAPER のエントリーポイントで読み込み、それらのための Kumi のホストを起動します。続いて `kumi update`（どのブリッジもそのまま）、`kumi update --rollback` を 2 回（それぞれを前の Kumi のコピーへ、そしてまた戻す）、`kumi uninstall`（それぞれを取り除き、プロデューサーが変えたツールのコピーを残し、プロデューサー自身のファイルはそのまま）を実行します。続いて各システムの 1 つのインストール（macOS arm64、Linux x64、Windows x64）が、空白と非 ASCII 文字を含むホームで次を行います：このビルドのインストーラーで GitHub の最新リリースを、続いて `KUMI_VERSION` でこのビルドの 1 つ前のリリースをインストールし、そのリリースのブリッジを入れ、このビルドへの更新と 2 回のロールバックのたびに Kumi とブリッジを確認し（REAPER と Renoise のブリッジ、Apple シリコン搭載 Mac では Logic Pro ブリッジも入れた状態で。そのリリースはどれも知らず、そのままにします）、アンインストールします。PATH の行は macOS では zsh の `ZDOTDIR` に、Linux では fish の `conf.d` に入り、そのシェルが `kumi` を見つけ、アンインストールで取り除かれます。Windows ではこれを PowerShell 7 で実行します。このビルドのインストール、ブリッジ、ロールバック、アンインストールは非 ASCII 文字の名前のフォルダーにある `KUMI_HOME` で、1 つ前のリリースからの更新は空白だけを含むホームで行います（そのリリース自身の更新機能が展開するため）。移行のジョブは、Kumi 1.7.5 と新しいバンドルで移行テストを実行します。edges のジョブは、install.sh と install.ps1 を代わりのリリースに対して実行します：リリースがない、応答がない、サインインページが返る、チェックサムが合わない、Kumi が起動しない、Ctrl-C。`v*` タグのプッシュでは、これらがすべてパスした後に `publish` がバンドルとインストーラーをリリースに添付し、`scripts/release.py` がノートを書いていればリリースを公開します。 |
 
@@ -131,12 +134,11 @@ python3 -m unittest discover -s scripts/tests -p test_release.py
 
 - `Python Remote Script` は macOS を省きます。
 - Rust のビルドキャッシュは `main` からだけ保存されます。プルリクエストは `main` のものを復元し、何も保存しません。
-- それぞれの世界のジョブは、テストする対象が変わったときに実行されます。Rust のジョブは Renoise のツールの Lua だけの変更では省かれ、`REAPER extension loads` は拡張機能のクレート、それがリンクする `daw-bridge` の部分、ロックファイル、リリーススクリプトの変更で、`Renoise tool` は `daws/renoise` の変更で実行されます。
-- Installer が各システムの 1 台でビルドしてインストールするのは、インストール、更新、リリース、Willington のファイル、Mac のヘルパー、Kumi が使う `tar` と PowerShell、ダウンロードの方法（HTTP クライアントとネットワークの設定）とパスの組み立て、Kumi の拡張機能を Live に入れる処理、REAPER、Renoise、Logic Pro のブリッジのビルドと配置（REAPER の変更の種類やホストのツールは含まない）、または依存関係を変える変更の場合だけです。6 つすべて、GitHub のリリースからの更新、edges、移行は `full-tests` ラベルで実行されます。ブリッジ（Remote Script、プロトコル、Live の拡張機能）やバージョン番号を変える変更では Linux のものをビルド、インストール、確認し、それ以外の変更では Linux のバンドルをビルドするだけです。
-- Kumi が保持するものの保存方法（`crates/kumi-store`、設定とサインイン、メモリー、テクニック、プレイブック、ギャップ、以前の Kumi のファイル）を変える変更にも、既存のデータを残したまま更新とロールバックを行う、Linux のインストールの確認が付きます。
+- それぞれの世界のジョブは、`scripts/dev.py` がクレートと `scripts/areas.toml` から読み取るとおり、テストする対象が変わったときに実行されます（`python3 scripts/dev.py affected --base origin/main` で、ブランチが何を実行するかがわかります）。Rust のジョブは Renoise のツールの Lua だけの変更では省かれ、`REAPER extension loads` は拡張機能のクレート、それがビルドに使うもの（`daw-bridge`、ロックファイル）、リリーススクリプトの変更で、`Renoise tool` は `daws/renoise` の変更で実行されます。`Release scripts` は、追跡されているすべてのファイルがクレートかエリアに属することを確認します。
+- Installer が各システムの 1 台でビルドしてインストールするのは、インストールに関わる部分を変える変更の場合だけです：インストーラー、インストール、更新、リリース、Willington のファイル、Mac のヘルパー、Kumi が使う `tar` と PowerShell、ダウンロードの方法（HTTP クライアントとネットワークの設定）とパスの組み立て、Kumi の拡張機能を Live に入れる処理、REAPER、Renoise、Logic Pro のブリッジのビルドと配置、そして Installer のワークフロー（それぞれのテストは含まない）。それ以外のプルリクエストでは何もビルドせず、マージ後の `main` の実行で確認します。6 つすべて、GitHub のリリースからの更新、edges、移行は `full-tests` ラベルで実行されます。
 - プルリクエストと `main` へのプッシュでは、Installer のバンドルを `ci-release` プロファイルでビルドします。これはリリースプロファイルのプログラム全体の最適化を省き、最適化も控えめにします。タグは `release` でビルドします。
 
-`main` へのプッシュでは、インストールを変えるプルリクエストと同じものが実行され、タグでは Installer のすべてが実行されます。Extended ワークフローは毎週すべてのテストを実行します。Installer は毎晩 `release` プロファイルで 6 つのバンドルをすべてビルドし（失敗すると issue「The nightly Installer build failed」を開きます）、次のタグのためにそのプロファイルのビルドキャッシュを温めておきます。
+`main` へのプッシュでは、インストールを変えるプルリクエストと同じものが実行され、タグでは Installer のすべてが実行されます。Extended ワークフローは毎週すべてのテストを実行します。Installer は毎晩 `release` プロファイルで 6 つのバンドルをすべてビルドし（失敗すると issue「The nightly Installer build failed」を開きます）、次のタグのためにそのプロファイルのビルドキャッシュを温めておきます。Caches ワークフローは毎日、Rust のビルドキャッシュを種類ごとに最新のものだけ残して削除します。古いロックファイルの世代が、プルリクエストの復元するキャッシュをリポジトリの 10 GB から押し出さないようにするためです。
 
 `main` にマージするには、`Required CI` と `Willington files` がパスする必要があります。Installer は必須ではありません。残りのルールは[リリースと配布](DISTRIBUTION_POLICY.md#マージゲート)にあります。
 
